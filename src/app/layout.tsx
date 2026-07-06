@@ -1,20 +1,21 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+const inter = Inter({
+  variable: "--font-inter",
+  subsets: ["latin", "vietnamese"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+export const viewport: Viewport = {
+  themeColor: "#0a0e1a",
+};
 
 export const metadata: Metadata = {
-  title: "SanDeal — Powered by ReviewPilot AI",
-  description: "Hệ thống quản lý sản phẩm affiliate, tạo nội dung và đăng bài tự động.",
+  title: "SanDeal — Săn deal thông minh bằng AI | Powered by ReviewPilot AI",
+  description: "Hệ thống quản lý sản phẩm affiliate, tìm deal thông minh, chấm điểm cơ hội và tạo nội dung an toàn, minh bạch.",
+  keywords: ["affiliate", "deal", "sản phẩm", "AI", "ReviewPilot", "SanDeal"],
 };
 
 export default function RootLayout({
@@ -23,7 +24,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="vi" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="vi" className={inter.variable}>
       <body>{children}</body>
     </html>
   );

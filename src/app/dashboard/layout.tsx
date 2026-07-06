@@ -35,7 +35,6 @@ const NAV_GROUPS = [
     items: [
       { label: 'API / Token Vault', href: '/dashboard/token-vault', icon: '🔐' },
       { label: 'Sức khỏe hệ thống', href: '/dashboard/app-health', icon: '💚' },
-      { label: 'Cài đặt', href: '/dashboard/settings', icon: '⚙️' },
     ],
   },
 ];
@@ -51,28 +50,30 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           <h2>SanDeal</h2>
           <p>ReviewPilot AI Dashboard</p>
         </div>
-        {NAV_GROUPS.map((group) => (
-          <div key={group.label} className="sidebar-group">
-            <div className="sidebar-group-label">{group.label}</div>
-            {group.items.map((item) => {
-              const isActive =
-                item.href === '/dashboard'
-                  ? pathname === '/dashboard'
-                  : pathname.startsWith(item.href.split('?')[0]) && item.href !== '/dashboard';
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`sidebar-link${isActive ? ' active' : ''}`}
-                >
-                  <span>{item.icon}</span>
-                  <span>{item.label}</span>
-                </Link>
-              );
-            })}
-          </div>
-        ))}
-        <div className="sidebar-group" style={{ marginTop: 'auto', borderTop: '1px solid var(--border-primary)', paddingTop: 'var(--space-md)' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-xs) 0' }}>
+          {NAV_GROUPS.map((group) => (
+            <div key={group.label} className="sidebar-group">
+              <div className="sidebar-group-label">{group.label}</div>
+              {group.items.map((item) => {
+                const isActive =
+                  item.href === '/dashboard'
+                    ? pathname === '/dashboard'
+                    : pathname.startsWith(item.href.split('?')[0]) && item.href !== '/dashboard';
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={`sidebar-link${isActive ? ' active' : ''}`}
+                  >
+                    <span>{item.icon}</span>
+                    <span>{item.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        <div className="sidebar-footer">
           <Link href="/deals" className="sidebar-link" target="_blank">
             <span>🌐</span>
             <span>Xem trang public</span>

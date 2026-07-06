@@ -1,0 +1,164 @@
+// ===========================================
+// Token Vault Types — Strict credential management
+// ===========================================
+
+// ---- Platform & Credential Enums ----
+
+export type CredentialPlatform =
+  | 'gemini'
+  | 'accesstrade'
+  | 'facebook'
+  | 'instagram'
+  | 'threads'
+  | 'youtube'
+  | 'tiktok'
+  | 'shopee'
+  | 'lazada'
+  | 'system'
+  | 'other';
+
+export type CredentialType =
+  | 'api_key'
+  | 'user_token'
+  | 'page_token'
+  | 'access_token'
+  | 'refresh_token'
+  | 'client_id'
+  | 'client_secret'
+  | 'app_secret'
+  | 'other';
+
+export type CredentialStatus =
+  | 'unchecked'
+  | 'valid'
+  | 'invalid'
+  | 'expired'
+  | 'missing_permission'
+  | 'disabled'
+  | 'error';
+
+export type CredentialRole =
+  | 'primary'
+  | 'backup'
+  | 'disabled'
+  | 'testing';
+
+// ---- Stored Credential (server-side full object) ----
+
+export interface StoredCredential {
+  id: string;
+  platform: CredentialPlatform;
+  credentialType: CredentialType;
+  role: CredentialRole;
+  label: string;
+  /** Encrypted value — server-side only, NEVER sent to frontend */
+  encryptedValue: string;
+  /** Masked value safe for frontend display */
+  maskedValue: string;
+  status: CredentialStatus;
+  permissions?: string[];
+  metadata?: Record<string, unknown>;
+  lastCheckedAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ---- Safe Credential (frontend projection — no secrets) ----
+
+export type SafeCredential = Omit<StoredCredential, 'encryptedValue'>;
+
+// ---- Input for creating a credential ----
+
+export interface CreateCredentialInput {
+  platform: CredentialPlatform;
+  credentialType: CredentialType;
+  label?: string;
+  value: string;
+  role?: CredentialRole;
+  metadata?: Record<string, unknown>;
+}
+
+// ---- Input for replacing a credential value ----
+
+export interface ReplaceCredentialInput {
+  id: string;
+  value: string;
+}
+
+// ---- Filters for listing credentials ----
+
+export interface CredentialFilters {
+  platform?: CredentialPlatform;
+  credentialType?: CredentialType;
+  status?: CredentialStatus;
+  role?: CredentialRole;
+}
+
+// ---- Grouped credentials for UI display ----
+
+export interface CredentialGroup {
+  platform: CredentialPlatform;
+  label: string;
+  icon: string;
+  credentials: SafeCredential[];
+}
+
+// ---- Vault statistics (for health check) ----
+
+export interface VaultStats {
+  totalCredentials: number;
+  geminiKeysCount: number;
+  geminiPrimaryConfigured: boolean;
+  accessTradeConfigured: boolean;
+  socialTokensCount: number;
+  affiliateKeysCount: number;
+  disabledCount: number;
+  errorCount: number;
+  lastCheckTime?: string;
+}
+
+// ---- Platform metadata for UI ----
+
+export const PLATFORM_CONFIG: Record<CredentialPlatform, { label: string; icon: string; group: string }> = {
+  gemini: { label: 'Gemini', icon: '🤖', group: 'AI Providers' },
+  accesstrade: { label: 'AccessTrade', icon: '🔗', group: 'Affiliate Sources' },
+  shopee: { label: 'Shopee', icon: '🛒', group: 'Affiliate Sources' },
+  lazada: { label: 'Lazada', icon: '🏪', group: 'Affiliate Sources' },
+  tiktok: { label: 'TikTok', icon: '🎵', group: 'Social Channels' },
+  facebook: { label: 'Facebook', icon: '📘', group: 'Social Channels' },
+  instagram: { label: 'Instagram', icon: '📷', group: 'Social Channels' },
+  threads: { label: 'Threads', icon: '🧵', group: 'Social Channels' },
+  youtube: { label: 'YouTube', icon: '▶️', group: 'Social Channels' },
+  system: { label: 'System', icon: '⚙️', group: 'System' },
+  other: { label: 'Khác', icon: '🔌', group: 'System' },
+};
+
+export const CREDENTIAL_TYPE_LABELS: Record<CredentialType, string> = {
+  api_key: 'API Key',
+  user_token: 'User Token',
+  page_token: 'Page Token',
+  access_token: 'Access Token',
+  refresh_token: 'Refresh Token',
+  client_id: 'Client ID',
+  client_secret: 'Client Secret',
+  app_secret: 'App Secret',
+  other: 'Khác',
+};
+
+export const CREDENTIAL_STATUS_LABELS: Record<CredentialStatus, { label: string; badge: string }> = {
+  unchecked: { label: 'Chưa kiểm tra', badge: 'badge-neutral' },
+  valid: { label: 'Hợp lệ', badge: 'badge-success' },
+  invalid: { label: 'Không hợp lệ', badge: 'badge-danger' },
+  expired: { label: 'Hết hạn', badge: 'badge-danger' },
+  missing_permission: { label: 'Thiếu quyền', badge: 'badge-warning' },
+  disabled: { label: 'Đã tắt', badge: 'badge-neutral' },
+  error: { label: 'Lỗi', badge: 'badge-danger' },
+};
+
+export const CREDENTIAL_ROLE_LABELS: Record<CredentialRole, { label: string; badge: string }> = {
+  primary: { label: 'Chính', badge: 'badge-purple' },
+  backup: { label: 'Dự phòng', badge: 'badge-neutral' },
+  disabled: { label: 'Đã tắt', badge: 'badge-neutral' },
+  testing: { label: 'Thử nghiệm', badge: 'badge-info' },
+};

@@ -178,8 +178,8 @@ export default function ProductsPage() {
 
         {/* Filters */}
         <div className="filter-bar">
-          <input className="input" style={{ maxWidth: '300px' }} placeholder="🔍 Tìm sản phẩm..." value={search} onChange={e => setSearch(e.target.value)} />
-          <select className="select" style={{ maxWidth: '150px' }} value={filterPlatform} onChange={e => setFilterPlatform(e.target.value)}>
+          <input className="input" style={{ maxWidth: '280px' }} placeholder="🔍 Tìm sản phẩm..." value={search} onChange={e => setSearch(e.target.value)} />
+          <select className="select" style={{ maxWidth: '140px' }} value={filterPlatform} onChange={e => setFilterPlatform(e.target.value)}>
             <option value="">Nền tảng</option>
             <option value="shopee">Shopee</option>
             <option value="tiktok_shop">TikTok Shop</option>
@@ -187,7 +187,7 @@ export default function ProductsPage() {
             <option value="accesstrade">AccessTrade</option>
             <option value="website">Website</option>
           </select>
-          <select className="select" style={{ maxWidth: '150px' }} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
+          <select className="select" style={{ maxWidth: '140px' }} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
             <option value="">Trạng thái</option>
             <option value="draft">Nháp</option>
             <option value="needs_review">Cần xem xét</option>
@@ -195,14 +195,14 @@ export default function ProductsPage() {
             <option value="published">Đã xuất bản</option>
             <option value="archived">Lưu trữ</option>
           </select>
-          <select className="select" style={{ maxWidth: '130px' }} value={filterKind} onChange={e => setFilterKind(e.target.value)}>
+          <select className="select" style={{ maxWidth: '120px' }} value={filterKind} onChange={e => setFilterKind(e.target.value)}>
             <option value="">Loại</option>
             <option value="product">Sản phẩm</option>
             <option value="voucher">Voucher</option>
             <option value="campaign">Chiến dịch</option>
             <option value="deal">Deal</option>
           </select>
-          <select className="select" style={{ maxWidth: '130px' }} value={filterRisk} onChange={e => setFilterRisk(e.target.value)}>
+          <select className="select" style={{ maxWidth: '120px' }} value={filterRisk} onChange={e => setFilterRisk(e.target.value)}>
             <option value="">Rủi ro</option>
             <option value="low">Thấp</option>
             <option value="medium">Trung bình</option>
@@ -257,7 +257,7 @@ export default function ProductsPage() {
                             <img src={p.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                           </div>
                         ) : (
-                          <div style={{ width: 40, height: 40, borderRadius: 'var(--radius-sm)', background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', flexShrink: 0 }}>📦</div>
+                          <div style={{ width: 40, height: 40, borderRadius: 'var(--radius-sm)', background: 'linear-gradient(135deg, #1a2237, #111827)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', flexShrink: 0 }}>📦</div>
                         )}
                         <div>
                           <Link href={`/dashboard/products/${p.id}`} style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{p.title}</Link>
@@ -271,7 +271,7 @@ export default function ProductsPage() {
                       <div>
                         {p.salePrice ? (
                           <>
-                            <span style={{ fontWeight: 700, color: 'var(--color-accent)' }}>{formatPrice(p.salePrice)}</span>
+                            <span style={{ fontWeight: 700, color: 'var(--color-accent-light)' }}>{formatPrice(p.salePrice)}</span>
                             {p.price && p.price !== p.salePrice && (
                               <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', textDecoration: 'line-through', marginLeft: '6px' }}>{formatPrice(p.price)}</span>
                             )}
@@ -288,7 +288,7 @@ export default function ProductsPage() {
                     </td>
                     <td>
                       {p.score != null ? (
-                        <span className={`score-badge ${p.score >= 75 ? 'score-badge-green' : p.score >= 45 ? 'score-badge-yellow' : 'score-badge-red'}`}>
+                        <span className={`score-badge ${p.score >= 75 ? 'score-badge-green' : p.score >= 45 ? 'score-badge-yellow' : 'score-badge-red'}`} style={{ fontSize: '12px', padding: '4px 10px' }}>
                           {p.score}
                         </span>
                       ) : '—'}
@@ -299,8 +299,8 @@ export default function ProductsPage() {
                       </span>
                     </td>
                     <td>
-                      <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
-                        <Link href={`/dashboard/products/${p.id}`} className="btn btn-ghost btn-sm">👁️</Link>
+                      <div className="flex gap-xs" style={{ flexWrap: 'wrap' }}>
+                        <Link href={`/dashboard/products/${p.id}`} className="btn btn-ghost btn-sm" title="Xem">👁️</Link>
                         <button className="btn btn-ghost btn-sm" onClick={() => handleScore(p.id)} title="Chấm điểm">⭐</button>
                         {p.status !== 'approved' && p.status !== 'published' && (
                           <button className="btn btn-ghost btn-sm" onClick={() => handleApprove(p.id)} title="Duyệt">✅</button>
@@ -335,15 +335,18 @@ export default function ProductsPage() {
                   <Link href={`/dashboard/products/${p.id}`}>
                     <h4 className="deal-card-title">{p.title}</h4>
                   </Link>
-                  <div className="flex items-center gap-sm" style={{ margin: 'var(--space-xs) 0' }}>
+                  <div className="flex items-center gap-sm" style={{ margin: 'var(--space-xs) 0', flexWrap: 'wrap' }}>
                     <span className={`badge ${STATUS_LABELS[p.status]?.badge || 'badge-neutral'}`} style={{ fontSize: '10px' }}>
                       {STATUS_LABELS[p.status]?.label || p.status}
                     </span>
                     <span className="badge badge-neutral" style={{ fontSize: '10px' }}>
                       {KIND_LABELS[p.kind] || p.kind}
                     </span>
+                    <span className={`badge ${RISK_LABELS[p.riskLevel]?.badge || 'badge-neutral'}`} style={{ fontSize: '10px' }}>
+                      {RISK_LABELS[p.riskLevel]?.label || 'N/A'}
+                    </span>
                   </div>
-                  <div className="deal-card-price">
+                  <div className="deal-card-price" style={{ fontSize: 'var(--text-lg)' }}>
                     {p.salePrice ? formatPrice(p.salePrice) : formatPrice(p.price)}
                   </div>
                   {p.score != null && (
@@ -353,12 +356,13 @@ export default function ProductsPage() {
                       </span>
                     </div>
                   )}
-                  <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)' }}>
-                    <button className="btn btn-sm btn-ghost" onClick={() => handleScore(p.id)}>⭐</button>
+                  <div className="flex gap-xs" style={{ marginTop: 'var(--space-sm)' }}>
+                    <button className="btn btn-sm btn-ghost" onClick={() => handleScore(p.id)} title="Chấm điểm">⭐</button>
                     {p.status !== 'approved' && p.status !== 'published' && (
-                      <button className="btn btn-sm btn-ghost" onClick={() => handleApprove(p.id)}>✅</button>
+                      <button className="btn btn-sm btn-ghost" onClick={() => handleApprove(p.id)} title="Duyệt">✅</button>
                     )}
-                    <button className="btn btn-sm btn-ghost" onClick={() => setDeleteConfirm(p.id)} style={{ color: 'var(--color-danger)' }}>🗑️</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => handleArchive(p.id)} title="Lưu trữ">📥</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>🗑️</button>
                   </div>
                 </div>
               </div>

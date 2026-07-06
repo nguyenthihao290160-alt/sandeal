@@ -1,9 +1,10 @@
 // ===========================================
-// API: App Health
+// API: App Health — System Health Check
 // ===========================================
 
 import { successResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { getProductStats } from '@/lib/storage/products';
+import { getVaultStats } from '@/lib/storage/tokenVault';
 import { isAccessTradeConfigured } from '@/lib/integrations/accesstrade';
 import { config } from '@/lib/config';
 
@@ -12,6 +13,12 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     const stats = await getProductStats();
+    let vaultStats = null;
+    try {
+      vaultStats = await getVaultStats();
+    } catch {
+      // Token vault may not be initialized yet
+    }
 
     const health = {
       app: {
@@ -32,9 +39,16 @@ export async function GET() {
       },
       integrations: {
         accesstrade: {
-          configured: isAccessTradeConfigured(),
+          configured: await isAccessTradeConfigured(),
           // Never expose the actual key
         },
+      },
+      tokenVault: vaultStats ? {
+        storageStatus: 'active',
+        ...vaultStats,
+      } : {
+        storageStatus: 'empty',
+        totalCredentials: 0,
       },
       timestamp: new Date().toISOString(),
     };

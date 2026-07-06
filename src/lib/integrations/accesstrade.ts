@@ -3,8 +3,10 @@
 // ===========================================
 // WARNING: This module must ONLY be imported from server-side code.
 // Never import this in client components or pages.
+// Now checks Token Vault first, then falls back to env config.
 
 import { getServerConfig } from '../config';
+import { getRawPrimaryCredentialValue } from '../storage/tokenVault';
 import type { Product, ProductKind, ProductPlatform } from '../types';
 
 // ---- Types ----
@@ -86,10 +88,27 @@ interface AccessTradeRawItem {
 
 /**
  * Check if AccessTrade API key is configured.
+ * Checks Token Vault first, then falls back to env.
  */
-export function isAccessTradeConfigured(): boolean {
+export async function isAccessTradeConfigured(): Promise<boolean> {
+  // Check Token Vault first
+  const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
+  if (vaultKey && vaultKey.length > 5) return true;
+  // Fallback to env
   const { accessTradeApiKey } = getServerConfig();
   return !!accessTradeApiKey && accessTradeApiKey.length > 5;
+}
+
+/**
+ * Get the AccessTrade API key.
+ * Token Vault first, then env fallback.
+ * Server-side only.
+ */
+async function getAccessTradeKey(): Promise<string | null> {
+  const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
+  if (vaultKey && vaultKey.length > 5) return vaultKey;
+  const { accessTradeApiKey } = getServerConfig();
+  return accessTradeApiKey || null;
 }
 
 /**
@@ -97,10 +116,10 @@ export function isAccessTradeConfigured(): boolean {
  * Server-side only — never call from frontend.
  */
 export async function searchAccessTrade(params: AccessTradeSearchParams): Promise<AccessTradeSearchResult> {
-  const { accessTradeApiKey } = getServerConfig();
+  const accessTradeApiKey = await getAccessTradeKey();
 
   if (!accessTradeApiKey) {
-    throw new Error('Chưa cấu hình AccessTrade API key trên server.');
+    throw new Error('Chưa cấu hình AccessTrade API key. Hãy thêm trong Token Vault hoặc đặt ACCESS_TRADE_API_KEY trong env.');
   }
 
   const url = new URL('https://api.accesstrade.vn/v1/offers_informations');

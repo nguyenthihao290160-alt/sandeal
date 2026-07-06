@@ -19,12 +19,12 @@ type TabId = (typeof TABS)[number]['id'];
 
 // ---- Source Status ----
 const SOURCE_STATUSES = [
-  { name: 'AccessTrade', status: 'pending', note: 'Cấu hình qua API key' },
-  { name: 'Shopee', status: 'placeholder', note: 'Sắp kết nối' },
-  { name: 'TikTok Shop', status: 'placeholder', note: 'Sắp kết nối' },
-  { name: 'Lazada', status: 'placeholder', note: 'Sắp kết nối' },
-  { name: 'Thủ công', status: 'active', note: 'Luôn khả dụng' },
-  { name: 'CSV', status: 'coming', note: 'Sắp có' },
+  { name: 'AccessTrade', status: 'pending', note: 'Cấu hình qua API key', icon: '🔗' },
+  { name: 'Shopee', status: 'placeholder', note: 'Sắp kết nối', icon: '🛒' },
+  { name: 'TikTok Shop', status: 'placeholder', note: 'Sắp kết nối', icon: '🎵' },
+  { name: 'Lazada', status: 'placeholder', note: 'Sắp kết nối', icon: '🏪' },
+  { name: 'Thủ công', status: 'active', note: 'Luôn khả dụng', icon: '✏️' },
+  { name: 'CSV', status: 'coming', note: 'Sắp có', icon: '📄' },
 ];
 
 // ---- Form Default ----
@@ -206,6 +206,25 @@ export default function ProductSourcesPage() {
     }
   };
 
+  const renderPlaceholderTab = (icon: string, title: string, desc: string, keys?: string) => (
+    <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
+      <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
+        <span className="coming-soon-icon">{icon}</span>
+        <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>{title}</h3>
+        <p className="coming-soon-desc">{desc}</p>
+        <div className="coming-soon-actions">
+          <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>✏️ Thêm thủ công</button>
+          <Link href="/dashboard/token-vault" className="btn btn-secondary">🔐 Cấu hình API</Link>
+        </div>
+        {keys && (
+          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 'var(--space-md)' }}>
+            Cần: {keys}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <>
       <div className="topbar">
@@ -235,16 +254,14 @@ export default function ProductSourcesPage() {
         </div>
 
         {/* Source Status Cards */}
-        <div className="grid grid-3" style={{ marginBottom: 'var(--space-xl)' }}>
+        <div className="grid grid-6" style={{ marginBottom: 'var(--space-xl)' }}>
           {SOURCE_STATUSES.map(s => (
-            <div key={s.name} className="card" style={{ padding: 'var(--space-md)' }}>
-              <div className="flex items-center justify-between">
-                <strong style={{ fontSize: 'var(--text-sm)' }}>{s.name}</strong>
-                <span className={`badge ${s.status === 'active' ? 'badge-success' : s.status === 'pending' ? 'badge-warning' : 'badge-neutral'}`}>
-                  {s.status === 'active' ? 'Khả dụng' : s.status === 'pending' ? 'Cần cấu hình' : 'Sắp có'}
-                </span>
-              </div>
-              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: '4px' }}>{s.note}</p>
+            <div key={s.name} className="glass-card" style={{ padding: 'var(--space-md)', textAlign: 'center' }}>
+              <div style={{ fontSize: '24px', marginBottom: '6px' }}>{s.icon}</div>
+              <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: '4px' }}>{s.name}</div>
+              <span className={`badge ${s.status === 'active' ? 'badge-success' : s.status === 'pending' ? 'badge-warning' : 'badge-neutral'}`}>
+                {s.status === 'active' ? 'Khả dụng' : s.status === 'pending' ? 'Cần cấu hình' : 'Sắp có'}
+              </span>
             </div>
           ))}
         </div>
@@ -266,21 +283,17 @@ export default function ProductSourcesPage() {
         <div className="tab-content">
           {/* ====== MANUAL TAB ====== */}
           {activeTab === 'manual' && (
-            <div className="card" style={{ maxWidth: '800px' }}>
+            <div className="card" style={{ maxWidth: '900px' }}>
               <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>✏️ Thêm sản phẩm thủ công</h3>
 
               {/* Basic Info */}
               <fieldset className="form-fieldset">
                 <legend className="form-legend">Thông tin cơ bản</legend>
-                <div className="form-group">
-                  <label className="label">Tên sản phẩm *</label>
-                  <input className="input" name="title" value={form.title} onChange={handleChange} placeholder="VD: Tai nghe Bluetooth TWS Pro Max" />
-                </div>
-                <div className="form-group">
-                  <label className="label">Mô tả ngắn</label>
-                  <textarea className="textarea" name="description" value={form.description} onChange={handleChange} rows={2} placeholder="Mô tả ngắn gọn về sản phẩm..." />
-                </div>
                 <div className="form-row">
+                  <div className="form-group" style={{ flex: 2 }}>
+                    <label className="label">Tên sản phẩm *</label>
+                    <input className="input" name="title" value={form.title} onChange={handleChange} placeholder="VD: Tai nghe Bluetooth TWS Pro Max" />
+                  </div>
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="label">Nền tảng *</label>
                     <select className="select" name="platform" value={form.platform} onChange={handleChange}>
@@ -291,6 +304,12 @@ export default function ProductSourcesPage() {
                       <option value="website">Website khác</option>
                     </select>
                   </div>
+                </div>
+                <div className="form-group">
+                  <label className="label">Mô tả ngắn</label>
+                  <textarea className="textarea" name="description" value={form.description} onChange={handleChange} rows={2} placeholder="Mô tả ngắn gọn về sản phẩm..." />
+                </div>
+                <div className="form-row">
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="label">Loại</label>
                     <select className="select" name="kind" value={form.kind} onChange={handleChange}>
@@ -300,43 +319,45 @@ export default function ProductSourcesPage() {
                       <option value="deal">Deal</option>
                     </select>
                   </div>
-                </div>
-                <div className="form-row">
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="label">Danh mục</label>
                     <input className="input" name="category" value={form.category} onChange={handleChange} placeholder="VD: Công nghệ" />
                   </div>
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="label">Tags (phân cách bằng dấu phẩy)</label>
-                    <input className="input" name="tags" value={form.tags} onChange={handleChange} placeholder="VD: tai nghe, bluetooth, giảm giá" />
+                    <input className="input" name="tags" value={form.tags} onChange={handleChange} placeholder="VD: tai nghe, bluetooth" />
                   </div>
                 </div>
               </fieldset>
 
-              {/* Links */}
+              {/* Links & Images */}
               <fieldset className="form-fieldset">
-                <legend className="form-legend">Liên kết</legend>
-                <div className="form-group">
-                  <label className="label">Link sản phẩm gốc</label>
-                  <input className="input" name="originalUrl" value={form.originalUrl} onChange={handleChange} placeholder="https://..." />
+                <legend className="form-legend">Liên kết & hình ảnh</legend>
+                <div className="form-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Link sản phẩm gốc</label>
+                    <input className="input" name="originalUrl" value={form.originalUrl} onChange={handleChange} placeholder="https://..." />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Link affiliate *</label>
+                    <input className="input" name="affiliateUrl" value={form.affiliateUrl} onChange={handleChange} placeholder="https://..." />
+                  </div>
                 </div>
-                <div className="form-group">
-                  <label className="label">Link affiliate *</label>
-                  <input className="input" name="affiliateUrl" value={form.affiliateUrl} onChange={handleChange} placeholder="https://..." />
-                </div>
-                <div className="form-group">
-                  <label className="label">Link ảnh sản phẩm</label>
-                  <input className="input" name="imageUrl" value={form.imageUrl} onChange={handleChange} placeholder="https://..." />
-                </div>
-                <div className="form-group">
-                  <label className="label">Link ảnh phụ (mỗi dòng một URL)</label>
-                  <textarea className="textarea" name="gallery" value={form.gallery} onChange={handleChange} rows={2} placeholder="https://image1.jpg&#10;https://image2.jpg" />
+                <div className="form-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Link ảnh sản phẩm</label>
+                    <input className="input" name="imageUrl" value={form.imageUrl} onChange={handleChange} placeholder="https://..." />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Link ảnh phụ (mỗi dòng một URL)</label>
+                    <textarea className="textarea" name="gallery" value={form.gallery} onChange={handleChange} rows={2} placeholder={"https://image1.jpg\nhttps://image2.jpg"} style={{ minHeight: '60px' }} />
+                  </div>
                 </div>
               </fieldset>
 
               {/* Price */}
               <fieldset className="form-fieldset">
-                <legend className="form-legend">Giá cả</legend>
+                <legend className="form-legend">Giá & ưu đãi</legend>
                 <div className="form-row">
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="label">Giá gốc (VND)</label>
@@ -346,16 +367,51 @@ export default function ProductSourcesPage() {
                     <label className="label">Giá khuyến mãi (VND)</label>
                     <input className="input" name="salePrice" type="number" value={form.salePrice} onChange={handleChange} placeholder="VD: 199000" />
                   </div>
-                </div>
-                <div className="form-group">
-                  <label className="label">Ghi chú giá</label>
-                  <input className="input" name="priceNote" value={form.priceNote} onChange={handleChange} />
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Ghi chú giá</label>
+                    <input className="input" name="priceNote" value={form.priceNote} onChange={handleChange} />
+                  </div>
                 </div>
               </fieldset>
 
-              {/* Affiliate */}
+              {/* Content Intelligence */}
               <fieldset className="form-fieldset">
-                <legend className="form-legend">Thông tin affiliate</legend>
+                <legend className="form-legend">Góc nội dung</legend>
+                <div className="form-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Lợi ích chính (mỗi dòng một lợi ích)</label>
+                    <textarea className="textarea" name="benefits" value={form.benefits} onChange={handleChange} rows={3} placeholder={"Chống ồn chủ động\nPin 30 giờ\nBluetooth 5.3"} />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Cảnh báo / Không được nói quá</label>
+                    <textarea className="textarea" name="warnings" value={form.warnings} onChange={handleChange} rows={3} placeholder={"Không cam kết chất lượng tuyệt đối\nKhông khẳng định chữa bệnh"} />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Pain point khách hàng</label>
+                    <textarea className="textarea" name="painPoints" value={form.painPoints} onChange={handleChange} rows={2} placeholder={"Muốn tai nghe không dây\nCần tai nghe cho họp online"} />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Đối tượng phù hợp</label>
+                    <textarea className="textarea" name="targetAudience" value={form.targetAudience} onChange={handleChange} rows={2} placeholder={"Dân văn phòng\nSinh viên"} />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Gợi ý góc nội dung</label>
+                    <textarea className="textarea" name="contentAngles" value={form.contentAngles} onChange={handleChange} rows={2} placeholder={"Review trung thực\nSo sánh với sản phẩm khác"} />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Ghi chú kiểm duyệt</label>
+                    <textarea className="textarea" name="complianceNotes" value={form.complianceNotes} onChange={handleChange} rows={2} />
+                  </div>
+                </div>
+              </fieldset>
+
+              {/* Kiểm duyệt & rủi ro */}
+              <fieldset className="form-fieldset">
+                <legend className="form-legend">Kiểm duyệt & rủi ro</legend>
                 <div className="form-row">
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="label">Nguồn affiliate</label>
@@ -366,42 +422,15 @@ export default function ProductSourcesPage() {
                     <input className="input" name="campaignName" value={form.campaignName} onChange={handleChange} />
                   </div>
                 </div>
-                <div className="form-group">
-                  <label className="label">Ghi chú hoa hồng</label>
-                  <input className="input" name="commissionNote" value={form.commissionNote} onChange={handleChange} />
-                </div>
-                <div className="form-group">
-                  <label className="label">Affiliate disclosure</label>
-                  <input className="input" name="affiliateDisclosure" value={form.affiliateDisclosure} onChange={handleChange} placeholder="VD: Bài viết có chứa link liên kết..." />
-                </div>
-              </fieldset>
-
-              {/* Content Intelligence */}
-              <fieldset className="form-fieldset">
-                <legend className="form-legend">Content Intelligence</legend>
-                <div className="form-group">
-                  <label className="label">Lợi ích chính (mỗi dòng một lợi ích)</label>
-                  <textarea className="textarea" name="benefits" value={form.benefits} onChange={handleChange} rows={3} placeholder="Chống ồn chủ động&#10;Pin 30 giờ&#10;Bluetooth 5.3" />
-                </div>
-                <div className="form-group">
-                  <label className="label">Pain point khách hàng</label>
-                  <textarea className="textarea" name="painPoints" value={form.painPoints} onChange={handleChange} rows={2} placeholder="Muốn tai nghe không dây&#10;Cần tai nghe cho họp online" />
-                </div>
-                <div className="form-group">
-                  <label className="label">Đối tượng phù hợp</label>
-                  <textarea className="textarea" name="targetAudience" value={form.targetAudience} onChange={handleChange} rows={2} placeholder="Dân văn phòng&#10;Sinh viên" />
-                </div>
-                <div className="form-group">
-                  <label className="label">Những điều không được nói quá</label>
-                  <textarea className="textarea" name="warnings" value={form.warnings} onChange={handleChange} rows={2} placeholder="Không cam kết chất lượng tuyệt đối&#10;Không khẳng định chữa bệnh" />
-                </div>
-                <div className="form-group">
-                  <label className="label">Gợi ý góc nội dung</label>
-                  <textarea className="textarea" name="contentAngles" value={form.contentAngles} onChange={handleChange} rows={2} placeholder="Review trung thực&#10;So sánh với sản phẩm khác" />
-                </div>
-                <div className="form-group">
-                  <label className="label">Ghi chú kiểm duyệt</label>
-                  <textarea className="textarea" name="complianceNotes" value={form.complianceNotes} onChange={handleChange} rows={2} />
+                <div className="form-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Ghi chú hoa hồng</label>
+                    <input className="input" name="commissionNote" value={form.commissionNote} onChange={handleChange} />
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="label">Affiliate disclosure</label>
+                    <input className="input" name="affiliateDisclosure" value={form.affiliateDisclosure} onChange={handleChange} placeholder="VD: Bài viết có chứa link liên kết..." />
+                  </div>
                 </div>
               </fieldset>
 
@@ -417,7 +446,7 @@ export default function ProductSourcesPage() {
                   ⭐ Lưu và chấm điểm
                 </button>
                 <Link href="/dashboard/products" className="btn btn-ghost">
-                  📦 Xem danh sách sản phẩm
+                  📦 Xem danh sách
                 </Link>
               </div>
             </div>
@@ -426,7 +455,7 @@ export default function ProductSourcesPage() {
           {/* ====== ACCESSTRADE TAB ====== */}
           {activeTab === 'accesstrade' && (
             <div>
-              <div className="card" style={{ maxWidth: '800px', marginBottom: 'var(--space-lg)' }}>
+              <div className="glass-card" style={{ maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
                 <h3 className="card-title" style={{ marginBottom: 'var(--space-md)' }}>🔗 Tìm kiếm trên AccessTrade</h3>
                 <div className="form-row">
                   <div className="form-group" style={{ flex: 2 }}>
@@ -449,13 +478,13 @@ export default function ProductSourcesPage() {
               </div>
 
               {atError && (
-                <div className="card" style={{ borderColor: 'var(--color-danger)', maxWidth: '800px', marginBottom: 'var(--space-lg)' }}>
+                <div className="glass-card" style={{ borderColor: 'rgba(244, 63, 94, 0.3)', maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
                   <p style={{ color: 'var(--color-danger)' }}>❌ {atError}</p>
                 </div>
               )}
 
               {atResults && (
-                <div style={{ maxWidth: '800px' }}>
+                <div style={{ maxWidth: '900px' }}>
                   {/* Summary */}
                   <div className="grid grid-4" style={{ marginBottom: 'var(--space-lg)' }}>
                     <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
@@ -490,14 +519,14 @@ export default function ProductSourcesPage() {
                     };
                     
                     return (
-                      <div key={idx} className="card" style={{ marginBottom: 'var(--space-md)', display: 'flex', gap: 'var(--space-md)' }}>
+                      <div key={idx} className="glass-card" style={{ marginBottom: 'var(--space-md)', display: 'flex', gap: 'var(--space-md)' }}>
                         {Boolean(item.imageUrl) && (
                           <div style={{ width: '80px', height: '80px', borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
                             <img src={item.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                           </div>
                         )}
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div className="flex items-center gap-sm" style={{ marginBottom: '4px' }}>
+                          <div className="flex items-center gap-sm" style={{ marginBottom: '4px', flexWrap: 'wrap' }}>
                             <strong style={{ fontSize: 'var(--text-sm)' }}>{item.name}</strong>
                             <span className={`badge ${item.kind === 'product' ? 'badge-success' : item.kind === 'voucher' ? 'badge-warning' : 'badge-neutral'}`}>
                               {item.kind}
@@ -533,71 +562,22 @@ export default function ProductSourcesPage() {
           )}
 
           {/* ====== SHOPEE TAB ====== */}
-          {activeTab === 'shopee' && (
-            <div className="card" style={{ maxWidth: '600px' }}>
-              <div className="empty-state" style={{ padding: 'var(--space-xl)' }}>
-                <div className="empty-state-icon">🛒</div>
-                <div className="empty-state-title">Shopee Affiliate</div>
-                <div className="empty-state-desc">
-                  Shopee Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link Shopee thủ công.
-                </div>
-                <div style={{ marginTop: 'var(--space-lg)', display: 'flex', gap: 'var(--space-sm)' }}>
-                  <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>✏️ Thêm sản phẩm thủ công</button>
-                  <Link href="/dashboard/token-vault" className="btn btn-secondary">🔐 Cấu hình API key</Link>
-                </div>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 'var(--space-md)' }}>
-                  Cần: SHOPEE_AFFILIATE_APP_ID, SHOPEE_AFFILIATE_SECRET
-                </p>
-              </div>
-            </div>
-          )}
+          {activeTab === 'shopee' && renderPlaceholderTab('🛒', 'Shopee Affiliate', 'Shopee Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link Shopee thủ công.', 'SHOPEE_AFFILIATE_APP_ID, SHOPEE_AFFILIATE_SECRET')}
 
           {/* ====== TIKTOK TAB ====== */}
-          {activeTab === 'tiktok' && (
-            <div className="card" style={{ maxWidth: '600px' }}>
-              <div className="empty-state" style={{ padding: 'var(--space-xl)' }}>
-                <div className="empty-state-icon">🎵</div>
-                <div className="empty-state-title">TikTok Shop Affiliate</div>
-                <div className="empty-state-desc">
-                  TikTok Shop Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link sản phẩm thủ công.
-                </div>
-                <div style={{ marginTop: 'var(--space-lg)', display: 'flex', gap: 'var(--space-sm)' }}>
-                  <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>✏️ Thêm sản phẩm thủ công</button>
-                  <Link href="/dashboard/token-vault" className="btn btn-secondary">🔐 Cấu hình API key</Link>
-                </div>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 'var(--space-md)' }}>
-                  Cần: TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET
-                </p>
-              </div>
-            </div>
-          )}
+          {activeTab === 'tiktok' && renderPlaceholderTab('🎵', 'TikTok Shop Affiliate', 'TikTok Shop Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link sản phẩm thủ công.', 'TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET')}
 
           {/* ====== LAZADA TAB ====== */}
-          {activeTab === 'lazada' && (
-            <div className="card" style={{ maxWidth: '600px' }}>
-              <div className="empty-state" style={{ padding: 'var(--space-xl)' }}>
-                <div className="empty-state-icon">🏪</div>
-                <div className="empty-state-title">Lazada Affiliate</div>
-                <div className="empty-state-desc">Lazada Affiliate sẽ được kết nối ở bước sau.</div>
-                <div style={{ marginTop: 'var(--space-lg)', display: 'flex', gap: 'var(--space-sm)' }}>
-                  <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>✏️ Thêm sản phẩm thủ công</button>
-                  <Link href="/dashboard/token-vault" className="btn btn-secondary">🔐 Cấu hình API key</Link>
-                </div>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 'var(--space-md)' }}>
-                  Cần: LAZADA_AFFILIATE_APP_KEY, LAZADA_AFFILIATE_APP_SECRET
-                </p>
-              </div>
-            </div>
-          )}
+          {activeTab === 'lazada' && renderPlaceholderTab('🏪', 'Lazada Affiliate', 'Lazada Affiliate sẽ được kết nối ở bước sau.', 'LAZADA_AFFILIATE_APP_KEY, LAZADA_AFFILIATE_APP_SECRET')}
 
           {/* ====== CSV TAB ====== */}
           {activeTab === 'csv' && (
-            <div className="card" style={{ maxWidth: '600px' }}>
-              <div className="empty-state" style={{ padding: 'var(--space-xl)' }}>
-                <div className="empty-state-icon">📄</div>
-                <div className="empty-state-title">Nhập từ CSV</div>
-                <div className="empty-state-desc">Tính năng nhập CSV sẽ được thêm ở bước sau.</div>
-                <div className="disclosure-banner" style={{ marginTop: 'var(--space-lg)', textAlign: 'left' }}>
+            <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
+              <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
+                <span className="coming-soon-icon">📄</span>
+                <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>Nhập từ CSV</h3>
+                <p className="coming-soon-desc">Tính năng nhập CSV sẽ được thêm ở bước sau.</p>
+                <div className="disclosure-banner" style={{ textAlign: 'left', margin: 'var(--space-lg) 0 0' }}>
                   <strong>Các cột dự kiến:</strong><br />
                   title, originalUrl, affiliateUrl, imageUrl, platform, price, salePrice, category, tags
                 </div>
@@ -606,20 +586,7 @@ export default function ProductSourcesPage() {
           )}
 
           {/* ====== OTHER TAB ====== */}
-          {activeTab === 'other' && (
-            <div className="card" style={{ maxWidth: '600px' }}>
-              <div className="empty-state" style={{ padding: 'var(--space-xl)' }}>
-                <div className="empty-state-icon">🔌</div>
-                <div className="empty-state-title">Nguồn khác</div>
-                <div className="empty-state-desc">
-                  Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công hoặc sử dụng API.
-                </div>
-                <button className="btn btn-primary" onClick={() => setActiveTab('manual')} style={{ marginTop: 'var(--space-lg)' }}>
-                  ✏️ Thêm sản phẩm thủ công
-                </button>
-              </div>
-            </div>
-          )}
+          {activeTab === 'other' && renderPlaceholderTab('🔌', 'Nguồn khác', 'Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công hoặc sử dụng API.')}
         </div>
 
         {/* Recent Products */}

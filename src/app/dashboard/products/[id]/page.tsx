@@ -84,9 +84,10 @@ export default function ProductDetailPage() {
       <>
         <div className="topbar"><div className="topbar-title">Chi tiết sản phẩm</div></div>
         <div className="page-content">
-          <div className="error-state">
-            <div className="error-state-icon">❌</div>
-            <div className="error-state-title">Không tìm thấy sản phẩm</div>
+          <div className="empty-state">
+            <div className="empty-state-icon">❌</div>
+            <div className="empty-state-title">Không tìm thấy sản phẩm</div>
+            <div className="empty-state-desc">Sản phẩm này có thể đã bị xoá hoặc không tồn tại.</div>
             <Link href="/dashboard/products" className="btn btn-primary" style={{ marginTop: 'var(--space-lg)' }}>← Quay lại danh sách</Link>
           </div>
         </div>
@@ -114,17 +115,17 @@ export default function ProductDetailPage() {
           {/* Left: Main info */}
           <div>
             {/* Product Header */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
-              <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)' }}>
+            <div className="gradient-card" style={{ marginBottom: 'var(--space-lg)' }}>
+              <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
                 {product.imageUrl ? (
                   <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
                     <img src={product.imageUrl} alt={product.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </div>
                 ) : (
-                  <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '40px', flexShrink: 0 }}>📦</div>
+                  <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', background: 'linear-gradient(135deg, #1a2237, #111827)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '40px', flexShrink: 0 }}>📦</div>
                 )}
-                <div>
-                  <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: '4px' }}>{product.title}</h1>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: '6px', letterSpacing: '-0.01em' }}>{product.title}</h1>
                   <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
                     <span className="badge badge-neutral">{product.platform}</span>
                     <span className="badge badge-neutral">{product.kind}</span>
@@ -136,20 +137,20 @@ export default function ProductDetailPage() {
               </div>
 
               {product.description && (
-                <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-md)', fontSize: 'var(--text-sm)' }}>{product.description}</p>
+                <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-md)', fontSize: 'var(--text-sm)', lineHeight: 1.7 }}>{product.description}</p>
               )}
 
               {/* Price */}
-              <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)' }}>
+              <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
                 {product.salePrice ? (
                   <>
-                    <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--color-accent)' }}>{formatPrice(product.salePrice)}</span>
+                    <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--color-accent-light)' }}>{formatPrice(product.salePrice)}</span>
                     {product.price && product.price !== product.salePrice && (
                       <span style={{ fontSize: 'var(--text-base)', color: 'var(--text-tertiary)', textDecoration: 'line-through' }}>{formatPrice(product.price)}</span>
                     )}
                   </>
                 ) : product.price ? (
-                  <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--color-accent)' }}>{formatPrice(product.price)}</span>
+                  <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--color-accent-light)' }}>{formatPrice(product.price)}</span>
                 ) : null}
                 {product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}
               </div>
@@ -167,7 +168,7 @@ export default function ProductDetailPage() {
 
             {/* Benefits */}
             {product.benefits && product.benefits.length > 0 && (
-              <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+              <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
                 <h3 className="card-title">✅ Lợi ích chính</h3>
                 <ul className="detail-list">
                   {product.benefits.map((b, i) => <li key={i}>{b}</li>)}
@@ -177,7 +178,7 @@ export default function ProductDetailPage() {
 
             {/* Warnings */}
             {product.warnings && product.warnings.length > 0 && (
-              <div className="card" style={{ marginBottom: 'var(--space-lg)', borderColor: 'var(--color-warning)' }}>
+              <div className="glass-card" style={{ marginBottom: 'var(--space-lg)', borderColor: 'rgba(245, 158, 11, 0.2)' }}>
                 <h3 className="card-title">⚠️ Cảnh báo / Không được nói quá</h3>
                 <ul className="detail-list detail-list-warning">
                   {product.warnings.map((w, i) => <li key={i}>{w}</li>)}
@@ -186,7 +187,7 @@ export default function ProductDetailPage() {
             )}
 
             {/* Content Intelligence */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">🧠 Content Intelligence</h3>
               {product.painPoints && product.painPoints.length > 0 && (
                 <div style={{ marginBottom: 'var(--space-md)' }}>
@@ -221,12 +222,12 @@ export default function ProductDetailPage() {
           {/* Right: Score + Actions */}
           <div>
             {/* Score Card */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="gradient-card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">📊 Điểm đánh giá</h3>
               {product.score != null ? (
                 <>
                   <div style={{ textAlign: 'center', margin: 'var(--space-lg) 0' }}>
-                    <div className={`score-badge ${product.score >= 75 ? 'score-badge-green' : product.score >= 45 ? 'score-badge-yellow' : 'score-badge-red'}`} style={{ fontSize: 'var(--text-2xl)', padding: '12px 24px' }}>
+                    <div className={`score-badge ${product.score >= 75 ? 'score-badge-green' : product.score >= 45 ? 'score-badge-yellow' : 'score-badge-red'}`} style={{ fontSize: 'var(--text-2xl)', padding: '14px 28px' }}>
                       {product.score}
                     </div>
                     {product.scoreLabel && (
@@ -259,7 +260,7 @@ export default function ProductDetailPage() {
             </div>
 
             {/* Risk */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">🛡️ Mức rủi ro</h3>
               <span className={`badge ${product.riskLevel === 'low' ? 'badge-success' : product.riskLevel === 'medium' ? 'badge-warning' : product.riskLevel === 'high' ? 'badge-danger' : 'badge-neutral'}`} style={{ fontSize: 'var(--text-sm)', padding: '6px 14px' }}>
                 {product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa rõ'}
@@ -267,7 +268,7 @@ export default function ProductDetailPage() {
             </div>
 
             {/* Actions */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">⚡ Hành động</h3>
               <div className="flex flex-col gap-sm">
                 {product.status !== 'approved' && product.status !== 'published' && (
@@ -290,7 +291,7 @@ export default function ProductDetailPage() {
             </div>
 
             {/* Meta */}
-            <div className="card">
+            <div className="glass-card">
               <h3 className="card-title">📋 Thông tin thêm</h3>
               <div className="detail-meta">
                 <div className="detail-meta-row"><span>Nguồn:</span><span>{product.source}</span></div>
@@ -310,7 +311,7 @@ export default function ProductDetailPage() {
                 {showTechnical ? '▲' : '▼'} Chi tiết kỹ thuật
               </button>
               {showTechnical && (
-                <pre style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', padding: 'var(--space-md)', borderRadius: 'var(--radius-md)', marginTop: 'var(--space-sm)', overflow: 'auto', maxHeight: '400px' }}>
+                <pre style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', background: 'rgba(148, 163, 184, 0.04)', padding: 'var(--space-md)', borderRadius: 'var(--radius-md)', marginTop: 'var(--space-sm)', overflow: 'auto', maxHeight: '400px', border: '1px solid var(--border-primary)' }}>
                   {JSON.stringify(product, null, 2)}
                 </pre>
               )}

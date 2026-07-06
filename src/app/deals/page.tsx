@@ -5,7 +5,7 @@ import type { Metadata } from 'next';
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  title: 'Deals Hot — SanDeal',
+  title: 'Deal Hot — SanDeal',
   description: 'Tổng hợp deal, khuyến mãi và sản phẩm tốt nhất từ Shopee, TikTok Shop, Lazada và nhiều nguồn khác.',
 };
 
@@ -19,14 +19,16 @@ export default async function DealsPage() {
         <div className="public-nav-inner">
           <Link href="/" className="public-nav-brand">SanDeal</Link>
           <ul className="public-nav-links">
-            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/">Trang chủ</Link></li>
+            <li><Link href="/deals" style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Deals</Link></li>
+            <li><Link href="/dashboard" className="btn btn-primary btn-sm">Dashboard</Link></li>
           </ul>
         </div>
       </nav>
 
       {/* Hero */}
-      <section className="hero">
-        <h1 className="hero-title" style={{ position: 'relative' }}>
+      <section className="hero" style={{ padding: '48px 24px 40px' }}>
+        <h1 className="hero-title" style={{ fontSize: 'var(--text-4xl)', position: 'relative' }}>
           Deal hot từ <span>SanDeal</span>
         </h1>
         <p className="hero-subtitle">
@@ -38,9 +40,14 @@ export default async function DealsPage() {
       <div className="container" style={{ padding: 'var(--space-xl) var(--space-lg)' }}>
         {products.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state-icon">📦</div>
+            <div className="empty-state-icon">🔍</div>
             <div className="empty-state-title">Chưa có deal nào</div>
-            <div className="empty-state-desc">Các sản phẩm được duyệt sẽ hiển thị ở đây.</div>
+            <div className="empty-state-desc">
+              Các sản phẩm được duyệt và xuất bản sẽ hiển thị ở đây. Hãy quay lại sau!
+            </div>
+            <Link href="/" className="btn btn-secondary" style={{ marginTop: 'var(--space-lg)' }}>
+              ← Về trang chủ
+            </Link>
           </div>
         ) : (
           <div className="grid grid-3">
@@ -52,7 +59,7 @@ export default async function DealsPage() {
                     {product.imageUrl ? (
                       <img src={product.imageUrl} alt={product.title} />
                     ) : (
-                      <span>📦 Chưa có hình ảnh</span>
+                      <span>📦</span>
                     )}
                     <div className="deal-card-platform">
                       <span className="badge badge-neutral">{product.platform}</span>
@@ -64,15 +71,16 @@ export default async function DealsPage() {
                     </Link>
                     {(product.salePrice || product.price) && (
                       <div className="deal-card-price">
-                        {product.salePrice
-                          ? product.salePrice.toLocaleString('vi-VN') + '₫'
-                          : product.price?.toLocaleString('vi-VN') + '₫'}
+                        <span>
+                          {product.salePrice
+                            ? product.salePrice.toLocaleString('vi-VN') + '₫'
+                            : product.price?.toLocaleString('vi-VN') + '₫'}
+                        </span>
                         {product.price && product.salePrice && product.price > product.salePrice && (
                           <span style={{
                             fontSize: 'var(--text-sm)',
                             color: 'var(--text-tertiary)',
                             textDecoration: 'line-through',
-                            marginLeft: '8px',
                             fontWeight: 400,
                           }}>
                             {product.price.toLocaleString('vi-VN')}₫
@@ -100,7 +108,9 @@ export default async function DealsPage() {
                         Xem deal →
                       </a>
                     ) : (
-                      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>Link sản phẩm chưa sẵn sàng.</span>
+                      <Link href={`/deals/${product.slug}`} className="btn btn-secondary btn-sm">
+                        Chi tiết
+                      </Link>
                     )}
                   </div>
                 </div>
@@ -119,7 +129,15 @@ export default async function DealsPage() {
       {/* Footer */}
       <footer className="public-footer">
         <div className="public-footer-inner">
+          <p style={{ fontSize: 'var(--text-xl)', fontWeight: 900, marginBottom: '8px' }}>
+            <span style={{ background: 'linear-gradient(135deg, #7c3aed, #06b6d4)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>SanDeal</span>
+          </p>
           <p className="public-footer-text">© {new Date().getFullYear()} SanDeal — Powered by ReviewPilot AI</p>
+          <ul className="public-footer-links">
+            <li><Link href="/">Trang chủ</Link></li>
+            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/dashboard">Dashboard</Link></li>
+          </ul>
           <p className="public-footer-disclosure">
             Trang web này chứa liên kết tiếp thị liên kết. Giá và khuyến mãi có thể thay đổi. Vui lòng kiểm tra lại trên trang bán hàng trước khi mua.
           </p>
