@@ -6,24 +6,29 @@ import { type ReactNode } from 'react';
 
 const NAV_GROUPS = [
   {
-    label: 'Kiếm tiền',
+    label: 'Tổng quan',
     items: [
-      { label: 'Tổng quan', href: '/dashboard', icon: '📊' },
-      { label: 'Trung tâm nguồn SP', href: '/dashboard/product-sources', icon: '🔗' },
-      { label: 'Danh sách sản phẩm', href: '/dashboard/products', icon: '📦' },
+      { label: 'Command Center', href: '/dashboard', icon: '🎯' },
+    ],
+  },
+  {
+    label: 'Sản phẩm & Deal',
+    items: [
+      { label: 'Nguồn sản phẩm', href: '/dashboard/product-sources', icon: '🔗' },
+      { label: 'Kho sản phẩm', href: '/dashboard/products', icon: '📦' },
       { label: 'Sản phẩm nên làm', href: '/dashboard/products?minScore=75', icon: '⭐' },
     ],
   },
   {
-    label: 'Tạo nội dung',
+    label: 'Nội dung AI',
     items: [
-      { label: 'AI Content', href: '/dashboard/content', icon: '🤖' },
+      { label: 'AI Content Studio', href: '/dashboard/content', icon: '🤖' },
       { label: 'Media / Video', href: '/dashboard/media', icon: '🎬' },
-      { label: 'Kiểm duyệt nội dung', href: '/dashboard/compliance', icon: '🛡️' },
+      { label: 'Compliance Guard', href: '/dashboard/compliance', icon: '🛡️' },
     ],
   },
   {
-    label: 'Đăng & lịch',
+    label: 'Đăng & Lịch',
     items: [
       { label: 'Kênh kết nối', href: '/dashboard/channels', icon: '📡' },
       { label: 'Lịch đăng', href: '/dashboard/schedule', icon: '📅' },
@@ -33,8 +38,9 @@ const NAV_GROUPS = [
   {
     label: 'Hệ thống',
     items: [
-      { label: 'API / Token Vault', href: '/dashboard/token-vault', icon: '🔐' },
+      { label: 'Token Vault', href: '/dashboard/token-vault', icon: '🔐' },
       { label: 'Sức khỏe hệ thống', href: '/dashboard/app-health', icon: '💚' },
+      { label: 'Cài đặt', href: '/dashboard/settings', icon: '⚙️' },
     ],
   },
 ];
@@ -44,27 +50,24 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="app-shell">
-      {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-brand">
           <h2>SanDeal</h2>
-          <p>ReviewPilot AI Dashboard</p>
+          <p>ReviewPilot AI Command Center</p>
         </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-xs) 0' }}>
+
+        <div className="sidebar-nav">
           {NAV_GROUPS.map((group) => (
             <div key={group.label} className="sidebar-group">
               <div className="sidebar-group-label">{group.label}</div>
               {group.items.map((item) => {
+                const hrefBase = item.href.split('?')[0];
                 const isActive =
                   item.href === '/dashboard'
                     ? pathname === '/dashboard'
-                    : pathname.startsWith(item.href.split('?')[0]) && item.href !== '/dashboard';
+                    : pathname.startsWith(hrefBase) && hrefBase !== '/dashboard';
                 return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={`sidebar-link${isActive ? ' active' : ''}`}
-                  >
+                  <Link key={item.href} href={item.href} className={`sidebar-link${isActive ? ' active' : ''}`}>
                     <span>{item.icon}</span>
                     <span>{item.label}</span>
                   </Link>
@@ -73,15 +76,19 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
           ))}
         </div>
+
         <div className="sidebar-footer">
-          <Link href="/deals" className="sidebar-link" target="_blank">
-            <span>🌐</span>
-            <span>Xem trang public</span>
-          </Link>
+          <div className="sidebar-footer-card">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+              <span className="status-dot status-dot-ok">Safe Mode: ON</span>
+            </div>
+            <Link href="/deals" className="sidebar-link sidebar-link-external" target="_blank" style={{ padding: '4px 0', fontSize: '11px' }}>
+              🌐 Xem trang deal public →
+            </Link>
+          </div>
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="main-content">
         {children}
       </main>

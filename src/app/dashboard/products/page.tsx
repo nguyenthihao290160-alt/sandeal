@@ -149,10 +149,21 @@ export default function ProductsPage() {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">Danh sách sản phẩm</div>
-        <Link href="/dashboard/product-sources" className="btn btn-primary btn-sm">+ Thêm sản phẩm</Link>
+        <div className="topbar-title">Kho sản phẩm</div>
+        <div className="safe-mode-badges">
+          <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
+          <span className="safe-badge safe-badge-on">💰 Free Only</span>
+          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+        </div>
       </div>
       <div className="page-content">
+        <div className="page-header">
+          <div>
+            <h1 className="page-header-title">📦 Kho sản phẩm</h1>
+            <p className="page-header-desc">Quản lý toàn bộ sản phẩm, duyệt và chuẩn bị nội dung.</p>
+          </div>
+          <Link href="/dashboard/product-sources" className="btn btn-primary">+ Thêm sản phẩm</Link>
+        </div>
         {/* Toast */}
         {toast && (
           <div className="toast-container">

@@ -230,8 +230,8 @@ export default function ProductSourcesPage() {
       <div className="topbar">
         <div className="topbar-title">Trung tâm nguồn sản phẩm</div>
         <div className="safe-mode-badges">
-          <span className="safe-badge safe-badge-on">🔒 Safe Mode: ON</span>
-          <span className="safe-badge safe-badge-on">💰 Free Only: ON</span>
+          <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
+          <span className="safe-badge safe-badge-on">💰 Free Only</span>
           <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
         </div>
       </div>
@@ -254,14 +254,24 @@ export default function ProductSourcesPage() {
         </div>
 
         {/* Source Status Cards */}
-        <div className="grid grid-6" style={{ marginBottom: 'var(--space-xl)' }}>
+        <div className="source-cards">
           {SOURCE_STATUSES.map(s => (
-            <div key={s.name} className="glass-card" style={{ padding: 'var(--space-md)', textAlign: 'center' }}>
-              <div style={{ fontSize: '24px', marginBottom: '6px' }}>{s.icon}</div>
-              <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: '4px' }}>{s.name}</div>
-              <span className={`badge ${s.status === 'active' ? 'badge-success' : s.status === 'pending' ? 'badge-warning' : 'badge-neutral'}`}>
-                {s.status === 'active' ? 'Khả dụng' : s.status === 'pending' ? 'Cần cấu hình' : 'Sắp có'}
-              </span>
+            <div key={s.name} className={`source-card${activeTab === (s.name === 'Thủ công' ? 'manual' : s.name === 'CSV' ? 'csv' : s.name.toLowerCase().replace(/\s+/g,'')) ? ' active' : ''}`}
+              onClick={() => {
+                if (s.name === 'Thủ công') setActiveTab('manual');
+                else if (s.name === 'AccessTrade') setActiveTab('accesstrade');
+                else if (s.name === 'Shopee') setActiveTab('shopee');
+                else if (s.name === 'TikTok Shop') setActiveTab('tiktok');
+                else if (s.name === 'Lazada') setActiveTab('lazada');
+                else if (s.name === 'CSV') setActiveTab('csv');
+              }}>
+              <div className="source-card-icon">{s.icon}</div>
+              <div className="source-card-name">{s.name}</div>
+              <div className="source-card-status">
+                <span className={`badge ${s.status === 'active' ? 'badge-success' : s.status === 'pending' ? 'badge-warning' : 'badge-neutral'}`} style={{ fontSize: '9px', padding: '2px 6px' }}>
+                  {s.status === 'active' ? 'Khả dụng' : s.status === 'pending' ? 'Cần cấu hình' : 'Sắp có'}
+                </span>
+              </div>
             </div>
           ))}
         </div>
