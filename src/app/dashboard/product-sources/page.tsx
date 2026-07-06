@@ -69,6 +69,7 @@ export default function ProductSourcesPage() {
   const [atError, setAtError] = useState('');
   const [atResults, setAtResults] = useState<{items: Array<Record<string, unknown>>; summary: Record<string, number>} | null>(null);
   const [atSaving, setAtSaving] = useState<string | null>(null);
+  const [atConfigured, setAtConfigured] = useState(true);
 
   const showToast = useCallback((type: string, message: string) => {
     setToast({ type, message });
@@ -82,6 +83,14 @@ export default function ProductSourcesPage() {
       const data = await res.json();
       if (data.ok && Array.isArray(data.data)) {
         setRecentProducts(data.data.slice(0, 10));
+      }
+    } catch { /* ignore */ }
+    
+    try {
+      const hRes = await fetch('/api/app-health');
+      const hData = await hRes.json();
+      if (hData.ok) {
+        setAtConfigured(hData.data?.integrations?.accesstrade?.configured ?? false);
       }
     } catch { /* ignore */ }
   }, []);
@@ -465,9 +474,19 @@ export default function ProductSourcesPage() {
           {/* ====== ACCESSTRADE TAB ====== */}
           {activeTab === 'accesstrade' && (
             <div>
-              <div className="glass-card" style={{ maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
+              <div className="card" style={{ maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
                 <h3 className="card-title" style={{ marginBottom: 'var(--space-md)' }}>🔗 Tìm kiếm trên AccessTrade</h3>
-                <div className="form-row">
+                
+                {!atConfigured && (
+                  <div style={{ background: 'var(--color-warning-bg)', border: '1px solid var(--color-warning)', padding: 'var(--space-xl)', borderRadius: 'var(--radius-lg)', textAlign: 'center', marginBottom: 'var(--space-xl)' }}>
+                    <div style={{ fontSize: '32px', marginBottom: 'var(--space-sm)' }}>⚠️</div>
+                    <h4 style={{ fontSize: 'var(--text-lg)', fontWeight: 700, color: 'var(--color-warning)', marginBottom: 'var(--space-xs)' }}>Thiếu API Key AccessTrade</h4>
+                    <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>Bạn cần cấu hình API key của AccessTrade để tìm kiếm và lấy deal tự động.</p>
+                    <Link href="/dashboard/token-vault" className="btn btn-primary">🔐 Mở Token Vault</Link>
+                  </div>
+                )}
+
+                <div className="form-row" style={{ opacity: atConfigured ? 1 : 0.5, pointerEvents: atConfigured ? 'auto' : 'none' }}>
                   <div className="form-group" style={{ flex: 2 }}>
                     <label className="label">Từ khoá</label>
                     <input className="input" value={atKeyword} onChange={e => setAtKeyword(e.target.value)} placeholder="VD: tai nghe, serum, balo..." />
@@ -482,7 +501,8 @@ export default function ProductSourcesPage() {
                     </select>
                   </div>
                 </div>
-                <button className="btn btn-primary" onClick={handleAtSearch} disabled={atLoading}>
+
+                <button className="btn btn-primary" onClick={handleAtSearch} disabled={atLoading} style={{ marginTop: 'var(--space-md)' }}>
                   {atLoading ? '⏳ Đang tìm...' : '🔍 Tìm kiếm'}
                 </button>
               </div>

@@ -17,6 +17,11 @@ export async function generateMetadata(
   };
 }
 
+const PLATFORMS: Record<string, string> = {
+  shopee: 'Shopee', tiktok_shop: 'TikTok Shop', lazada: 'Lazada',
+  accesstrade: 'AccessTrade', website: 'Website', other: 'Khác',
+};
+
 export default async function DealDetailPage(
   { params }: { params: Promise<{ slug: string }> }
 ) {
@@ -29,203 +34,224 @@ export default async function DealDetailPage(
 
   const dealUrl = product.affiliateUrl || product.originalUrl;
   const allDeals = await getPublishedProducts();
-  const relatedDeals = allDeals.filter(d => d.id !== product.id).slice(0, 3);
+  const relatedDeals = allDeals.filter(d => d.id !== product.id).slice(0, 4);
+
+  const formatPrice = (p?: number) => p ? p.toLocaleString('vi-VN') + '₫' : '';
+  const discount = (product.salePrice && product.price && product.price > product.salePrice) 
+    ? Math.round((1 - product.salePrice / product.price) * 100) 
+    : 0;
 
   return (
-    <>
-      {/* Navigation */}
-      <nav className="public-nav">
-        <div className="public-nav-inner">
-          <Link href="/" className="public-nav-brand">SanDeal</Link>
-          <ul className="public-nav-links">
+    <div className="market-shell">
+      {/* Top Announcement */}
+      <div className="top-announcement">
+        <div>Deal mới mỗi ngày — So sánh nhanh — Link minh bạch</div>
+        <div className="top-announcement-right">Giá và ưu đãi có thể thay đổi</div>
+      </div>
+
+      {/* Header */}
+      <header className="market-header">
+        <div className="market-container market-header-inner">
+          <Link href="/" className="market-logo">SanDeal</Link>
+          <div className="market-search">
+            <span className="market-search-icon">🔍</span>
+            <input placeholder="Bạn muốn tìm deal gì hôm nay?" />
+          </div>
+          <ul className="market-nav-links">
             <li><Link href="/">Trang chủ</Link></li>
-            <li><Link href="/deals">Deals</Link></li>
-            <li><Link href="/dashboard" className="btn btn-primary btn-sm">Dashboard</Link></li>
+            <li><Link href="/deals" style={{ color: 'var(--market-primary)' }}>Deals</Link></li>
+            <li><Link href="/#how-it-works">Cách hoạt động</Link></li>
+            <li><Link href="/#disclosure">Minh bạch affiliate</Link></li>
           </ul>
         </div>
-      </nav>
+      </header>
 
-      <div className="container" style={{ padding: 'var(--space-xl) var(--space-lg)' }}>
+      {/* Main Content */}
+      <main className="market-container" style={{ padding: 'var(--space-2xl) var(--space-lg)' }}>
+        
         {/* Breadcrumb */}
-        <div style={{ marginBottom: 'var(--space-lg)', fontSize: 'var(--text-sm)' }}>
-          <Link href="/deals" style={{ color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>← Quay lại deals</Link>
+        <div style={{ marginBottom: 'var(--space-xl)', fontSize: 'var(--text-sm)', color: 'var(--market-text-muted)' }}>
+          <Link href="/" style={{ color: 'var(--market-text-muted)', textDecoration: 'none' }}>Trang chủ</Link> 
+          <span style={{ margin: '0 8px' }}>/</span> 
+          <Link href="/deals" style={{ color: 'var(--market-text-muted)', textDecoration: 'none' }}>Deals</Link> 
+          <span style={{ margin: '0 8px' }}>/</span> 
+          <span style={{ color: 'var(--market-text-main)', fontWeight: 500 }}>{product.title}</span>
         </div>
 
-        <div className="product-detail-grid">
-          {/* Left: Main content */}
-          <div>
-            {/* Product Image */}
-            <div style={{
-              borderRadius: 'var(--radius-lg)',
-              overflow: 'hidden',
-              marginBottom: 'var(--space-lg)',
-              background: 'linear-gradient(135deg, #1a2237, #111827)',
-              minHeight: '200px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}>
+        {/* Product Detail Layout */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 450px) 1fr', gap: 'var(--space-3xl)', alignItems: 'start' }}>
+          
+          {/* Left: Image */}
+          <div style={{ background: '#ffffff', border: '1px solid var(--market-border)', borderRadius: 'var(--radius-xl)', overflow: 'hidden' }}>
+            <div className="market-deal-image-wrapper">
               {product.imageUrl ? (
-                <img src={product.imageUrl} alt={product.title} style={{ width: '100%', maxHeight: '400px', objectFit: 'cover' }} />
+                <img src={product.imageUrl} alt={product.title} />
               ) : (
-                <span style={{ fontSize: '64px', opacity: 0.4 }}>📦</span>
+                <div className="market-deal-placeholder">
+                  <span className="market-deal-placeholder-icon">📦</span>
+                  <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
+                </div>
+              )}
+            </div>
+            
+            {product.gallery && product.gallery.length > 0 && (
+              <div style={{ display: 'flex', gap: 'var(--space-sm)', padding: 'var(--space-md)', overflowX: 'auto' }}>
+                {product.gallery.map((url, idx) => (
+                  <div key={idx} style={{ width: '60px', height: '60px', borderRadius: 'var(--radius-md)', border: '1px solid var(--market-border)', overflow: 'hidden', flexShrink: 0 }}>
+                    <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Right: Details */}
+          <div>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: 'var(--space-md)' }}>
+              <span className="market-platform-badge" style={{ position: 'relative', top: 'auto', right: 'auto' }}>
+                {PLATFORMS[product.platform] || product.platform}
+              </span>
+              {discount > 0 && (
+                <span className="market-discount-badge" style={{ position: 'relative', top: 'auto', left: 'auto' }}>
+                  Giảm {discount}%
+                </span>
               )}
             </div>
 
-            <h1 style={{ fontSize: 'var(--text-3xl)', fontWeight: 800, marginBottom: 'var(--space-md)', letterSpacing: '-0.02em', lineHeight: 1.2 }}>
+            <h1 style={{ fontSize: 'var(--text-3xl)', fontWeight: 800, color: 'var(--market-text-main)', marginBottom: 'var(--space-md)', lineHeight: 1.3 }}>
               {product.title}
             </h1>
 
-            <div className="flex gap-sm" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
-              <span className="badge badge-neutral">{product.platform}</span>
-              {product.scoreLabel && (
-                <span className={`badge ${product.score && product.score >= 75 ? 'badge-success' : 'badge-warning'}`}>
-                  {product.scoreLabel}
-                </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)', marginBottom: 'var(--space-xl)', paddingBottom: 'var(--space-xl)', borderBottom: '1px dashed var(--market-border)' }}>
+              <div style={{ fontSize: 'var(--text-4xl)', fontWeight: 900, color: 'var(--market-discount)' }}>
+                {formatPrice(product.salePrice || product.price)}
+              </div>
+              {product.salePrice && product.price && product.price !== product.salePrice && (
+                <div style={{ fontSize: 'var(--text-lg)', color: 'var(--market-text-muted)', textDecoration: 'line-through' }}>
+                  {formatPrice(product.price)}
+                </div>
               )}
-              <span className="badge badge-warning">Giá có thể thay đổi</span>
             </div>
 
+            {/* Description */}
             {product.description && (
-              <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)', lineHeight: 1.8, fontSize: 'var(--text-base)' }}>
-                {product.description}
-              </p>
+              <div style={{ marginBottom: 'var(--space-xl)' }}>
+                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, marginBottom: 'var(--space-sm)' }}>Thông tin sản phẩm</h3>
+                <p style={{ color: 'var(--market-text-muted)', lineHeight: 1.7, fontSize: 'var(--text-sm)' }}>
+                  {product.description}
+                </p>
+              </div>
             )}
 
             {/* Benefits */}
             {product.benefits && product.benefits.length > 0 && (
-              <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
-                <h3 className="card-title">✅ Lợi ích chính</h3>
-                <ul className="detail-list">
-                  {product.benefits.map((b, i) => <li key={i}>{b}</li>)}
+              <div style={{ marginBottom: 'var(--space-xl)' }}>
+                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, marginBottom: 'var(--space-sm)' }}>Điểm nổi bật</h3>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {product.benefits.map((b, i) => (
+                    <li key={i} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginBottom: '8px', fontSize: 'var(--text-sm)' }}>
+                      <span style={{ color: 'var(--market-success)' }}>✓</span>
+                      <span>{b}</span>
+                    </li>
+                  ))}
                 </ul>
               </div>
             )}
 
-            {/* Things to check */}
+            {/* Warnings */}
             {product.warnings && product.warnings.length > 0 && (
-              <div className="glass-card" style={{ marginBottom: 'var(--space-lg)', borderColor: 'rgba(245, 158, 11, 0.2)' }}>
-                <h3 className="card-title">🔍 Điều cần kiểm tra trước khi mua</h3>
-                <ul className="detail-list detail-list-warning">
-                  {product.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              <div style={{ marginBottom: 'var(--space-xl)', padding: 'var(--space-md)', background: 'rgba(245, 158, 11, 0.1)', borderRadius: 'var(--radius-md)' }}>
+                <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--market-warning)', marginBottom: 'var(--space-xs)' }}>Lưu ý trước khi mua</h3>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {product.warnings.map((w, i) => (
+                    <li key={i} style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: 'var(--text-xs)', color: '#92400e', marginBottom: '4px' }}>
+                      <span>⚠️</span>
+                      <span>{w}</span>
+                    </li>
+                  ))}
                 </ul>
               </div>
             )}
 
-            {/* Price note */}
-            {product.priceNote && (
-              <div className="disclosure-banner">
-                💡 <strong>Ghi chú giá:</strong> {product.priceNote}
-              </div>
-            )}
-
-            {/* Affiliate disclosure */}
-            <div className="disclosure-banner" style={{ marginTop: 'var(--space-md)' }}>
-              🛡️ {product.affiliateDisclosure || 'Bài viết có chứa liên kết tiếp thị liên kết. Nếu bạn mua hàng thông qua liên kết này, chúng tôi có thể nhận được hoa hồng nhỏ, không ảnh hưởng đến giá bạn trả.'}
-            </div>
-
-            {/* Disclaimer */}
-            <div className="disclosure-banner" style={{ marginTop: 'var(--space-md)' }}>
-              ⚠️ Giá, tồn kho và ưu đãi có thể thay đổi theo thời gian. Vui lòng kiểm tra lại trên trang bán hàng trước khi mua.
-            </div>
-          </div>
-
-          {/* Right: CTA + Info */}
-          <div>
-            <div className="gradient-card" style={{ position: 'sticky', top: '80px' }}>
-              {/* Price */}
-              {(product.salePrice || product.price) && (
-                <div style={{ marginBottom: 'var(--space-lg)', textAlign: 'center' }}>
-                  <div style={{ fontSize: 'var(--text-3xl)', fontWeight: 800, color: 'var(--color-accent-light)' }}>
-                    {product.salePrice
-                      ? product.salePrice.toLocaleString('vi-VN') + '₫'
-                      : product.price?.toLocaleString('vi-VN') + '₫'}
-                  </div>
-                  {product.price && product.salePrice && product.price > product.salePrice && (
-                    <div style={{ marginTop: '4px' }}>
-                      <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', textDecoration: 'line-through' }}>
-                        {product.price.toLocaleString('vi-VN')}₫
-                      </span>
-                      <span className="badge badge-success" style={{ marginLeft: '8px' }}>
-                        -{Math.round(((product.price - product.salePrice) / product.price) * 100)}%
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* CTA */}
+            {/* Actions */}
+            <div style={{ marginTop: 'var(--space-2xl)' }}>
               {dealUrl ? (
-                <a href={dealUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-lg" style={{ width: '100%', marginBottom: 'var(--space-md)' }}>
-                  Xem deal →
+                <a href={dealUrl} target="_blank" rel="noopener noreferrer" className="btn" style={{ background: 'var(--market-primary)', color: '#ffffff', width: '100%', fontSize: 'var(--text-lg)', padding: '16px', borderRadius: 'var(--radius-lg)' }}>
+                  Đến trang mua hàng
                 </a>
               ) : (
-                <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)', textAlign: 'center', marginBottom: 'var(--space-md)' }}>
-                  Link sản phẩm chưa sẵn sàng.
-                </p>
+                <button className="btn" disabled style={{ background: 'var(--market-border)', color: 'var(--market-text-muted)', width: '100%', fontSize: 'var(--text-lg)', padding: '16px', borderRadius: 'var(--radius-lg)' }}>
+                  Sản phẩm chưa sẵn sàng
+                </button>
               )}
-
-              {/* Info */}
-              <div className="detail-meta">
-                <div className="detail-meta-row"><span>Nền tảng:</span><span>{product.platform}</span></div>
-                {product.category && <div className="detail-meta-row"><span>Danh mục:</span><span>{product.category}</span></div>}
-                {product.tags && product.tags.length > 0 && (
-                  <div className="detail-meta-row"><span>Tags:</span><span>{product.tags.join(', ')}</span></div>
-                )}
+              <div style={{ textAlign: 'center', marginTop: 'var(--space-md)', fontSize: 'var(--text-xs)', color: 'var(--market-text-muted)' }}>
+                Giá có thể thay đổi tùy thời điểm.
               </div>
-
-              {/* Back */}
-              <Link href="/deals" className="btn btn-secondary" style={{ width: '100%', marginTop: 'var(--space-md)', textAlign: 'center' }}>
-                ← Tất cả deals
-              </Link>
             </div>
+
           </div>
         </div>
 
         {/* Related Deals */}
         {relatedDeals.length > 0 && (
-          <div style={{ marginTop: 'var(--space-3xl)' }}>
-            <h2 className="section-title">Deals khác</h2>
-            <div className="grid grid-3">
-              {relatedDeals.map(d => (
-                <div key={d.id} className="deal-card">
-                  <div className="deal-card-image">
-                    {d.imageUrl ? <img src={d.imageUrl} alt={d.title} /> : <span>📦</span>}
-                    <div className="deal-card-platform">
-                      <span className="badge badge-neutral">{d.platform}</span>
+          <div style={{ marginTop: 'var(--space-4xl)', paddingTop: 'var(--space-2xl)', borderTop: '1px solid var(--market-border)' }}>
+            <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: 'var(--space-lg)' }}>Deal khác có thể bạn thích</h2>
+            <div className="deal-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+              {relatedDeals.map(p => {
+                const relDiscount = (p.salePrice && p.price && p.price > p.salePrice) 
+                  ? Math.round((1 - p.salePrice / p.price) * 100) 
+                  : 0;
+
+                return (
+                  <Link href={`/deals/${p.slug}`} key={p.id} className="market-deal-card">
+                    <div className="market-deal-image-wrapper">
+                      {p.imageUrl ? (
+                        <img src={p.imageUrl} alt={p.title} />
+                      ) : (
+                        <div className="market-deal-placeholder">
+                          <span className="market-deal-placeholder-icon">📦</span>
+                          <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
+                        </div>
+                      )}
+                      {relDiscount > 0 && (
+                        <div className="market-discount-badge">Giảm {relDiscount}%</div>
+                      )}
+                      <div className="market-platform-badge">{PLATFORMS[p.platform] || p.platform}</div>
                     </div>
-                  </div>
-                  <div className="deal-card-body">
-                    <Link href={`/deals/${d.slug}`}><h3 className="deal-card-title">{d.title}</h3></Link>
-                    {(d.salePrice || d.price) && (
-                      <div className="deal-card-price">
-                        {(d.salePrice || d.price || 0).toLocaleString('vi-VN')}₫
+                    <div className="market-deal-body">
+                      <h3 className="market-deal-title">{p.title}</h3>
+                      <div className="market-deal-price-row">
+                        <span className="market-price-current">{formatPrice(p.salePrice || p.price)}</span>
+                        {p.salePrice && p.price && p.price !== p.salePrice && (
+                          <span className="market-price-original">{formatPrice(p.price)}</span>
+                        )}
                       </div>
-                    )}
-                  </div>
-                  <div className="deal-card-footer">
-                    <span className="badge badge-neutral">{d.platform}</span>
-                    <Link href={`/deals/${d.slug}`} className="btn btn-primary btn-sm">Xem →</Link>
-                  </div>
-                </div>
-              ))}
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
           </div>
         )}
-      </div>
+      </main>
 
       {/* Footer */}
-      <footer className="public-footer">
-        <div className="public-footer-inner">
-          <p style={{ fontSize: 'var(--text-xl)', fontWeight: 900, marginBottom: '8px' }}>
-            <span style={{ background: 'linear-gradient(135deg, #7c3aed, #06b6d4)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>SanDeal</span>
-          </p>
-          <p className="public-footer-text">© {new Date().getFullYear()} SanDeal — Powered by ReviewPilot AI</p>
-          <p className="public-footer-disclosure">
-            Trang web này chứa liên kết tiếp thị liên kết. Giá và khuyến mãi có thể thay đổi. Vui lòng kiểm tra lại trên trang bán hàng trước khi mua.
-          </p>
+      <footer className="market-footer">
+        <div className="market-container market-footer-inner">
+          <div className="market-affiliate-note" style={{ maxWidth: '800px', margin: '0 auto var(--space-2xl)' }}>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, color: 'var(--market-text-main)', marginBottom: 'var(--space-sm)' }}>📋 Minh bạch Affiliate</h3>
+            SanDeal có thể nhận hoa hồng nếu bạn mua qua liên kết này, nhưng <strong>giá của bạn không thay đổi</strong>. Chúng tôi cam kết chỉ giới thiệu sản phẩm đã được đánh giá và kiểm duyệt.
+          </div>
+          
+          <Link href="/" className="market-logo" style={{ fontSize: 'var(--text-xl)', display: 'inline-block', marginBottom: 'var(--space-md)' }}>SanDeal</Link>
+          <ul className="market-footer-links">
+            <li><Link href="/">Trang chủ</Link></li>
+            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/#how-it-works">Cách hoạt động</Link></li>
+            <li><Link href="/#disclosure">Minh bạch affiliate</Link></li>
+          </ul>
         </div>
       </footer>
-    </>
+    </div>
   );
 }
