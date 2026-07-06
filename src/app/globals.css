@@ -961,9 +961,8 @@ tr:hover td { background: rgba(148,163,184,0.02); }
   gap: var(--space-md);
 }
 @media (max-width: 1200px) { .deal-grid { grid-template-columns: repeat(4, 1fr); } }
-@media (max-width: 900px) { .deal-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 640px) { .deal-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 480px) { .deal-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .deal-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px) { .deal-grid { grid-template-columns: 1fr; } }
 
 /* Deal Card */
 .market-category-card {
@@ -987,7 +986,7 @@ tr:hover td { background: rgba(148,163,184,0.02); }
 .market-deal-card {
   background: var(--market-card-bg);
   border: 1px solid var(--market-border);
-  border-radius: var(--radius-lg);
+  border-radius: 18px;
   overflow: hidden;
   transition: all var(--transition-base);
   display: flex;

@@ -43,7 +43,8 @@ export default async function HomePage() {
           </div>
           <ul className="market-nav-links">
             <li><Link href="/">Trang chủ</Link></li>
-            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/deals">Deal hot</Link></li>
+            <li><Link href="/deals">Danh mục</Link></li>
             <li><Link href="#how-it-works">Cách hoạt động</Link></li>
             <li><Link href="#disclosure">Minh bạch affiliate</Link></li>
           </ul>
@@ -54,17 +55,17 @@ export default async function HomePage() {
       <section className="market-section" style={{ background: 'linear-gradient(180deg, #ffffff 0%, var(--market-bg) 100%)', textAlign: 'center', paddingTop: 'var(--space-4xl)' }}>
         <div className="market-container">
           <h1 style={{ fontSize: 'var(--text-4xl)', fontWeight: 900, marginBottom: 'var(--space-md)', letterSpacing: '-0.03em' }}>
-            SanDeal — săn deal thông minh bằng AI
+            Săn Deal Thông Minh, Nhanh & Minh Bạch
           </h1>
           <p style={{ fontSize: 'var(--text-lg)', color: 'var(--market-text-muted)', maxWidth: '640px', margin: '0 auto var(--space-xl)', lineHeight: 1.6 }}>
-            Tổng hợp sản phẩm đáng mua, ưu đãi nổi bật và thông tin minh bạch trước khi bạn bấm mua.
+            SanDeal tổng hợp sản phẩm đáng mua, ưu đãi nổi bật và thông tin affiliate minh bạch để bạn dễ so sánh trước khi bấm mua.
           </p>
           <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-md)' }}>
             <Link href="/deals" className="btn" style={{ background: 'var(--gradient-accent)', color: '#fff', fontSize: 'var(--text-base)', padding: '12px 32px' }}>
               🔥 Xem deal hot
             </Link>
             <Link href="#how-it-works" className="btn" style={{ background: '#ffffff', color: 'var(--market-text-main)', border: '1px solid var(--market-border)', fontSize: 'var(--text-base)', padding: '12px 32px' }}>
-              Tìm hiểu cách hoạt động
+              Xem cách hoạt động
             </Link>
           </div>
 
@@ -136,7 +137,10 @@ export default async function HomePage() {
                       <div className="market-warning-pill">
                         ⚡ Giá có thể thay đổi
                       </div>
-                      <span className="market-deal-cta">Xem deal</span>
+                      <div style={{ display: 'flex', gap: '8px', marginTop: 'var(--space-sm)' }}>
+                        <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</span>
+                        <span className="market-deal-cta" style={{ background: '#f1f5f9', color: 'var(--market-text-main)' }}>Chi tiết</span>
+                      </div>
                     </div>
                   </Link>
                 );
@@ -206,7 +210,9 @@ export default async function HomePage() {
             Săn deal thông minh. Giá, tồn kho và ưu đãi có thể thay đổi theo thời gian.
           </p>
           <ul className="market-footer-links">
-            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/">SanDeal</Link></li>
+            <li><Link href="/deals">Deal hot</Link></li>
+            <li><Link href="/deals">Danh mục</Link></li>
             <li><Link href="#how-it-works">Cách hoạt động</Link></li>
             <li><Link href="#disclosure">Minh bạch affiliate</Link></li>
           </ul>

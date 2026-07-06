@@ -15,20 +15,31 @@ const CATEGORIES = [
   { label: 'TikTok Shop', value: 'tiktok_shop' },
   { label: 'Lazada', value: 'lazada' },
   { label: 'AccessTrade', value: 'accesstrade' },
+  { label: 'Giá tốt', value: 'gia_tot' },
+  { label: 'Deal mới', value: 'deal_moi' },
+  { label: 'Nên xem', value: 'nen_xem' },
 ];
 
 const FILTERS = [
+  { label: 'Bộ lọc', value: '' },
   { label: 'Có ảnh', value: 'has_image' },
+  { label: 'Đã duyệt', value: 'approved' },
   { label: 'Giá tốt', value: 'good_price' },
-  { label: 'Điểm cao (>75)', value: 'high_score' },
+  { label: 'Nên làm ngay', value: 'do_now' },
+  { label: 'Cần xác minh', value: 'verify' },
+  { label: 'Shopee', value: 'shopee' },
+  { label: 'TikTok Shop', value: 'tiktok_shop' },
+  { label: 'Lazada', value: 'lazada' },
+  { label: 'AccessTrade', value: 'accesstrade' },
 ];
 
 const SORTS = [
   { label: 'Phổ biến', value: 'popular' },
-  { label: 'Mới nhất', value: 'newest' },
+  { label: 'Khuyến mãi HOT', value: 'hot_sale' },
+  { label: 'Deal mới', value: 'newest' },
   { label: 'Giá thấp - cao', value: 'price_asc' },
   { label: 'Giá cao - thấp', value: 'price_desc' },
-  { label: 'Điểm cao nhất', value: 'score_desc' },
+  { label: 'Điểm tốt nhất', value: 'score_desc' },
 ];
 
 export default function DealsPage() {
@@ -98,7 +109,8 @@ export default function DealsPage() {
           </div>
           <ul className="market-nav-links">
             <li><Link href="/">Trang chủ</Link></li>
-            <li><Link href="/deals" style={{ color: 'var(--market-primary)' }}>Deals</Link></li>
+            <li><Link href="/deals" style={{ color: 'var(--market-primary)' }}>Deal hot</Link></li>
+            <li><Link href="/deals">Danh mục</Link></li>
             <li><Link href="/#how-it-works">Cách hoạt động</Link></li>
             <li><Link href="/#disclosure">Minh bạch affiliate</Link></li>
           </ul>
@@ -205,7 +217,10 @@ export default function DealsPage() {
                     <div className="market-warning-pill">
                       ⚡ Giá có thể thay đổi
                     </div>
-                    <span className="market-deal-cta">Xem deal</span>
+                    <div style={{ display: 'flex', gap: '8px', marginTop: 'var(--space-sm)' }}>
+                      <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</span>
+                      <span className="market-deal-cta" style={{ background: '#f1f5f9', color: 'var(--market-text-main)' }}>Chi tiết</span>
+                    </div>
                   </div>
                 </Link>
               );
@@ -224,8 +239,9 @@ export default function DealsPage() {
           
           <Link href="/" className="market-logo" style={{ fontSize: 'var(--text-xl)', display: 'inline-block', marginBottom: 'var(--space-md)' }}>SanDeal</Link>
           <ul className="market-footer-links">
-            <li><Link href="/">Trang chủ</Link></li>
-            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/">SanDeal</Link></li>
+            <li><Link href="/deals">Deal hot</Link></li>
+            <li><Link href="/deals">Danh mục</Link></li>
             <li><Link href="/#how-it-works">Cách hoạt động</Link></li>
             <li><Link href="/#disclosure">Minh bạch affiliate</Link></li>
           </ul>

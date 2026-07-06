@@ -63,7 +63,8 @@ export default async function DealDetailPage(
           </div>
           <ul className="market-nav-links">
             <li><Link href="/">Trang chủ</Link></li>
-            <li><Link href="/deals" style={{ color: 'var(--market-primary)' }}>Deals</Link></li>
+            <li><Link href="/deals" style={{ color: 'var(--market-primary)' }}>Deal hot</Link></li>
+            <li><Link href="/deals">Danh mục</Link></li>
             <li><Link href="/#how-it-works">Cách hoạt động</Link></li>
             <li><Link href="/#disclosure">Minh bạch affiliate</Link></li>
           </ul>
@@ -75,11 +76,7 @@ export default async function DealDetailPage(
         
         {/* Breadcrumb */}
         <div style={{ marginBottom: 'var(--space-xl)', fontSize: 'var(--text-sm)', color: 'var(--market-text-muted)' }}>
-          <Link href="/" style={{ color: 'var(--market-text-muted)', textDecoration: 'none' }}>Trang chủ</Link> 
-          <span style={{ margin: '0 8px' }}>/</span> 
-          <Link href="/deals" style={{ color: 'var(--market-text-muted)', textDecoration: 'none' }}>Deals</Link> 
-          <span style={{ margin: '0 8px' }}>/</span> 
-          <span style={{ color: 'var(--market-text-main)', fontWeight: 500 }}>{product.title}</span>
+          <Link href="/deals" style={{ color: 'var(--market-text-muted)', textDecoration: 'none' }}>← Quay lại Deal hot</Link> 
         </div>
 
         {/* Product Detail Layout */}
@@ -165,7 +162,7 @@ export default async function DealDetailPage(
             {/* Warnings */}
             {Array.isArray(product.warnings) && product.warnings.length > 0 && (
               <div style={{ marginBottom: 'var(--space-xl)', padding: 'var(--space-md)', background: 'rgba(245, 158, 11, 0.1)', borderRadius: 'var(--radius-md)' }}>
-                <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--market-warning)', marginBottom: 'var(--space-xs)' }}>Lưu ý trước khi mua</h3>
+                <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--market-warning)', marginBottom: 'var(--space-xs)' }}>Cần kiểm tra trước khi mua</h3>
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {product.warnings.map((w, i) => (
                     <li key={i} style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: 'var(--text-xs)', color: '#92400e', marginBottom: '4px' }}>
@@ -249,8 +246,9 @@ export default async function DealDetailPage(
           
           <Link href="/" className="market-logo" style={{ fontSize: 'var(--text-xl)', display: 'inline-block', marginBottom: 'var(--space-md)' }}>SanDeal</Link>
           <ul className="market-footer-links">
-            <li><Link href="/">Trang chủ</Link></li>
-            <li><Link href="/deals">Deals</Link></li>
+            <li><Link href="/">SanDeal</Link></li>
+            <li><Link href="/deals">Deal hot</Link></li>
+            <li><Link href="/deals">Danh mục</Link></li>
             <li><Link href="/#how-it-works">Cách hoạt động</Link></li>
             <li><Link href="/#disclosure">Minh bạch affiliate</Link></li>
           </ul>
