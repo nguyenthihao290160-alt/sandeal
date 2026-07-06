@@ -6,7 +6,10 @@ export const dynamic = 'force-dynamic';
 
 export default async function HomePage() {
   let products: Awaited<ReturnType<typeof getPublishedProducts>> = [];
-  try { products = await getPublishedProducts(); } catch { /* empty */ }
+  try { 
+    const data = await getPublishedProducts(); 
+    if (Array.isArray(data)) products = data;
+  } catch { /* empty */ }
   const featured = products.slice(0, 10);
 
   const formatPrice = (p?: number) => p ? p.toLocaleString('vi-VN') + '₫' : '';

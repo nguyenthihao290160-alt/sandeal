@@ -198,7 +198,7 @@ export default function DealsPage() {
                       )}
                     </div>
                     <div className="market-deal-benefits">
-                      {p.benefits?.slice(0, 3).map((b, i) => (
+                      {Array.isArray(p.benefits) && p.benefits.slice(0, 3).map((b, i) => (
                         <span key={i} className="market-benefit-chip">{b}</span>
                       ))}
                     </div>

@@ -33,7 +33,11 @@ export default async function DealDetailPage(
   }
 
   const dealUrl = product.affiliateUrl || product.originalUrl;
-  const allDeals = await getPublishedProducts();
+  let allDeals: Awaited<ReturnType<typeof getPublishedProducts>> = [];
+  try {
+    const data = await getPublishedProducts();
+    if (Array.isArray(data)) allDeals = data;
+  } catch { /* empty */ }
   const relatedDeals = allDeals.filter(d => d.id !== product.id).slice(0, 4);
 
   const formatPrice = (p?: number) => p ? p.toLocaleString('vi-VN') + '₫' : '';
@@ -94,7 +98,7 @@ export default async function DealDetailPage(
               )}
             </div>
             
-            {product.gallery && product.gallery.length > 0 && (
+            {Array.isArray(product.gallery) && product.gallery.length > 0 && (
               <div style={{ display: 'flex', gap: 'var(--space-sm)', padding: 'var(--space-md)', overflowX: 'auto' }}>
                 {product.gallery.map((url, idx) => (
                   <div key={idx} style={{ width: '60px', height: '60px', borderRadius: 'var(--radius-md)', border: '1px solid var(--market-border)', overflow: 'hidden', flexShrink: 0 }}>
@@ -144,7 +148,7 @@ export default async function DealDetailPage(
             )}
 
             {/* Benefits */}
-            {product.benefits && product.benefits.length > 0 && (
+            {Array.isArray(product.benefits) && product.benefits.length > 0 && (
               <div style={{ marginBottom: 'var(--space-xl)' }}>
                 <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, marginBottom: 'var(--space-sm)' }}>Điểm nổi bật</h3>
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
@@ -159,7 +163,7 @@ export default async function DealDetailPage(
             )}
 
             {/* Warnings */}
-            {product.warnings && product.warnings.length > 0 && (
+            {Array.isArray(product.warnings) && product.warnings.length > 0 && (
               <div style={{ marginBottom: 'var(--space-xl)', padding: 'var(--space-md)', background: 'rgba(245, 158, 11, 0.1)', borderRadius: 'var(--radius-md)' }}>
                 <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--market-warning)', marginBottom: 'var(--space-xs)' }}>Lưu ý trước khi mua</h3>
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>

@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       originalUrl: body.originalUrl || undefined,
       affiliateUrl: body.affiliateUrl || undefined,
       imageUrl: body.imageUrl || undefined,
-      gallery: body.gallery || [],
+      gallery: parseMultiline(body.gallery),
       price: body.price ? Number(body.price) : undefined,
       salePrice: body.salePrice ? Number(body.salePrice) : undefined,
       currency: 'VND',

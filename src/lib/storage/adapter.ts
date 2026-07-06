@@ -27,9 +27,10 @@ export async function readCollection<T>(collection: string): Promise<T[]> {
   const filePath = getFilePath(collection);
   try {
     const raw = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(raw) as T[];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
   } catch {
-    // File doesn't exist yet — return empty array
+    // File doesn't exist yet or is corrupt — return empty array
     return [];
   }
 }
