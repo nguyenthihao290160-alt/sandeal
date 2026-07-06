@@ -966,6 +966,24 @@ tr:hover td { background: rgba(148,163,184,0.02); }
 @media (max-width: 480px) { .deal-grid { grid-template-columns: 1fr; } }
 
 /* Deal Card */
+.market-category-card {
+  background: #ffffff;
+  border: 1px solid var(--market-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md) var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--market-text-main);
+  transition: all var(--transition-fast);
+  min-width: 100px;
+}
+.market-category-card:hover {
+  border-color: var(--market-primary);
+}
+
 .market-deal-card {
   background: var(--market-card-bg);
   border: 1px solid var(--market-border);

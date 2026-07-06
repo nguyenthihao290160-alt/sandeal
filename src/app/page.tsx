@@ -71,10 +71,7 @@ export default async function HomePage() {
           {/* Categories Shortcuts */}
           <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-md)', flexWrap: 'wrap', marginTop: 'var(--space-3xl)' }}>
             {CATEGORIES.map(c => (
-              <Link href="/deals" key={c.name} style={{ background: '#ffffff', border: '1px solid var(--market-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-md) var(--space-lg)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', textDecoration: 'none', color: 'var(--market-text-main)', transition: 'all var(--transition-fast)', minWidth: '100px' }}
-                onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--market-primary)'}
-                onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--market-border)'}
-              >
+              <Link href="/deals" key={c.name} className="market-category-card">
                 <span style={{ fontSize: '28px' }}>{c.icon}</span>
                 <span style={{ fontSize: 'var(--text-xs)', fontWeight: 600 }}>{c.name}</span>
               </Link>
