@@ -477,36 +477,49 @@ export default function ProductSourcesPage() {
                   </div>
 
                   {/* Results */}
-                  {atResults.items.map((item, idx) => (
-                    <div key={idx} className="card" style={{ marginBottom: 'var(--space-md)', display: 'flex', gap: 'var(--space-md)' }}>
-                      {item.imageUrl && (
-                        <div style={{ width: '80px', height: '80px', borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
-                          <img src={String(item.imageUrl)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                        </div>
-                      )}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="flex items-center gap-sm" style={{ marginBottom: '4px' }}>
-                          <strong style={{ fontSize: 'var(--text-sm)' }}>{String(item.name || 'Không có tên')}</strong>
-                          <span className={`badge ${item.kind === 'product' ? 'badge-success' : item.kind === 'voucher' ? 'badge-warning' : 'badge-neutral'}`}>
-                            {String(item.kind)}
-                          </span>
-                          {item.needsVerification && <span className="badge badge-warning">Cần xác minh</span>}
-                        </div>
-                        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-                          {item.price ? `${Number(item.price).toLocaleString('vi-VN')}₫` : ''}
-                          {item.affiliateUrl ? ' • Có link affiliate' : ' • Chưa có link affiliate'}
-                        </p>
-                        <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)' }}>
-                          <button className="btn btn-sm btn-primary" disabled={atSaving === String(item.id)} onClick={() => handleAtSave(item)}>
-                            💾 Lưu vào sản phẩm
-                          </button>
-                          <button className="btn btn-sm btn-accent" disabled={atSaving === String(item.id)} onClick={() => handleAtSave(item, true)}>
-                            ⭐ Lưu và chấm điểm
-                          </button>
+                  {atResults.items.map((rawItem, idx) => {
+                    const item = {
+                      id: String(rawItem.id || ''),
+                      name: String(rawItem.name || 'Không có tên'),
+                      kind: String(rawItem.kind || 'unknown'),
+                      imageUrl: typeof rawItem.imageUrl === 'string' ? rawItem.imageUrl : '',
+                      price: Number(rawItem.price || 0),
+                      affiliateUrl: typeof rawItem.affiliateUrl === 'string' ? rawItem.affiliateUrl : '',
+                      needsVerification: Boolean(rawItem.needsVerification),
+                      originalItem: rawItem,
+                    };
+                    
+                    return (
+                      <div key={idx} className="card" style={{ marginBottom: 'var(--space-md)', display: 'flex', gap: 'var(--space-md)' }}>
+                        {Boolean(item.imageUrl) && (
+                          <div style={{ width: '80px', height: '80px', borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
+                            <img src={item.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          </div>
+                        )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="flex items-center gap-sm" style={{ marginBottom: '4px' }}>
+                            <strong style={{ fontSize: 'var(--text-sm)' }}>{item.name}</strong>
+                            <span className={`badge ${item.kind === 'product' ? 'badge-success' : item.kind === 'voucher' ? 'badge-warning' : 'badge-neutral'}`}>
+                              {item.kind}
+                            </span>
+                            {item.needsVerification && <span className="badge badge-warning">Cần xác minh</span>}
+                          </div>
+                          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                            {item.price > 0 ? `${item.price.toLocaleString('vi-VN')}₫` : ''}
+                            {item.affiliateUrl ? ' • Có link affiliate' : ' • Chưa có link affiliate'}
+                          </p>
+                          <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)' }}>
+                            <button className="btn btn-sm btn-primary" disabled={atSaving === item.id} onClick={() => handleAtSave(item.originalItem)}>
+                              💾 Lưu vào sản phẩm
+                            </button>
+                            <button className="btn btn-sm btn-accent" disabled={atSaving === item.id} onClick={() => handleAtSave(item.originalItem, true)}>
+                              ⭐ Lưu và chấm điểm
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {atResults.items.length === 0 && (
                     <div className="empty-state">
                       <div className="empty-state-icon">🔍</div>
