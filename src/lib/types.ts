@@ -92,6 +92,18 @@ export interface Product {
   externalId?: string;
   rawSourceType?: string;
 
+  // Bot infrastructure fields
+  linkHealthStatus?: LinkHealthStatus;
+  linkLastCheckedAt?: string;
+  linkFailureCount?: number;
+  imageHealthStatus?: LinkHealthStatus;
+  archivedReason?: string;
+  unpublishedReason?: string;
+  contentPackageStatus?: 'none' | 'generated' | 'approved';
+  complianceStatus?: ComplianceStatus;
+  complianceIssues?: ComplianceIssue[];
+  generatedContent?: ContentPackage;
+
   createdAt: string;
   updatedAt: string;
 }
@@ -213,4 +225,153 @@ export interface Channel {
   requiredPermissions: string[];
   status: 'connected' | 'disconnected' | 'error' | 'token_expired';
   lastSyncAt?: string;
+}
+
+// ---- AI Bot Infrastructure ----
+
+export type BotName = 
+  | 'orchestrator'
+  | 'source_scout'
+  | 'deal_hunter'
+  | 'product_normalizer'
+  | 'image_resolver'
+  | 'gemini_analyst'
+  | 'deal_scorer'
+  | 'content_review'
+  | 'compliance_guard'
+  | 'link_health'
+  | 'product_cleanup'
+  | 'content_package'
+  | 'app_health';
+
+export type BotRunMode =
+  | 'source_scan'
+  | 'deal_hunt'
+  | 'gemini_analysis'
+  | 'content_review'
+  | 'link_health'
+  | 'cleanup'
+  | 'score_only'
+  | 'full_safe_run';
+
+export type BotRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface BotRunLog {
+  id: string;
+  runId: string;
+  botName: BotName;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  timestamp: string;
+  data?: Record<string, unknown>;
+}
+
+export interface BotRun {
+  id: string;
+  mode: BotRunMode;
+  source: 'local' | 'accesstrade' | 'manual' | 'all';
+  limit: number;
+  status: BotRunStatus;
+  startedAt: string;
+  completedAt?: string;
+  candidatesFound: number;
+  productsSaved: number;
+  contentPackagesGenerated: number;
+  linksChecked: number;
+  productsArchived: number;
+  errorCount: number;
+  logs: BotRunLog[];
+}
+
+export type LinkHealthStatus = 'ok' | 'redirect_ok' | 'timeout' | 'not_found' | 'server_error' | 'affiliate_error' | 'image_broken' | 'product_unavailable' | 'needs_manual_check';
+
+export interface LinkHealthCheck {
+  id: string;
+  productId: string;
+  productUrlStatus: LinkHealthStatus;
+  productUrlHttpCode?: number;
+  affiliateUrlStatus?: LinkHealthStatus;
+  affiliateUrlHttpCode?: number;
+  imageUrlStatus?: LinkHealthStatus;
+  checkedAt: string;
+  failureCount: number;
+  lastFailureReason?: string;
+}
+
+export type ComplianceIssue =
+  | 'fake_personal_experience'
+  | 'exaggerated_claims'
+  | 'missing_affiliate_disclosure'
+  | 'missing_price_change_note'
+  | 'invented_price'
+  | 'invented_discount'
+  | 'invented_stock'
+  | 'risky_wording'
+  | 'missing_data';
+
+export type ComplianceStatus = 'safe' | 'needs_edit' | 'blocked';
+
+export interface ComplianceCheckResult {
+  status: ComplianceStatus;
+  issues: ComplianceIssue[];
+  safeRewrite?: string;
+  checkedAt: string;
+}
+
+export interface DealScoringCriteria {
+  hasRealImage: boolean;
+  hasCurrentPrice: boolean;
+  hasOriginalPrice: boolean;
+  discountPercent?: number;
+  hasAffiliateUrl: boolean;
+  trustedSource: boolean;
+  dataCompleteness: number; // 0-100
+  lowRisk: boolean;
+  contentPotential: boolean;
+}
+
+export interface DealScoreResult {
+  score: number; // 0-100
+  label: 'Bỏ qua' | 'Cần xem xét' | 'Nên làm' | 'Ưu tiên cao';
+  reasons: string[];
+  criteria: DealScoringCriteria;
+}
+
+export interface ContentPackage {
+  id: string;
+  productId: string;
+  websiteTitle: string;
+  websiteReview: string;
+  bulletPoints: string[];
+  shortCaption: string;
+  socialCaption?: string;
+  hashtags: string[];
+  cta: string;
+  contentAngle: string;
+  affiliateNote: string;
+  imageUrl?: string;
+  productUrl: string;
+  affiliateUrl?: string;
+  complianceStatus: ComplianceStatus;
+  complianceIssues: ComplianceIssue[];
+  generatedAt: string;
+}
+
+export interface BotTeamStatus {
+  aiBotsEnabled: boolean;
+  contentBotEnabled: boolean;
+  linkHealthBotEnabled: boolean;
+  cleanupBotEnabled: boolean;
+  lastBotRunStatus?: BotRunStatus;
+  lastBotRunAt?: string;
+  productCount: number;
+  approvedProductCount: number;
+  reviewProductCount: number;
+  brokenLinkCount: number;
+  contentPackageCount: number;
+  hasGeminiPrimaryToken: boolean;
+  hasAccessTradePrimaryToken: boolean;
+  safeMode: boolean;
+  freeOnly: boolean;
+  autoPublish: boolean;
 }

@@ -403,3 +403,24 @@ export function getScoreLabel(score: number): { label: string; color: string } {
   if (score >= 40) return { label: 'Cần xác minh', color: 'yellow' };
   return { label: 'Không nên làm', color: 'red' };
 }
+
+/**
+ * Normalize platform identifier from a product URL.
+ * Returns one of ProductPlatform or 'website' fallback.
+ */
+export function normalizePlatformFromUrl(url: string): import('./types').ProductPlatform | undefined {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes('shopee.')) return 'shopee';
+    if (host.includes('tiki.vn')) return 'other';
+    if (host.includes('lazada.')) return 'lazada';
+    if (host.includes('accesstrade') || host.includes('accesstrade.vn')) return 'accesstrade';
+    if (host.includes('tiktok.com') || host.includes('vm.tiktok.com')) return 'tiktok_shop';
+    if (host.includes('amazon.')) return 'other';
+    if (host.includes('thegioididong') || host.includes('cellphones')) return 'other';
+    // Default to website when unknown
+    return 'website';
+  } catch {
+    return undefined;
+  }
+}

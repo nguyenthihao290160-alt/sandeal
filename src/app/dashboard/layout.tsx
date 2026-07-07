@@ -6,39 +6,33 @@ import { type ReactNode } from 'react';
 
 const NAV_GROUPS = [
   {
-    label: 'Tổng quan',
+    label: 'TỔNG QUAN',
     items: [
-      { label: 'Command Center', href: '/dashboard', icon: '🎯' },
+      { label: 'AI Command Center', href: '/dashboard/ai-bots', icon: '🤖' },
+      { label: 'Dashboard', href: '/dashboard', icon: '📊' },
     ],
   },
   {
-    label: 'Sản phẩm & Deal',
-    items: [
-      { label: 'Nguồn sản phẩm', href: '/dashboard/product-sources', icon: '🔗' },
-      { label: 'Kho sản phẩm', href: '/dashboard/products', icon: '📦' },
-      { label: 'Sản phẩm nên làm', href: '/dashboard/products?minScore=75', icon: '⭐' },
-    ],
-  },
-  {
-    label: 'Nội dung AI',
-    items: [
-      { label: 'AI Content Studio', href: '/dashboard/content', icon: '🤖' },
-      { label: 'Media / Video', href: '/dashboard/media', icon: '🎬' },
-      { label: 'Compliance Guard', href: '/dashboard/compliance', icon: '🛡️' },
-    ],
-  },
-  {
-    label: 'Đăng & Lịch',
-    items: [
-      { label: 'Kênh kết nối', href: '/dashboard/channels', icon: '📡' },
-      { label: 'Lịch đăng', href: '/dashboard/schedule', icon: '📅' },
-      { label: 'Hàng đợi', href: '/dashboard/queue', icon: '⏳' },
-    ],
-  },
-  {
-    label: 'Hệ thống',
+    label: 'DỮ LIỆU & NGUỒN',
     items: [
       { label: 'Token Vault', href: '/dashboard/token-vault', icon: '🔐' },
+      { label: 'Nguồn sản phẩm', href: '/dashboard/product-sources', icon: '🔗' },
+      { label: 'Kho sản phẩm', href: '/dashboard/products', icon: '📦' },
+    ],
+  },
+  {
+    label: 'NỘI DUNG & XUẤT BẢN',
+    items: [
+      { label: 'Content Studio', href: '/dashboard/content', icon: '✍️' },
+      { label: 'Media', href: '/dashboard/media', icon: '🎬' },
+      { label: 'Kênh kết nối', href: '/dashboard/channels', icon: '📡' },
+      { label: 'Lịch đăng', href: '/dashboard/schedule', icon: '📅' },
+    ],
+  },
+  {
+    label: 'AN TOÀN & HỆ THỐNG',
+    items: [
+      { label: 'Compliance Guard', href: '/dashboard/compliance', icon: '✔️' },
       { label: 'Sức khỏe hệ thống', href: '/dashboard/app-health', icon: '💚' },
       { label: 'Cài đặt', href: '/dashboard/settings', icon: '⚙️' },
     ],
