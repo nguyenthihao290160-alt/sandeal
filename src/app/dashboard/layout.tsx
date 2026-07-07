@@ -13,7 +13,7 @@ const NAV_GROUPS = [
     ],
   },
   {
-    label: 'DỮ LIỆU & NGUỒN',
+    label: 'DỮ LIỆU',
     items: [
       { label: 'Token Vault', href: '/dashboard/token-vault' },
       { label: 'Nguồn sản phẩm', href: '/dashboard/product-sources' },
@@ -21,16 +21,14 @@ const NAV_GROUPS = [
     ],
   },
   {
-    label: 'NỘI DUNG & XUẤT BẢN',
+    label: 'NỘI DUNG',
     items: [
       { label: 'Content Studio', href: '/dashboard/content' },
-      { label: 'Media', href: '/dashboard/media' },
       { label: 'Kênh kết nối', href: '/dashboard/channels' },
-      { label: 'Lịch đăng', href: '/dashboard/schedule' },
     ],
   },
   {
-    label: 'AN TOÀN & HỆ THỐNG',
+    label: 'AN TOÀN',
     items: [
       { label: 'Compliance Guard', href: '/dashboard/compliance' },
       { label: 'Sức khỏe hệ thống', href: '/dashboard/app-health' },
