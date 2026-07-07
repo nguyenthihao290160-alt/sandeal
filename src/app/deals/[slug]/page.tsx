@@ -28,7 +28,9 @@ export default async function DealDetailPage(
   const { slug } = await params;
   const product = await getProductBySlug(slug);
 
-  if (!product || (product.status !== 'approved' && product.status !== 'published')) {
+  // Ensure product is public-safe
+  const { isPublicSafeProduct } = await import('@/lib/publicProductFilter');
+  if (!product || !isPublicSafeProduct(product)) {
     notFound();
   }
 
@@ -88,8 +90,15 @@ export default async function DealDetailPage(
               {product.imageUrl ? (
                 <img src={product.imageUrl} alt={product.title} />
               ) : (
-                <div className="market-deal-placeholder">
-                  <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,#f3f4f6,#eef2ff)', height: '360px' }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ marginBottom: 8 }}>
+                      <rect x="2" y="6" width="20" height="12" rx="2" fill="#e6eefc" />
+                      <circle cx="8" cy="10" r="3" fill="#dbeafe" />
+                      <path d="M3 18 L9 11 L14 16 L21 9" stroke="#cbd5e1" strokeWidth="1.2" fill="none" />
+                    </svg>
+                    <div style={{ fontSize: 14, color: '#6b7280' }}>Ảnh sản phẩm đang chờ nguồn thật</div>
+                  </div>
                 </div>
               )}
             </div>

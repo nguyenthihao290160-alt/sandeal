@@ -272,7 +272,16 @@ export default function ProductsPage() {
                         )}
                         <div>
                           <Link href={`/dashboard/products/${p.id}`} style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{p.title}</Link>
-                          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>{p.source}</div>
+                          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <span>{p.source}</span>
+                            {/* Badges: test/demo/manual unverified and Nguồn thật */}
+                            {((p as any).isDemo || (p as any).isSample || (p as any).isTest || ['demo','sample','test'].includes(p.source || '')) && (
+                              <span style={{ fontSize: 10, background: 'rgba(245,158,11,0.1)', color: '#f59e0b', padding: '2px 8px', borderRadius: 6 }}>Dữ liệu test</span>
+                            )}
+                            {(p.source === 'accesstrade' || (p as any).verifiedSource) && (
+                              <span style={{ fontSize: 10, background: 'rgba(34,211,238,0.08)', color: '#22d3ee', padding: '2px 8px', borderRadius: 6 }}>Nguồn thật</span>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </td>

@@ -1,7 +1,5 @@
 import type { Product } from './types';
 
-const PLACEHOLDER_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='800' height='800' viewBox='0 0 24 24' fill='none' stroke='currentColor'>\n  <rect width='100%' height='100%' fill='%23f3f4f6' />\n  <g transform='translate(4,4)'>\n    <rect x='0' y='0' width='16' height='12' rx='2' fill='%23e5e7eb' />\n    <circle cx='4' cy='4' r='2' fill='%23c7d2fe' />\n    <path d='M0 12 L6 6 L10 10 L16 4 L24 12' stroke='%23cbd5e1' stroke-width='1.2' fill='none' />\n  </g>\n</svg>";
-const PLACEHOLDER_SVG_DATAURL = 'data:image/svg+xml;utf8,' + encodeURIComponent(PLACEHOLDER_SVG);
 
 /**
  * Normalize product for public display.
@@ -14,7 +12,7 @@ export function normalizeProductForPublic(p: Partial<Product>): Product {
   const salePrice = typeof p.salePrice === 'number' ? p.salePrice : undefined;
   const discountPercent = (price && salePrice && price > salePrice) ? Math.round((1 - (salePrice / price)) * 100) : undefined;
 
-  const imageUrl = p.imageUrl && typeof p.imageUrl === 'string' && p.imageUrl.length > 5 ? p.imageUrl : PLACEHOLDER_SVG_DATAURL;
+  const imageUrl = p.imageUrl && typeof p.imageUrl === 'string' && p.imageUrl.length > 5 ? p.imageUrl : undefined;
 
   const normalized: Product = {
     id: String(p.id || '') || '',

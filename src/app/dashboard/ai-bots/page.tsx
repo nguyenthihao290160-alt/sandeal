@@ -244,10 +244,21 @@ export default function AIBotsPage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '16px', marginBottom: 'var(--space-xl)' }}>
           {BOTS.map(bot => {
             let badge = { text: 'Idle', color: '#64748b', bg: '#0f172a' };
-            if (bot.dep.includes('Cần')) {
-              badge = { text: 'Needs key', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' };
-            } else if (bot.id === 'orchestrator') {
-              badge = { text: 'Ready', color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)' };
+            // Use real status object for readiness
+            if (status) {
+              if (bot.id === 'source_scout') {
+                const ready = status.sourceReady || status.hasAccessTradePrimaryToken;
+                badge = ready ? { text: 'Ready', color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)' } : { text: 'Needs key', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' };
+              } else if (bot.id === 'gemini_analyst') {
+                const ready = status.hasGeminiPrimaryToken;
+                badge = ready ? { text: 'Ready', color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)' } : { text: 'Needs key', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' };
+              } else if (bot.id === 'orchestrator') {
+                badge = { text: 'Ready', color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)' };
+              } else if (bot.id === 'link_health') {
+                badge = status.linkHealthBotEnabled ? { text: 'Ready', color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)' } : badge;
+              }
+            } else {
+              if (bot.dep.includes('Cần')) badge = { text: 'Needs key', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' };
             }
 
             return (

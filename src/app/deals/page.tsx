@@ -59,11 +59,18 @@ export default function DealsPage() {
       if (search) params.set('q', search);
       if (platform) params.set('platform', platform);
       
+      // Fetch public-safe products from server API
       let url = '/api/products?public=true';
       const paramStr = params.toString();
       if (paramStr) url += '&' + paramStr;
       const res = await fetch(url);
       const data = await res.json();
+      // Ensure client-side double-check (defensive) by filtering any non-public items
+      if (data?.ok && Array.isArray(data.data)) {
+        data.data = data.data.filter((p: any) => {
+          try { return p && (p.status === 'approved' || p.status === 'published'); } catch { return false; }
+        });
+      }
       
       if (data.ok && Array.isArray(data.data)) {
         let list = data.data.filter((p: Product) => p.status === 'approved' || p.status === 'published');
@@ -202,8 +209,15 @@ export default function DealsPage() {
                     {p.imageUrl ? (
                       <img src={p.imageUrl} alt={p.title} />
                     ) : (
-                      <div className="market-deal-placeholder">
-                        <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,#f3f4f6,#eef2ff)', height: '140px' }}>
+                        <div style={{ textAlign: 'center' }}>
+                          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ marginBottom: 6 }}>
+                            <rect x="2" y="6" width="20" height="12" rx="2" fill="#e6eefc" />
+                            <circle cx="8" cy="10" r="3" fill="#dbeafe" />
+                            <path d="M3 18 L9 11 L14 16 L21 9" stroke="#cbd5e1" strokeWidth="1.2" fill="none" />
+                          </svg>
+                          <div style={{ fontSize: 12, color: '#6b7280' }}>Ảnh sản phẩm đang chờ nguồn thật</div>
+                        </div>
                       </div>
                     )}
                     {discount > 0 && (
