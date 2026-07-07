@@ -4,6 +4,7 @@
 
 import type { Product, CreateProductInput, ProductFilters } from '../types';
 import { readCollection, writeCollection, findById, insertOne, updateOne, deleteOne, generateId } from './adapter';
+import { normalizeProductForPublic } from '../productNormalizer';
 
 const COLLECTION = 'products';
 
@@ -16,9 +17,9 @@ export async function listProducts(filters?: ProductFilters): Promise<Product[]>
   if (filters.q) {
     const q = filters.q.toLowerCase();
     products = products.filter(p =>
-      p.title.toLowerCase().includes(q) ||
+      (p.title || '').toLowerCase().includes(q) ||
       (p.description?.toLowerCase().includes(q)) ||
-      p.tags.some(t => t.toLowerCase().includes(q))
+      ((Array.isArray(p.tags) ? p.tags : []).some(t => t.toLowerCase().includes(q)))
     );
   }
   if (filters.platform) {
@@ -56,9 +57,35 @@ export async function getProductBySlug(slug: string): Promise<Product | null> {
   return products.find(p => p.slug === slug) ?? null;
 }
 
+export function isPublicSafeProduct(p: Product): boolean {
+  const status = p.status;
+  // Disallowed explicit states
+  if (status === 'archived' || status === 'draft' || status === 'needs_review') return false;
+  // Only allow approved or published
+  if (status !== 'published' && status !== 'approved') return false;
+
+  // Link health — treat certain statuses as broken
+  const brokenStatuses = ['not_found', 'affiliate_error', 'image_broken', 'product_unavailable', 'server_error'];
+  if (p.linkHealthStatus && brokenStatuses.includes(p.linkHealthStatus)) return false;
+
+  return true;
+}
+
 export async function getPublishedProducts(): Promise<Product[]> {
   const products = await readCollection<Product>(COLLECTION);
-  return products.filter(p => p.status === 'published' || p.status === 'approved');
+  const filtered = products.filter(isPublicSafeProduct);
+  // Normalize to ensure consistent public schema
+  return filtered.map(p => normalizeProductForPublic(p));
+}
+
+export async function getPublicProducts(filters?: ProductFilters): Promise<Product[]> {
+  let products = await readCollection<Product>(COLLECTION);
+  if (filters) {
+    // reuse existing listProducts filtering by delegating
+    products = await listProducts(filters);
+  }
+  const filtered = products.filter(isPublicSafeProduct);
+  return filtered.map(p => normalizeProductForPublic(p));
 }
 
 export async function createProduct(data: CreateProductInput): Promise<Product> {

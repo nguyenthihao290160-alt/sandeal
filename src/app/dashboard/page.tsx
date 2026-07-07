@@ -35,9 +35,13 @@ export default async function DashboardPage() {
             <p style={{ color: 'var(--dash-text-secondary)', fontSize: 'var(--text-sm)', lineHeight: 1.7, maxWidth: '520px', marginBottom: 'var(--space-lg)' }}>
               Điều phối đội bot AI để tìm sản phẩm thật, lọc deal, tạo bài review an toàn, kiểm tra link và đưa sản phẩm vào hàng chờ duyệt.
             </p>
-            <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
-              <Link href="/dashboard/ai-bots" className="dashboard-gradient-button">Mở Đội Bot AI</Link>
-              <Link href="/dashboard/token-vault" className="dashboard-secondary-button">Cấu hình Token Vault</Link>
+            <div style={{ display: 'flex', gap: 'var(--space-md)', flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
+              <Link href="/dashboard/ai-bots" className="dashboard-gradient-button" style={{ padding: '14px 28px', fontSize: '15px', fontWeight: 700, boxShadow: '0 8px 16px rgba(124, 58, 237, 0.25)' }}>
+                Mở Đội Bot AI
+              </Link>
+              <Link href="/dashboard/token-vault" className="dashboard-secondary-button" style={{ padding: '14px 28px', fontSize: '15px', fontWeight: 600 }}>
+                Cấu hình Token Vault
+              </Link>
             </div>
           </div>
           <div className="dashboard-hero-panel">
@@ -110,27 +114,49 @@ export default async function DashboardPage() {
           </div>
         )}
 
-        {/* Workflow */}
-        <div className="dashboard-card" style={{ marginBottom: 'var(--space-xl)' }}>
-          <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, marginBottom: 'var(--space-xs)', color: 'var(--dash-text-primary)' }}>Quy trình AI an toàn</h3>
-          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--dash-text-muted)', marginBottom: 'var(--space-md)' }}>
-            Mỗi bước đều yêu cầu xác nhận thủ công. Không tự động đăng bài.
-          </p>
-          <div className="workflow-timeline-premium">
-            {[
-              { n: '1', l: 'Nguồn dữ liệu' },
-              { n: '2', l: 'Bot quét SP' },
-              { n: '3', l: 'AI phân tích' },
-              { n: '4', l: 'Tạo bài review' },
-              { n: '5', l: 'Kiểm duyệt' },
-              { n: '6', l: 'Kiểm link' },
-              { n: '7', l: 'Chờ duyệt' },
-            ].map(s => (
-              <div className="workflow-step-premium" key={s.n}>
-                <div className="workflow-step-premium-num">{s.n}</div>
-                <div className="workflow-step-premium-label">{s.l}</div>
-              </div>
-            ))}
+        <div className="grid grid-2" style={{ gap: 'var(--space-xl)', marginBottom: 'var(--space-2xl)' }}>
+          {/* Workflow */}
+          <div className="dashboard-card" style={{ height: '100%' }}>
+            <h3 style={{ fontSize: 'var(--text-lg)', fontWeight: 800, marginBottom: 'var(--space-xs)', color: 'var(--dash-text-primary)' }}>Bot Automation Pipeline</h3>
+            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--dash-text-muted)', marginBottom: 'var(--space-xl)' }}>
+              Mỗi bước đều yêu cầu xác nhận thủ công. Không tự động đăng bài.
+            </p>
+            <div className="workflow-timeline-premium" style={{ display: 'flex', justifyContent: 'space-between', position: 'relative' }}>
+              <div style={{ position: 'absolute', top: '16px', left: '20px', right: '20px', height: '2px', background: 'rgba(148,163,184,0.1)', zIndex: 0 }} />
+              {[
+                { n: '1', l: 'Quét SP', status: 'completed' },
+                { n: '2', l: 'Phân tích', status: 'current' },
+                { n: '3', l: 'Review', status: 'pending' },
+                { n: '4', l: 'Kiểm duyệt', status: 'pending' },
+              ].map((s, idx) => (
+                <div className="workflow-step-premium" key={s.n} style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, textAlign: 'center' }}>
+                  <div className="workflow-step-premium-num" style={{ width: '32px', height: '32px', borderRadius: '50%', background: s.status === 'completed' ? 'rgba(52, 211, 153, 0.15)' : s.status === 'current' ? 'var(--gradient-accent)' : '#0f172a', border: `2px solid ${s.status === 'completed' ? '#34d399' : s.status === 'current' ? 'transparent' : 'rgba(148,163,184,0.2)'}`, color: s.status === 'completed' ? '#34d399' : s.status === 'current' ? '#fff' : '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', fontWeight: 700, marginBottom: '12px' }}>
+                    {s.status === 'completed' ? '✓' : s.n}
+                  </div>
+                  <div className="workflow-step-premium-label" style={{ fontSize: '12px', fontWeight: s.status === 'current' ? 700 : 500, color: s.status === 'current' ? 'var(--dash-text-primary)' : 'var(--dash-text-muted)' }}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* What happens next */}
+          <div className="dashboard-card" style={{ height: '100%', background: 'linear-gradient(145deg, #0f172a 0%, #1e293b 100%)', borderColor: 'rgba(124, 58, 237, 0.2)' }}>
+            <h3 style={{ fontSize: 'var(--text-lg)', fontWeight: 800, marginBottom: 'var(--space-xs)', color: '#fff' }}>What happens next?</h3>
+            <p style={{ fontSize: 'var(--text-sm)', color: '#94a3b8', marginBottom: 'var(--space-lg)' }}>Các bước để có bài review đầu tiên:</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {[
+                { n: '1', l: 'Gắn token/API key trong Token Vault' },
+                { n: '2', l: 'Bot AI Boss quét nguồn thật' },
+                { n: '3', l: 'AI phân tích rủi ro và chấm điểm' },
+                { n: '4', l: 'Bot tạo bài review an toàn' },
+                { n: '5', l: 'Admin duyệt trước khi public' },
+              ].map(s => (
+                <div key={s.n} style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                  <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(148,163,184,0.1)', color: '#cbd5e1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>{s.n}</div>
+                  <div style={{ fontSize: '14px', color: '#e2e8f0', fontWeight: 500 }}>{s.l}</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 

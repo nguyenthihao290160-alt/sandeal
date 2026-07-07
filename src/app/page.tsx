@@ -91,13 +91,13 @@ export default async function HomePage() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
                 {[
-                  { label: 'Sản phẩm AI đã quét', value: `${products.length}+` },
-                  { label: 'Nguồn được hỗ trợ', value: '5+' },
-                  { label: 'Kiểm duyệt tự động', value: 'ON' },
-                  { label: 'Link đã xác minh', value: `${products.length}` },
+                  { label: 'Nguồn dữ liệu', value: 'Sẵn sàng' },
+                  { label: 'Bot kiểm link', value: 'Active' },
+                  { label: 'Chờ duyệt', value: 'Chặt chẽ' },
+                  { label: 'Minh bạch affiliate', value: '100%' },
                 ].map(s => (
                   <div key={s.label} style={{ padding: '12px', background: 'rgba(148,163,184,0.06)', borderRadius: '8px', border: '1px solid rgba(148,163,184,0.1)' }}>
-                    <div style={{ fontSize: '18px', fontWeight: 800, color: '#a78bfa', marginBottom: '2px' }}>{s.value}</div>
+                    <div style={{ fontSize: '16px', fontWeight: 800, color: '#a78bfa', marginBottom: '4px' }}>{s.value}</div>
                     <div style={{ fontSize: '10px', color: '#64748b' }}>{s.label}</div>
                   </div>
                 ))}
@@ -122,17 +122,24 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* ========== SUPPORTED SOURCES ========== */}
-      <section className="market-section" style={{ background: '#ffffff', borderTop: '1px solid var(--market-border)', paddingTop: 'var(--space-2xl)', paddingBottom: 'var(--space-2xl)' }}>
-        <div className="market-container" style={{ textAlign: 'center' }}>
-          <h2 style={{ fontSize: 'var(--text-xs)', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--market-text-muted)', fontWeight: 700, marginBottom: 'var(--space-lg)' }}>
-            Nguồn dữ liệu đang hỗ trợ
-          </h2>
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-2xl)', flexWrap: 'wrap' }}>
-            {['Shopee', 'TikTok Shop', 'Lazada', 'AccessTrade'].map(s => (
-              <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--market-text-muted)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10b981' }} />
-                {s}
+      {/* ========== NGUỒN & QUY TRÌNH ========== */}
+      <section className="market-section" style={{ background: '#ffffff', borderTop: '1px solid var(--market-border)', paddingTop: 'var(--space-3xl)', paddingBottom: 'var(--space-3xl)' }}>
+        <div className="market-container">
+          <div style={{ textAlign: 'center', marginBottom: 'var(--space-2xl)' }}>
+            <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: 'var(--space-xs)', color: 'var(--market-text-main)' }}>Nguồn dữ liệu &amp; quy trình kiểm tra</h2>
+            <p style={{ color: 'var(--market-text-muted)' }}>Mọi deal đều phải qua 4 bước kiểm duyệt trước khi hiển thị cho bạn.</p>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--space-lg)' }}>
+            {[
+              { t: 'Nguồn sản phẩm thật', d: 'Lấy dữ liệu từ AccessTrade, Shopee, TikTok Shop...', i: '1' },
+              { t: 'AI lọc cơ hội', d: 'Loại bỏ deal ảo, chấm điểm rủi ro.', i: '2' },
+              { t: 'Kiểm tra link', d: 'Đảm bảo link affiliate an toàn, không bị hỏng.', i: '3' },
+              { t: 'Duyệt trước khi public', d: 'Admin kiểm tra lần cuối để đảm bảo chất lượng.', i: '4' },
+            ].map(s => (
+              <div key={s.t} style={{ background: 'var(--market-bg)', padding: 'var(--space-xl)', borderRadius: '16px', border: '1px solid var(--market-border)' }}>
+                <div style={{ width: '40px', height: '40px', borderRadius: '12px', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: 'var(--market-primary)', fontSize: '18px', marginBottom: '16px', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>{s.i}</div>
+                <h3 style={{ fontSize: '15px', fontWeight: 700, marginBottom: '8px' }}>{s.t}</h3>
+                <p style={{ fontSize: '13px', color: 'var(--market-text-muted)', lineHeight: 1.6 }}>{s.d}</p>
               </div>
             ))}
           </div>
@@ -179,6 +186,11 @@ export default async function HomePage() {
                       <div className="market-platform-badge">{PLATFORMS[p.platform] || p.platform}</div>
                     </div>
                     <div className="market-deal-body">
+                      {p.title.toLowerCase().includes('demo') || p.title.toLowerCase().includes('test') ? (
+                        <div style={{ fontSize: '10px', color: '#f59e0b', background: 'rgba(245,158,11,0.1)', padding: '4px 8px', borderRadius: '4px', display: 'inline-block', marginBottom: '8px', fontWeight: 600 }}>
+                          Dữ liệu đang trong giai đoạn kiểm thử nội bộ
+                        </div>
+                      ) : null}
                       <h3 className="market-deal-title">{p.title}</h3>
                       <div className="market-deal-price-row">
                         <span className="market-price-current">{formatPrice(p.salePrice || p.price)}</span>
@@ -195,8 +207,12 @@ export default async function HomePage() {
                         Giá có thể thay đổi
                       </div>
                       <div style={{ display: 'flex', gap: '8px', marginTop: 'var(--space-sm)' }}>
-                        <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</span>
-                        <span className="market-deal-cta" style={{ background: '#f1f5f9', color: 'var(--market-text-main)' }}>Chi tiết</span>
+                        {(p.affiliateUrl || p.originalUrl) ? (
+                          <a href={p.affiliateUrl || p.originalUrl} target="_blank" rel="noreferrer" className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</a>
+                        ) : (
+                          <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center', opacity: 0.7 }}>Xem deal</span>
+                        )}
+                        <Link href={`/deals/${p.slug}`} className="market-deal-cta" style={{ background: '#f1f5f9', color: 'var(--market-text-main)' }}>Chi tiết</Link>
                       </div>
                     </div>
                   </Link>
@@ -204,47 +220,6 @@ export default async function HomePage() {
               })}
             </div>
           )}
-        </div>
-      </section>
-
-      {/* ========== HOW AI FILTERS ========== */}
-      <section id="how-it-works" className="market-section" style={{ background: '#ffffff', borderTop: '1px solid var(--market-border)', borderBottom: '1px solid var(--market-border)' }}>
-        <div className="market-container">
-          <div style={{ textAlign: 'center', marginBottom: 'var(--space-3xl)' }}>
-            <h2 className="market-section-title">Cách bot AI lọc deal cho bạn</h2>
-            <p className="market-section-subtitle">Quy trình 4 bước để tìm deal tốt nhất, minh bạch và an toàn</p>
-          </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--space-xl)', textAlign: 'center' }}>
-            {[
-              { n: '1', t: 'Quét nguồn', d: 'Bot tự động quét sản phẩm từ Shopee, TikTok Shop, Lazada, AccessTrade.' },
-              { n: '2', t: 'Lọc & phân tích', d: 'AI phân tích giá, lợi ích, rủi ro và chấm điểm cơ hội cho từng deal.' },
-              { n: '3', t: 'Kiểm duyệt', d: 'Sản phẩm qua kiểm duyệt nội dung, link và tuân thủ trước khi hiển thị.' },
-              { n: '4', t: 'Xem deal minh bạch', d: 'Hiển thị đầy đủ thông tin, điểm số và cảnh báo trước khi bạn mua.' },
-            ].map(s => (
-              <div key={s.n}>
-                <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'var(--gradient-subtle)', color: 'var(--market-primary)', fontSize: 'var(--text-xl)', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto var(--space-md)' }}>
-                  {s.n}
-                </div>
-                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, marginBottom: 'var(--space-xs)' }}>{s.t}</h3>
-                <p style={{ fontSize: 'var(--text-sm)', color: 'var(--market-text-muted)', lineHeight: 1.6 }}>{s.d}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="trust-cards-grid" style={{ marginTop: 'var(--space-3xl)' }}>
-            {[
-              { t: 'Cập nhật deal', d: 'Làm mới thường xuyên để bạn dễ thấy ưu đãi nổi bật.' },
-              { t: 'Link minh bạch', d: 'Một số liên kết có thể là affiliate, nhưng giá của bạn không đổi.' },
-              { t: 'Ưu tiên sản phẩm đáng mua', d: 'Sản phẩm được lọc theo giá, lợi ích và độ phù hợp.' },
-              { t: 'So sánh nhanh', d: 'Xem giá, ưu điểm và ghi chú trước khi mua.' },
-            ].map(s => (
-              <div key={s.t} className="trust-card">
-                <div className="trust-card-title">{s.t}</div>
-                <div className="trust-card-desc">{s.d}</div>
-              </div>
-            ))}
-          </div>
         </div>
       </section>
 

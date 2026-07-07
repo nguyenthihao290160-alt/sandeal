@@ -23,6 +23,14 @@ export async function GET(request: NextRequest) {
       minScore: sp.get('minScore') ? Number(sp.get('minScore')) : undefined,
     };
 
+    // If client requests public=true, return public-safe normalized products
+    if (sp.get('public') === 'true') {
+      // lazy import to avoid cycles
+      const { getPublicProducts } = await import('@/lib/storage/products');
+      const products = await getPublicProducts(filters as any);
+      return successResponse('Đã tải danh sách sản phẩm (public).', products);
+    }
+
     const products = await listProducts(filters);
     return successResponse('Đã tải danh sách sản phẩm.', products);
   } catch (err) {

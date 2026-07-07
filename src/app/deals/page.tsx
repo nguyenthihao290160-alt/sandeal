@@ -59,7 +59,10 @@ export default function DealsPage() {
       if (search) params.set('q', search);
       if (platform) params.set('platform', platform);
       
-      const res = await fetch(`/api/products?${params.toString()}`);
+      let url = '/api/products?public=true';
+      const paramStr = params.toString();
+      if (paramStr) url += '&' + paramStr;
+      const res = await fetch(url);
       const data = await res.json();
       
       if (data.ok && Array.isArray(data.data)) {
@@ -120,6 +123,14 @@ export default function DealsPage() {
       {/* Main Content */}
       <main className="market-container" style={{ padding: 'var(--space-2xl) var(--space-lg)' }}>
         
+        {/* Professional Listing Header */}
+        <div style={{ marginBottom: 'var(--space-2xl)' }}>
+          <h1 style={{ fontSize: 'var(--text-3xl)', fontWeight: 800, color: 'var(--market-text-main)', marginBottom: 'var(--space-sm)' }}>
+            Deal Hot & Ưu Đãi Mới
+          </h1>
+          <p style={{ fontSize: 'var(--text-base)', color: 'var(--market-text-muted)' }}>Khám phá các sản phẩm giảm giá tốt nhất đã được AI kiểm duyệt.</p>
+        </div>
+
         {/* Navigation / Filters / Sorting Block */}
         <div style={{ background: '#ffffff', border: '1px solid var(--market-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-lg)', marginBottom: 'var(--space-2xl)' }}>
           
@@ -170,8 +181,8 @@ export default function DealsPage() {
         {!loading && products.length === 0 && (
           <div style={{ textAlign: 'center', padding: 'var(--space-4xl) 0', background: '#ffffff', borderRadius: 'var(--radius-xl)', border: '1px dashed var(--market-border)' }}>
             <div style={{ fontSize: '32px', marginBottom: 'var(--space-md)', opacity: 0.3, fontWeight: 700 }}>S</div>
-            <h3 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, marginBottom: 'var(--space-xs)' }}>Không tìm thấy deal</h3>
-            <p style={{ color: 'var(--market-text-muted)' }}>Thử tìm kiếm khác hoặc xoá bộ lọc.</p>
+            <h3 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, marginBottom: 'var(--space-xs)' }}>Chưa có deal thật đã duyệt</h3>
+            <p style={{ color: 'var(--market-text-muted)' }}>Hệ thống đang chờ nguồn sản phẩm từ AccessTrade hoặc nguồn nội bộ.</p>
             <button className="btn" style={{ marginTop: 'var(--space-md)', background: 'var(--market-bg)', border: '1px solid var(--market-border)' }} onClick={() => { setSearch(''); setPlatform(''); setActiveFilter(''); }}>
               Xoá bộ lọc
             </button>
@@ -201,6 +212,11 @@ export default function DealsPage() {
                     <div className="market-platform-badge">{PLATFORMS[p.platform] || p.platform}</div>
                   </div>
                   <div className="market-deal-body">
+                    {p.title.toLowerCase().includes('demo') || p.title.toLowerCase().includes('test') ? (
+                      <div style={{ fontSize: '10px', color: '#f59e0b', background: 'rgba(245,158,11,0.1)', padding: '4px 8px', borderRadius: '4px', display: 'inline-block', marginBottom: '8px', fontWeight: 600 }}>
+                        Dữ liệu đang trong giai đoạn kiểm thử nội bộ
+                      </div>
+                    ) : null}
                     <h3 className="market-deal-title">{p.title}</h3>
                     <div className="market-deal-price-row">
                       <span className="market-price-current">{formatPrice(p.salePrice || p.price)}</span>
@@ -217,8 +233,12 @@ export default function DealsPage() {
                       Giá có thể thay đổi
                     </div>
                     <div style={{ display: 'flex', gap: '8px', marginTop: 'var(--space-sm)' }}>
-                      <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</span>
-                      <span className="market-deal-cta" style={{ background: '#f1f5f9', color: 'var(--market-text-main)' }}>Chi tiết</span>
+                      {(p.affiliateUrl || p.originalUrl) ? (
+                        <a href={p.affiliateUrl || p.originalUrl} target="_blank" rel="noreferrer" className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</a>
+                      ) : (
+                        <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center', opacity: 0.7 }}>Xem deal</span>
+                      )}
+                      <Link href={`/deals/${p.slug}`} className="market-deal-cta" style={{ background: '#f1f5f9', color: 'var(--market-text-main)' }}>Chi tiết</Link>
                     </div>
                   </div>
                 </Link>
