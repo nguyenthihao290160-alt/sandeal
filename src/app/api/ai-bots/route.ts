@@ -139,6 +139,8 @@ async function executeWorkflow(
         const scout = await createSourceScout(runId);
         const candidates = await scout.scanSource(source, limit);
         stats.candidatesFound = candidates.length;
+        // Products saved by scout (createProduct) — count them
+        stats.productsSaved = candidates.length;
         break;
       }
 

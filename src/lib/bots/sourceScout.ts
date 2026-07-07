@@ -5,8 +5,9 @@
 
 import type { Product, ProductSource } from '../types';
 import { BotContext } from './context';
-import { listProducts } from '../storage/products';
+import { listProducts, createProduct } from '../storage/products';
 import { getPrimaryCredential } from '../storage/tokenVault';
+import { isAccessTradeConfigured, searchAccessTrade, mapAccessTradeToProduct } from '../integrations/accesstrade';
 
 export class SourceScoutBot {
   private ctx: BotContext;
@@ -63,22 +64,33 @@ export class SourceScoutBot {
     try {
       await this.ctx.info('Checking AccessTrade token status');
 
-      const token = await getPrimaryCredential('accesstrade');
-      if (!token || token.status !== 'valid') {
-        await this.ctx.warn('AccessTrade token not available or invalid', {
-          tokenStatus: token?.status,
-        });
+      const configured = await isAccessTradeConfigured();
+      if (!configured) {
+        await this.ctx.warn('AccessTrade token not configured. Skipping AccessTrade scan');
         return [];
       }
 
-      await this.ctx.info('AccessTrade source would scan here', {
-        note: 'Integration with AccessTrade API required',
-        limit,
-      });
+      await this.ctx.info('Calling AccessTrade search adapter', { limit });
+      const result = await searchAccessTrade({ limit, kind: 'product' });
+      const items = result.items || [];
 
-      // TODO: Implement actual AccessTrade API integration
-      // For now, return empty to avoid API errors
-      return [];
+      await this.ctx.info('AccessTrade returned items', { count: items.length });
+
+      const savedProducts: Product[] = [];
+      for (const rawItem of items.slice(0, limit)) {
+        try {
+          const input = mapAccessTradeToProduct(rawItem);
+          // Ensure status is needs_review by default
+          input.status = 'needs_review';
+          const saved = await createProduct(input as any);
+          savedProducts.push(saved);
+        } catch (err) {
+          await this.ctx.error('Failed to save product from AccessTrade', { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      await this.ctx.info('AccessTrade scan complete', { saved: savedProducts.length });
+      return savedProducts;
     } catch (error) {
       await this.ctx.error(`AccessTrade source scan failed`, {
         error: error instanceof Error ? error.message : String(error),

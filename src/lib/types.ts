@@ -373,6 +373,8 @@ export interface BotTeamStatus {
   contentPackageCount: number;
   hasGeminiPrimaryToken: boolean;
   hasAccessTradePrimaryToken: boolean;
+  sourceReady?: boolean;
+  publicSafeProductCount?: number;
   safeMode: boolean;
   freeOnly: boolean;
   autoPublish: boolean;

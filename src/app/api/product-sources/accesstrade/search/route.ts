@@ -11,11 +11,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: NextRequest) {
   try {
     if (!(await isAccessTradeConfigured())) {
-      return errorResponse(
-        'Chưa cấu hình AccessTrade API key. Hãy thêm trong Token Vault hoặc đặt ACCESS_TRADE_API_KEY trong env.',
-        'AccessTrade API key not configured',
-        400
-      );
+      return successResponse('AccessTrade not configured', { sourceReady: false, message: 'AccessTrade token chưa được cấu hình.' });
     }
 
     const body = await request.json();

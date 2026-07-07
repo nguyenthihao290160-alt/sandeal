@@ -5,11 +5,12 @@
 
 import { BotContext } from './context';
 import { config } from '../config';
-import { getProductStats } from '../storage/products';
+import { getProductStats, getPublishedProducts } from '../storage/products';
 import { getBotRunsStats } from '../storage/botRuns';
 import { getLinkHealthStats } from '../storage/linkHealth';
 import { getContentPackageStats } from '../storage/contentPackages';
 import { getPrimaryCredential } from '../storage/tokenVault';
+import { isAccessTradeConfigured } from '../integrations/accesstrade';
 import type { BotTeamStatus } from '../types';
 
 export class AppHealthBot {
@@ -28,6 +29,7 @@ export class AppHealthBot {
     const geminiToken = await getPrimaryCredential('gemini');
     const atToken = await getPrimaryCredential('accesstrade');
 
+    const publicProducts = await getPublishedProducts();
     const status: BotTeamStatus = {
       aiBotsEnabled: true,
       contentBotEnabled: true,
@@ -38,10 +40,12 @@ export class AppHealthBot {
       productCount: productStats.total,
       approvedProductCount: productStats.approved + productStats.published,
       reviewProductCount: productStats.needsReview,
+      publicSafeProductCount: publicProducts.length,
       brokenLinkCount: linkStats.broken,
       contentPackageCount: contentStats.totalPackages,
       hasGeminiPrimaryToken: !!geminiToken && geminiToken.status === 'valid',
       hasAccessTradePrimaryToken: !!atToken && atToken.status === 'valid',
+      sourceReady: await isAccessTradeConfigured(),
       safeMode: !config.allowPaidAi,
       freeOnly: config.costMode === 'free_only',
       autoPublish: config.autoPublishEnabled,
