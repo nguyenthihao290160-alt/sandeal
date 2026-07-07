@@ -155,7 +155,7 @@ export async function seedSampleProducts(): Promise<void> {
       complianceNotes: [],
       affiliateSource: 'shopee',
       score: 72,
-      scoreLabel: 'Nên làm ngay',
+      scoreLabel: 'Ưu tiên cao',
       scoreReasons: ['Có hình ảnh', 'Có link affiliate', 'Giá hấp dẫn'],
       scoreWarnings: [],
       riskLevel: 'low',

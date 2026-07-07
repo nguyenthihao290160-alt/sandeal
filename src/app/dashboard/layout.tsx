@@ -8,33 +8,33 @@ const NAV_GROUPS = [
   {
     label: 'TỔNG QUAN',
     items: [
-      { label: 'AI Command Center', href: '/dashboard/ai-bots', icon: '🤖' },
-      { label: 'Dashboard', href: '/dashboard', icon: '📊' },
+      { label: 'AI Command Center', href: '/dashboard/ai-bots' },
+      { label: 'Dashboard', href: '/dashboard' },
     ],
   },
   {
     label: 'DỮ LIỆU & NGUỒN',
     items: [
-      { label: 'Token Vault', href: '/dashboard/token-vault', icon: '🔐' },
-      { label: 'Nguồn sản phẩm', href: '/dashboard/product-sources', icon: '🔗' },
-      { label: 'Kho sản phẩm', href: '/dashboard/products', icon: '📦' },
+      { label: 'Token Vault', href: '/dashboard/token-vault' },
+      { label: 'Nguồn sản phẩm', href: '/dashboard/product-sources' },
+      { label: 'Kho sản phẩm', href: '/dashboard/products' },
     ],
   },
   {
     label: 'NỘI DUNG & XUẤT BẢN',
     items: [
-      { label: 'Content Studio', href: '/dashboard/content', icon: '✍️' },
-      { label: 'Media', href: '/dashboard/media', icon: '🎬' },
-      { label: 'Kênh kết nối', href: '/dashboard/channels', icon: '📡' },
-      { label: 'Lịch đăng', href: '/dashboard/schedule', icon: '📅' },
+      { label: 'Content Studio', href: '/dashboard/content' },
+      { label: 'Media', href: '/dashboard/media' },
+      { label: 'Kênh kết nối', href: '/dashboard/channels' },
+      { label: 'Lịch đăng', href: '/dashboard/schedule' },
     ],
   },
   {
     label: 'AN TOÀN & HỆ THỐNG',
     items: [
-      { label: 'Compliance Guard', href: '/dashboard/compliance', icon: '✔️' },
-      { label: 'Sức khỏe hệ thống', href: '/dashboard/app-health', icon: '💚' },
-      { label: 'Cài đặt', href: '/dashboard/settings', icon: '⚙️' },
+      { label: 'Compliance Guard', href: '/dashboard/compliance' },
+      { label: 'Sức khỏe hệ thống', href: '/dashboard/app-health' },
+      { label: 'Cài đặt', href: '/dashboard/settings' },
     ],
   },
 ];
@@ -62,7 +62,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                     : pathname.startsWith(hrefBase) && hrefBase !== '/dashboard';
                 return (
                   <Link key={item.href} href={item.href} className={`sidebar-link${isActive ? ' active' : ''}`}>
-                    <span>{item.icon}</span>
                     <span>{item.label}</span>
                   </Link>
                 );
@@ -77,7 +76,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <span className="status-dot status-dot-ok">Safe Mode: ON</span>
             </div>
             <Link href="/deals" className="sidebar-link sidebar-link-external" target="_blank" style={{ padding: '4px 0', fontSize: '11px' }}>
-              🌐 Xem trang deal public →
+              View public site →
             </Link>
           </div>
         </div>

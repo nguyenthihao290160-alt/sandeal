@@ -15,14 +15,14 @@ export default async function HomePage() {
   const formatPrice = (p?: number) => p ? p.toLocaleString('vi-VN') + '₫' : '';
 
   const CATEGORIES = [
-    { name: 'Điện tử', icon: '📱' },
-    { name: 'Gia dụng', icon: '🏠' },
-    { name: 'Thời trang', icon: '👕' },
-    { name: 'Làm đẹp', icon: '💄' },
-    { name: 'Mẹ & bé', icon: '👶' },
-    { name: 'Phụ kiện', icon: '🎧' },
-    { name: 'Văn phòng', icon: '📎' },
-    { name: 'Deal mới', icon: '✨' },
+    { name: 'Điện tử' },
+    { name: 'Gia dụng' },
+    { name: 'Thời trang' },
+    { name: 'Làm đẹp' },
+    { name: 'Mẹ & bé' },
+    { name: 'Phụ kiện' },
+    { name: 'Văn phòng' },
+    { name: 'Deal mới' },
   ];
 
   return (
@@ -62,7 +62,7 @@ export default async function HomePage() {
           </p>
           <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-md)' }}>
             <Link href="/deals" className="btn" style={{ background: 'var(--gradient-accent)', color: '#fff', fontSize: 'var(--text-base)', padding: '12px 32px' }}>
-              🔥 Xem deal hot
+              Xem deal hot
             </Link>
             <Link href="#how-it-works" className="btn" style={{ background: '#ffffff', color: 'var(--market-text-main)', border: '1px solid var(--market-border)', fontSize: 'var(--text-base)', padding: '12px 32px' }}>
               Xem cách hoạt động
@@ -73,8 +73,7 @@ export default async function HomePage() {
           <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-md)', flexWrap: 'wrap', marginTop: 'var(--space-3xl)' }}>
             {CATEGORIES.map(c => (
               <Link href="/deals" key={c.name} className="market-category-card">
-                <span style={{ fontSize: '28px' }}>{c.icon}</span>
-                <span style={{ fontSize: 'var(--text-xs)', fontWeight: 600 }}>{c.name}</span>
+                <span style={{ fontSize: '16px', fontWeight: 600 }}>{c.name}</span>
               </Link>
             ))}
           </div>
@@ -94,9 +93,9 @@ export default async function HomePage() {
 
           {featured.length === 0 ? (
             <div style={{ textAlign: 'center', padding: 'var(--space-4xl) 0', background: '#ffffff', borderRadius: 'var(--radius-xl)', border: '1px dashed var(--market-border)' }}>
-              <div style={{ fontSize: '48px', marginBottom: 'var(--space-md)' }}>🛍️</div>
-              <h3 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, marginBottom: 'var(--space-xs)' }}>Chưa có deal nào</h3>
-              <p style={{ color: 'var(--market-text-muted)' }}>Các deal nổi bật sẽ xuất hiện ở đây khi có sản phẩm được duyệt.</p>
+              <div style={{ fontSize: '48px', marginBottom: 'var(--space-md)', color: '#d1d5db' }}>■</div>
+              <h3 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, marginBottom: 'var(--space-xs)' }}>Chưa có deal thật đã duyệt</h3>
+              <p style={{ color: 'var(--market-text-muted)' }}>Hệ thống đang chờ nguồn sản phẩm từ AccessTrade hoặc nguồn nội bộ. Các deal sẽ xuất hiện ở đây sau khi được kiểm duyệt.</p>
             </div>
           ) : (
             <div className="deal-grid">
@@ -112,8 +111,7 @@ export default async function HomePage() {
                         <img src={p.imageUrl} alt={p.title} />
                       ) : (
                         <div className="market-deal-placeholder">
-                          <span className="market-deal-placeholder-icon">📦</span>
-                          <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
+                          <span className="market-deal-placeholder-text">Ảnh sản phẩm đang chờ nguồn thật</span>
                         </div>
                       )}
                       {discount > 0 && (
@@ -177,13 +175,12 @@ export default async function HomePage() {
 
           <div className="trust-cards-grid">
             {[
-              { t: 'Cập nhật deal', d: 'Làm mới thường xuyên để bạn dễ thấy ưu đãi nổi bật.', i: '⚡' },
-              { t: 'Link minh bạch', d: 'Một số liên kết có thể là affiliate, nhưng giá của bạn không đổi.', i: '🔗' },
-              { t: 'Ưu tiên sản phẩm đáng mua', d: 'Sản phẩm được lọc theo giá, lợi ích và độ phù hợp.', i: '⭐' },
-              { t: 'So sánh nhanh', d: 'Xem giá, ưu điểm và ghi chú trước khi mua.', i: '⚖️' },
+              { t: 'Cập nhật deal', d: 'Làm mới thường xuyên để bạn dễ thấy ưu đãi nổi bật.' },
+              { t: 'Link minh bạch', d: 'Một số liên kết có thể là affiliate, nhưng giá của bạn không đổi.' },
+              { t: 'Ưu tiên sản phẩm đáng mua', d: 'Sản phẩm được lọc theo giá, lợi ích và độ phù hợp.' },
+              { t: 'So sánh nhanh', d: 'Xem giá, ưu điểm và ghi chú trước khi mua.' },
             ].map(s => (
               <div key={s.t} className="trust-card">
-                <div className="trust-card-icon">{s.i}</div>
                 <div className="trust-card-title">{s.t}</div>
                 <div className="trust-card-desc">{s.d}</div>
               </div>

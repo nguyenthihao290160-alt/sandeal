@@ -13,8 +13,8 @@ export class ProductNormalizerBot {
     this.ctx = ctx;
   }
 
-  async normalizeProduct(rawData: Record<string, unknown>, source: string): Promise<CreateProductInput> {
-    const normalized: CreateProductInput = {
+  async normalizeProduct(rawData: Record<string, unknown>, source: string): Promise<CreateProductInput | null> {
+    const temp: Omit<CreateProductInput, 'dataCompleteness'> = {
       title: String(rawData.title || rawData.name || 'Untitled'),
       description: String(rawData.description || rawData.summary || ''),
       kind: 'product',
@@ -35,13 +35,53 @@ export class ProductNormalizerBot {
       status: 'draft',
     };
 
+    const normalized: CreateProductInput = {
+      ...temp,
+      dataCompleteness: this.calculateDataCompleteness(temp),
+    };
+
+    // Validate required fields
+    if (!this.isValidProduct(normalized)) {
+      await this.ctx.warn('Product validation failed - missing critical fields', {
+        title: normalized.title,
+        platform: normalized.platform,
+      });
+      return null;
+    }
+
     await this.ctx.info('Product normalized', {
       title: normalized.title,
       platform: normalized.platform,
       source: normalized.source,
+      dataCompleteness: normalized.dataCompleteness,
     });
 
     return normalized;
+  }
+
+  private calculateDataCompleteness(product: CreateProductInput): number {
+    const checks = [
+      !!product.title && product.title.trim().length > 0,
+      !!product.description && product.description.trim().length > 0,
+      !!product.category && product.category.trim().length > 0,
+      product.benefits && product.benefits.length > 0,
+      product.tags && product.tags.length > 0,
+      product.price !== undefined && product.price > 0,
+      product.salePrice !== undefined && product.salePrice > 0,
+      !!product.imageUrl && product.imageUrl.trim().length > 0,
+      !!product.affiliateUrl && product.affiliateUrl.trim().length > 0,
+      !!product.originalUrl && product.originalUrl.trim().length > 0,
+    ];
+    return Math.round((checks.filter(Boolean).length / checks.length) * 100);
+  }
+
+  private isValidProduct(product: CreateProductInput): boolean {
+    // Minimum requirements for a valid product
+    const hasTitle = !!(product.title && product.title.trim().length > 0);
+    const hasUrl = !!(product.originalUrl && product.originalUrl.trim().length > 0);
+    const hasPlatform = !!(product.platform && product.platform !== 'other');
+
+    return hasTitle && (hasUrl || hasPlatform);
   }
 
   private detectPlatform(data: Record<string, unknown>): 'shopee' | 'tiktok_shop' | 'lazada' | 'accesstrade' | 'website' | 'other' {

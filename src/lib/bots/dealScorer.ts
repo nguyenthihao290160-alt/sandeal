@@ -5,6 +5,7 @@
 
 import type { Product, DealScoreResult, DealScoringCriteria } from '../types';
 import { BotContext } from './context';
+import { updateProduct } from '../storage/products';
 
 export class DealScorerBot {
   private ctx: BotContext;
@@ -31,6 +32,20 @@ export class DealScorerBot {
       title: product.title,
       score,
       label,
+    });
+
+    return result;
+  }
+
+  async scoreAndSaveProduct(product: Product): Promise<DealScoreResult> {
+    const result = await this.scoreProduct(product);
+    
+    // Save score to product
+    await updateProduct(product.id, {
+      score: result.score,
+      scoreLabel: result.label,
+      scoreReasons: result.reasons,
+      scoreWarnings: [],
     });
 
     return result;

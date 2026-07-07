@@ -159,11 +159,11 @@ export function scoreProductV2(product: Product): ProductScoreV2Result {
   // ---- Determine label ----
   let label: ProductScoreLabel;
   if (score >= 75) {
-    label = 'Nên làm ngay';
+    label = 'Ưu tiên cao';
   } else if (score >= 45) {
-    label = 'Cần xác minh';
+    label = 'Cần xem xét';
   } else {
-    label = 'Không nên làm';
+    label = 'Bỏ qua';
   }
 
   // ---- Determine risk level ----

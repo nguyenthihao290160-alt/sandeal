@@ -28,9 +28,9 @@ export default async function DashboardPage() {
           <input placeholder="Tìm sản phẩm, deal, nội dung..." readOnly />
         </div>
         <div className="safe-mode-badges">
-          <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
-          <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="safe-badge safe-badge-on">Safe Mode</span>
+          <span className="safe-badge safe-badge-on">Free Only</span>
+          <span className="safe-badge safe-badge-off">Auto Publish: OFF</span>
         </div>
       </div>
 
@@ -45,8 +45,8 @@ export default async function DashboardPage() {
               Quản lý sản phẩm, chấm điểm cơ hội, tạo nội dung và chuẩn bị đăng đa nền tảng từ một nơi duy nhất.
             </p>
             <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
-              <Link href="/dashboard/product-sources" className="btn btn-primary">🔗 Thêm / lấy sản phẩm</Link>
-              <Link href="/dashboard/products" className="btn btn-secondary">📦 Xem kho sản phẩm</Link>
+              <Link href="/dashboard/product-sources" className="btn btn-primary">Add / Get Products</Link>
+              <Link href="/dashboard/products" className="btn btn-secondary">View Product Inventory</Link>
             </div>
           </div>
           <div className="command-hero-panel">
@@ -68,57 +68,57 @@ export default async function DashboardPage() {
         {/* Metrics */}
         <div className="grid grid-6" style={{ marginBottom: 'var(--space-xl)', gap: 'var(--space-md)' }}>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'rgba(124,58,237,0.08)', color: '#a78bfa' }}>📦</div>
+            <div className="stat-card-icon" style={{ background: 'rgba(124,58,237,0.08)', color: '#a78bfa' }}>■</div>
             <div className="stat-card-value">{stats.total}</div>
-            <div className="stat-card-label">Tổng sản phẩm</div>
+            <div className="stat-card-label">Total Products</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-warning-bg)', color: 'var(--color-warning)' }}>🔍</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-warning-bg)', color: 'var(--color-warning)' }}>●</div>
             <div className="stat-card-value">{stats.needsReview}</div>
-            <div className="stat-card-label">Cần xem xét</div>
+            <div className="stat-card-label">Needs Review</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success)' }}>✅</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success)' }}>✓</div>
             <div className="stat-card-value">{stats.approved}</div>
-            <div className="stat-card-label">Đã duyệt</div>
+            <div className="stat-card-label">Approved</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-info-bg)', color: 'var(--color-info)' }}>🚀</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-info-bg)', color: 'var(--color-info)' }}>→</div>
             <div className="stat-card-value">{stats.published}</div>
-            <div className="stat-card-label">Đã xuất bản</div>
+            <div className="stat-card-label">Published</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'rgba(6,182,212,0.08)', color: 'var(--color-accent-light)' }}>🔐</div>
+            <div className="stat-card-icon" style={{ background: 'rgba(6,182,212,0.08)', color: 'var(--color-accent-light)' }}>◆</div>
             <div className="stat-card-value">{vaultTotal}</div>
-            <div className="stat-card-label">Token / API</div>
+            <div className="stat-card-label">Tokens / APIs</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-danger-bg)', color: 'var(--color-danger)' }}>⚠️</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-danger-bg)', color: 'var(--color-danger)' }}>!</div>
             <div className="stat-card-value">{vaultErrors}</div>
-            <div className="stat-card-label">Lỗi cần xử lý</div>
+            <div className="stat-card-label">Errors</div>
           </div>
         </div>
 
         {/* Recommendation */}
         {noProducts && (
           <div className="rec-card">
-            <div className="rec-card-icon">📦</div>
-            <div className="rec-card-text">Hãy thêm sản phẩm đầu tiên từ <Link href="/dashboard/product-sources">Trung tâm nguồn sản phẩm</Link>.</div>
-            <Link href="/dashboard/product-sources" className="btn btn-primary btn-sm">Thêm ngay</Link>
+            <div className="rec-card-icon">■</div>
+            <div className="rec-card-text">Start by adding your first product from <Link href="/dashboard/product-sources">Product Sources</Link>.</div>
+            <Link href="/dashboard/product-sources" className="btn btn-primary btn-sm">Add Now</Link>
           </div>
         )}
         {!noProducts && noTokens && (
           <div className="rec-card">
-            <div className="rec-card-icon">🔐</div>
-            <div className="rec-card-text">Cấu hình Token Vault để dùng AI Content và affiliate tự động.</div>
-            <Link href="/dashboard/token-vault" className="btn btn-primary btn-sm">Mở Token Vault</Link>
+            <div className="rec-card-icon">◆</div>
+            <div className="rec-card-text">Configure Token Vault to enable AI content generation and automatic affiliate linking.</div>
+            <Link href="/dashboard/token-vault" className="btn btn-primary btn-sm">Open Token Vault</Link>
           </div>
         )}
         {needsAction && !noProducts && (
           <div className="rec-card">
-            <div className="rec-card-icon">🔍</div>
-            <div className="rec-card-text">Bạn có <strong>{stats.needsReview}</strong> sản phẩm cần duyệt. Xem và duyệt để tiếp tục quy trình.</div>
-            <Link href="/dashboard/products?status=needs_review" className="btn btn-primary btn-sm">Xem ngay</Link>
+            <div className="rec-card-icon">●</div>
+            <div className="rec-card-text">You have <strong>{stats.needsReview}</strong> products pending review. Review and approve to continue.</div>
+            <Link href="/dashboard/products?status=needs_review" className="btn btn-primary btn-sm">Review Now</Link>
           </div>
         )}
 

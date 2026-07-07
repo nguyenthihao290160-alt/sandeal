@@ -5,7 +5,10 @@
 
 import type { LinkHealthStatus, Product } from '../types';
 import { BotContext } from './context';
-import { getLinkHealthByProductId } from '../storage/linkHealth';
+import {
+  getLinkHealthByProductId,
+  getBrokenLinks,
+} from '../storage/linkHealth';
 import { getProductById, updateProduct } from '../storage/products';
 
 export class ProductCleanupBot {
@@ -13,6 +16,109 @@ export class ProductCleanupBot {
 
   constructor(ctx: BotContext) {
     this.ctx = ctx;
+  }
+
+  async cleanupBrokenProducts(options: {
+    dryRun?: boolean;
+    limit?: number;
+  } = {}): Promise<{
+    checked: number;
+    archived: number;
+    needsReview: number;
+  }> {
+    const limit = options.limit || 50;
+    const dryRun = options.dryRun === true;
+
+    let checked = 0;
+    let archived = 0;
+    let needsReview = 0;
+
+    try {
+      // Get broken links from link health storage
+      const brokenLinks = await getBrokenLinks(1); // threshold 1 or more failures
+
+      if (brokenLinks.length === 0) {
+        await this.ctx.info('No broken links found for cleanup');
+        return { checked: 0, archived: 0, needsReview: 0 };
+      }
+
+      // Process up to limit items
+      const itemsToProcess = brokenLinks.slice(0, limit);
+
+      for (const linkCheck of itemsToProcess) {
+        const product = await getProductById(linkCheck.productId);
+        if (!product) continue;
+
+        checked++;
+        const failureCount = linkCheck.failureCount || 0;
+
+        if (!dryRun) {
+          // Update link check timestamp
+          await updateProduct(linkCheck.productId, {
+            linkLastCheckedAt: new Date().toISOString(),
+            linkFailureCount: failureCount,
+            linkHealthStatus: linkCheck.productUrlStatus,
+          });
+
+          if (failureCount >= 3 && this.isBrokenBeyondRecovery(linkCheck.productUrlStatus)) {
+            // Archive the product
+            await updateProduct(linkCheck.productId, {
+              status: 'archived',
+              archivedReason: `Link liên tục bị lỗi (${failureCount} lần). Status: ${linkCheck.productUrlStatus}`,
+            });
+            archived++;
+
+            await this.ctx.info('Product archived - broken link', {
+              productId: linkCheck.productId,
+              failureCount,
+              status: linkCheck.productUrlStatus,
+            });
+          } else if (failureCount >= 1 && product.status !== 'archived') {
+            // Mark as needs review
+            if (product.status !== 'needs_review') {
+              await updateProduct(linkCheck.productId, {
+                status: 'needs_review',
+              });
+              needsReview++;
+
+              await this.ctx.info('Product marked for review - link issues', {
+                productId: linkCheck.productId,
+                failureCount,
+              });
+            }
+          }
+        } else {
+          // Dry run: just log what would happen
+          if (failureCount >= 3 && this.isBrokenBeyondRecovery(linkCheck.productUrlStatus)) {
+            archived++;
+            await this.ctx.info('[DRY RUN] Would archive product', {
+              productId: linkCheck.productId,
+              failureCount,
+            });
+          } else if (failureCount >= 1) {
+            needsReview++;
+            await this.ctx.info('[DRY RUN] Would mark as needs review', {
+              productId: linkCheck.productId,
+              failureCount,
+            });
+          }
+        }
+      }
+
+      await this.ctx.info('Cleanup complete', {
+        dryRun,
+        checked,
+        archived,
+        needsReview,
+      });
+
+      return { checked, archived, needsReview };
+    } catch (error) {
+      await this.ctx.error('Cleanup failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { checked, archived, needsReview };
+    }
   }
 
   async checkAndCleanupBrokenLinks(productId: string): Promise<boolean> {

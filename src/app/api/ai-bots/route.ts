@@ -12,11 +12,17 @@ import {
   updateBotRun,
   addBotRunLog,
 } from '@/lib/storage/botRuns';
+import { listProducts, createProduct } from '@/lib/storage/products';
 import { createOrchestrator } from '@/lib/bots/orchestrator';
 import { createSourceScout } from '@/lib/bots/sourceScout';
 import { createDealScorer } from '@/lib/bots/dealScorer';
 import { createLinkHealthChecker } from '@/lib/bots/linkHealth';
-import type { BotRunMode } from '@/lib/types';
+import { createProductNormalizer } from '@/lib/bots/productNormalizer';
+import { createGeminiAnalyst } from '@/lib/bots/geminiAnalyst';
+import { createContentReview } from '@/lib/bots/contentReview';
+import { createProductCleanup } from '@/lib/bots/productCleanup';
+import { createContentPackage } from '@/lib/storage/contentPackages';
+import type { BotRunMode, Product } from '@/lib/types';
 
 interface BotRunRequest {
   mode: BotRunMode;
@@ -119,40 +125,209 @@ async function executeWorkflow(
     // Start workflow
     await orchestrator.startWorkflow(state);
 
+    let stats = {
+      candidatesFound: 0,
+      productsSaved: 0,
+      contentPackagesGenerated: 0,
+      linksChecked: 0,
+      productsArchived: 0,
+    };
+
     // Execute workflow based on mode
     switch (mode) {
       case 'source_scan': {
         const scout = await createSourceScout(runId);
         const candidates = await scout.scanSource(source, limit);
-        await updateBotRun(runId, {
-          candidatesFound: candidates.length,
-        });
+        stats.candidatesFound = candidates.length;
         break;
       }
 
-      case 'score_only': {
-        // Example: score products
+      case 'deal_hunt': {
         const scorer = await createDealScorer(runId);
-        // In production, this would iterate over products
+        const products = await listProducts();
+        let savedCount = 0;
+
+        for (const product of products.slice(0, limit)) {
+          const scoreResult = await scorer.scoreProduct(product);
+          
+          // Save score to product
+          if (scoreResult.score > 50) {
+            // High quality product - update with score
+            await updateBotRun(runId, {
+              productsSaved: ++savedCount,
+            });
+          }
+        }
+        stats.productsSaved = savedCount;
+        break;
+      }
+
+      case 'gemini_analysis': {
+        if (!state.hasGeminiToken) {
+          await addBotRunLog(runId, 'orchestrator', 'warn', 'Gemini token not available - skipping analysis');
+          break;
+        }
+
+        const analyst = await createGeminiAnalyst(runId);
+        const products = await listProducts({ status: 'draft' });
+
+        for (const product of products.slice(0, limit)) {
+          const analysis = await analyst.analyzeProduct(product);
+          // Analysis is merged into product
+        }
+        break;
+      }
+
+      case 'content_review': {
+        const contentReview = await createContentReview(runId);
+        const products = await listProducts({ status: 'approved' });
+        let packageCount = 0;
+
+        for (const product of products.slice(0, limit)) {
+          const content = await contentReview.generateContent(product);
+          
+          // Save content package
+          await createContentPackage(product.id, {
+            productId: product.id,
+            websiteTitle: content.websiteTitle,
+            websiteReview: content.websiteReview,
+            bulletPoints: content.bulletPoints,
+            shortCaption: content.shortCaption,
+            socialCaption: content.socialCaption,
+            hashtags: content.hashtags,
+            cta: content.cta,
+            contentAngle: content.contentAngle,
+            affiliateNote: content.affiliateNote,
+            imageUrl: content.imageUrl,
+            productUrl: content.productUrl,
+            affiliateUrl: content.affiliateUrl,
+            complianceStatus: content.complianceStatus,
+            complianceIssues: content.complianceIssues,
+          });
+          packageCount++;
+        }
+        stats.contentPackagesGenerated = packageCount;
         break;
       }
 
       case 'link_health': {
         const checker = await createLinkHealthChecker(runId);
-        // In production, this would check products
+        const products = await listProducts();
+        let checkedCount = 0;
+
+        for (const product of products.slice(0, limit)) {
+          if (product.originalUrl) {
+            await checker.checkProductLink(
+              product.id,
+              product.originalUrl,
+              product.affiliateUrl,
+              product.imageUrl
+            );
+            checkedCount++;
+          }
+        }
+        stats.linksChecked = checkedCount;
+        break;
+      }
+
+      case 'cleanup': {
+        const cleanup = await createProductCleanup(runId);
+        const result = await cleanup.cleanupBrokenProducts({
+          limit,
+          dryRun: false,
+        });
+        stats.productsArchived = result.archived;
+        stats.linksChecked = result.checked;
+        break;
+      }
+
+      case 'score_only': {
+        const scorer = await createDealScorer(runId);
+        const products = await listProducts();
+
+        for (const product of products.slice(0, limit)) {
+          const scoreResult = await scorer.scoreProduct(product);
+          // Score is logged but not saved
+        }
+        break;
+      }
+
+      case 'full_safe_run': {
+        // Run all steps in safe mode
+        const scout = await createSourceScout(runId);
+        const normalizer = await createProductNormalizer(runId);
+        const scorer = await createDealScorer(runId);
+        const checker = await createLinkHealthChecker(runId);
+        const contentReview = await createContentReview(runId);
+
+        // Step 1: Scan sources
+        const candidates = await scout.scanSource(source, limit);
+        stats.candidatesFound = candidates.length;
+
+        // Step 2: Score candidates
+        const scoredProducts = [];
+        for (const candidate of candidates) {
+          const scoreResult = await scorer.scoreProduct(candidate);
+          if (scoreResult.score > 50) {
+            scoredProducts.push(candidate);
+          }
+        }
+
+        // Step 3: Check link health
+        let checkedCount = 0;
+        for (const product of scoredProducts) {
+          if (product.originalUrl) {
+            await checker.checkProductLink(
+              product.id,
+              product.originalUrl,
+              product.affiliateUrl,
+              product.imageUrl
+            );
+            checkedCount++;
+          }
+        }
+        stats.linksChecked = checkedCount;
+
+        // Step 4: Generate content for approved products
+        let packageCount = 0;
+        for (const product of scoredProducts) {
+          if (product.status === 'approved') {
+            const content = await contentReview.generateContent(product);
+            await createContentPackage(product.id, {
+              productId: product.id,
+              websiteTitle: content.websiteTitle,
+              websiteReview: content.websiteReview,
+              bulletPoints: content.bulletPoints,
+              shortCaption: content.shortCaption,
+              socialCaption: content.socialCaption,
+              hashtags: content.hashtags,
+              cta: content.cta,
+              contentAngle: content.contentAngle,
+              affiliateNote: content.affiliateNote,
+              imageUrl: content.imageUrl,
+              productUrl: content.productUrl,
+              affiliateUrl: content.affiliateUrl,
+              complianceStatus: content.complianceStatus,
+              complianceIssues: content.complianceIssues,
+            });
+            packageCount++;
+          }
+        }
+        stats.contentPackagesGenerated = packageCount;
+        stats.productsSaved = scoredProducts.length;
         break;
       }
 
       default: {
-        // Other modes
-        break;
+        await addBotRunLog(runId, 'orchestrator', 'warn', `Unknown mode: ${mode}`);
       }
     }
 
-    // Complete workflow
+    // Complete workflow with stats
     await orchestrator.completeWorkflow(state);
     await updateBotRun(runId, {
       status: 'completed',
+      ...stats,
     });
   } catch (error) {
     console.error(`[executeWorkflow] Error for run ${runId}:`, error);

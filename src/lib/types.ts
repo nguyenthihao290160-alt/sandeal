@@ -42,9 +42,10 @@ export type ProductKind =
   | "unknown";
 
 export type ProductScoreLabel =
-  | "Nên làm ngay"
-  | "Cần xác minh"
-  | "Không nên làm";
+  | "Bỏ qua"
+  | "Cần xem xét"
+  | "Nên làm"
+  | "Ưu tiên cao";
 
 export interface Product {
   id: string;
@@ -103,6 +104,7 @@ export interface Product {
   complianceStatus?: ComplianceStatus;
   complianceIssues?: ComplianceIssue[];
   generatedContent?: ContentPackage;
+  dataCompleteness?: number; // 0-100, calculated during normalization
 
   createdAt: string;
   updatedAt: string;
