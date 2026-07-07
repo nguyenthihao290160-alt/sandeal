@@ -149,18 +149,18 @@ export default function ProductsPage() {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">Kho sản phẩm</div>
+        <div className="topbar-title">Kết quả bot & hàng chờ duyệt</div>
         <div className="safe-mode-badges">
-          <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
-          <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="dashboard-status-badge success">Safe Mode</span>
+          <span className="dashboard-status-badge success">Free Only</span>
+          <span className="dashboard-status-badge neutral">Auto Publish: OFF</span>
         </div>
       </div>
       <div className="page-content">
         <div className="page-header">
           <div>
-            <h1 className="page-header-title">📦 Kho sản phẩm</h1>
-            <p className="page-header-desc">Quản lý toàn bộ sản phẩm, duyệt và chuẩn bị nội dung.</p>
+            <h1 className="page-header-title">Kết quả bot & hàng chờ duyệt</h1>
+            <p className="page-header-desc">Sản phẩm do bot AI quét được, chờ duyệt trước khi xuất bản.</p>
           </div>
           <Link href="/dashboard/product-sources" className="btn btn-primary">+ Thêm sản phẩm</Link>
         </div>
@@ -168,7 +168,7 @@ export default function ProductsPage() {
         {toast && (
           <div className="toast-container">
             <div className={`toast toast-${toast.type}`}>
-              {toast.type === 'success' ? '✅' : '❌'} {toast.message}
+              {toast.message}
             </div>
           </div>
         )}
@@ -177,7 +177,7 @@ export default function ProductsPage() {
         {deleteConfirm && (
           <div className="dialog-overlay" onClick={() => setDeleteConfirm(null)}>
             <div className="dialog" onClick={e => e.stopPropagation()}>
-              <div className="dialog-title">⚠️ Xác nhận xoá</div>
+              <div className="dialog-title">Xác nhận xoá</div>
               <div className="dialog-message">Bạn chắc chắn muốn xoá sản phẩm này? Hành động không thể hoàn tác.</div>
               <div className="dialog-actions">
                 <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Huỷ</button>
@@ -189,7 +189,7 @@ export default function ProductsPage() {
 
         {/* Filters */}
         <div className="filter-bar">
-          <input className="input" style={{ maxWidth: '280px' }} placeholder="🔍 Tìm sản phẩm..." value={search} onChange={e => setSearch(e.target.value)} />
+          <input className="input" style={{ maxWidth: '280px' }} placeholder="Tìm sản phẩm..." value={search} onChange={e => setSearch(e.target.value)} />
           <select className="select" style={{ maxWidth: '140px' }} value={filterPlatform} onChange={e => setFilterPlatform(e.target.value)}>
             <option value="">Nền tảng</option>
             <option value="shopee">Shopee</option>
@@ -220,8 +220,8 @@ export default function ProductsPage() {
             <option value="high">Cao</option>
           </select>
           <div className="view-toggle">
-            <button className={`view-toggle-btn${viewMode === 'table' ? ' active' : ''}`} onClick={() => setViewMode('table')}>📋</button>
-            <button className={`view-toggle-btn${viewMode === 'card' ? ' active' : ''}`} onClick={() => setViewMode('card')}>🗂️</button>
+            <button className={`view-toggle-btn${viewMode === 'table' ? ' active' : ''}`} onClick={() => setViewMode('table')}>List</button>
+            <button className={`view-toggle-btn${viewMode === 'card' ? ' active' : ''}`} onClick={() => setViewMode('card')}>Grid</button>
           </div>
         </div>
 
@@ -233,7 +233,7 @@ export default function ProductsPage() {
         {/* Empty */}
         {!loading && products.length === 0 && (
           <div className="empty-state">
-            <div className="empty-state-icon">📦</div>
+            <div className="empty-state-icon" style={{ fontSize: '32px', opacity: 0.3 }}>P</div>
             <div className="empty-state-title">Chưa có sản phẩm nào</div>
             <div className="empty-state-desc">Hãy thêm sản phẩm thủ công hoặc lấy từ nguồn affiliate.</div>
             <Link href="/dashboard/product-sources" className="btn btn-primary" style={{ marginTop: 'var(--space-lg)' }}>
@@ -268,7 +268,7 @@ export default function ProductsPage() {
                             <img src={p.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                           </div>
                         ) : (
-                          <div style={{ width: 40, height: 40, borderRadius: 'var(--radius-sm)', background: 'linear-gradient(135deg, #1a2237, #111827)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', flexShrink: 0 }}>📦</div>
+                          <div style={{ width: 40, height: 40, borderRadius: 'var(--radius-sm)', background: 'linear-gradient(135deg, #1a2237, #111827)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700, color: '#64748b', flexShrink: 0 }}>SP</div>
                         )}
                         <div>
                           <Link href={`/dashboard/products/${p.id}`} style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{p.title}</Link>
@@ -311,13 +311,13 @@ export default function ProductsPage() {
                     </td>
                     <td>
                       <div className="flex gap-xs" style={{ flexWrap: 'wrap' }}>
-                        <Link href={`/dashboard/products/${p.id}`} className="btn btn-ghost btn-sm" title="Xem">👁️</Link>
-                        <button className="btn btn-ghost btn-sm" onClick={() => handleScore(p.id)} title="Chấm điểm">⭐</button>
+                        <Link href={`/dashboard/products/${p.id}`} className="btn btn-ghost btn-sm" title="Xem">View</Link>
+                        <button className="btn btn-ghost btn-sm" onClick={() => handleScore(p.id)} title="Chấm điểm">Score</button>
                         {p.status !== 'approved' && p.status !== 'published' && (
-                          <button className="btn btn-ghost btn-sm" onClick={() => handleApprove(p.id)} title="Duyệt">✅</button>
+                          <button className="btn btn-ghost btn-sm" onClick={() => handleApprove(p.id)} title="Duyệt">OK</button>
                         )}
-                        <button className="btn btn-ghost btn-sm" onClick={() => handleArchive(p.id)} title="Lưu trữ">📥</button>
-                        <button className="btn btn-ghost btn-sm" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>🗑️</button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => handleArchive(p.id)} title="Lưu trữ">Arch</button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>Del</button>
                       </div>
                     </td>
                   </tr>
@@ -336,7 +336,7 @@ export default function ProductsPage() {
                   {p.imageUrl ? (
                     <img src={p.imageUrl} alt={p.title} />
                   ) : (
-                    <span>📦</span>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: '#64748b' }}>SP</span>
                   )}
                   <div className="deal-card-platform">
                     <span className="badge badge-neutral">{PLATFORM_LABELS[p.platform] || p.platform}</span>
@@ -368,12 +368,12 @@ export default function ProductsPage() {
                     </div>
                   )}
                   <div className="flex gap-xs" style={{ marginTop: 'var(--space-sm)' }}>
-                    <button className="btn btn-sm btn-ghost" onClick={() => handleScore(p.id)} title="Chấm điểm">⭐</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => handleScore(p.id)} title="Chấm điểm">Score</button>
                     {p.status !== 'approved' && p.status !== 'published' && (
-                      <button className="btn btn-sm btn-ghost" onClick={() => handleApprove(p.id)} title="Duyệt">✅</button>
+                      <button className="btn btn-sm btn-ghost" onClick={() => handleApprove(p.id)} title="Duyệt">OK</button>
                     )}
-                    <button className="btn btn-sm btn-ghost" onClick={() => handleArchive(p.id)} title="Lưu trữ">📥</button>
-                    <button className="btn btn-sm btn-ghost" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>🗑️</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => handleArchive(p.id)} title="Lưu trữ">Arch</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>Del</button>
                   </div>
                 </div>
               </div>

@@ -58,7 +58,7 @@ export default async function DealDetailPage(
         <div className="market-container market-header-inner">
           <Link href="/" className="market-logo">SanDeal</Link>
           <div className="market-search">
-            <span className="market-search-icon">🔍</span>
+            <span className="market-search-icon" style={{ fontSize: '14px', opacity: 0.5 }}>⌕</span>
             <input placeholder="Bạn muốn tìm deal gì hôm nay?" />
           </div>
           <ul className="market-nav-links">
@@ -89,7 +89,6 @@ export default async function DealDetailPage(
                 <img src={product.imageUrl} alt={product.title} />
               ) : (
                 <div className="market-deal-placeholder">
-                  <span className="market-deal-placeholder-icon">📦</span>
                   <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
                 </div>
               )}
@@ -151,7 +150,7 @@ export default async function DealDetailPage(
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {product.benefits.map((b, i) => (
                     <li key={i} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginBottom: '8px', fontSize: 'var(--text-sm)' }}>
-                      <span style={{ color: 'var(--market-success)' }}>✓</span>
+                      <span style={{ color: 'var(--market-success)' }}>✔</span>
                       <span>{b}</span>
                     </li>
                   ))}
@@ -166,7 +165,7 @@ export default async function DealDetailPage(
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {product.warnings.map((w, i) => (
                     <li key={i} style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: 'var(--text-xs)', color: '#92400e', marginBottom: '4px' }}>
-                      <span>⚠️</span>
+                      <span>[!]</span>
                       <span>{w}</span>
                     </li>
                   ))}
@@ -210,7 +209,6 @@ export default async function DealDetailPage(
                         <img src={p.imageUrl} alt={p.title} />
                       ) : (
                         <div className="market-deal-placeholder">
-                          <span className="market-deal-placeholder-icon">📦</span>
                           <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
                         </div>
                       )}
@@ -240,7 +238,7 @@ export default async function DealDetailPage(
       <footer className="market-footer">
         <div className="market-container market-footer-inner">
           <div className="market-affiliate-note" style={{ maxWidth: '800px', margin: '0 auto var(--space-2xl)' }}>
-            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, color: 'var(--market-text-main)', marginBottom: 'var(--space-sm)' }}>📋 Minh bạch Affiliate</h3>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, color: 'var(--market-text-main)', marginBottom: 'var(--space-sm)' }}>Minh bạch Affiliate</h3>
             SanDeal có thể nhận hoa hồng nếu bạn mua qua liên kết này, nhưng <strong>giá của bạn không thay đổi</strong>. Chúng tôi cam kết chỉ giới thiệu sản phẩm đã được đánh giá và kiểm duyệt.
           </div>
           

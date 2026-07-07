@@ -6,25 +6,25 @@ import type { Product } from '@/lib/types';
 
 // ---- Tab IDs ----
 const TABS = [
-  { id: 'manual', label: 'Thêm thủ công', icon: '✏️' },
-  { id: 'accesstrade', label: 'AccessTrade', icon: '🔗' },
-  { id: 'shopee', label: 'Shopee Affiliate', icon: '🛒' },
-  { id: 'tiktok', label: 'TikTok Shop', icon: '🎵' },
-  { id: 'lazada', label: 'Lazada', icon: '🏪' },
-  { id: 'csv', label: 'CSV Import', icon: '📄' },
-  { id: 'other', label: 'Nguồn khác', icon: '🔌' },
+  { id: 'manual', label: 'Thêm thủ công', icon: 'M' },
+  { id: 'accesstrade', label: 'AccessTrade', icon: 'AT' },
+  { id: 'shopee', label: 'Shopee Affiliate', icon: 'SP' },
+  { id: 'tiktok', label: 'TikTok Shop', icon: 'TK' },
+  { id: 'lazada', label: 'Lazada', icon: 'LZ' },
+  { id: 'csv', label: 'CSV Import', icon: 'CS' },
+  { id: 'other', label: 'Nguồn khác', icon: '+' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
 
 // ---- Source Status ----
 const SOURCE_STATUSES = [
-  { name: 'AccessTrade', status: 'pending', note: 'Cấu hình qua API key', icon: '🔗' },
-  { name: 'Shopee', status: 'placeholder', note: 'Sắp kết nối', icon: '🛒' },
-  { name: 'TikTok Shop', status: 'placeholder', note: 'Sắp kết nối', icon: '🎵' },
-  { name: 'Lazada', status: 'placeholder', note: 'Sắp kết nối', icon: '🏪' },
-  { name: 'Thủ công', status: 'active', note: 'Luôn khả dụng', icon: '✏️' },
-  { name: 'CSV', status: 'coming', note: 'Sắp có', icon: '📄' },
+  { name: 'AccessTrade', status: 'pending', note: 'Cấu hình qua API key', icon: 'AT' },
+  { name: 'Shopee', status: 'placeholder', note: 'Sắp kết nối', icon: 'SP' },
+  { name: 'TikTok Shop', status: 'placeholder', note: 'Sắp kết nối', icon: 'TK' },
+  { name: 'Lazada', status: 'placeholder', note: 'Sắp kết nối', icon: 'LZ' },
+  { name: 'Thủ công', status: 'active', note: 'Luôn khả dụng', icon: 'M' },
+  { name: 'CSV', status: 'coming', note: 'Sắp có', icon: 'CS' },
 ];
 
 // ---- Form Default ----
@@ -222,8 +222,8 @@ export default function ProductSourcesPage() {
         <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>{title}</h3>
         <p className="coming-soon-desc">{desc}</p>
         <div className="coming-soon-actions">
-          <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>✏️ Thêm thủ công</button>
-          <Link href="/dashboard/token-vault" className="btn btn-secondary">🔐 Cấu hình API</Link>
+          <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>Thêm thủ công</button>
+          <Link href="/dashboard/token-vault" className="btn btn-secondary">Cấu hình API</Link>
         </div>
         {keys && (
           <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 'var(--space-md)' }}>
@@ -237,11 +237,11 @@ export default function ProductSourcesPage() {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">Trung tâm nguồn sản phẩm</div>
+        <div className="topbar-title">Trung tâm nguồn dữ liệu</div>
         <div className="safe-mode-badges">
-          <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
-          <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="dashboard-status-badge success">Safe Mode</span>
+          <span className="dashboard-status-badge success">Free Only</span>
+          <span className="dashboard-status-badge neutral">Auto Publish: OFF</span>
         </div>
       </div>
       <div className="page-content">
@@ -249,7 +249,7 @@ export default function ProductSourcesPage() {
         {toast && (
           <div className="toast-container">
             <div className={`toast toast-${toast.type}`}>
-              {toast.type === 'success' ? '✅' : '❌'} {toast.message}
+              {toast.message}
             </div>
           </div>
         )}
@@ -257,8 +257,8 @@ export default function ProductSourcesPage() {
         {/* Header */}
         <div className="page-header">
           <div>
-            <h1 className="page-header-title">Trung tâm nguồn sản phẩm</h1>
-            <p className="page-header-desc">Thêm, lấy và đánh giá sản phẩm affiliate trước khi tạo nội dung.</p>
+            <h1 className="page-header-title">Trung tâm nguồn dữ liệu</h1>
+            <p className="page-header-desc">Kết nối nguồn sản phẩm thật để bot AI tự quét, lọc deal và đưa vào hàng chờ duyệt.</p>
           </div>
         </div>
 
@@ -303,7 +303,7 @@ export default function ProductSourcesPage() {
           {/* ====== MANUAL TAB ====== */}
           {activeTab === 'manual' && (
             <div className="card" style={{ maxWidth: '900px' }}>
-              <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>✏️ Thêm sản phẩm thủ công</h3>
+              <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>Thêm sản phẩm thủ công</h3>
 
               {/* Basic Info */}
               <fieldset className="form-fieldset">
@@ -456,16 +456,16 @@ export default function ProductSourcesPage() {
               {/* Actions */}
               <div className="form-actions">
                 <button className="btn btn-primary" disabled={saving} onClick={() => handleSave('needs_review')}>
-                  {saving ? '⏳ Đang lưu...' : '💾 Lưu sản phẩm'}
+                  {saving ? 'Đang lưu...' : 'Lưu sản phẩm'}
                 </button>
                 <button className="btn btn-secondary" disabled={saving} onClick={() => handleSave('draft')}>
-                  📝 Lưu nháp
+                  Lưu nháp
                 </button>
                 <button className="btn btn-accent" disabled={saving} onClick={() => handleSave('needs_review', true)}>
-                  ⭐ Lưu và chấm điểm
+                  Lưu và chấm điểm
                 </button>
                 <Link href="/dashboard/products" className="btn btn-ghost">
-                  📦 Xem danh sách
+                  Xem danh sách
                 </Link>
               </div>
             </div>
@@ -475,14 +475,14 @@ export default function ProductSourcesPage() {
           {activeTab === 'accesstrade' && (
             <div>
               <div className="card" style={{ maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
-                <h3 className="card-title" style={{ marginBottom: 'var(--space-md)' }}>🔗 Tìm kiếm trên AccessTrade</h3>
+                <h3 className="card-title" style={{ marginBottom: 'var(--space-md)' }}>Tìm kiếm trên AccessTrade</h3>
                 
                 {!atConfigured && (
                   <div style={{ background: 'var(--color-warning-bg)', border: '1px solid var(--color-warning)', padding: 'var(--space-xl)', borderRadius: 'var(--radius-lg)', textAlign: 'center', marginBottom: 'var(--space-xl)' }}>
                     <div style={{ fontSize: '32px', marginBottom: 'var(--space-sm)' }}>⚠️</div>
                     <h4 style={{ fontSize: 'var(--text-lg)', fontWeight: 700, color: 'var(--color-warning)', marginBottom: 'var(--space-xs)' }}>Thiếu API Key AccessTrade</h4>
                     <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>Bạn cần cấu hình API key của AccessTrade để tìm kiếm và lấy deal tự động.</p>
-                    <Link href="/dashboard/token-vault" className="btn btn-primary">🔐 Mở Token Vault</Link>
+                    <Link href="/dashboard/token-vault" className="btn btn-primary">Mở Token Vault</Link>
                   </div>
                 )}
 
@@ -503,7 +503,7 @@ export default function ProductSourcesPage() {
                 </div>
 
                 <button className="btn btn-primary" onClick={handleAtSearch} disabled={atLoading} style={{ marginTop: 'var(--space-md)' }}>
-                  {atLoading ? '⏳ Đang tìm...' : '🔍 Tìm kiếm'}
+                  {atLoading ? 'Đang tìm...' : 'Tìm kiếm'}
                 </button>
               </div>
 
@@ -569,10 +569,10 @@ export default function ProductSourcesPage() {
                           </p>
                           <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)' }}>
                             <button className="btn btn-sm btn-primary" disabled={atSaving === item.id} onClick={() => handleAtSave(item.originalItem)}>
-                              💾 Lưu vào sản phẩm
+                              Lưu vào sản phẩm
                             </button>
                             <button className="btn btn-sm btn-accent" disabled={atSaving === item.id} onClick={() => handleAtSave(item.originalItem, true)}>
-                              ⭐ Lưu và chấm điểm
+                              Lưu và chấm điểm
                             </button>
                           </div>
                         </div>

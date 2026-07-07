@@ -99,7 +99,7 @@ export default function DealsPage() {
         <div className="market-container market-header-inner">
           <Link href="/" className="market-logo">SanDeal</Link>
           <div className="market-search">
-            <span className="market-search-icon">🔍</span>
+            <span className="market-search-icon" style={{ fontSize: '14px', opacity: 0.5 }}>⌕</span>
             <input 
               placeholder="Bạn muốn tìm deal gì hôm nay?" 
               value={search} 
@@ -169,7 +169,7 @@ export default function DealsPage() {
 
         {!loading && products.length === 0 && (
           <div style={{ textAlign: 'center', padding: 'var(--space-4xl) 0', background: '#ffffff', borderRadius: 'var(--radius-xl)', border: '1px dashed var(--market-border)' }}>
-            <div style={{ fontSize: '48px', marginBottom: 'var(--space-md)' }}>🔍</div>
+            <div style={{ fontSize: '32px', marginBottom: 'var(--space-md)', opacity: 0.3, fontWeight: 700 }}>S</div>
             <h3 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, marginBottom: 'var(--space-xs)' }}>Không tìm thấy deal</h3>
             <p style={{ color: 'var(--market-text-muted)' }}>Thử tìm kiếm khác hoặc xoá bộ lọc.</p>
             <button className="btn" style={{ marginTop: 'var(--space-md)', background: 'var(--market-bg)', border: '1px solid var(--market-border)' }} onClick={() => { setSearch(''); setPlatform(''); setActiveFilter(''); }}>
@@ -192,7 +192,6 @@ export default function DealsPage() {
                       <img src={p.imageUrl} alt={p.title} />
                     ) : (
                       <div className="market-deal-placeholder">
-                        <span className="market-deal-placeholder-icon">📦</span>
                         <span className="market-deal-placeholder-text">Ảnh đang cập nhật</span>
                       </div>
                     )}
@@ -215,7 +214,7 @@ export default function DealsPage() {
                       ))}
                     </div>
                     <div className="market-warning-pill">
-                      ⚡ Giá có thể thay đổi
+                      Giá có thể thay đổi
                     </div>
                     <div style={{ display: 'flex', gap: '8px', marginTop: 'var(--space-sm)' }}>
                       <span className="market-deal-cta" style={{ flex: 1, textAlign: 'center' }}>Xem deal</span>
@@ -233,7 +232,7 @@ export default function DealsPage() {
       <footer className="market-footer">
         <div className="market-container market-footer-inner">
           <div className="market-affiliate-note" style={{ maxWidth: '800px', margin: '0 auto var(--space-2xl)' }}>
-            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, color: 'var(--market-text-main)', marginBottom: 'var(--space-sm)' }}>📋 Minh bạch Affiliate</h3>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 700, color: 'var(--market-text-main)', marginBottom: 'var(--space-sm)' }}>Minh bạch Affiliate</h3>
             Giá, tồn kho và ưu đãi có thể thay đổi theo thời gian. Một số liên kết có thể là liên kết tiếp thị liên kết. SanDeal có thể nhận hoa hồng nếu bạn mua qua liên kết này, nhưng <strong>giá của bạn không thay đổi</strong>.
           </div>
           

@@ -255,12 +255,12 @@ export default function TokenVaultPage() {
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">API / Token Vault</div>
+        <div className="topbar-title">Token Vault Security Center</div>
         <div className="safe-mode-badges">
-          <span className="safe-badge safe-badge-on">🔒 Safe Mode: ON</span>
-          <span className="safe-badge safe-badge-on">💰 Free Only: ON</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
-          <span className="safe-badge safe-badge-on">👁️ Secrets Hidden</span>
+          <span className="dashboard-status-badge success">Safe Mode: ON</span>
+          <span className="dashboard-status-badge success">Free Only: ON</span>
+          <span className="dashboard-status-badge neutral">Auto Publish: OFF</span>
+          <span className="dashboard-status-badge success">Secrets Hidden</span>
         </div>
       </div>
       <div className="page-content">
@@ -268,7 +268,7 @@ export default function TokenVaultPage() {
         {toast && (
           <div className="toast-container">
             <div className={`toast toast-${toast.type}`}>
-              {toast.type === 'success' ? '✅' : toast.type === 'warning' ? '⚠️' : '❌'} {toast.message}
+              {toast.message}
             </div>
           </div>
         )}
@@ -277,7 +277,7 @@ export default function TokenVaultPage() {
         {deleteConfirm && (
           <div className="dialog-overlay" onClick={() => setDeleteConfirm(null)}>
             <div className="dialog" onClick={e => e.stopPropagation()}>
-              <div className="dialog-title">⚠️ Xác nhận xoá credential</div>
+              <div className="dialog-title">Xác nhận xoá credential</div>
               <div className="dialog-message">
                 Bạn chắc chắn muốn xoá credential này? Hành động không thể hoàn tác. Token/API key sẽ bị xoá vĩnh viễn.
               </div>
@@ -292,40 +292,40 @@ export default function TokenVaultPage() {
         {/* Header */}
         <div className="page-header">
           <div>
-            <h1 className="page-header-title">🔐 API / Token Vault</h1>
-            <p className="page-header-desc">Quản lý API key và token kết nối nền tảng một cách an toàn.</p>
+            <h1 className="page-header-title">Token Vault Security Center</h1>
+            <p className="page-header-desc">Quản lý API key và token bảo mật cho đội bot AI. Token luôn được che và không hiển thị thô.</p>
           </div>
           <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>
-            {showForm ? '✕ Đóng form' : '+ Thêm credential'}
+            {showForm ? 'Đóng form' : '+ Thêm credential'}
           </button>
         </div>
 
         {/* Security Notice */}
         <div className="disclosure-banner" style={{ marginBottom: 'var(--space-lg)' }}>
-          🛡️ <strong>Bảo mật:</strong> Token/API key được mã hoá và lưu phía server. Giao diện chỉ hiển thị dạng rút gọn (VD: <code style={{ color: 'var(--color-primary-light)' }}>AIza****3456</code>). Không nhập App Secret vào ô công khai nếu chưa thật sự cần.
+          <strong>Bảo mật:</strong> Token/API key được mã hoá và lưu phía server. Giao diện chỉ hiển thị dạng rút gọn (VD: <code style={{ color: 'var(--color-primary-light)' }}>AIza****3456</code>). Không nhập App Secret vào ô công khai nếu chưa thật sự cần.
         </div>
 
         {/* Stats */}
         <div className="grid grid-4" style={{ marginBottom: 'var(--space-xl)' }}>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'rgba(124,58,237,0.12)', color: '#8b5cf6' }}>🔐</div>
+            <div className="stat-card-icon" style={{ background: 'rgba(124,58,237,0.12)', color: '#8b5cf6' }}>V</div>
             <div className="stat-card-value">{totalCredentials}</div>
             <div className="stat-card-label">Tổng credentials</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-info-bg)', color: 'var(--color-info)' }}>🤖</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-info-bg)', color: 'var(--color-info)' }}>G</div>
             <div className="stat-card-value">{groups.find(g => g.platform === 'gemini')?.credentials.length ?? 0}</div>
             <div className="stat-card-label">Gemini keys</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success)' }}>🔗</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success)' }}>A</div>
             <div className="stat-card-value">
               {groups.filter(g => ['accesstrade', 'shopee', 'lazada'].includes(g.platform)).reduce((s, g) => s + g.credentials.length, 0)}
             </div>
             <div className="stat-card-label">Affiliate keys</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-warning-bg)', color: 'var(--color-warning)' }}>📡</div>
+            <div className="stat-card-icon" style={{ background: 'var(--color-warning-bg)', color: 'var(--color-warning)' }}>S</div>
             <div className="stat-card-value">
               {groups.filter(g => ['facebook', 'instagram', 'threads', 'youtube', 'tiktok'].includes(g.platform)).reduce((s, g) => s + g.credentials.length, 0)}
             </div>
@@ -336,7 +336,7 @@ export default function TokenVaultPage() {
         {/* Add Credential Form */}
         {showForm && (
           <div className="gradient-card" style={{ marginBottom: 'var(--space-xl)', maxWidth: '800px' }}>
-            <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>➕ Thêm credential mới</h3>
+            <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>Thêm credential mới</h3>
 
             <fieldset className="form-fieldset">
               <legend className="form-legend">Thông tin credential</legend>
@@ -393,11 +393,11 @@ export default function TokenVaultPage() {
                     onClick={() => setShowValue(!showValue)}
                     style={{ position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)' }}
                   >
-                    {showValue ? '🙈 Ẩn' : '👁️ Xem'}
+                     {showValue ? 'Ẩn' : 'Xem'}
                   </button>
                 </div>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                  ⚠️ Không dùng mật khẩu Gmail/GitHub làm API key. Không chia sẻ token công khai.
+                  Không dùng mật khẩu Gmail/GitHub làm API key. Không chia sẻ token công khai.
                 </p>
               </div>
               <div className="form-group">
@@ -416,13 +416,13 @@ export default function TokenVaultPage() {
 
             <div className="form-actions">
               <button className="btn btn-primary" disabled={saving} onClick={() => handleSave(false)}>
-                {saving ? '⏳ Đang lưu...' : '💾 Lưu credential'}
+                {saving ? 'Đang lưu...' : 'Lưu credential'}
               </button>
               <button className="btn btn-accent" disabled={saving} onClick={() => handleSave(true)}>
-                {saving ? '⏳ ...' : '🧪 Lưu và kiểm tra'}
+                {saving ? '...' : 'Lưu và kiểm tra'}
               </button>
               <button className="btn btn-ghost" onClick={() => { setForm(EMPTY_FORM); setShowValue(false); }}>
-                🗑️ Xoá form
+                Xoá form
               </button>
             </div>
           </div>
@@ -436,7 +436,7 @@ export default function TokenVaultPage() {
         {/* Credential Groups */}
         {!loading && groupedSections.map(section => (
           <div key={section.name} style={{ marginBottom: 'var(--space-xl)' }}>
-            <h2 className="section-title">{section.name === 'AI Providers' ? '🤖 AI Providers' : section.name === 'Affiliate Sources' ? '🔗 Affiliate Sources' : section.name === 'Social Channels' ? '📡 Social Channels' : '⚙️ System / Advanced'}</h2>
+            <h2 className="section-title">{section.name}</h2>
             <div className="grid grid-2" style={{ gap: 'var(--space-md)' }}>
               {section.groups.map(group => (
                 <PlatformCard
@@ -462,7 +462,7 @@ export default function TokenVaultPage() {
         {/* Empty state */}
         {!loading && totalCredentials === 0 && !showForm && (
           <div className="empty-state" style={{ marginTop: 'var(--space-xl)' }}>
-            <div className="empty-state-icon">🔐</div>
+            <div className="empty-state-icon" style={{ fontSize: '32px', opacity: 0.3 }}>V</div>
             <div className="empty-state-title">Chưa có credential nào</div>
             <div className="empty-state-desc">
               Thêm API key hoặc token để kết nối với các nền tảng. Bắt đầu bằng cách thêm Gemini API Key hoặc AccessTrade API Key.
@@ -475,7 +475,7 @@ export default function TokenVaultPage() {
 
         {/* Next module link */}
         <div className="disclosure-banner" style={{ marginTop: 'var(--space-xl)' }}>
-          💡 <strong>Tiếp theo:</strong>{' '}
+          <strong>Tiếp theo:</strong>{' '}
           <Link href="/dashboard/content" style={{ color: 'var(--color-primary-light)' }}>
             Tạo nội dung bằng AI →
           </Link>{' '}
@@ -536,9 +536,9 @@ function PlatformCard({
           </div>
         </div>
         {primary ? (
-          <span className="badge badge-success" style={{ fontSize: '10px' }}>
-            ✓ Đã kết nối
-          </span>
+           <span className="badge badge-success" style={{ fontSize: '10px' }}>
+             Đã kết nối
+           </span>
         ) : hasCredentials ? (
           <span className="badge badge-warning" style={{ fontSize: '10px' }}>
             Chưa có primary
@@ -661,23 +661,23 @@ function CredentialRow({
         </div>
         <div className="flex gap-xs" style={{ flexShrink: 0, flexWrap: 'wrap' }}>
           <button className="btn btn-ghost btn-sm" onClick={() => onTest(cred.id)} disabled={isTesting} title="Kiểm tra">
-            {isTesting ? '⏳' : '🧪'}
+            {isTesting ? '...' : 'Test'}
           </button>
           {cred.role !== 'primary' && cred.role !== 'disabled' && (
             <button className="btn btn-ghost btn-sm" onClick={() => onSetPrimary(cred.id)} title="Đặt làm chính">
-              ⭐
+              Set Primary
             </button>
           )}
           <button className="btn btn-ghost btn-sm" onClick={() => onReplace(cred.id)} title="Thay thế">
-            🔄
+            Replace
           </button>
           {cred.role !== 'disabled' && (
             <button className="btn btn-ghost btn-sm" onClick={() => onDisable(cred.id)} title="Tắt">
-              ⏸️
+              Disable
             </button>
           )}
           <button className="btn btn-ghost btn-sm" onClick={() => onDelete(cred.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>
-            🗑️
+            Del
           </button>
         </div>
       </div>
