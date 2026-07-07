@@ -23,7 +23,7 @@ const STATUS_LABELS: Record<string, { label: string; badge: string }> = {
 
 const KIND_LABELS: Record<string, string> = {
   product: 'Sản phẩm',
-  voucher: 'Voucher',
+  voucher: 'Ưu đãi',
   campaign: 'Chiến dịch',
   deal: 'Deal',
   unknown: 'Chưa rõ',

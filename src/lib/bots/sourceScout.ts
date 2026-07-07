@@ -5,7 +5,7 @@
 
 import type { Product, ProductSource } from '../types';
 import { BotContext } from './context';
-import { listProducts, createProduct } from '../storage/products';
+import { listProducts, createProduct, getAllProducts } from '../storage/products';
 import { getPrimaryCredential } from '../storage/tokenVault';
 import { isAccessTradeConfigured, searchAccessTrade, mapAccessTradeToProduct } from '../integrations/accesstrade';
 
@@ -71,25 +71,99 @@ export class SourceScoutBot {
       }
 
       await this.ctx.info('Calling AccessTrade search adapter', { limit });
-      const result = await searchAccessTrade({ limit, kind: 'product' });
-      const items = result.items || [];
 
-      await this.ctx.info('AccessTrade returned items', { count: items.length });
+      const KEYWORDS = [
+        'iphone', 'điện thoại', 'laptop', 'tai nghe', 'máy lọc không khí', 'nồi chiên không dầu',
+        'skincare', 'kem chống nắng', 'mẹ và bé', 'gia dụng', 'thời trang'
+      ];
 
+      const totalLimit = Math.min(Math.max(limit || 10, 1), 20); // enforce 1..20
       const savedProducts: Product[] = [];
-      for (const rawItem of items.slice(0, limit)) {
+      let duplicates = 0;
+      let returnedTotal = 0;
+
+      // seed dedupe set from existing products
+      const existing = await getAllProducts();
+      const seenExternal = new Set<string>(existing.filter(e => e.externalId).map(e => String(e.externalId)));
+      const seenUrls = new Set<string>(existing.filter(e => e.affiliateUrl || e.originalUrl).map(e => (e.affiliateUrl || e.originalUrl) as string));
+      const seenTitles = new Set<string>(existing.filter(e => e.title).map(e => e.title.toLowerCase()));
+
+      for (let ki = 0; ki < KEYWORDS.length && savedProducts.length < totalLimit; ki++) {
+        const keyword = KEYWORDS[ki];
+        const remainingSlots = totalLimit - savedProducts.length;
+        const perKeyword = Math.max(1, Math.ceil(remainingSlots / (KEYWORDS.length - ki)));
+
+        let result;
         try {
-          const input = mapAccessTradeToProduct(rawItem);
-          // Ensure status is needs_review by default
-          input.status = 'needs_review';
-          const saved = await createProduct(input as any);
-          savedProducts.push(saved);
+          result = await searchAccessTrade({ keyword, limit: perKeyword, kind: 'all' });
         } catch (err) {
-          await this.ctx.error('Failed to save product from AccessTrade', { error: err instanceof Error ? err.message : String(err) });
+          await this.ctx.error('AccessTrade search error', { keyword, error: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+
+        const items = result.items || [];
+        returnedTotal += items.length;
+        await this.ctx.info('AccessTrade returned items for keyword', { keyword, count: items.length });
+
+        for (const rawItem of items) {
+          if (savedProducts.length >= totalLimit) break;
+
+          // Deduplicate by external id, url, or title
+          const ext = String(rawItem.id || '');
+          const au = (rawItem.affiliateUrl || rawItem.originalUrl || '').trim();
+          const titleKey = (rawItem.name || '').toLowerCase();
+
+          if (ext && seenExternal.has(ext)) { duplicates++; continue; }
+          if (au && seenUrls.has(au)) { duplicates++; continue; }
+          if (titleKey && seenTitles.has(titleKey)) { duplicates++; continue; }
+
+          // Map to product input
+          try {
+            const mapped = mapAccessTradeToProduct(rawItem);
+
+            // Clean price fields: avoid fake 0 prices
+            if (mapped.price === 0) mapped.price = undefined as any;
+            if (mapped.salePrice === 0) mapped.salePrice = undefined as any;
+
+            // Add safe meta fields (use any cast to avoid type issues)
+            (mapped as any).status = 'needs_review';
+            (mapped as any).source = 'accesstrade';
+            (mapped as any).platform = mapped.platform || 'accesstrade';
+            (mapped as any).sourceType = 'affiliate';
+            (mapped as any).verifiedSource = true;
+            (mapped as any).sourceVerified = true;
+            (mapped as any).publicHidden = false;
+            (mapped as any).needsVerification = !(mapped.affiliateUrl || (mapped.imageUrl && (mapped.price || mapped.salePrice)) );
+            (mapped as any).importedFrom = 'accesstrade';
+            (mapped as any).rawSourceKind = rawItem.kind || 'unknown';
+            (mapped as any).externalId = rawItem.id ? String(rawItem.id) : undefined;
+
+            // Use affiliateUrl preferred, otherwise originalUrl
+            if (mapped.affiliateUrl) {
+              // ok
+            } else if (mapped.originalUrl) {
+              // mark needsVerification if originalUrl may have tracking
+              (mapped as any).needsVerification = true;
+            }
+
+            // Persist
+            const saved = await createProduct(mapped as any);
+            savedProducts.push(saved);
+
+            // mark as seen
+            if ((mapped as any).externalId) seenExternal.add((mapped as any).externalId);
+            if (mapped.affiliateUrl) seenUrls.add(mapped.affiliateUrl);
+            if (mapped.originalUrl) seenUrls.add(mapped.originalUrl);
+            if (mapped.title) seenTitles.add(mapped.title.toLowerCase());
+
+            await this.ctx.info('Saved product from AccessTrade', { keyword, externalId: (mapped as any).externalId, id: saved.id });
+          } catch (err) {
+            await this.ctx.error('Failed to map/save AccessTrade item', { error: err instanceof Error ? err.message : String(err), raw: rawItem });
+          }
         }
       }
 
-      await this.ctx.info('AccessTrade scan complete', { saved: savedProducts.length });
+      await this.ctx.info('AccessTrade scan complete', { requestedLimit: limit, returnedTotal, duplicates, saved: savedProducts.length });
       return savedProducts;
     } catch (error) {
       await this.ctx.error(`AccessTrade source scan failed`, {
