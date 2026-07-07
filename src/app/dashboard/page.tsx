@@ -148,6 +148,9 @@ export default async function DashboardPage() {
         {/* Quick Actions */}
         <h3 className="section-title">Truy cập nhanh</h3>
         <div className="quick-actions" style={{ marginBottom: 'var(--space-xl)' }}>
+          <Link href="/dashboard/ai-bots" className="quick-action-btn">
+            <span className="quick-action-icon">⚡</span>AI Command Center
+          </Link>
           <Link href="/dashboard/product-sources" className="quick-action-btn">
             <span className="quick-action-icon">🔗</span>Nguồn sản phẩm
           </Link>
