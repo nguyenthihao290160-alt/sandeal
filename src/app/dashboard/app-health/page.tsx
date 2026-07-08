@@ -70,7 +70,7 @@ export default function AppHealthPage() {
         <div className="safe-mode-badges">
           <span className="safe-badge safe-badge-on">🔒 Safe Mode: ON</span>
           <span className="safe-badge safe-badge-on">💰 Free Only: ON</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
         </div>
       </div>
       <div className="page-content">

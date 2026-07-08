@@ -8,7 +8,7 @@ export default function SettingsPage() {
         <div className="safe-mode-badges">
           <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
           <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
         </div>
       </div>
       <div className="module-placeholder">
@@ -21,7 +21,7 @@ export default function SettingsPage() {
           <div className="module-hero-badges">
             <span className="safe-badge safe-badge-on">🔒 Safe Mode: ON</span>
             <span className="safe-badge safe-badge-on">💰 Free Only: ON</span>
-            <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+            <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
           </div>
           <div className="module-hero-actions">
             <Link href="/dashboard/token-vault" className="btn btn-secondary">🔐 Token Vault</Link>

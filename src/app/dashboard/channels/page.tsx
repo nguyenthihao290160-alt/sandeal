@@ -8,7 +8,7 @@ export default function ChannelsPage() {
         <div className="safe-mode-badges">
           <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
           <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
         </div>
       </div>
       <div className="module-placeholder">
@@ -21,7 +21,7 @@ export default function ChannelsPage() {
           </p>
           <div className="module-hero-badges">
             <span className="safe-badge safe-badge-on">📡 Multi-Channel</span>
-            <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+            <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
           </div>
           <div className="module-hero-actions">
             <Link href="/dashboard/token-vault" className="btn btn-primary">🔐 Token Vault</Link>

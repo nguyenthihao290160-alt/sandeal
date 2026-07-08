@@ -21,7 +21,8 @@ export default async function DashboardPage() {
         <div className="safe-mode-badges">
           <span className="dashboard-status-badge success">Safe Mode</span>
           <span className="dashboard-status-badge success">Free Only</span>
-          <span className="dashboard-status-badge neutral">Auto Publish: OFF</span>
+          <span className="dashboard-status-badge success">AutoPilot ON</span>
+          <span className="dashboard-status-badge success">Safe Publish ON</span>
         </div>
       </div>
 
@@ -52,8 +53,11 @@ export default async function DashboardPage() {
               <div className="dashboard-status-badge success" style={{ justifyContent: 'flex-start' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981', boxShadow: '0 0 6px rgba(16,185,129,0.5)' }} /> Free Only: ON
               </div>
-              <div className="dashboard-status-badge neutral" style={{ justifyContent: 'flex-start' }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#64748b' }} /> Auto Publish: OFF
+              <div className="dashboard-status-badge success" style={{ justifyContent: 'flex-start' }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981', boxShadow: '0 0 6px rgba(16,185,129,0.5)' }} /> AutoPilot ON
+              </div>
+              <div className="dashboard-status-badge success" style={{ justifyContent: 'flex-start' }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981', boxShadow: '0 0 6px rgba(16,185,129,0.5)' }} /> Safe Publish ON
               </div>
               <div className={`dashboard-status-badge ${vaultErrors > 0 ? 'warning' : 'success'}`} style={{ justifyContent: 'flex-start' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: vaultErrors > 0 ? '#f59e0b' : '#10b981' }} />

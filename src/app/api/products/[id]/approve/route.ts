@@ -6,12 +6,13 @@
 import { type NextRequest } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
-import { approveProduct, getProductById } from '@/lib/storage/products';
+import { approveProduct, getProductById, updateProduct } from '@/lib/storage/products';
 import {
   classifyProductKind,
   looksLikeVoucherOrCampaign,
 } from '@/lib/sourceItemClassifier';
 import type { Product, ProductKind } from '@/lib/types';
+import { checkLinkHealth, checkImageHealth } from '@/lib/bots/productHealthCheck';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,6 +44,7 @@ type ProductRecord = Product &
   publicHidden?: boolean;
   linkHealthStatus?: unknown;
   linkHealth?: unknown;
+  imageHealthStatus?: unknown;
 };
 
 function normalizeText(value?: unknown): string {
@@ -191,6 +193,9 @@ function isBrokenLinkStatus(product: Product): boolean {
     'broken',
     'broken_link',
     'not_found',
+    'not_allowed',
+    'forbidden',
+    'timeout',
     'affiliate_error',
     'image_broken',
     'product_unavailable',
@@ -201,6 +206,22 @@ function isBrokenLinkStatus(product: Product): boolean {
     'redirect_error',
     'unavailable',
     'out_of_stock',
+  ].includes(status);
+}
+
+function isBrokenImageStatus(product: Product): boolean {
+  const p = getRecord(product);
+
+  const status = normalizeText(p.imageHealthStatus);
+
+  if (!status) return false;
+
+  return [
+    'image_broken',
+    'invalid_image',
+    'forbidden',
+    'timeout',
+    'error',
   ].includes(status);
 }
 
@@ -287,6 +308,10 @@ function getApproveBlockReason(product: Product): string | null {
     return 'Link sản phẩm đang lỗi hoặc không khả dụng, không thể duyệt public.';
   }
 
+  if (isBrokenImageStatus(product)) {
+    return 'Ảnh sản phẩm đang lỗi hoặc không hợp lệ, không thể duyệt public.';
+  }
+
   return null;
 }
 
@@ -303,6 +328,52 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return errorResponse('Không tìm thấy sản phẩm.', undefined, 404);
     }
 
+    // Quick health verify nếu chưa có health status
+    const p = existing as ProductRecord;
+    const hasLinkHealth = Boolean(normalizeText(p.linkHealthStatus));
+    const hasImageHealth = Boolean(normalizeText(p.imageHealthStatus));
+
+    if (!hasLinkHealth || !hasImageHealth) {
+      try {
+        const healthUpdates: Record<string, unknown> = {};
+
+        if (!hasLinkHealth) {
+          const linkUrl =
+            (typeof p.affiliateUrl === 'string' ? p.affiliateUrl.trim() : '') ||
+            (typeof p.originalUrl === 'string' ? p.originalUrl.trim() : '') ||
+            (typeof p.url === 'string' ? (p.url as string).trim() : '') ||
+            (typeof p.productUrl === 'string' ? (p.productUrl as string).trim() : '');
+
+          if (linkUrl) {
+            const linkResult = await checkLinkHealth(linkUrl);
+            healthUpdates.linkHealthStatus = linkResult.status;
+            healthUpdates.linkLastCheckedAt = new Date().toISOString();
+          }
+        }
+
+        if (!hasImageHealth && existing.imageUrl) {
+          const imageResult = await checkImageHealth(existing.imageUrl);
+          healthUpdates.imageHealthStatus = imageResult.status;
+        }
+
+        if (Object.keys(healthUpdates).length > 0) {
+          await updateProduct(id, healthUpdates as Partial<Product>);
+
+          // Re-fetch with updated health status
+          const refreshed = await getProductById(id);
+          if (refreshed) {
+            const blockReason = getApproveBlockReason(refreshed);
+            if (blockReason) {
+              return errorResponse(blockReason, undefined, 400);
+            }
+          }
+        }
+      } catch (healthErr) {
+        // Health check lỗi không chặn approve, chỉ log
+        console.warn('[Approve] Health check error:', healthErr instanceof Error ? healthErr.message : String(healthErr));
+      }
+    }
+
     const blockReason = getApproveBlockReason(existing);
 
     if (blockReason) {
@@ -310,7 +381,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     }
 
     if (existing.status === 'approved' || existing.status === 'published') {
-      return successResponse('Sản phẩm đã được duyệt trước đó.', existing);
+      return successResponse('Đã duyệt sản phẩm trước đó.', existing);
     }
 
     const product = await approveProduct(id);

@@ -6,12 +6,13 @@
 
 import type { Product, ProductKind } from '../types';
 import { BotContext } from './context';
-import { listProducts, createProduct, getAllProducts } from '../storage/products';
+import { listProducts, createProduct, getAllProducts, updateProduct } from '../storage/products';
 import { classifyProductKind, looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import {
   isAccessTradeConfigured,
   searchAccessTrade,
 } from '../integrations/accesstrade';
+import { checkLinkHealth, checkImageHealth } from './productHealthCheck';
 
 type SourceName = 'local' | 'accesstrade' | 'manual' | 'all';
 
@@ -864,6 +865,8 @@ export class SourceScoutBot {
       let autoPublishedCount = 0;
       let needsReviewProductCount = 0;
       let archivedNonProductCount = 0;
+      let blockedByLinkCount = 0;
+      let blockedByImageCount = 0;
 
       const kindCounters: Record<string, number> = {
         productsFound: 0,
@@ -997,9 +1000,100 @@ export class SourceScoutBot {
 
             savedInternalCount += 1;
 
-            const savedRecord = saved as Product & Record<string, unknown>;
-            const autoPublished = Boolean(savedRecord.autoPublished);
-            const savedStatus = getText(savedRecord.status);
+            let savedRecord = saved as Product & Record<string, unknown>;
+            let autoPublished = Boolean(savedRecord.autoPublished);
+            let savedStatus = getText(savedRecord.status);
+
+            // === Product Health Guard ===
+            // Nếu sản phẩm được auto-publish, kiểm tra link + ảnh thật
+            // trước khi giữ trạng thái published.
+            if (autoPublished || savedStatus === 'published') {
+              let healthBlocked = false;
+
+              try {
+                const checkUrl =
+                  getText(productDraft.affiliateUrl) ||
+                  getText(productDraft.originalUrl) ||
+                  getText(productDraft.url);
+
+                if (checkUrl) {
+                  const linkResult = await checkLinkHealth(checkUrl);
+
+                  if (!linkResult.ok) {
+                    healthBlocked = true;
+                    blockedByLinkCount += 1;
+
+                    await updateProduct(saved.id, {
+                      status: 'needs_review',
+                      publicHidden: true,
+                      aiApproved: false,
+                      linkHealthStatus: linkResult.status as Product['linkHealthStatus'],
+                      unpublishedReason: `Link lỗi: ${linkResult.reason}`,
+                    } as Partial<Product>);
+
+                    savedRecord = { ...savedRecord, autoPublished: false, status: 'needs_review' };
+                    autoPublished = false;
+                    savedStatus = 'needs_review';
+
+                    await this.ctx.warn('Auto-publish blocked by link health', {
+                      productId: saved.id,
+                      linkStatus: linkResult.status,
+                      linkReason: linkResult.reason,
+                      url: checkUrl,
+                    });
+                  } else {
+                    // Link ok — ghi lại status
+                    await updateProduct(saved.id, {
+                      linkHealthStatus: 'ok' as Product['linkHealthStatus'],
+                      linkLastCheckedAt: new Date().toISOString(),
+                    } as Partial<Product>);
+                  }
+                }
+
+                // Check image (chỉ nếu link ok)
+                if (!healthBlocked) {
+                  const imgUrl = getText(productDraft.imageUrl);
+
+                  if (imgUrl) {
+                    const imageResult = await checkImageHealth(imgUrl);
+
+                    if (!imageResult.ok) {
+                      healthBlocked = true;
+                      blockedByImageCount += 1;
+
+                      await updateProduct(saved.id, {
+                        status: 'needs_review',
+                        publicHidden: true,
+                        aiApproved: false,
+                        imageHealthStatus: imageResult.status as Product['imageHealthStatus'],
+                        unpublishedReason: `Ảnh lỗi: ${imageResult.reason}`,
+                      } as Partial<Product>);
+
+                      savedRecord = { ...savedRecord, autoPublished: false, status: 'needs_review' };
+                      autoPublished = false;
+                      savedStatus = 'needs_review';
+
+                      await this.ctx.warn('Auto-publish blocked by image health', {
+                        productId: saved.id,
+                        imageStatus: imageResult.status,
+                        imageReason: imageResult.reason,
+                        imageUrl: imgUrl,
+                      });
+                    } else {
+                      await updateProduct(saved.id, {
+                        imageHealthStatus: 'ok' as Product['imageHealthStatus'],
+                      } as Partial<Product>);
+                    }
+                  }
+                }
+              } catch (healthError) {
+                // Health check lỗi — không crash bot, giữ sản phẩm nhưng đưa vào review
+                await this.ctx.warn('Health check error — product moved to review', {
+                  productId: saved.id,
+                  error: healthError instanceof Error ? healthError.message : String(healthError),
+                });
+              }
+            }
 
             if (autoPublished || savedStatus === 'published') {
               autoPublishedCount += 1;
@@ -1062,6 +1156,8 @@ export class SourceScoutBot {
         autoPublishedCount,
         needsReviewProductCount,
         archivedNonProductCount,
+        blockedByLinkCount,
+        blockedByImageCount,
         duplicateCount,
         skippedCount,
         skippedFromPublicCount,

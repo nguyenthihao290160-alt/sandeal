@@ -13,6 +13,9 @@ const BROKEN_LINK_STATUSES = new Set<string>([
   'broken',
   'broken_link',
   'not_found',
+  'not_allowed',
+  'forbidden',
+  'timeout',
   'affiliate_error',
   'image_broken',
   'product_unavailable',
@@ -23,6 +26,14 @@ const BROKEN_LINK_STATUSES = new Set<string>([
   'redirect_error',
   'unavailable',
   'out_of_stock',
+]);
+
+const BROKEN_IMAGE_STATUSES = new Set<string>([
+  'image_broken',
+  'invalid_image',
+  'forbidden',
+  'timeout',
+  'error',
 ]);
 
 const UNSAFE_SOURCE_VALUES = new Set<string>([
@@ -61,6 +72,7 @@ type ProductRecord = Product &
   isInternal?: boolean;
   linkHealthStatus?: unknown;
   linkHealth?: unknown;
+  imageHealthStatus?: unknown;
   affiliateUrl?: unknown;
   originalUrl?: unknown;
   url?: unknown;
@@ -346,5 +358,24 @@ export function isPublicSafeProduct(product?: Product | null): boolean {
     return false;
   }
 
+  // Chặn ảnh lỗi (image_broken, invalid_image, forbidden, timeout, error).
+  if (hasUnsafeImageHealth(product)) {
+    return false;
+  }
+
   return true;
+}
+
+/**
+ * Kiểm tra imageHealthStatus có nằm trong danh sách lỗi không.
+ * Record cũ không có field này → normalizeText trả '' → has trả false → tương thích.
+ */
+function hasUnsafeImageHealth(product: Product): boolean {
+  const p = asRecord(product);
+
+  const imageStatus = normalizeText(p.imageHealthStatus);
+
+  if (!imageStatus) return false;
+
+  return BROKEN_IMAGE_STATUSES.has(imageStatus);
 }

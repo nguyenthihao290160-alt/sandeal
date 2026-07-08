@@ -8,7 +8,7 @@ export default function QueuePage() {
         <div className="safe-mode-badges">
           <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
           <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+          <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
         </div>
       </div>
       <div className="module-placeholder">
@@ -20,7 +20,7 @@ export default function QueuePage() {
           </p>
           <div className="module-hero-badges">
             <span className="safe-badge safe-badge-on">⏳ Queue System</span>
-            <span className="safe-badge safe-badge-off">📤 Auto Publish: OFF</span>
+            <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
           </div>
           <div className="module-hero-actions">
             <Link href="/dashboard/schedule" className="btn btn-primary">📅 Lịch đăng</Link>

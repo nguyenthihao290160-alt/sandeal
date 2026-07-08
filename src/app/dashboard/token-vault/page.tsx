@@ -259,7 +259,7 @@ export default function TokenVaultPage() {
         <div className="safe-mode-badges">
           <span className="dashboard-status-badge success">Safe Mode: ON</span>
           <span className="dashboard-status-badge success">Free Only: ON</span>
-          <span className="dashboard-status-badge neutral">Auto Publish: OFF</span>
+          <span className="dashboard-status-badge success">Safe Publish ON</span>
           <span className="dashboard-status-badge success">Secrets Hidden</span>
         </div>
       </div>

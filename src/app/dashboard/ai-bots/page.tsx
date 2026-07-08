@@ -24,6 +24,39 @@ type ReviewQueueItem = {
   publicHidden?: boolean;
 };
 
+type SchedulerData = {
+  scheduler: {
+    enabled: boolean;
+    intervalMinutes: number;
+    mode: string;
+    lastRunAt?: string;
+    nextRunAt?: string;
+    updatedAt: string;
+  };
+  lock: {
+    isLocked: boolean;
+    isExpired: boolean;
+    runId?: string | null;
+    mode?: string | null;
+    startedAt?: string | null;
+    expiresAt?: string | null;
+  };
+};
+
+type OperationLog = {
+  id: string;
+  runId: string;
+  mode: string;
+  trigger: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  summary: Record<string, number | undefined>;
+  message?: string;
+  error?: string;
+};
+
 type BotDefinition = {
   id: string;
   name: string;
@@ -304,8 +337,18 @@ export default function AIBotsPage() {
   const [reviewQueue, setReviewQueue] = useState<ReviewQueueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [runLoading, setRunLoading] = useState(false);
+  const [healthCheckLoading, setHealthCheckLoading] = useState(false);
+  const [runNowLoading, setRunNowLoading] = useState(false);
+  const [schedulerLoading, setSchedulerLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Scheduler & Operations state
+  const [schedulerData, setSchedulerData] = useState<SchedulerData | null>(null);
+  const [opLogs, setOpLogs] = useState<OperationLog[]>([]);
+  const [schedMode, setSchedMode] = useState('full_safe_run');
+  const [schedInterval, setSchedInterval] = useState(60);
+  const [appHealth, setAppHealth] = useState<Record<string, unknown> | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -356,15 +399,42 @@ export default function AIBotsPage() {
     }
   }, []);
 
+  const loadScheduler = useCallback(async () => {
+    try {
+      const [schedRes, logsRes] = await Promise.all([
+        fetch('/api/ai-bots/scheduler', { cache: 'no-store' }),
+        fetch('/api/ai-bots/logs?limit=50', { cache: 'no-store' }),
+      ]);
+
+      if (schedRes.ok) {
+        const schedPayload = await readJson<ApiEnvelope<SchedulerData>>(schedRes);
+        if (schedPayload.data) {
+          setSchedulerData(schedPayload.data);
+          setSchedMode(schedPayload.data.scheduler.mode || 'full_safe_run');
+          setSchedInterval(schedPayload.data.scheduler.intervalMinutes || 60);
+        }
+      }
+
+      if (logsRes.ok) {
+        const logsPayload = await readJson<ApiEnvelope<OperationLog[]>>(logsRes);
+        setOpLogs(Array.isArray(logsPayload.data) ? logsPayload.data : []);
+      }
+    } catch {
+      // Non-critical — scheduler data is optional
+    }
+  }, []);
+
   useEffect(() => {
     void loadData();
+    void loadScheduler();
 
     const interval = window.setInterval(() => {
       void loadData();
+      void loadScheduler();
     }, 30000);
 
     return () => window.clearInterval(interval);
-  }, [loadData]);
+  }, [loadData, loadScheduler]);
 
   const handleRunBot = async (mode: string) => {
     try {
@@ -417,6 +487,110 @@ export default function AIBotsPage() {
     }
   };
 
+  const handleHealthCheck = async () => {
+    try {
+      setHealthCheckLoading(true);
+      setError(null);
+      setSuccessMsg(null);
+
+      const res = await fetch('/api/products/health-check', {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        let message = `Health check thất bại. HTTP ${res.status}`;
+        try {
+          const payload = await res.json();
+          if (payload?.message || payload?.error) {
+            message = String(payload.message || payload.error);
+          }
+        } catch { /* keep fallback */ }
+        throw new Error(message);
+      }
+
+      const payload = await res.json();
+      const data = payload?.data;
+
+      await loadData();
+
+      const msg = data
+        ? `Health check xong: ${data.checked ?? 0} kiểm tra, ${data.healthy ?? 0} khỏe, ${data.hidden ?? 0} ẩn, ${data.linkBroken ?? 0} link lỗi, ${data.imageBroken ?? 0} ảnh lỗi.`
+        : 'Health check hoàn tất.';
+
+      setSuccessMsg(msg);
+      window.setTimeout(() => setSuccessMsg(null), 8000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Health check thất bại.');
+    } finally {
+      setHealthCheckLoading(false);
+    }
+  };
+
+  // --- Run Now via /api/ai-bots/run-now ---
+  const handleRunNow = async (mode: string) => {
+    try {
+      setRunNowLoading(true);
+      setError(null);
+      setSuccessMsg(null);
+
+      const res = await fetch('/api/ai-bots/run-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+
+      const payload = await res.json();
+
+      if (res.status === 409) {
+        setError(payload?.message || 'AutoPilot đang chạy, không thể chạy song song.');
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(payload?.message || payload?.error || `HTTP ${res.status}`);
+      }
+
+      await Promise.all([loadData(), loadScheduler()]);
+
+      const data = payload?.data;
+      const msg = data?.message || 'Đã hoàn tất.';
+      setSuccessMsg(msg);
+      window.setTimeout(() => setSuccessMsg(null), 8000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể chạy.');
+    } finally {
+      setRunNowLoading(false);
+    }
+  };
+
+  // --- Scheduler Config ---
+  const handleSaveScheduler = async (updates: Record<string, unknown>) => {
+    try {
+      setSchedulerLoading(true);
+      setError(null);
+
+      const res = await fetch('/api/ai-bots/scheduler', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+
+      const payload = await res.json();
+
+      if (!res.ok) {
+        throw new Error(payload?.error || `HTTP ${res.status}`);
+      }
+
+      await loadScheduler();
+      setSuccessMsg(payload?.message || 'Đã cập nhật lịch.');
+      window.setTimeout(() => setSuccessMsg(null), 5000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể cập nhật lịch.');
+    } finally {
+      setSchedulerLoading(false);
+    }
+  };
+
   const hasAccessTrade = getStatusBool(status, 'hasAccessTradePrimaryToken');
   const hasGemini = getStatusBool(status, 'hasGeminiPrimaryToken');
   const productCount = getStatusNumber(status, 'productCount');
@@ -425,7 +599,7 @@ export default function AIBotsPage() {
   const brokenLinkCount = getStatusNumber(status, 'brokenLinkCount');
   const lastRunStartedAt = runs[0]?.startedAt;
   const latestRun = runs[0];
-  const isRunning = runLoading || runs.some((run) => run.status === 'running');
+  const isRunning = runLoading || runNowLoading || runs.some((run) => run.status === 'running');
 
   if (loading) {
     return (
@@ -786,6 +960,16 @@ export default function AIBotsPage() {
 
               <button
                   type="button"
+                  className="secondary-button"
+                  onClick={() => void handleHealthCheck()}
+                  disabled={isRunning || healthCheckLoading}
+                  style={{ borderColor: 'var(--color-warning)' }}
+              >
+                {healthCheckLoading ? '🩺 Đang kiểm tra...' : '🩺 Kiểm tra sức khỏe SP'}
+              </button>
+
+              <button
+                  type="button"
                   className="primary-button"
                   onClick={() => void handleRunBot('full_safe_run')}
                   disabled={isRunning}
@@ -842,6 +1026,322 @@ export default function AIBotsPage() {
                 </table>
               </div>
           )}
+        </section>
+
+        {/* ===== AutoPilot Scheduler & Operations ===== */}
+        <section style={{ marginBottom: 'var(--space-xl)' }}>
+          <h2 className="section-title">AutoPilot Scheduler & Operations</h2>
+
+          {/* Scheduler Config Card */}
+          <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="flex items-center justify-between gap-md" style={{ marginBottom: 'var(--space-md)' }}>
+              <h3 style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: 'var(--text-base)' }}>
+                Cấu hình lịch tự động
+              </h3>
+              <span className={`badge ${schedulerData?.scheduler?.enabled ? 'badge-success' : 'badge-neutral'}`}>
+                {schedulerData?.scheduler?.enabled ? '🟢 Đang bật' : '⚪ Đang tắt'}
+              </span>
+            </div>
+
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 'var(--space-md)', marginBottom: 'var(--space-md)' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Chế độ chạy</label>
+                <select
+                  value={schedMode}
+                  onChange={(e) => setSchedMode(e.target.value)}
+                  className="form-select"
+                  style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }}
+                >
+                  <option value="full_safe_run">Full Safe Run</option>
+                  <option value="source_scan">Quét nguồn</option>
+                  <option value="health_check">Kiểm tra link/ảnh</option>
+                  <option value="cleanup_broken_products">Dọn sản phẩm lỗi</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Chu kỳ</label>
+                <select
+                  value={schedInterval}
+                  onChange={(e) => setSchedInterval(Number(e.target.value))}
+                  className="form-select"
+                  style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }}
+                >
+                  <option value={30}>30 phút</option>
+                  <option value={45}>45 phút</option>
+                  <option value={60}>60 phút</option>
+                  <option value={120}>120 phút</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Lần chạy gần nhất</label>
+                <div style={{ fontSize: 13, color: 'var(--text-primary)', padding: '8px 0' }}>
+                  {schedulerData?.scheduler?.lastRunAt ? formatDateTime(schedulerData.scheduler.lastRunAt) : '—'}
+                </div>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Lần chạy tiếp theo</label>
+                <div style={{ fontSize: 13, color: 'var(--text-primary)', padding: '8px 0' }}>
+                  {schedulerData?.scheduler?.nextRunAt ? formatDateTime(schedulerData.scheduler.nextRunAt) : '—'}
+                </div>
+              </div>
+            </div>
+
+            {/* Lock status */}
+            {schedulerData?.lock?.isLocked && (
+              <div style={{ padding: '8px 14px', background: 'rgba(251,191,36,0.1)', borderRadius: 8, border: '1px solid rgba(251,191,36,0.3)', marginBottom: 'var(--space-md)', fontSize: 13 }}>
+                ⚠️ Đang chạy: <strong>{schedulerData.lock.mode}</strong> (bắt đầu {schedulerData.lock.startedAt ? formatDateTime(schedulerData.lock.startedAt) : '?'})
+              </div>
+            )}
+
+            <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="secondary-button btn-sm"
+                disabled={schedulerLoading}
+                onClick={() => void handleSaveScheduler({ mode: schedMode, intervalMinutes: schedInterval })}
+              >
+                💾 Lưu cấu hình
+              </button>
+
+              {schedulerData?.scheduler?.enabled ? (
+                <button
+                  type="button"
+                  className="secondary-button btn-sm"
+                  disabled={schedulerLoading}
+                  onClick={() => void handleSaveScheduler({ enabled: false })}
+                  style={{ borderColor: 'var(--color-danger, #ef4444)' }}
+                >
+                  ⏸️ Tắt lịch tự động
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary-button btn-sm"
+                  disabled={schedulerLoading}
+                  onClick={() => void handleSaveScheduler({ enabled: true, mode: schedMode, intervalMinutes: schedInterval })}
+                  style={{ borderColor: 'var(--color-success, #10b981)' }}
+                >
+                  ▶️ Bật lịch tự động
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Run Now Panel */}
+          <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <h3 style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: 'var(--text-base)', marginBottom: 'var(--space-md)' }}>
+              Chạy thủ công (Run Now)
+            </h3>
+
+            <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={isRunning || runNowLoading}
+                onClick={() => void handleRunNow('full_safe_run')}
+              >
+                {runNowLoading ? '⏳ Đang chạy...' : '🚀 Chạy AutoPilot ngay'}
+              </button>
+
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={isRunning || runNowLoading}
+                onClick={() => void handleRunNow('source_scan')}
+              >
+                🔍 Quét nguồn ngay
+              </button>
+
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={isRunning || runNowLoading}
+                onClick={() => void handleRunNow('health_check')}
+              >
+                🩺 Kiểm tra link/ảnh ngay
+              </button>
+
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={isRunning || runNowLoading}
+                onClick={() => void handleRunNow('cleanup_broken_products')}
+              >
+                🧹 Dọn sản phẩm lỗi
+              </button>
+            </div>
+          </div>
+
+          {/* Operation Logs Table */}
+          <div className="card">
+            <h3 style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: 'var(--text-base)', marginBottom: 'var(--space-md)' }}>
+              Nhật ký vận hành
+            </h3>
+
+            {opLogs.length === 0 ? (
+              <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Chưa có nhật ký vận hành.</p>
+            ) : (
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Run ID</th>
+                      <th>Trigger</th>
+                      <th>Mode</th>
+                      <th>Status</th>
+                      <th>Bắt đầu</th>
+                      <th>Thời lượng</th>
+                      <th>Kết quả</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {opLogs.slice(0, 30).map((log) => {
+                      const triggerLabels: Record<string, string> = {
+                        dashboard: '🖥️ Dashboard',
+                        scheduler: '⏰ Scheduler',
+                        manual: '👤 Thủ công',
+                        api: '🔌 API',
+                      };
+
+                      const modeLabels: Record<string, string> = {
+                        full_safe_run: 'Full Safe Run',
+                        source_scan: 'Quét nguồn',
+                        health_check: 'Health Check',
+                        cleanup_broken_products: 'Cleanup',
+                        link_health: 'Link Health',
+                        cleanup: 'Cleanup',
+                      };
+
+                      const statusBadge: Record<string, string> = {
+                        running: 'badge-warning',
+                        completed: 'badge-success',
+                        failed: 'badge-danger',
+                        skipped: 'badge-neutral',
+                      };
+
+                      const durationText = typeof log.durationMs === 'number'
+                        ? log.durationMs < 1000 ? `${log.durationMs}ms` : `${(log.durationMs / 1000).toFixed(1)}s`
+                        : '—';
+
+                      const summaryParts: string[] = [];
+                      if (log.summary) {
+                        if (log.summary.found) summaryParts.push(`${log.summary.found} tìm`);
+                        if (log.summary.saved) summaryParts.push(`${log.summary.saved} lưu`);
+                        if (log.summary.checked) summaryParts.push(`${log.summary.checked} check`);
+                        if (log.summary.hidden) summaryParts.push(`${log.summary.hidden} ẩn`);
+                        if (log.summary.cleaned) summaryParts.push(`${log.summary.cleaned} dọn`);
+                        if (log.summary.errors) summaryParts.push(`${log.summary.errors} lỗi`);
+                      }
+                      if (log.error) summaryParts.push(log.error.slice(0, 40));
+
+                      return (
+                        <tr key={log.id}>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                            {log.runId?.slice(0, 8) || '—'}
+                          </td>
+                          <td style={{ fontSize: 12 }}>{triggerLabels[log.trigger] || log.trigger}</td>
+                          <td style={{ fontSize: 12 }}>{modeLabels[log.mode] || log.mode}</td>
+                          <td>
+                            <span className={`badge ${statusBadge[log.status] || 'badge-neutral'}`}>
+                              {log.status}
+                            </span>
+                          </td>
+                          <td style={{ color: 'var(--text-secondary)', fontSize: 11 }}>
+                            {formatDateTime(log.startedAt)}
+                          </td>
+                          <td style={{ fontSize: 12 }}>{durationText}</td>
+                          <td style={{ fontSize: 11, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {summaryParts.join(', ') || log.message || '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* ===== Production Readiness ===== */}
+        <section style={{ marginBottom: 'var(--space-xl)' }}>
+          <h2 className="section-title">Production Readiness</h2>
+
+          <div className="card">
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 'var(--space-md)' }}>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>App Health</div>
+                <span className={`badge ${appHealth?.ok ? 'badge-success' : 'badge-neutral'}`}>
+                  {appHealth?.ok ? '✅ Online' : '⚪ Chưa kiểm tra'}
+                </span>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>Environment</div>
+                <span className="badge badge-neutral">
+                  {typeof appHealth?.environment === 'string' ? appHealth.environment : '—'}
+                </span>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>Uptime</div>
+                <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>
+                  {typeof appHealth?.uptimeSeconds === 'number'
+                    ? appHealth.uptimeSeconds > 3600
+                      ? `${Math.floor(appHealth.uptimeSeconds / 3600)}h ${Math.floor((appHealth.uptimeSeconds % 3600) / 60)}m`
+                      : `${Math.floor(appHealth.uptimeSeconds / 60)}m`
+                    : '—'}
+                </span>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>Scheduler</div>
+                <span className={`badge ${schedulerData?.scheduler?.enabled ? 'badge-success' : 'badge-neutral'}`}>
+                  {schedulerData?.scheduler?.enabled ? '🟢 Bật' : '⚪ Tắt'}
+                </span>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>Run Lock</div>
+                <span className={`badge ${schedulerData?.lock?.isLocked ? 'badge-warning' : 'badge-success'}`}>
+                  {schedulerData?.lock?.isLocked ? '🔒 Đang chạy' : '✅ Rảnh'}
+                </span>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>VPS Cron</div>
+                <span className="badge badge-neutral" style={{ fontSize: 11 }}>
+                  Cần cấu hình thủ công
+                </span>
+              </div>
+            </div>
+
+            <div className="flex gap-sm" style={{ marginTop: 'var(--space-md)', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="secondary-button btn-sm"
+                onClick={() => {
+                  fetch('/api/health', { cache: 'no-store' })
+                    .then(r => r.json())
+                    .then(d => { setAppHealth(d); setSuccessMsg('Health check: ' + (d?.ok ? 'OK' : 'Lỗi')); window.setTimeout(() => setSuccessMsg(null), 4000); })
+                    .catch(() => setError('Không kết nối được /api/health'));
+                }}
+              >
+                🏥 Kiểm tra trạng thái
+              </button>
+
+              <button
+                type="button"
+                className="secondary-button btn-sm"
+                onClick={() => void loadScheduler()}
+              >
+                🔄 Làm mới
+              </button>
+            </div>
+          </div>
         </section>
 
         <section style={{ marginBottom: 'var(--space-xl)' }}>
