@@ -43,5 +43,8 @@ export function isPublicSafeProduct(p: Product): boolean {
   const brokenStatuses = ['not_found', 'affiliate_error', 'image_broken', 'product_unavailable', 'server_error'];
   if (p.linkHealthStatus && brokenStatuses.includes(p.linkHealthStatus)) return false;
 
+  // Exclude vouchers, campaigns and store offers from public listing
+  if (p.kind === 'voucher' || p.kind === 'campaign' || p.kind === 'store_offer' || p.kind === 'unknown') return false;
+
   return true;
 }

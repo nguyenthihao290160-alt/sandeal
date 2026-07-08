@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Product } from '@/lib/types';
+import { classifyProductKind, looksLikeVoucherOrCampaign } from '@/lib/sourceItemClassifier';
 
 const PLATFORM_LABELS: Record<string, string> = {
   shopee: 'Shopee',
@@ -23,9 +24,10 @@ const STATUS_LABELS: Record<string, { label: string; badge: string }> = {
 
 const KIND_LABELS: Record<string, string> = {
   product: 'Sản phẩm',
-  voucher: 'Ưu đãi',
+  voucher: 'Voucher',
   campaign: 'Chiến dịch',
   deal: 'Deal',
+  store_offer: 'Ưu đãi shop',
   unknown: 'Chưa rõ',
 };
 
@@ -285,7 +287,17 @@ export default function ProductsPage() {
                         </div>
                       </div>
                     </td>
-                    <td><span className="badge badge-neutral">{KIND_LABELS[p.kind] || p.kind}</span></td>
+                    <td>{(() => {
+                  const inferred = p.kind || classifyProductKind(p as any);
+                  return (
+                    <div>
+                      <span className="badge badge-neutral">{KIND_LABELS[inferred] || inferred}</span>
+                      {inferred !== 'product' && (
+                        <div style={{ fontSize: 11, color: 'var(--text-warning)', marginTop: 4 }}>Chưa phải sản phẩm cụ thể</div>
+                      )}
+                    </div>
+                  );
+                })()}</td>
                     <td><span className="badge badge-neutral">{PLATFORM_LABELS[p.platform] || p.platform}</span></td>
                     <td>
                       <div>
@@ -322,9 +334,17 @@ export default function ProductsPage() {
                       <div className="flex gap-xs" style={{ flexWrap: 'wrap' }}>
                         <Link href={`/dashboard/products/${p.id}`} className="btn btn-ghost btn-sm" title="Xem">View</Link>
                         <button className="btn btn-ghost btn-sm" onClick={() => handleScore(p.id)} title="Chấm điểm">Score</button>
-                        {p.status !== 'approved' && p.status !== 'published' && (
-                          <button className="btn btn-ghost btn-sm" onClick={() => handleApprove(p.id)} title="Duyệt">OK</button>
-                        )}
+                        {(() => {
+                          const inferred = p.kind || classifyProductKind(p as any);
+                          if (inferred !== 'product') {
+                            return (
+                              <button className="btn btn-ghost btn-sm" disabled title="Mục này là voucher/chiến dịch, không thể duyệt">OK</button>
+                            );
+                          }
+                          return (p.status !== 'approved' && p.status !== 'published') ? (
+                            <button className="btn btn-ghost btn-sm" onClick={() => handleApprove(p.id)} title="Duyệt">OK</button>
+                          ) : null;
+                        })()}
                         <button className="btn btn-ghost btn-sm" onClick={() => handleArchive(p.id)} title="Lưu trữ">Arch</button>
                         <button className="btn btn-ghost btn-sm" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>Del</button>
                       </div>
@@ -378,9 +398,17 @@ export default function ProductsPage() {
                   )}
                   <div className="flex gap-xs" style={{ marginTop: 'var(--space-sm)' }}>
                     <button className="btn btn-sm btn-ghost" onClick={() => handleScore(p.id)} title="Chấm điểm">Score</button>
-                    {p.status !== 'approved' && p.status !== 'published' && (
-                      <button className="btn btn-sm btn-ghost" onClick={() => handleApprove(p.id)} title="Duyệt">OK</button>
-                    )}
+                    {(() => {
+                      const inferred = p.kind || classifyProductKind(p as any);
+                      if (inferred !== 'product') {
+                        return (
+                          <button className="btn btn-sm btn-ghost" disabled title="Mục này là voucher/chiến dịch, không thể duyệt">OK</button>
+                        );
+                      }
+                      return (p.status !== 'approved' && p.status !== 'published') ? (
+                        <button className="btn btn-sm btn-ghost" onClick={() => handleApprove(p.id)} title="Duyệt">OK</button>
+                      ) : null;
+                    })()}
                     <button className="btn btn-sm btn-ghost" onClick={() => handleArchive(p.id)} title="Lưu trữ">Arch</button>
                     <button className="btn btn-sm btn-ghost" onClick={() => setDeleteConfirm(p.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>Del</button>
                   </div>

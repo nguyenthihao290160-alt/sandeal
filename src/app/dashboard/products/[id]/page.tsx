@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import type { Product } from '@/lib/types';
+import { classifyProductKind, looksLikeVoucherOrCampaign } from '@/lib/sourceItemClassifier';
 
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -128,7 +129,17 @@ export default function ProductDetailPage() {
                   <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: '6px', letterSpacing: '-0.01em' }}>{product.title}</h1>
                   <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
                     <span className="badge badge-neutral">{product.platform}</span>
-                    <span className="badge badge-neutral">{product.kind}</span>
+                    {(() => {
+                      const inferred = product.kind || classifyProductKind(product as any);
+                      return (
+                        <>
+                          <span className="badge badge-neutral">{inferred}</span>
+                          {inferred !== 'product' && (
+                            <div style={{ fontSize: 12, color: 'var(--text-warning)', marginLeft: 8 }}>Chưa phải sản phẩm cụ thể</div>
+                          )}
+                        </>
+                      );
+                    })()}
                     <span className={`badge ${product.status === 'approved' ? 'badge-success' : product.status === 'needs_review' ? 'badge-warning' : product.status === 'published' ? 'badge-info' : 'badge-neutral'}`}>
                       {product.status === 'approved' ? 'Đã duyệt' : product.status === 'needs_review' ? 'Cần xem xét' : product.status === 'draft' ? 'Nháp' : product.status === 'published' ? 'Đã xuất bản' : product.status}
                     </span>
@@ -271,11 +282,19 @@ export default function ProductDetailPage() {
             <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">⚡ Hành động</h3>
               <div className="flex flex-col gap-sm">
-                {product.status !== 'approved' && product.status !== 'published' && (
-                  <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => handleAction('approve')}>
-                    ✅ Duyệt sản phẩm
-                  </button>
-                )}
+                {(() => {
+                  const inferred = product.kind || classifyProductKind(product as any);
+                  if (inferred !== 'product') {
+                    return (
+                      <button className="btn btn-primary" style={{ width: '100%' }} disabled title="Mục này là voucher/chiến dịch/ưu đãi shop, không thể duyệt">✅ Duyệt sản phẩm</button>
+                    );
+                  }
+                  return (product.status !== 'approved' && product.status !== 'published') ? (
+                    <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => handleAction('approve')}>
+                      ✅ Duyệt sản phẩm
+                    </button>
+                  ) : null;
+                })()}
                 {product.status !== 'needs_review' && (
                   <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => handleAction('needs_review')}>
                     🔍 Chuyển về cần xem xét

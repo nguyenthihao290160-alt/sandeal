@@ -39,6 +39,7 @@ export type ProductKind =
   | "voucher"
   | "campaign"
   | "deal"
+  | "store_offer"
   | "unknown";
 
 export type ProductScoreLabel =

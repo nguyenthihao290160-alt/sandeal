@@ -6,6 +6,7 @@
 import type { Product } from '../types';
 import { BotContext } from './context';
 import { listProducts, createProduct, getAllProducts } from '../storage/products';
+import { classifyProductKind } from '../sourceItemClassifier';
 import {
   isAccessTradeConfigured,
   searchAccessTrade,
@@ -307,7 +308,7 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
 
   const imageUrl = getRawText(rawItem, ACCESS_TRADE_IMAGE_KEYS);
   const description = getRawText(rawItem, ACCESS_TRADE_DESCRIPTION_KEYS);
-  const kind = getRawKind(rawItem);
+  const rawKind = getRawKind(rawItem);
 
   const rawPlatform = getRawText(rawItem, ACCESS_TRADE_PLATFORM_KEYS);
   const platformText = normalizePlatformText(rawPlatform || 'AccessTrade');
@@ -326,7 +327,17 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
   const hasPrice = hasRealPositivePrice(currentPrice) || hasRealPositivePrice(originalPrice);
   const hasAffiliateUrl = Boolean(affiliateUrl);
   const hasImage = Boolean(imageUrl);
-  const needsVerification = !hasAffiliateUrl || !hasImage || !hasPrice;
+  let needsVerification = !hasAffiliateUrl || !hasImage || !hasPrice;
+
+  // Classify kind using helper — prefer explicit raw kind but fall back to title heuristics
+  const classifiedKind = classifyProductKind({ title, rawSourceKind: rawKind, source: 'accesstrade' });
+
+  // For non-product items (voucher/campaign/store offers) keep them internal and unverified
+  const isNonProduct = classifiedKind !== 'product';
+
+  if (isNonProduct) {
+    needsVerification = true;
+  }
 
   const productDraft = {
     title,
@@ -341,12 +352,12 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
     dataSource: 'accesstrade',
     sourceType: 'affiliate',
     importedFrom: 'accesstrade',
-    rawSourceKind: kind,
-    kind,
+    rawSourceKind: rawKind,
+    kind: classifiedKind,
 
-    verifiedSource: true,
-    sourceVerified: true,
-    publicHidden: false,
+    verifiedSource: !isNonProduct,
+    sourceVerified: !isNonProduct,
+    publicHidden: isNonProduct,
     needsVerification,
 
     // Không public tự động. Luôn chờ duyệt.
