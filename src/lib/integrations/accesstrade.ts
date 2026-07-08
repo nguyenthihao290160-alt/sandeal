@@ -1,10 +1,13 @@
 ﻿// ===========================================
-// AccessTrade Integration â€” Server-side only
+// AccessTrade Integration — Server-side only
 // ===========================================
-// WARNING: This module must ONLY be imported from server-side code.
-// Never import this in client components or pages.
-// Checks Token Vault first, then falls back to env config.
-// Does NOT fake products. Voucher/campaign/store offers are classified safely.
+// WARNING:
+// - This module must ONLY be imported from server-side code.
+// - Never import this in client components.
+// - Never expose API keys to frontend.
+// - Does NOT fake products.
+// - Product feed items are preferred.
+// - Voucher/campaign/store offers are stored internally only and blocked from public.
 
 import { getServerConfig } from '../config';
 import { getRawPrimaryCredentialValue } from '../storage/tokenVault';
@@ -64,6 +67,16 @@ export interface AccessTradeSearchResult {
   };
 }
 
+type AccessTradeEndpointKind = 'datafeed' | 'offers';
+
+interface AccessTradeFetchResult {
+  endpoint: AccessTradeEndpointKind;
+  ok: boolean;
+  items: AccessTradeRawItem[];
+  status?: number;
+  error?: string;
+}
+
 // ---- Raw API response types ----
 
 interface AccessTradeRawItem {
@@ -79,6 +92,11 @@ interface AccessTradeRawItem {
   campaign_id?: string;
   offerId?: string;
   offer_id?: string;
+  sku?: string;
+  skuId?: string;
+  sku_id?: string;
+  itemId?: string;
+  item_id?: string;
 
   name?: string;
   title?: string;
@@ -91,12 +109,13 @@ interface AccessTradeRawItem {
   offerName?: string;
   offer_name?: string;
 
-  desc?: string;
-  description?: string;
-  shortDescription?: string;
-  short_description?: string;
-  summary?: string;
-  content?: string;
+  desc?: string | null;
+  description?: string | null;
+  shortDescription?: string | null;
+  short_description?: string | null;
+  summary?: string | null;
+  content?: string | null;
+  promotion?: string | null;
 
   image?: string;
   image_url?: string;
@@ -122,6 +141,7 @@ interface AccessTradeRawItem {
   merchantUrl?: string;
   merchant_url?: string;
 
+  aff_link?: string;
   affiliate_url?: string;
   affiliateUrl?: string;
   affiliate_link?: string;
@@ -137,6 +157,7 @@ interface AccessTradeRawItem {
   salePrice?: number | string;
   currentPrice?: number | string;
   current_price?: number | string;
+  discount?: number | string;
   discount_price?: number | string;
   discountPrice?: number | string;
   discountedPrice?: number | string;
@@ -149,8 +170,12 @@ interface AccessTradeRawItem {
   old_price?: number | string;
   marketPrice?: number | string;
   market_price?: number | string;
+  discount_amount?: number | string;
+  discount_rate?: number | string;
+  status_discount?: number | string;
 
   category?: string;
+  cate?: string;
   categoryName?: string;
   category_name?: string;
   cat_name?: string;
@@ -170,9 +195,9 @@ interface AccessTradeRawItem {
   shop?: string;
   shopName?: string;
   shop_name?: string;
-
   campaign?: string;
   campaign_name_text?: string;
+  domain?: string;
 
   coupon_code?: string;
   voucher_code?: string;
@@ -190,10 +215,18 @@ interface AccessTradeRawItem {
   objectType?: string;
   object_type?: string;
 
+  update_time?: string;
+  updated_at?: string;
+  created_at?: string;
+
+  __sandealEndpoint?: AccessTradeEndpointKind;
+  __sandealSourceKind?: string;
+  __sandealEndpointUrl?: string;
+
   [key: string]: unknown;
 }
 
-// ---- Functions ----
+// ---- Public functions ----
 
 export async function isAccessTradeConfigured(): Promise<boolean> {
   const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
@@ -203,14 +236,6 @@ export async function isAccessTradeConfigured(): Promise<boolean> {
   return Boolean(accessTradeApiKey && accessTradeApiKey.length > 5);
 }
 
-async function getAccessTradeKey(): Promise<string | null> {
-  const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
-  if (vaultKey && vaultKey.length > 5) return vaultKey;
-
-  const { accessTradeApiKey } = getServerConfig();
-  return accessTradeApiKey || null;
-}
-
 export async function searchAccessTrade(
     params: AccessTradeSearchParams,
 ): Promise<AccessTradeSearchResult> {
@@ -218,56 +243,55 @@ export async function searchAccessTrade(
 
   if (!accessTradeApiKey) {
     throw new Error(
-        'ChÆ°a cáº¥u hĂ¬nh AccessTrade API key. HĂ£y thĂªm trong Token Vault hoáº·c Ä‘áº·t ACCESS_TRADE_API_KEY trong env.',
+        'Chưa cấu hình AccessTrade API key. Hãy thêm trong Token Vault hoặc đặt ACCESS_TRADE_API_KEY trong env.',
     );
   }
 
-  const limit = Math.min(Math.max(params.limit || 10, 1), 50);
+  const limit = Math.min(Math.max(params.limit || 20, 1), 50);
+  const fetchLimit = Math.min(Math.max(limit * 4, 50), 200);
 
-  // Current stable endpoint in this project.
-  // Note: this endpoint may return vouchers/campaign/store offers. We classify safely below.
-  const url = new URL('https://api.accesstrade.vn/v1/offers_informations');
+  const shouldFetchProducts =
+      !params.kind ||
+      params.kind === 'all' ||
+      params.kind === 'product' ||
+      params.kind === 'unknown';
 
-  if (params.keyword) url.searchParams.set('keyword', params.keyword);
-  if (params.category) url.searchParams.set('category', params.category);
-  url.searchParams.set('limit', String(limit));
+  const shouldFetchOffers =
+      !params.kind ||
+      params.kind === 'all' ||
+      params.kind === 'voucher' ||
+      params.kind === 'campaign' ||
+      params.kind === 'store_offer' ||
+      params.kind === 'unknown';
 
-  let response: Response;
+  const fetchResults: AccessTradeFetchResult[] = [];
 
-  try {
-    response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        Authorization: `Token ${accessTradeApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      cache: 'no-store',
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Lá»—i káº¿t ná»‘i';
-    throw new Error(`KhĂ´ng thá»ƒ láº¥y dá»¯ liá»‡u tá»« AccessTrade. ${message}`);
+  if (shouldFetchProducts) {
+    fetchResults.push(await fetchAccessTradeDatafeeds(accessTradeApiKey, params, fetchLimit));
   }
 
-  if (!response.ok) {
+  if (shouldFetchOffers) {
+    fetchResults.push(await fetchAccessTradeOffers(accessTradeApiKey, params, fetchLimit));
+  }
+
+  const successfulResults = fetchResults.filter((result) => result.ok);
+
+  if (!successfulResults.length) {
+    const errorMessage = fetchResults
+        .map((result) => `${result.endpoint}: ${result.error || `HTTP ${result.status || 'unknown'}`}`)
+        .join(' | ');
+
     throw new Error(
-        `KhĂ´ng thá»ƒ láº¥y dá»¯ liá»‡u tá»« AccessTrade. Vui lĂ²ng kiá»ƒm tra API key hoáº·c thá»­ láº¡i sau. (HTTP ${response.status})`,
+        `Không thể lấy dữ liệu từ AccessTrade. Vui lòng kiểm tra API key hoặc thử lại sau. ${errorMessage}`,
     );
   }
 
-  let data: unknown;
+  const rawItems = dedupeRawItems(successfulResults.flatMap((result) => result.items));
 
-  try {
-    data = await response.json();
-  } catch {
-    throw new Error('Dá»¯ liá»‡u tráº£ vá» tá»« AccessTrade khĂ´ng há»£p lá»‡.');
-  }
-
-  const rawItems = extractRawItems(data);
   let items = rawItems.map(normalizeAccessTradeItem);
 
-  if (params.kind && params.kind !== 'all') {
-    items = items.filter((item) => item.kind === params.kind);
-  }
+  items = applySearchFilters(items, params);
+  items = applyRequestedKindFilter(items, params.kind);
 
   if (params.imageOnly) {
     items = items.filter((item) => Boolean(item.imageUrl));
@@ -276,6 +300,8 @@ export async function searchAccessTrade(
   if (params.affiliateLinkOnly) {
     items = items.filter((item) => Boolean(item.affiliateUrl));
   }
+
+  items = sortAccessTradeItems(items).slice(0, limit);
 
   const products = items.filter((item) => item.kind === 'product' || item.kind === 'deal');
   const vouchers = items.filter((item) => item.kind === 'voucher');
@@ -287,17 +313,6 @@ export async function searchAccessTrade(
       (item) => !item.publicHidden && item.verifiedSource && !item.needsVerification,
   ).length;
 
-  const summary = {
-    total: items.length,
-    products: products.length,
-    vouchers: vouchers.length,
-    campaigns: campaigns.length,
-    storeOffers: storeOffers.length,
-    unknown: unknown.length,
-    publicEligibleProducts,
-    blockedFromPublic: items.length - publicEligibleProducts,
-  };
-
   return {
     items,
     products,
@@ -305,7 +320,16 @@ export async function searchAccessTrade(
     campaigns,
     storeOffers,
     unknown,
-    summary,
+    summary: {
+      total: items.length,
+      products: products.length,
+      vouchers: vouchers.length,
+      campaigns: campaigns.length,
+      storeOffers: storeOffers.length,
+      unknown: unknown.length,
+      publicEligibleProducts,
+      blockedFromPublic: items.length - publicEligibleProducts,
+    },
   };
 }
 
@@ -332,6 +356,7 @@ export function normalizeAccessTradeItem(
     'short_description',
     'summary',
     'content',
+    'promotion',
   ]);
 
   const imageUrl = getFirstText(item, [
@@ -363,6 +388,7 @@ export function normalizeAccessTradeItem(
   ]);
 
   const affiliateUrl = getFirstText(item, [
+    'aff_link',
     'affiliate_url',
     'affiliateUrl',
     'affiliate_link',
@@ -375,6 +401,7 @@ export function normalizeAccessTradeItem(
   ]);
 
   const category = getFirstText(item, [
+    'cate',
     'category',
     'categoryName',
     'category_name',
@@ -387,6 +414,7 @@ export function normalizeAccessTradeItem(
     'campaign_name',
     'campaignName',
     'campaign',
+    'campaign_name_text',
     'merchant',
     'merchantName',
     'merchant_name',
@@ -396,17 +424,23 @@ export function normalizeAccessTradeItem(
     'shop',
     'shopName',
     'shop_name',
+    'domain',
   ]);
 
   const price =
       parseNumber(item.price) ||
       parseNumber(item.currentPrice) ||
       parseNumber(item.current_price) ||
-      parseNumber(item.salePrice) ||
-      parseNumber(item.sale_price) ||
+      parseNumber(item.originalPrice) ||
+      parseNumber(item.original_price) ||
+      parseNumber(item.listPrice) ||
+      parseNumber(item.list_price) ||
+      parseNumber(item.marketPrice) ||
+      parseNumber(item.market_price) ||
       0;
 
   const salePrice =
+      parseNumber(item.discount) ||
       parseNumber(item.discount_price) ||
       parseNumber(item.discountPrice) ||
       parseNumber(item.discountedPrice) ||
@@ -423,7 +457,6 @@ export function normalizeAccessTradeItem(
 
   const rawSourceKind = getRawSourceKind(item);
   const kind = detectAccessTradeItemKind(item);
-
   const isRealProduct = kind === 'product' || kind === 'deal';
 
   const hasRequiredProductData =
@@ -440,13 +473,14 @@ export function normalizeAccessTradeItem(
     raw: item,
   });
 
+  const isDatafeedProduct = item.__sandealEndpoint === 'datafeed' && hasDatafeedProductSignals(item);
+
   const verifiedSource =
       isRealProduct &&
       hasRequiredProductData &&
-      !titleLooksUnsafe;
+      (isDatafeedProduct || !titleLooksUnsafe);
 
   const needsVerification = !verifiedSource || !isRealProduct;
-
   const publicHidden = !verifiedSource || !isRealProduct;
 
   return {
@@ -474,6 +508,7 @@ export function normalizeAccessTradeItem(
 
 export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind {
   const rawSourceKind = getRawSourceKind(item);
+
   const title = getFirstText(item, [
     'name',
     'title',
@@ -494,9 +529,11 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
     'short_description',
     'summary',
     'content',
+    'promotion',
   ]);
 
   const nameText = normalizeText(title);
+
   const rawText = normalizeText(
       [
         rawSourceKind,
@@ -510,8 +547,24 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
         item.category_type,
         item.objectType,
         item.object_type,
+        item.__sandealEndpoint,
+        item.__sandealSourceKind,
       ].join(' '),
   );
+
+  if (item.__sandealEndpoint === 'datafeed' && hasDatafeedProductSignals(item)) {
+    return 'product';
+  }
+
+  if (
+      rawText.includes('product') ||
+      rawText.includes('datafeed') ||
+      rawText.includes('product_feed')
+  ) {
+    if (hasProductSignals(item)) {
+      return 'product';
+    }
+  }
 
   if (rawText.includes('voucher') || rawText.includes('coupon')) {
     return 'voucher';
@@ -543,7 +596,7 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
 
   if (looksLikeOffer) {
     if (
-        /^\[[^\]]+\]\s*-\s*/.test(nameText) ||
+        /^\[[^\]]+\]\s*-\s*/.test(title.trim()) ||
         nameText.includes('official store') ||
         nameText.includes('official shop') ||
         nameText.includes('shop') ||
@@ -555,65 +608,7 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
     return 'voucher';
   }
 
-  if (rawText.includes('product')) {
-    return 'product';
-  }
-
-  const hasPrice =
-      Boolean(
-          parseNumber(item.price) ||
-          parseNumber(item.currentPrice) ||
-          parseNumber(item.current_price) ||
-          parseNumber(item.salePrice) ||
-          parseNumber(item.sale_price) ||
-          parseNumber(item.discount_price) ||
-          parseNumber(item.discountPrice),
-      );
-
-  const hasImage = Boolean(
-      getFirstText(item, [
-        'image',
-        'image_url',
-        'imageUrl',
-        'productImage',
-        'product_image',
-        'thumbnail',
-        'thumbnail_url',
-        'thumbnailUrl',
-      ]),
-  );
-
-  const hasUrl = Boolean(
-      getFirstText(item, [
-        'affiliate_url',
-        'affiliateUrl',
-        'affiliate_link',
-        'affiliateLink',
-        'tracking_link',
-        'trackingLink',
-        'deep_link',
-        'deepLink',
-        'deeplink',
-        'url',
-        'link',
-        'productUrl',
-        'product_url',
-      ]),
-  );
-
-  const hasProductId = Boolean(
-      getFirstText(item, [
-        'productId',
-        'product_id',
-        'sku',
-        'skuId',
-        'sku_id',
-        'itemId',
-        'item_id',
-      ]),
-  );
-
-  if (title && hasUrl && hasImage && (hasPrice || hasProductId)) {
+  if (hasProductSignals(item)) {
     return 'product';
   }
 
@@ -627,11 +622,17 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
     description,
     source: 'accesstrade',
     imageUrl: getFirstText(item, ['image', 'image_url', 'imageUrl', 'thumbnail']),
-    affiliateUrl: getFirstText(item, ['affiliate_url', 'affiliateUrl', 'deep_link', 'deepLink']),
+    affiliateUrl: getFirstText(item, [
+      'aff_link',
+      'affiliate_url',
+      'affiliateUrl',
+      'deep_link',
+      'deepLink',
+    ]),
     originalUrl: getFirstText(item, ['url', 'link', 'productUrl', 'product_url']),
     url: getFirstText(item, ['url', 'link', 'productUrl', 'product_url']),
     price: parseNumber(item.price),
-    salePrice: parseNumber(item.sale_price),
+    salePrice: parseNumber(item.discount) || parseNumber(item.sale_price),
     rawSourceKind,
     sourceType: 'affiliate',
     raw: item,
@@ -673,13 +674,13 @@ export function mapAccessTradeToProduct(
     benefits: [],
     warnings: [],
     checkBeforeBuy: [
-      'Kiá»ƒm tra giĂ¡, phĂ­ váº­n chuyá»ƒn vĂ  Ä‘iá»u kiá»‡n Æ°u Ä‘Ă£i trÆ°á»›c khi mua.',
-      'GiĂ¡ vĂ  Æ°u Ä‘Ă£i cĂ³ thá»ƒ thay Ä‘á»•i theo thá»i Ä‘iá»ƒm.',
+      'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
+      'Giá và ưu đãi có thể thay đổi theo thời điểm.',
     ],
 
     affiliateSource: 'accesstrade',
     campaignName: item.campaignName || undefined,
-    commissionNote: item.commissionRate ? `Hoa há»“ng: ${item.commissionRate}%` : undefined,
+    commissionNote: item.commissionRate ? `Hoa hồng: ${item.commissionRate}%` : undefined,
 
     riskLevel: item.needsVerification ? 'unknown' : 'low',
     status: 'needs_review',
@@ -705,7 +706,301 @@ export function mapAccessTradeToProduct(
   return product;
 }
 
-// ---- Helpers ----
+// ---- AccessTrade fetchers ----
+
+async function getAccessTradeKey(): Promise<string | null> {
+  const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
+  if (vaultKey && vaultKey.length > 5) return vaultKey;
+
+  const { accessTradeApiKey } = getServerConfig();
+  return accessTradeApiKey || null;
+}
+
+async function fetchAccessTradeDatafeeds(
+    apiKey: string,
+    params: AccessTradeSearchParams,
+    limit: number,
+): Promise<AccessTradeFetchResult> {
+  const url = new URL('https://api.accesstrade.vn/v1/datafeeds');
+
+  url.searchParams.set('limit', String(limit));
+  url.searchParams.set('page', '1');
+
+  const domain = resolveAccessTradeDomain(params.platform);
+  const campaign = resolveAccessTradeCampaign(params.platform);
+
+  if (domain) {
+    url.searchParams.set('domain', domain);
+  } else if (campaign) {
+    url.searchParams.set('campaign', campaign);
+  }
+
+  if (params.category) {
+    url.searchParams.set('cate', toAsciiSlug(params.category));
+  }
+
+  return fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed');
+}
+
+async function fetchAccessTradeOffers(
+    apiKey: string,
+    params: AccessTradeSearchParams,
+    limit: number,
+): Promise<AccessTradeFetchResult> {
+  const url = new URL('https://api.accesstrade.vn/v1/offers_informations');
+
+  url.searchParams.set('limit', String(limit));
+
+  if (params.keyword) {
+    url.searchParams.set('keyword', params.keyword);
+  }
+
+  if (params.category) {
+    url.searchParams.set('category', params.category);
+  }
+
+  return fetchAccessTradeEndpoint(apiKey, url, 'offers', 'offer_feed');
+}
+
+async function fetchAccessTradeEndpoint(
+    apiKey: string,
+    url: URL,
+    endpoint: AccessTradeEndpointKind,
+    sourceKind: string,
+): Promise<AccessTradeFetchResult> {
+  let response: Response;
+
+  try {
+    response = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Token ${apiKey}`,
+        Accept: 'application/json',
+      },
+      cache: 'no-store',
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Lỗi kết nối';
+
+    return {
+      endpoint,
+      ok: false,
+      items: [],
+      error: message,
+    };
+  }
+
+  if (!response.ok) {
+    return {
+      endpoint,
+      ok: false,
+      items: [],
+      status: response.status,
+      error: `HTTP ${response.status}`,
+    };
+  }
+
+  let data: unknown;
+
+  try {
+    data = await response.json();
+  } catch {
+    return {
+      endpoint,
+      ok: false,
+      items: [],
+      status: response.status,
+      error: 'Dữ liệu trả về không phải JSON hợp lệ.',
+    };
+  }
+
+  const items = extractRawItems(data).map((item) => ({
+    ...item,
+    __sandealEndpoint: endpoint,
+    __sandealSourceKind: sourceKind,
+    __sandealEndpointUrl: sanitizeEndpointUrl(url),
+  }));
+
+  return {
+    endpoint,
+    ok: true,
+    items,
+    status: response.status,
+  };
+}
+
+// ---- Filters and sort ----
+
+function applyRequestedKindFilter(
+    items: NormalizedAccessTradeItem[],
+    requestedKind?: AccessTradeSearchParams['kind'],
+): NormalizedAccessTradeItem[] {
+  if (!requestedKind || requestedKind === 'all') return items;
+
+  if (requestedKind === 'product') {
+    return items.filter((item) => item.kind === 'product' || item.kind === 'deal');
+  }
+
+  return items.filter((item) => item.kind === requestedKind);
+}
+
+function applySearchFilters(
+    items: NormalizedAccessTradeItem[],
+    params: AccessTradeSearchParams,
+): NormalizedAccessTradeItem[] {
+  let filtered = items;
+
+  const keyword = normalizeText(params.keyword);
+  if (keyword) {
+    filtered = filtered.filter((item) => {
+      const haystack = normalizeText(
+          [
+            item.name,
+            item.description,
+            item.category,
+            item.campaignName,
+            item.rawSourceKind,
+            getRawValueText(item.rawData, 'domain'),
+            getRawValueText(item.rawData, 'merchant'),
+            getRawValueText(item.rawData, 'campaign'),
+          ].join(' '),
+      );
+
+      return haystack.includes(keyword);
+    });
+  }
+
+  const category = normalizeText(params.category);
+  if (category) {
+    filtered = filtered.filter((item) => {
+      const haystack = normalizeText([item.category, item.name, item.description].join(' '));
+      return haystack.includes(category) || haystack.includes(toAsciiSlug(category));
+    });
+  }
+
+  const platform = normalizeText(params.platform);
+  if (platform && platform !== 'all' && platform !== 'accesstrade') {
+    filtered = filtered.filter((item) => {
+      const haystack = normalizeText(
+          [
+            item.platform,
+            item.campaignName,
+            item.originalUrl,
+            item.affiliateUrl,
+            getRawValueText(item.rawData, 'domain'),
+            getRawValueText(item.rawData, 'merchant'),
+            getRawValueText(item.rawData, 'campaign'),
+          ].join(' '),
+      );
+
+      return haystack.includes(platform) || haystack.includes(platform.replace(/\s+/g, ''));
+    });
+  }
+
+  return filtered;
+}
+
+function sortAccessTradeItems(items: NormalizedAccessTradeItem[]): NormalizedAccessTradeItem[] {
+  const kindWeight: Record<string, number> = {
+    product: 0,
+    deal: 1,
+    store_offer: 2,
+    voucher: 3,
+    campaign: 4,
+    unknown: 5,
+  };
+
+  return [...items].sort((a, b) => {
+    const aWeight = kindWeight[a.kind] ?? 10;
+    const bWeight = kindWeight[b.kind] ?? 10;
+
+    if (aWeight !== bWeight) return aWeight - bWeight;
+
+    const aComplete = Number(Boolean(a.name && a.imageUrl && (a.affiliateUrl || a.originalUrl)));
+    const bComplete = Number(Boolean(b.name && b.imageUrl && (b.affiliateUrl || b.originalUrl)));
+
+    if (aComplete !== bComplete) return bComplete - aComplete;
+
+    return a.name.localeCompare(b.name);
+  });
+}
+
+// ---- Product signal helpers ----
+
+function hasDatafeedProductSignals(item: AccessTradeRawItem): boolean {
+  const hasOfficialProductId = Boolean(
+      getFirstText(item, ['product_id', 'productId', 'sku', 'skuId', 'sku_id']),
+  );
+
+  const hasOfficialProductUrl = Boolean(getFirstText(item, ['url', 'aff_link']));
+  const hasOfficialProductImage = Boolean(getFirstText(item, ['image']));
+  const hasOfficialProductPrice = Boolean(parseNumber(item.price) || parseNumber(item.discount));
+
+  return hasOfficialProductId && hasOfficialProductUrl && hasOfficialProductImage && hasOfficialProductPrice;
+}
+
+function hasProductSignals(item: AccessTradeRawItem): boolean {
+  const title = getFirstText(item, ['name', 'title', 'productName', 'product_name']);
+
+  const hasPrice = Boolean(
+      parseNumber(item.price) ||
+      parseNumber(item.currentPrice) ||
+      parseNumber(item.current_price) ||
+      parseNumber(item.salePrice) ||
+      parseNumber(item.sale_price) ||
+      parseNumber(item.discount) ||
+      parseNumber(item.discount_price) ||
+      parseNumber(item.discountPrice),
+  );
+
+  const hasImage = Boolean(
+      getFirstText(item, [
+        'image',
+        'image_url',
+        'imageUrl',
+        'productImage',
+        'product_image',
+        'thumbnail',
+        'thumbnail_url',
+        'thumbnailUrl',
+      ]),
+  );
+
+  const hasUrl = Boolean(
+      getFirstText(item, [
+        'aff_link',
+        'affiliate_url',
+        'affiliateUrl',
+        'affiliate_link',
+        'affiliateLink',
+        'tracking_link',
+        'trackingLink',
+        'deep_link',
+        'deepLink',
+        'deeplink',
+        'url',
+        'link',
+        'productUrl',
+        'product_url',
+      ]),
+  );
+
+  const hasProductId = Boolean(
+      getFirstText(item, [
+        'productId',
+        'product_id',
+        'sku',
+        'skuId',
+        'sku_id',
+        'itemId',
+        'item_id',
+      ]),
+  );
+
+  return Boolean(title && hasUrl && hasImage && (hasPrice || hasProductId));
+}
+
+// ---- Raw extraction helpers ----
 
 function extractRawItems(data: unknown): AccessTradeRawItem[] {
   if (Array.isArray(data)) {
@@ -760,17 +1055,57 @@ function isRawItem(value: unknown): value is AccessTradeRawItem {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function dedupeRawItems(items: AccessTradeRawItem[]): AccessTradeRawItem[] {
+  const seen = new Set<string>();
+  const unique: AccessTradeRawItem[] = [];
+
+  for (const item of items) {
+    const key = getRawDedupeKey(item);
+
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    unique.push(item);
+  }
+
+  return unique;
+}
+
+function getRawDedupeKey(item: AccessTradeRawItem): string {
+  return normalizeText(
+      getFirstText(item, [
+        'product_id',
+        'productId',
+        'sku',
+        'skuId',
+        'sku_id',
+        'id',
+        '_id',
+        'sourceId',
+        'source_id',
+        'externalId',
+        'external_id',
+        'offerId',
+        'offer_id',
+        'aff_link',
+        'affiliate_url',
+        'affiliateUrl',
+        'url',
+        'link',
+        'name',
+        'title',
+      ]) || JSON.stringify(item).slice(0, 160),
+  );
+}
+
+// ---- Generic helpers ----
+
 function getFirstText(item: AccessTradeRawItem, keys: string[]): string {
   for (const key of keys) {
     const value = getPathValue(item, key);
+    const text = stringifyValue(value);
 
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return String(value).trim();
-    }
+    if (text) return text;
   }
 
   return '';
@@ -791,17 +1126,52 @@ function getPathValue(item: AccessTradeRawItem, path: string): unknown {
   return cursor;
 }
 
+function stringifyValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim();
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const text = stringifyValue(entry);
+      if (text) return text;
+    }
+
+    return '';
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+
+    for (const key of ['url', 'link', 'src', 'name', 'title', 'value']) {
+      const text = stringifyValue(record[key]);
+      if (text) return text;
+    }
+  }
+
+  return '';
+}
+
 function getItemId(item: AccessTradeRawItem): string {
   return (
       getFirstText(item, [
+        'product_id',
+        'productId',
+        'sku',
+        'skuId',
+        'sku_id',
         'id',
         '_id',
         'sourceId',
         'source_id',
         'externalId',
         'external_id',
-        'productId',
-        'product_id',
         'campaignId',
         'campaign_id',
         'offerId',
@@ -813,6 +1183,7 @@ function getItemId(item: AccessTradeRawItem): string {
 function getRawSourceKind(item: AccessTradeRawItem): string {
   return (
       getFirstText(item, [
+        '__sandealSourceKind',
         'sourceItemKind',
         'kind',
         'type',
@@ -825,6 +1196,7 @@ function getRawSourceKind(item: AccessTradeRawItem): string {
         'item_type',
         'objectType',
         'object_type',
+        '__sandealEndpoint',
       ]) || 'unknown'
   ).toLowerCase();
 }
@@ -836,9 +1208,16 @@ function normalizeText(value: unknown): string {
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
-      .replace(/[â€“â€”]/g, '-')
+      .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ')
       .trim();
+}
+
+function toAsciiSlug(value: string): string {
+  return normalizeText(value)
+      .replace(/đ/g, 'd')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
 }
 
 function parseNumber(value: unknown): number | undefined {
@@ -861,7 +1240,7 @@ function parseNumber(value: unknown): number | undefined {
   if (!digitsOnly) return undefined;
 
   const looksLikeVnd =
-      /â‚«|Ä‘|vnd/i.test(trimmed) ||
+      /₫|đ|vnd/i.test(trimmed) ||
       /\d+[.,]\d{3}/.test(trimmed) ||
       digitsOnly.length >= 4;
 
@@ -876,4 +1255,42 @@ function parseNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function resolveAccessTradeDomain(platform?: string): string | null {
+  const value = normalizeText(platform);
 
+  if (!value || value === 'all' || value === 'accesstrade') return null;
+
+  if (value.includes('.')) return value;
+
+  const domainMap: Record<string, string> = {
+    lazada: 'lazada.vn',
+    tiki: 'tiki.vn',
+    shopee: 'shopee.vn',
+    sendo: 'sendo.vn',
+    fahasa: 'fahasa.com',
+  };
+
+  return domainMap[value] || null;
+}
+
+function resolveAccessTradeCampaign(platform?: string): string | null {
+  const value = normalizeText(platform);
+
+  if (!value || value === 'all' || value === 'accesstrade') return null;
+  if (resolveAccessTradeDomain(platform)) return null;
+
+  return value;
+}
+
+function sanitizeEndpointUrl(url: URL): string {
+  const cloned = new URL(url.toString());
+  return cloned.toString();
+}
+
+function getRawValueText(rawData: NormalizedAccessTradeItem['rawData'], key: string): string {
+  if (!rawData || typeof rawData !== 'object') return '';
+
+  const value = (rawData as Record<string, unknown>)[key];
+
+  return stringifyValue(value);
+}
