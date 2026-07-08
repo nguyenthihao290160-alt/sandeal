@@ -1,8 +1,10 @@
 // ===========================================
 // API: Approve Product
+// Safe approve / AutoPilot-compatible approve
 // ===========================================
 
 import { type NextRequest } from 'next/server';
+import { requireAuth } from '@/lib/auth';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { approveProduct, getProductById } from '@/lib/storage/products';
 import {
@@ -13,6 +15,36 @@ import type { Product, ProductKind } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
+type RouteContext = {
+  params: Promise<{ id: string }> | { id: string };
+};
+
+type ProductRecord = Product &
+    Record<string, unknown> & {
+  sourceItemKind?: ProductKind;
+  kind?: ProductKind;
+  affiliateUrl?: unknown;
+  originalUrl?: unknown;
+  url?: unknown;
+  productUrl?: unknown;
+  landingUrl?: unknown;
+  platform?: unknown;
+  source?: unknown;
+  dataSource?: unknown;
+  verifiedSource?: boolean;
+  sourceVerified?: boolean;
+  isDemo?: boolean;
+  isSample?: boolean;
+  isTest?: boolean;
+  isInternal?: boolean;
+  archived?: boolean;
+  deleted?: boolean;
+  hidden?: boolean;
+  publicHidden?: boolean;
+  linkHealthStatus?: unknown;
+  linkHealth?: unknown;
+};
+
 function normalizeText(value?: unknown): string {
   if (value === null || value === undefined) return '';
 
@@ -20,25 +52,30 @@ function normalizeText(value?: unknown): string {
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
+      .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ')
       .trim();
 }
 
-function getEffectiveKind(product: Product): ProductKind {
-  const p = product as Product & {
-    sourceItemKind?: ProductKind;
-    kind?: ProductKind;
-  };
+function getRecord(product: Product): ProductRecord {
+  return product as ProductRecord;
+}
 
+function getEffectiveKind(product: Product): ProductKind {
+  const p = getRecord(product);
   const explicitKind = p.sourceItemKind || p.kind;
 
-  // Không tin "unknown" vì dữ liệu cũ có thể bị lưu thiếu phân loại.
   if (explicitKind && explicitKind !== 'unknown') {
-    // Nếu bị gắn nhầm product/deal nhưng tiêu đề giống voucher thì phân loại lại.
-    if (
-        (explicitKind === 'product' || explicitKind === 'deal') &&
-        (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(product.title))
-    ) {
+    const looksUnsafe =
+        looksLikeVoucherOrCampaign({
+          title: product.title,
+          description: product.description,
+          rawSourceKind: p.rawSourceKind,
+          source: p.source,
+          raw: product,
+        }) || looksLikeVoucherOrCampaign(product.title);
+
+    if ((explicitKind === 'product' || explicitKind === 'deal') && looksUnsafe) {
       return classifyProductKind({
         ...product,
         kind: undefined,
@@ -57,13 +94,7 @@ function getEffectiveKind(product: Product): ProductKind {
 }
 
 function hasExternalUrl(product: Product): boolean {
-  const p = product as Product & {
-    affiliateUrl?: unknown;
-    originalUrl?: unknown;
-    url?: unknown;
-    productUrl?: unknown;
-    landingUrl?: unknown;
-  };
+  const p = getRecord(product);
 
   const urls = [
     p.affiliateUrl,
@@ -73,15 +104,11 @@ function hasExternalUrl(product: Product): boolean {
     p.landingUrl,
   ];
 
-  return urls.some((url) => typeof url === 'string' && /^https?:\/\//i.test(url));
+  return urls.some((url) => typeof url === 'string' && /^https?:\/\//i.test(url.trim()));
 }
 
 function hasPlatformOrSource(product: Product): boolean {
-  const p = product as Product & {
-    platform?: unknown;
-    source?: unknown;
-    dataSource?: unknown;
-  };
+  const p = getRecord(product);
 
   return Boolean(
       normalizeText(p.platform) ||
@@ -90,20 +117,39 @@ function hasPlatformOrSource(product: Product): boolean {
   );
 }
 
+function hasRealTitle(product: Product): boolean {
+  return Boolean(product.title && String(product.title).trim().length >= 3);
+}
+
+function hasRealPrice(product: Product): boolean {
+  const p = getRecord(product);
+
+  const priceCandidates = [
+    product.price,
+    product.salePrice,
+    p.currentPrice,
+    p.originalPrice,
+  ];
+
+  return priceCandidates.some((value) => {
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0;
+
+    if (typeof value === 'string') {
+      const digitsOnly = value.replace(/[^\d]/g, '');
+      const parsed = Number(digitsOnly);
+      return Number.isFinite(parsed) && parsed > 0;
+    }
+
+    return false;
+  });
+}
+
+function hasImage(product: Product): boolean {
+  return Boolean(product.imageUrl && String(product.imageUrl).trim());
+}
+
 function isDemoOrInternal(product: Product): boolean {
-  const p = product as Product & {
-    source?: unknown;
-    dataSource?: unknown;
-    title?: unknown;
-    isDemo?: boolean;
-    isSample?: boolean;
-    isTest?: boolean;
-    isInternal?: boolean;
-    publicHidden?: boolean;
-    archived?: boolean;
-    deleted?: boolean;
-    hidden?: boolean;
-  };
+  const p = getRecord(product);
 
   const source = normalizeText(p.source);
   const dataSource = normalizeText(p.dataSource);
@@ -114,7 +160,6 @@ function isDemoOrInternal(product: Product): boolean {
       p.isSample === true ||
       p.isTest === true ||
       p.isInternal === true ||
-      p.publicHidden === true ||
       p.archived === true ||
       p.deleted === true ||
       p.hidden === true ||
@@ -134,11 +179,11 @@ function isDemoOrInternal(product: Product): boolean {
 }
 
 function isBrokenLinkStatus(product: Product): boolean {
-  const p = product as Product & {
-    linkHealthStatus?: unknown;
-  };
+  const p = getRecord(product);
 
-  const status = normalizeText(p.linkHealthStatus);
+  const status =
+      normalizeText(p.linkHealthStatus) ||
+      normalizeText(p.linkHealth);
 
   if (!status) return false;
 
@@ -159,7 +204,22 @@ function isBrokenLinkStatus(product: Product): boolean {
   ].includes(status);
 }
 
+function titleLooksUnsafe(product: Product): boolean {
+  const p = getRecord(product);
+
+  return Boolean(
+      looksLikeVoucherOrCampaign({
+        title: product.title,
+        description: product.description,
+        rawSourceKind: p.rawSourceKind,
+        source: p.source,
+        raw: product,
+      }) || looksLikeVoucherOrCampaign(product.title),
+  );
+}
+
 function getApproveBlockReason(product: Product): string | null {
+  const p = getRecord(product);
   const kind = getEffectiveKind(product);
   const status = normalizeText(product.status);
 
@@ -167,7 +227,7 @@ function getApproveBlockReason(product: Product): string | null {
     return 'Sản phẩm đã lưu trữ, không thể duyệt public.';
   }
 
-  if (status === 'published') {
+  if (status === 'published' || status === 'approved') {
     return null;
   }
 
@@ -191,11 +251,11 @@ function getApproveBlockReason(product: Product): string | null {
     return 'Mục này chưa phải sản phẩm thật, không thể duyệt public.';
   }
 
-  if (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(product.title)) {
+  if (titleLooksUnsafe(product)) {
     return 'Tiêu đề giống voucher/chiến dịch/ưu đãi shop, không thể duyệt public.';
   }
 
-  if (!product.title || !String(product.title).trim()) {
+  if (!hasRealTitle(product)) {
     return 'Thiếu tên sản phẩm, không thể duyệt public.';
   }
 
@@ -211,12 +271,15 @@ function getApproveBlockReason(product: Product): string | null {
     return 'Thiếu link mua hàng hoặc link affiliate hợp lệ, không thể duyệt public.';
   }
 
-  const p = product as Product & {
-    source?: unknown;
-    verifiedSource?: boolean;
-  };
+  if (!hasImage(product)) {
+    return 'Thiếu ảnh sản phẩm thật, không thể duyệt public.';
+  }
 
-  if (normalizeText(p.source) === 'manual' && p.verifiedSource !== true) {
+  if (!hasRealPrice(product)) {
+    return 'Thiếu giá sản phẩm thật, không thể duyệt public.';
+  }
+
+  if (normalizeText(p.source) === 'manual' && p.verifiedSource !== true && p.sourceVerified !== true) {
     return 'Sản phẩm nhập thủ công chưa được xác minh nguồn, không thể duyệt public.';
   }
 
@@ -227,12 +290,12 @@ function getApproveBlockReason(product: Product): string | null {
   return null;
 }
 
-export async function POST(
-    _request: NextRequest,
-    { params }: { params: Promise<{ id: string }> },
-) {
+export async function POST(request: NextRequest, context: RouteContext) {
   try {
-    const { id } = await params;
+    const authError = await requireAuth(request);
+    if (authError) return authError;
+
+    const { id } = await context.params;
 
     const existing = await getProductById(id);
 
@@ -244,6 +307,10 @@ export async function POST(
 
     if (blockReason) {
       return errorResponse(blockReason, undefined, 400);
+    }
+
+    if (existing.status === 'approved' || existing.status === 'published') {
+      return successResponse('Sản phẩm đã được duyệt trước đó.', existing);
     }
 
     const product = await approveProduct(id);

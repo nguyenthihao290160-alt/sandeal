@@ -41,6 +41,39 @@ const NON_PUBLIC_KINDS = new Set<ProductKind | string>([
   'unknown',
 ]);
 
+type ProductRecord = Product &
+    Record<string, unknown> & {
+  sourceItemKind?: ProductKind;
+  kind?: ProductKind;
+  source?: unknown;
+  dataSource?: unknown;
+  platform?: unknown;
+  verifiedSource?: boolean;
+  sourceVerified?: boolean;
+  needsVerification?: boolean;
+  publicHidden?: boolean;
+  archived?: boolean;
+  deleted?: boolean;
+  hidden?: boolean;
+  isDemo?: boolean;
+  isSample?: boolean;
+  isTest?: boolean;
+  isInternal?: boolean;
+  linkHealthStatus?: unknown;
+  linkHealth?: unknown;
+  affiliateUrl?: unknown;
+  originalUrl?: unknown;
+  url?: unknown;
+  productUrl?: unknown;
+  landingUrl?: unknown;
+  currentPrice?: unknown;
+  originalPrice?: unknown;
+};
+
+function asRecord(product: Product): ProductRecord {
+  return product as ProductRecord;
+}
+
 function normalizeText(value?: unknown): string {
   if (value === null || value === undefined) return '';
 
@@ -53,14 +86,28 @@ function normalizeText(value?: unknown): string {
       .trim();
 }
 
+function parsePositiveNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const digitsOnly = trimmed.replace(/[^\d]/g, '');
+  if (!digitsOnly) return undefined;
+
+  const parsed = Number(digitsOnly);
+
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function hasExternalUrl(product: Product): boolean {
-  const p = product as Product & {
-    url?: unknown;
-    originalUrl?: unknown;
-    affiliateUrl?: unknown;
-    productUrl?: unknown;
-    landingUrl?: unknown;
-  };
+  const p = asRecord(product);
 
   const urls = [
     p.affiliateUrl,
@@ -70,15 +117,11 @@ function hasExternalUrl(product: Product): boolean {
     p.landingUrl,
   ];
 
-  return urls.some((url) => typeof url === 'string' && /^https?:\/\//i.test(url));
+  return urls.some((url) => typeof url === 'string' && /^https?:\/\//i.test(url.trim()));
 }
 
 function hasPlatformOrSource(product: Product): boolean {
-  const p = product as Product & {
-    platform?: unknown;
-    source?: unknown;
-    dataSource?: unknown;
-  };
+  const p = asRecord(product);
 
   return Boolean(
       normalizeText(p.platform) ||
@@ -87,29 +130,58 @@ function hasPlatformOrSource(product: Product): boolean {
   );
 }
 
+function hasRealImage(product: Product): boolean {
+  return Boolean(product.imageUrl && String(product.imageUrl).trim());
+}
+
+function hasRealPrice(product: Product): boolean {
+  const p = asRecord(product);
+
+  const priceCandidates = [
+    product.price,
+    product.salePrice,
+    p.currentPrice,
+    p.originalPrice,
+  ];
+
+  return priceCandidates.some((value) => Boolean(parsePositiveNumber(value)));
+}
+
 function getEffectiveKind(product: Product): ProductKind {
-  const p = product as Product & {
-    sourceItemKind?: ProductKind;
-    kind?: ProductKind;
-  };
+  const p = asRecord(product);
+
+  const explicitKind = p.sourceItemKind || p.kind;
+
+  if (explicitKind && explicitKind !== 'unknown') {
+    const looksUnsafe =
+        looksLikeVoucherOrCampaign({
+          title: product.title,
+          description: product.description,
+          rawSourceKind: p.rawSourceKind,
+          source: p.source,
+          raw: product,
+        }) || looksLikeVoucherOrCampaign(product.title);
+
+    if ((explicitKind === 'product' || explicitKind === 'deal') && looksUnsafe) {
+      return classifyProductKind({
+        ...product,
+        kind: undefined,
+        sourceItemKind: undefined,
+      } as Partial<Product>);
+    }
+
+    return explicitKind;
+  }
 
   return classifyProductKind({
     ...product,
-    kind: p.sourceItemKind || p.kind,
-  });
+    kind: undefined,
+    sourceItemKind: undefined,
+  } as Partial<Product>);
 }
 
 function hasUnsafeFlags(product: Product): boolean {
-  const p = product as Product & {
-    isDemo?: boolean;
-    isSample?: boolean;
-    isTest?: boolean;
-    isInternal?: boolean;
-    publicHidden?: boolean;
-    archived?: boolean;
-    deleted?: boolean;
-    hidden?: boolean;
-  };
+  const p = asRecord(product);
 
   return Boolean(
       p.publicHidden === true ||
@@ -155,21 +227,56 @@ export function isUnsafePublicKind(kind?: ProductKind | string): boolean {
   return NON_PUBLIC_KINDS.has(kind);
 }
 
+function isBrokenOrUnavailable(product: Product): boolean {
+  const p = asRecord(product);
+
+  const linkHealthStatus =
+      normalizeText(p.linkHealthStatus) ||
+      normalizeText(p.linkHealth);
+
+  if (!linkHealthStatus) return false;
+
+  return BROKEN_LINK_STATUSES.has(linkHealthStatus);
+}
+
+function looksUnsafeForPublic(product: Product): boolean {
+  const p = asRecord(product);
+
+  return Boolean(
+      looksLikeVoucherOrCampaign({
+        title: product.title,
+        description: product.description,
+        rawSourceKind: p.rawSourceKind,
+        source: p.source,
+        raw: product,
+      }) || looksLikeVoucherOrCampaign(product.title),
+  );
+}
+
+function isManualUnverified(product: Product): boolean {
+  const p = asRecord(product);
+
+  return (
+      normalizeText(p.source) === 'manual' &&
+      p.verifiedSource !== true &&
+      p.sourceVerified !== true
+  );
+}
+
+function isSourceExplicitlyUnverified(product: Product): boolean {
+  const p = asRecord(product);
+
+  return p.verifiedSource === false || p.sourceVerified === false || p.needsVerification === true;
+}
+
 export function isPublicSafeProduct(product?: Product | null): boolean {
   if (!product) return false;
 
-  const p = product as Product & {
-    source?: unknown;
-    dataSource?: unknown;
-    linkHealthStatus?: unknown;
-    sourceItemKind?: ProductKind;
-    kind?: ProductKind;
-    verifiedSource?: boolean;
-  };
+  const p = asRecord(product);
+  const status = normalizeText(product.status);
 
-  const status = normalizeText(p.status);
-
-  // Public chỉ cho approved hoặc published.
+  // Public chỉ cho sản phẩm đã duyệt hoặc đã publish.
+  // AutoPilot SourceScout có thể tự set status = published nếu đạt chuẩn.
   if (status !== 'approved' && status !== 'published') {
     return false;
   }
@@ -180,19 +287,22 @@ export function isPublicSafeProduct(product?: Product | null): boolean {
   }
 
   // Title phải có và không được là demo/test.
-  if (!p.title || looksLikeDemoTitle(p.title)) {
+  if (!product.title || !String(product.title).trim() || looksLikeDemoTitle(product.title)) {
     return false;
   }
 
-  // Chặn voucher/campaign/store offer bằng cả kind và heuristic title.
+  // Chặn voucher/campaign/store offer/unknown bằng kind và heuristic.
   const effectiveKind = getEffectiveKind(product);
 
   if (isUnsafePublicKind(effectiveKind)) {
     return false;
   }
 
-  // Dữ liệu cũ có thể chưa có kind/sourceItemKind, nên vẫn phải soi theo title.
-  if (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(p.title)) {
+  if (effectiveKind !== 'product' && effectiveKind !== 'deal') {
+    return false;
+  }
+
+  if (looksUnsafeForPublic(product)) {
     return false;
   }
 
@@ -211,15 +321,28 @@ export function isPublicSafeProduct(product?: Product | null): boolean {
     return false;
   }
 
+  // Phải có ảnh thật.
+  if (!hasRealImage(product)) {
+    return false;
+  }
+
+  // Phải có giá thật.
+  if (!hasRealPrice(product)) {
+    return false;
+  }
+
   // Manual source phải được xác minh.
-  if (normalizeText(p.source) === 'manual' && p.verifiedSource !== true) {
+  if (isManualUnverified(product)) {
+    return false;
+  }
+
+  // Nếu source báo rõ chưa verified / needsVerification thì không public.
+  if (isSourceExplicitlyUnverified(product)) {
     return false;
   }
 
   // Chặn link lỗi/hết hàng/unavailable.
-  const linkHealthStatus = normalizeText(p.linkHealthStatus);
-
-  if (linkHealthStatus && BROKEN_LINK_STATUSES.has(linkHealthStatus)) {
+  if (isBrokenOrUnavailable(product)) {
     return false;
   }
 

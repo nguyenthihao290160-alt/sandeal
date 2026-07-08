@@ -104,7 +104,10 @@ function shouldUseForPublicAutomation(product: Product): boolean {
 
   const hasTitle = Boolean(product.title);
   const hasImage = Boolean(product.imageUrl);
-  const hasUrl = Boolean(product.affiliateUrl || product.originalUrl || product.url);
+  
+  const recordUrl = typeof record.url === 'string' ? record.url.trim() : '';
+  const hasUrl = Boolean(product.affiliateUrl || product.originalUrl || recordUrl);
+  
   const hasPrice = Boolean(product.price || product.salePrice);
 
   return hasTitle && hasImage && hasUrl && hasPrice;
@@ -168,7 +171,10 @@ async function checkLinksForProducts(
   let checkedCount = 0;
 
   for (const product of products.slice(0, limit)) {
-    const targetUrl = product.originalUrl || product.affiliateUrl || product.url;
+    const record = product as Product & Record<string, unknown>;
+    const recordUrl = typeof record.url === 'string' ? record.url : '';
+    
+    const targetUrl = product.originalUrl || product.affiliateUrl || recordUrl;
 
     if (!targetUrl) {
       await addBotRunLog(runId, 'link_health', 'warn', 'Skipped product without link', {
