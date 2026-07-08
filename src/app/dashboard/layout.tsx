@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 
 /* ---- SVG Icon components: inline, no external library ---- */
 const Icon = ({ d, size = 18 }: { d: string; size?: number }) => (
@@ -74,6 +74,13 @@ const LEGACY_ITEMS = [
   { label: 'Compliance Guard', href: '/dashboard/compliance', icon: 'compliance' },
 ];
 
+const AUTOPILOT_BADGES = [
+  'Safe Mode ON',
+  'Free Only ON',
+  'AutoPilot ON',
+  'Safe Publish ON',
+];
+
 function isRouteActive(pathname: string, href: string) {
   if (href === '/dashboard') return pathname === '/dashboard';
   return pathname === href || pathname.startsWith(`${href}/`);
@@ -93,12 +100,21 @@ function getPageTitle(pathname: string) {
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+
   const [legacyOpen, setLegacyOpen] = useState(
       LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href)),
   );
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const pageTitle = useMemo(() => getPageTitle(pathname), [pathname]);
+
+  useEffect(() => {
+    if (LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href))) {
+      setLegacyOpen(true);
+    }
+
+    setSidebarOpen(false);
+  }, [pathname]);
 
   const closeSidebar = () => setSidebarOpen(false);
 
@@ -185,8 +201,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               </div>
 
               <div className="dashboard-sidebar-footer-row">
-                <span className="dashboard-sidebar-footer-dot off" />
-                <span>Auto Publish OFF</span>
+                <span className="dashboard-sidebar-footer-dot on" />
+                <span>Free Only ON</span>
+              </div>
+
+              <div className="dashboard-sidebar-footer-row">
+                <span className="dashboard-sidebar-footer-dot on" />
+                <span>AutoPilot ON</span>
+              </div>
+
+              <div className="dashboard-sidebar-footer-row">
+                <span className="dashboard-sidebar-footer-dot on" />
+                <span>Safe Publish ON</span>
               </div>
 
               <Link
@@ -198,7 +224,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <span className="dashboard-sidebar-link-icon">
                 <Icon d={ICONS.external} size={13} />
               </span>
-                <span>View public site</span>
+                <span>Xem public site</span>
               </Link>
             </div>
           </div>
@@ -228,10 +254,12 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <div className="topbar-title dashboard-topbar-title">{pageTitle}</div>
             </div>
 
-            <div className="safe-mode-badges dashboard-safe-badges" aria-label="Safety status">
-              <span className="safe-badge safe-badge-on">Safe Mode ON</span>
-              <span className="safe-badge safe-badge-on">Free Only ON</span>
-              <span className="safe-badge safe-badge-off">Auto Publish OFF</span>
+            <div className="safe-mode-badges dashboard-safe-badges" aria-label="AutoPilot status">
+              {AUTOPILOT_BADGES.map((label) => (
+                  <span key={label} className="safe-badge safe-badge-on">
+                {label}
+              </span>
+              ))}
             </div>
           </header>
 

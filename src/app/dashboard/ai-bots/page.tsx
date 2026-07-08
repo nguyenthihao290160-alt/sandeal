@@ -45,12 +45,12 @@ const BOTS: BotDefinition[] = [
     role: 'Điều phối toàn bộ quy trình',
     icon: 'AI',
     color: '#a78bfa',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Tự điều phối AutoPilot',
   },
   {
     id: 'source_scout',
     name: 'Source Scout Bot',
-    role: 'Tìm sản phẩm từ nguồn',
+    role: 'Tìm sản phẩm thật từ nguồn',
     icon: 'SS',
     color: '#22d3ee',
     dep: 'Cần AccessTrade/local source',
@@ -61,7 +61,7 @@ const BOTS: BotDefinition[] = [
     role: 'Phát hiện deal tiềm năng',
     icon: 'DH',
     color: '#34d399',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Chỉ xử lý sản phẩm thật',
   },
   {
     id: 'product_normalizer',
@@ -69,7 +69,7 @@ const BOTS: BotDefinition[] = [
     role: 'Chuẩn hóa dữ liệu sản phẩm',
     icon: 'PN',
     color: '#fbbf24',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Chặn voucher/campaign',
   },
   {
     id: 'image_resolver',
@@ -77,7 +77,7 @@ const BOTS: BotDefinition[] = [
     role: 'Xử lý và kiểm tra ảnh',
     icon: 'IR',
     color: '#f472b6',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Cần kiểm ảnh lỗi 404',
   },
   {
     id: 'gemini_analyst',
@@ -85,7 +85,7 @@ const BOTS: BotDefinition[] = [
     role: 'Phân tích bằng Gemini AI',
     icon: 'GA',
     color: '#818cf8',
-    dep: 'Cần Gemini key nếu chưa có',
+    dep: 'Cần Gemini key nếu dùng AI',
   },
   {
     id: 'deal_scorer',
@@ -101,7 +101,7 @@ const BOTS: BotDefinition[] = [
     role: 'Tạo bài review sản phẩm',
     icon: 'CR',
     color: '#38bdf8',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Không fake trải nghiệm',
   },
   {
     id: 'compliance_guard',
@@ -109,7 +109,7 @@ const BOTS: BotDefinition[] = [
     role: 'Kiểm duyệt nội dung an toàn',
     icon: 'CG',
     color: '#f43f5e',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Minh bạch affiliate',
   },
   {
     id: 'link_health',
@@ -117,7 +117,7 @@ const BOTS: BotDefinition[] = [
     role: 'Kiểm tra link liên kết',
     icon: 'LH',
     color: '#2dd4bf',
-    dep: 'Sẵn sàng kiểm link',
+    dep: 'Chặn link lỗi trước public',
   },
   {
     id: 'product_cleanup',
@@ -125,7 +125,7 @@ const BOTS: BotDefinition[] = [
     role: 'Dọn sản phẩm lỗi / cũ',
     icon: 'PC',
     color: '#a3e635',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Archive sản phẩm lỗi',
   },
   {
     id: 'content_package',
@@ -133,7 +133,7 @@ const BOTS: BotDefinition[] = [
     role: 'Đóng gói nội dung đa nền tảng',
     icon: 'CP',
     color: '#c084fc',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Website/social caption',
   },
   {
     id: 'app_health',
@@ -141,7 +141,7 @@ const BOTS: BotDefinition[] = [
     role: 'Giám sát sức khỏe hệ thống',
     icon: 'AH',
     color: '#4ade80',
-    dep: 'Sẵn sàng hoạt động',
+    dep: 'Theo dõi hệ thống',
   },
 ];
 
@@ -158,20 +158,27 @@ const WORKFLOW_STEPS = [
   },
   {
     number: '3',
-    label: 'Lọc deal tiềm năng',
+    label: 'Lọc voucher/campaign và chấm điểm',
     status: 'current',
   },
   {
     number: '4',
-    label: 'Tạo nội dung an toàn',
+    label: 'Auto public sản phẩm đạt chuẩn',
     status: 'pending',
   },
   {
     number: '5',
-    label: 'Kiểm link trước khi public',
+    label: 'Kiểm link, nội dung và dọn lỗi',
     status: 'pending',
   },
 ] as const;
+
+const AUTOPILOT_BADGES = [
+  { label: 'Safe Mode ON', className: 'badge-success' },
+  { label: 'Free Only ON', className: 'badge-success' },
+  { label: 'AutoPilot ON', className: 'badge-info' },
+  { label: 'Safe Publish ON', className: 'badge-success' },
+];
 
 async function readJson<T>(response: Response): Promise<T> {
   try {
@@ -231,11 +238,11 @@ function getBotBadge(botId: string, status: BotTeamStatus | null): BotBadge {
   if (botId === 'gemini_analyst') {
     return hasGemini
         ? { text: 'Ready', className: 'badge-success' }
-        : { text: 'Needs key', className: 'badge-warning' };
+        : { text: 'Optional key', className: 'badge-warning' };
   }
 
   if (botId === 'orchestrator') {
-    return { text: 'Ready', className: 'badge-success' };
+    return { text: 'AutoPilot', className: 'badge-info' };
   }
 
   if (botId === 'link_health') {
@@ -244,7 +251,11 @@ function getBotBadge(botId: string, status: BotTeamStatus | null): BotBadge {
         : { text: 'Idle', className: 'badge-neutral' };
   }
 
-  return { text: 'Idle', className: 'badge-neutral' };
+  if (botId === 'product_normalizer' || botId === 'compliance_guard') {
+    return { text: 'Guard ON', className: 'badge-success' };
+  }
+
+  return { text: 'Ready', className: 'badge-success' };
 }
 
 function getRunBadgeClass(runStatus: string): string {
@@ -270,6 +281,21 @@ function formatTime(value: string | number | Date | undefined): string {
   if (Number.isNaN(date.getTime())) return 'Không rõ';
 
   return date.toLocaleTimeString('vi-VN');
+}
+
+function getModeLabel(mode: string): string {
+  const labels: Record<string, string> = {
+    source_scan: 'Quét nguồn',
+    deal_hunt: 'Tìm deal',
+    gemini_analysis: 'Gemini analysis',
+    content_review: 'Tạo review',
+    link_health: 'Kiểm link',
+    cleanup: 'Dọn lỗi',
+    score_only: 'Chấm điểm',
+    full_safe_run: 'AutoPilot đầy đủ',
+  };
+
+  return labels[mode] || mode;
 }
 
 export default function AIBotsPage() {
@@ -356,7 +382,10 @@ export default function AIBotsPage() {
           costMode: 'safe_free',
           safeMode: true,
           freeOnly: true,
-          autoPublish: false,
+          autoMode: true,
+          autoApprove: true,
+          autoPublish: true,
+          allowPaidAi: false,
         }),
       });
 
@@ -377,8 +406,10 @@ export default function AIBotsPage() {
 
       await loadData();
 
-      setSuccessMsg('Đã khởi chạy bot thành công. Safe Mode ON, Free Only ON, Auto Publish OFF.');
-      window.setTimeout(() => setSuccessMsg(null), 3500);
+      setSuccessMsg(
+          'Đã khởi chạy AutoPilot. Safe Mode ON, Free Only ON, Safe Publish ON. Chỉ sản phẩm thật đạt chuẩn mới được public.',
+      );
+      window.setTimeout(() => setSuccessMsg(null), 4200);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không khởi chạy được bot.');
     } finally {
@@ -393,6 +424,8 @@ export default function AIBotsPage() {
   const reviewProductCount = getStatusNumber(status, 'reviewProductCount');
   const brokenLinkCount = getStatusNumber(status, 'brokenLinkCount');
   const lastRunStartedAt = runs[0]?.startedAt;
+  const latestRun = runs[0];
+  const isRunning = runLoading || runs.some((run) => run.status === 'running');
 
   if (loading) {
     return (
@@ -431,40 +464,49 @@ export default function AIBotsPage() {
         <section className="command-hero">
           <div className="command-hero-content">
             <div className="badge badge-purple" style={{ marginBottom: 'var(--space-md)' }}>
-              ReviewPilot AI Command Center
+              ReviewPilot AI AutoPilot Command Center
             </div>
 
             <h1 className="page-title">AI Command Center SanDeal</h1>
 
-            <p className="page-subtitle" style={{ maxWidth: 620 }}>
-              Trung tâm điều phối đội bot AI săn deal, tạo nội dung, kiểm link và bảo trì dữ liệu
-              sản phẩm. Quy trình hiện giữ Safe Mode ON, Free Only ON và Auto Publish OFF.
+            <p className="page-subtitle" style={{ maxWidth: 660 }}>
+              Trung tâm điều phối đội bot AI săn deal, kiểm tra nguồn, lọc voucher/campaign,
+              chấm điểm và tự public sản phẩm thật đạt chuẩn. Quy trình hiện giữ Safe Mode ON,
+              Free Only ON, AutoPilot ON và Safe Publish ON.
             </p>
+
+            <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
+              {AUTOPILOT_BADGES.map((badge) => (
+                  <span key={badge.label} className={`badge ${badge.className}`}>
+                {badge.label}
+              </span>
+              ))}
+            </div>
 
             <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-lg)' }}>
               <button
                   type="button"
                   className="primary-button"
                   onClick={() => void handleRunBot('full_safe_run')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
-                {runLoading ? 'Đang chạy...' : 'Chạy toàn bộ quy trình an toàn'}
+                {isRunning ? 'AutoPilot đang chạy...' : 'Chạy AutoPilot toàn bộ'}
               </button>
 
               <button
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('source_scan')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
-                Quét nguồn
+                Quét nguồn & tự public an toàn
               </button>
 
               <button
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('content_review')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Tạo bài review
               </button>
@@ -473,7 +515,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('link_health')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Kiểm tra link
               </button>
@@ -489,8 +531,23 @@ export default function AIBotsPage() {
                 </div>
 
                 <div className="detail-meta-row">
+                  <span>Chế độ tự động</span>
+                  <span style={{ color: 'var(--color-success)' }}>AutoPilot ON</span>
+                </div>
+
+                <div className="detail-meta-row">
+                  <span>Public an toàn</span>
+                  <span style={{ color: 'var(--color-success)' }}>Safe Publish ON</span>
+                </div>
+
+                <div className="detail-meta-row">
                   <span>Quy trình gần nhất</span>
                   <span>{formatTime(lastRunStartedAt)}</span>
+                </div>
+
+                <div className="detail-meta-row">
+                  <span>Run gần nhất</span>
+                  <span>{latestRun ? getModeLabel(latestRun.mode) : 'Chưa có'}</span>
                 </div>
 
                 <div className="detail-meta-row">
@@ -565,7 +622,7 @@ export default function AIBotsPage() {
 
                   {step.status === 'current' && (
                       <div className="badge badge-purple" style={{ marginTop: 8 }}>
-                        Chờ chạy
+                        Đang sẵn sàng
                       </div>
                   )}
                 </div>
@@ -677,7 +734,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('source_scan')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Quét nguồn sản phẩm
               </button>
@@ -686,7 +743,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('deal_hunt')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Tìm deal hot
               </button>
@@ -695,7 +752,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('gemini_analysis')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Phân tích Gemini
               </button>
@@ -704,7 +761,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('content_review')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Tạo bài review an toàn
               </button>
@@ -713,7 +770,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('link_health')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Kiểm tra link
               </button>
@@ -722,7 +779,7 @@ export default function AIBotsPage() {
                   type="button"
                   className="secondary-button"
                   onClick={() => void handleRunBot('cleanup')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
                 Dọn sản phẩm lỗi
               </button>
@@ -731,9 +788,9 @@ export default function AIBotsPage() {
                   type="button"
                   className="primary-button"
                   onClick={() => void handleRunBot('full_safe_run')}
-                  disabled={runLoading}
+                  disabled={isRunning}
               >
-                {runLoading ? 'Đang xử lý...' : 'Chạy toàn bộ an toàn'}
+                {isRunning ? 'Đang xử lý...' : 'Chạy AutoPilot an toàn'}
               </button>
             </div>
           </div>
@@ -746,7 +803,7 @@ export default function AIBotsPage() {
               <div className="empty-state card">
                 <h3 className="empty-state-title">Chưa có lượt chạy bot</h3>
                 <p className="empty-state-desc">
-                  Hãy chạy quy trình an toàn hoặc quét nguồn để bắt đầu tạo dữ liệu nội bộ.
+                  Hãy chạy AutoPilot hoặc quét nguồn để bắt đầu tạo dữ liệu nội bộ.
                 </p>
               </div>
           ) : (
@@ -767,7 +824,7 @@ export default function AIBotsPage() {
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
                           {run.id.slice(0, 8)}
                         </td>
-                        <td>{run.mode}</td>
+                        <td>{getModeLabel(run.mode)}</td>
                         <td>
                       <span className={`badge ${getRunBadgeClass(run.status)}`}>
                         {run.status}
@@ -802,8 +859,8 @@ export default function AIBotsPage() {
               <div className="empty-state card">
                 <h3 className="empty-state-title">Chưa có sản phẩm chờ duyệt</h3>
                 <p className="empty-state-desc">
-                  Hãy kết nối nguồn dữ liệu hoặc chạy Source Scout Bot. Voucher/campaign/store offer vẫn
-                  được giữ nội bộ và không public tự động.
+                  AutoPilot sẽ tự public sản phẩm thật đạt chuẩn. Voucher/campaign/store offer,
+                  item thiếu dữ liệu hoặc không an toàn vẫn được giữ nội bộ để kiểm tra.
                 </p>
               </div>
           ) : (
@@ -878,7 +935,7 @@ export default function AIBotsPage() {
               <div className="grid grid-4" style={{ marginBottom: 'var(--space-md)' }}>
                 {[
                   { label: 'Tổng SP', value: productCount, className: 'badge-purple' },
-                  { label: 'Đã duyệt', value: approvedProductCount, className: 'badge-success' },
+                  { label: 'Đã public/duyệt', value: approvedProductCount, className: 'badge-success' },
                   { label: 'Chờ duyệt', value: reviewProductCount, className: 'badge-warning' },
                   { label: 'Link lỗi', value: brokenLinkCount, className: 'badge-danger' },
                 ].map((item) => (
@@ -898,6 +955,10 @@ export default function AIBotsPage() {
 
                 <Link href="/dashboard/token-vault" className="secondary-button">
                   Token Vault
+                </Link>
+
+                <Link href="/deals" target="_blank" rel="noreferrer" className="primary-button">
+                  Xem public site
                 </Link>
               </div>
             </section>

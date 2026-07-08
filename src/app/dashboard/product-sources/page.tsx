@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { type ChangeEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import type { Product } from '@/lib/types';
 
@@ -17,21 +17,43 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id'];
 
-// ---- Source Status ----
-const SOURCE_STATUSES = [
-  { name: 'AccessTrade', status: 'pending', note: 'Cấu hình qua API key', icon: 'AT' },
-  { name: 'Shopee', status: 'placeholder', note: 'Sắp kết nối', icon: 'SP' },
-  { name: 'TikTok Shop', status: 'placeholder', note: 'Sắp kết nối', icon: 'TK' },
-  { name: 'Lazada', status: 'placeholder', note: 'Sắp kết nối', icon: 'LZ' },
-  { name: 'Thủ công', status: 'active', note: 'Luôn khả dụng', icon: 'M' },
-  { name: 'CSV', status: 'coming', note: 'Sắp có', icon: 'CS' },
-];
+type Toast = {
+  type: 'success' | 'error' | 'info';
+  message: string;
+};
+
+type AccessTradeResults = {
+  items: Array<Record<string, unknown>>;
+  summary: {
+    total?: number;
+    products?: number;
+    vouchers?: number;
+    campaigns?: number;
+    unknown?: number;
+  };
+};
+
+type SourceStatus = {
+  name: string;
+  tab: TabId;
+  status: 'active' | 'pending' | 'placeholder' | 'coming';
+  note: string;
+  icon: string;
+};
+
+type ApiEnvelope<T> = {
+  ok?: boolean;
+  success?: boolean;
+  message?: string;
+  error?: string;
+  data?: T;
+};
 
 // ---- Form Default ----
 const EMPTY_FORM = {
   title: '',
   description: '',
-  platform: 'shopee' as string,
+  platform: 'shopee',
   category: '',
   tags: '',
   originalUrl: '',
@@ -44,63 +66,249 @@ const EMPTY_FORM = {
   affiliateSource: '',
   campaignName: '',
   commissionNote: '',
-  affiliateDisclosure: '',
+  affiliateDisclosure: 'Bài viết có thể chứa link affiliate. Giá của bạn không thay đổi.',
   benefits: '',
   painPoints: '',
   targetAudience: '',
   warnings: '',
   contentAngles: '',
   complianceNotes: '',
-  kind: 'product' as string,
-  status: 'needs_review' as string,
+  kind: 'product',
+  status: 'needs_review',
 };
+
+function splitLines(value: string): string[] {
+  return value
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean);
+}
+
+function splitTags(value: string): string[] {
+  return value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+}
+
+function parsePrice(value: string): number | undefined {
+  if (!value.trim()) return undefined;
+
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function getString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+
+  if (typeof value === 'string') {
+    const parsed = Number(value.replace(/[^\d]/g, ''));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function getStatusLabel(status?: string) {
+  if (status === 'published') return 'Đã xuất bản';
+  if (status === 'approved') return 'Đã duyệt';
+  if (status === 'needs_review') return 'Cần xem xét';
+  if (status === 'draft') return 'Nháp';
+  if (status === 'archived') return 'Lưu trữ';
+
+  return status || 'Không rõ';
+}
+
+function getStatusBadgeClass(status?: string) {
+  if (status === 'published' || status === 'approved') return 'badge-success';
+  if (status === 'needs_review') return 'badge-warning';
+  if (status === 'archived') return 'badge-neutral';
+  if (status === 'draft') return 'badge-info';
+
+  return 'badge-neutral';
+}
+
+function formatPrice(value?: number) {
+  if (!value) return '—';
+
+  return `${value.toLocaleString('vi-VN')}₫`;
+}
+
+function SafeThumb({
+                     src,
+                     label = 'S',
+                     size = 80,
+                   }: {
+  src?: string;
+  label?: string;
+  size?: number;
+}) {
+  const [failed, setFailed] = useState(false);
+  const cleanSrc = src?.trim() || '';
+
+  useEffect(() => {
+    setFailed(false);
+  }, [cleanSrc]);
+
+  if (!cleanSrc || failed) {
+    return (
+        <div
+            style={{
+              width: size,
+              height: size,
+              borderRadius: 'var(--radius-md)',
+              overflow: 'hidden',
+              background:
+                  'radial-gradient(circle at 50% 20%, rgba(14,165,233,0.18), transparent 38%), linear-gradient(135deg, rgba(15,23,42,0.7), rgba(30,41,59,0.95))',
+              color: '#ffffff',
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0,
+              fontWeight: 900,
+              fontSize: 14,
+            }}
+        >
+          {label}
+        </div>
+    );
+  }
+
+  return (
+      <div
+          style={{
+            width: size,
+            height: size,
+            borderRadius: 'var(--radius-md)',
+            overflow: 'hidden',
+            background: 'var(--bg-tertiary)',
+            flexShrink: 0,
+          }}
+      >
+        <img
+            src={cleanSrc}
+            alt=""
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            onError={() => setFailed(true)}
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        />
+      </div>
+  );
+}
 
 export default function ProductSourcesPage() {
   const [activeTab, setActiveTab] = useState<TabId>('manual');
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<{ type: string; message: string } | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const [recentProducts, setRecentProducts] = useState<Product[]>([]);
+  const [runningBot, setRunningBot] = useState(false);
 
   // AccessTrade state
   const [atKeyword, setAtKeyword] = useState('');
-  const [atKind, setAtKind] = useState('all');
+  const [atKind, setAtKind] = useState('product');
   const [atLoading, setAtLoading] = useState(false);
   const [atError, setAtError] = useState('');
-  const [atResults, setAtResults] = useState<{items: Array<Record<string, unknown>>; summary: Record<string, number>} | null>(null);
+  const [atResults, setAtResults] = useState<AccessTradeResults | null>(null);
   const [atSaving, setAtSaving] = useState<string | null>(null);
-  const [atConfigured, setAtConfigured] = useState(true);
+  const [atConfigured, setAtConfigured] = useState(false);
 
-  const showToast = useCallback((type: string, message: string) => {
+  const sourceStatuses = useMemo<SourceStatus[]>(
+      () => [
+        {
+          name: 'AccessTrade',
+          tab: 'accesstrade',
+          status: atConfigured ? 'active' : 'pending',
+          note: atConfigured ? 'Đang hoạt động' : 'Cần cấu hình API key',
+          icon: 'AT',
+        },
+        {
+          name: 'Shopee',
+          tab: 'shopee',
+          status: 'placeholder',
+          note: 'Sắp kết nối',
+          icon: 'SP',
+        },
+        {
+          name: 'TikTok Shop',
+          tab: 'tiktok',
+          status: 'placeholder',
+          note: 'Sắp kết nối',
+          icon: 'TK',
+        },
+        {
+          name: 'Lazada',
+          tab: 'lazada',
+          status: 'placeholder',
+          note: 'Sắp kết nối',
+          icon: 'LZ',
+        },
+        {
+          name: 'Thủ công',
+          tab: 'manual',
+          status: 'active',
+          note: 'Luôn khả dụng',
+          icon: 'M',
+        },
+        {
+          name: 'CSV',
+          tab: 'csv',
+          status: 'coming',
+          note: 'Sắp có',
+          icon: 'CS',
+        },
+      ],
+      [atConfigured],
+  );
+
+  const showToast = useCallback((type: Toast['type'], message: string) => {
     setToast({ type, message });
-    setTimeout(() => setToast(null), 4000);
+    window.setTimeout(() => setToast(null), 4000);
   }, []);
 
-  // ---- Load recent products ----
   const loadRecent = useCallback(async () => {
     try {
-      const res = await fetch('/api/products?status=needs_review');
-      const data = await res.json();
-      if (data.ok && Array.isArray(data.data)) {
+      const res = await fetch('/api/products?limit=10', { cache: 'no-store' });
+      const data = (await res.json()) as ApiEnvelope<Product[]>;
+
+      if ((data.ok || data.success) && Array.isArray(data.data)) {
         setRecentProducts(data.data.slice(0, 10));
       }
-    } catch { /* ignore */ }
-    
+    } catch {
+      // Ignore recent product preview errors.
+    }
+
     try {
-      const hRes = await fetch('/api/app-health');
-      const hData = await hRes.json();
-      if (hData.ok) {
-        setAtConfigured(hData.data?.integrations?.accesstrade?.configured ?? false);
+      const healthRes = await fetch('/api/app-health', { cache: 'no-store' });
+      const healthData = (await healthRes.json()) as ApiEnvelope<{
+        integrations?: {
+          accesstrade?: {
+            configured?: boolean;
+          };
+        };
+      }>;
+
+      if (healthData.ok || healthData.success) {
+        setAtConfigured(Boolean(healthData.data?.integrations?.accesstrade?.configured));
       }
-    } catch { /* ignore */ }
+    } catch {
+      setAtConfigured(false);
+    }
   }, []);
 
-  // Load on first render
-  useState(() => { loadRecent(); });
+  useEffect(() => {
+    void loadRecent();
+  }, [loadRecent]);
 
-  // ---- Form handlers ----
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-    setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
+  const handleChange = (
+      event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
+  ) => {
+    setForm((prev) => ({ ...prev, [event.target.name]: event.target.value }));
   };
 
   const handleSave = async (status: string, runScore = false) => {
@@ -108,41 +316,61 @@ export default function ProductSourcesPage() {
       showToast('error', 'Tên sản phẩm là bắt buộc.');
       return;
     }
+
     if (!form.platform) {
       showToast('error', 'Nền tảng là bắt buộc.');
       return;
     }
-    if (!form.originalUrl && !form.affiliateUrl) {
+
+    if (!form.originalUrl.trim() && !form.affiliateUrl.trim()) {
       showToast('error', 'Cần ít nhất link sản phẩm gốc hoặc link affiliate.');
       return;
     }
 
     setSaving(true);
+
     try {
       const res = await fetch('/api/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...form,
+          source: 'manual',
           status,
-          price: form.price ? Number(form.price) : undefined,
-          salePrice: form.salePrice ? Number(form.salePrice) : undefined,
-          gallery: form.gallery ? form.gallery.split('\n').filter(Boolean) : [],
+          verifiedSource: false,
+          sourceVerified: false,
+          publicHidden: true,
+          price: parsePrice(form.price),
+          salePrice: parsePrice(form.salePrice),
+          gallery: splitLines(form.gallery),
+          tags: splitTags(form.tags),
+          benefits: splitLines(form.benefits),
+          warnings: splitLines(form.warnings),
+          painPoints: splitLines(form.painPoints),
+          targetAudience: splitLines(form.targetAudience),
+          contentAngles: splitLines(form.contentAngles),
         }),
       });
-      const data = await res.json();
-      if (data.ok) {
-        showToast('success', 'Đã thêm sản phẩm vào danh sách cần xem xét.');
+
+      const data = (await res.json()) as ApiEnvelope<Product>;
+
+      if (data.ok || data.success) {
+        showToast(
+            'success',
+            status === 'draft'
+                ? 'Đã lưu nháp sản phẩm.'
+                : 'Đã thêm sản phẩm thủ công vào hàng chờ an toàn.',
+        );
+
         setForm(EMPTY_FORM);
 
-        // If score requested
         if (runScore && data.data?.id) {
           await fetch(`/api/products/${data.data.id}/score`, { method: 'POST' });
         }
 
-        loadRecent();
+        await loadRecent();
       } else {
-        showToast('error', data.message || 'Không thể thêm sản phẩm.');
+        showToast('error', data.message || data.error || 'Không thể thêm sản phẩm.');
       }
     } catch {
       showToast('error', 'Lỗi kết nối. Vui lòng thử lại.');
@@ -151,22 +379,86 @@ export default function ProductSourcesPage() {
     }
   };
 
-  // ---- AccessTrade handlers ----
+  const handleRunAutoPilot = async (mode: 'source_scan' | 'full_safe_run' = 'source_scan') => {
+    setRunningBot(true);
+
+    try {
+      const res = await fetch('/api/ai-bots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          source: 'all',
+          limit: 10,
+          costMode: 'safe_free',
+          safeMode: true,
+          freeOnly: true,
+          autoMode: true,
+          autoApprove: true,
+          autoPublish: true,
+          allowPaidAi: false,
+        }),
+      });
+
+      const data = (await res.json()) as ApiEnvelope<unknown>;
+
+      if (!res.ok || (!data.ok && !data.success)) {
+        throw new Error(data.message || data.error || `Không chạy được bot. HTTP ${res.status}`);
+      }
+
+      showToast(
+          'success',
+          mode === 'full_safe_run'
+              ? 'Đã khởi chạy AutoPilot toàn bộ. Chỉ sản phẩm thật đạt chuẩn mới được public.'
+              : 'Đã khởi chạy Source Scout AutoPilot.',
+      );
+
+      await loadRecent();
+    } catch (err) {
+      showToast(err instanceof Error ? 'error' : 'error', err instanceof Error ? err.message : 'Không chạy được AutoPilot.');
+    } finally {
+      setRunningBot(false);
+    }
+  };
+
   const handleAtSearch = async () => {
+    if (!atConfigured) {
+      showToast('error', 'AccessTrade chưa được cấu hình. Hãy mở Token Vault để thêm API key.');
+      return;
+    }
+
     setAtLoading(true);
     setAtError('');
     setAtResults(null);
+
     try {
       const res = await fetch('/api/product-sources/accesstrade/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyword: atKeyword, kind: atKind, limit: 20 }),
       });
-      const data = await res.json();
-      if (data.ok) {
-        setAtResults(data.data);
+
+      const data = (await res.json()) as ApiEnvelope<AccessTradeResults | Array<Record<string, unknown>>>;
+
+      if (data.ok || data.success) {
+        if (Array.isArray(data.data)) {
+          setAtResults({
+            items: data.data,
+            summary: {
+              total: data.data.length,
+              products: data.data.filter((item) => getString(item.kind) === 'product').length,
+              vouchers: data.data.filter((item) => getString(item.kind) === 'voucher').length,
+              unknown: data.data.filter((item) => !getString(item.kind) || getString(item.kind) === 'unknown').length,
+            },
+          });
+        } else {
+          setAtResults({
+            items: Array.isArray(data.data?.items) ? data.data.items : [],
+            summary: data.data?.summary || {},
+          });
+        }
       } else {
-        setAtError(data.message || 'Lỗi khi tìm kiếm.');
+        setAtError(data.message || data.error || 'Lỗi khi tìm kiếm.');
       }
     } catch {
       setAtError('Không thể kết nối đến server.');
@@ -176,37 +468,59 @@ export default function ProductSourcesPage() {
   };
 
   const handleAtSave = async (item: Record<string, unknown>, runScore = false) => {
-    const itemId = String(item.id || '');
+    const itemId = getString(item.id) || getString(item.productId) || getString(item.name);
+
     setAtSaving(itemId);
+
+    const kind = getString(item.kind) || 'unknown';
+    const isPublicCandidate = kind === 'product' || kind === 'deal';
+
     try {
       const res = await fetch('/api/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: item.name || '',
+          title: item.name || item.title || '',
           description: item.description || '',
-          kind: item.kind || 'unknown',
+          kind,
+          sourceItemKind: kind,
           platform: 'accesstrade',
           source: 'accesstrade',
-          originalUrl: item.originalUrl || '',
+          dataSource: 'accesstrade',
+          verifiedSource: true,
+          sourceVerified: true,
+          publicHidden: !isPublicCandidate,
+          originalUrl: item.originalUrl || item.url || '',
           affiliateUrl: item.affiliateUrl || '',
           imageUrl: item.imageUrl || '',
-          price: item.price || undefined,
-          salePrice: item.salePrice || undefined,
+          price: getNumber(item.price),
+          salePrice: getNumber(item.salePrice),
           category: item.category || '',
           campaignName: item.campaignName || '',
+          affiliateSource: 'accesstrade',
+          priceNote: 'Giá có thể thay đổi theo thời gian',
+          affiliateDisclosure: 'Sản phẩm có thể chứa link affiliate. Giá của bạn không thay đổi.',
           status: 'needs_review',
         }),
       });
-      const data = await res.json();
-      if (data.ok) {
+
+      const data = (await res.json()) as ApiEnvelope<Product>;
+
+      if (data.ok || data.success) {
         if (runScore && data.data?.id) {
           await fetch(`/api/products/${data.data.id}/score`, { method: 'POST' });
         }
-        showToast('success', 'Đã lưu sản phẩm từ AccessTrade.');
-        loadRecent();
+
+        showToast(
+            'success',
+            isPublicCandidate
+                ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ an toàn.'
+                : 'Đã lưu item AccessTrade nội bộ. Voucher/campaign sẽ không public như sản phẩm.',
+        );
+
+        await loadRecent();
       } else {
-        showToast('error', data.message || 'Không thể lưu sản phẩm.');
+        showToast('error', data.message || data.error || 'Không thể lưu sản phẩm.');
       }
     } catch {
       showToast('error', 'Lỗi kết nối.');
@@ -216,85 +530,182 @@ export default function ProductSourcesPage() {
   };
 
   const renderPlaceholderTab = (icon: string, title: string, desc: string, keys?: string) => (
-    <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
-      <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
-        <span className="coming-soon-icon">{icon}</span>
-        <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>{title}</h3>
-        <p className="coming-soon-desc">{desc}</p>
-        <div className="coming-soon-actions">
-          <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>Thêm thủ công</button>
-          <Link href="/dashboard/token-vault" className="btn btn-secondary">Cấu hình API</Link>
+      <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
+        <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
+          <span className="coming-soon-icon">{icon}</span>
+          <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>
+            {title}
+          </h3>
+          <p className="coming-soon-desc">{desc}</p>
+
+          <div className="coming-soon-actions">
+            <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>
+              Thêm thủ công
+            </button>
+            <Link href="/dashboard/token-vault" className="btn btn-secondary">
+              Cấu hình API
+            </Link>
+          </div>
+
+          {keys && (
+              <p
+                  style={{
+                    fontSize: 'var(--text-xs)',
+                    color: 'var(--text-tertiary)',
+                    marginTop: 'var(--space-md)',
+                  }}
+              >
+                Cần: {keys}
+              </p>
+          )}
         </div>
-        {keys && (
-          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 'var(--space-md)' }}>
-            Cần: {keys}
-          </p>
-        )}
       </div>
-    </div>
   );
 
   return (
-    <>
-      <div className="topbar">
-        <div className="topbar-title">Trung tâm nguồn dữ liệu</div>
-        <div className="safe-mode-badges">
-          <span className="dashboard-status-badge success">Safe Mode</span>
-          <span className="dashboard-status-badge success">Free Only</span>
-          <span className="dashboard-status-badge neutral">Auto Publish: OFF</span>
-        </div>
-      </div>
       <div className="page-content">
         {/* Toast */}
         {toast && (
-          <div className="toast-container">
-            <div className={`toast toast-${toast.type}`}>
-              {toast.message}
+            <div className="toast-container">
+              <div className={`toast toast-${toast.type}`}>{toast.message}</div>
             </div>
-          </div>
         )}
 
         {/* Header */}
-        <div className="page-header">
-          <div>
-            <h1 className="page-header-title">Trung tâm nguồn dữ liệu</h1>
-            <p className="page-header-desc">Kết nối nguồn sản phẩm thật để bot AI tự quét, lọc deal và đưa vào hàng chờ duyệt.</p>
+        <section className="command-hero" style={{ marginBottom: 'var(--space-xl)' }}>
+          <div className="command-hero-content">
+            <div className="badge badge-purple" style={{ marginBottom: 'var(--space-md)' }}>
+              Data Source Center
+            </div>
+
+            <h1 className="page-title">Trung tâm nguồn dữ liệu</h1>
+
+            <p className="page-subtitle" style={{ maxWidth: 680 }}>
+              Kết nối nguồn sản phẩm thật để bot AI tự quét, lọc voucher/campaign, chấm điểm
+              và public an toàn những sản phẩm đủ chuẩn. Manual source sẽ luôn nằm trong hàng chờ
+              để tránh public nhầm.
+            </p>
+
+            <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
+              <span className="badge badge-success">Safe Mode ON</span>
+              <span className="badge badge-success">Free Only ON</span>
+              <span className="badge badge-info">AutoPilot ON</span>
+              <span className="badge badge-success">Safe Publish ON</span>
+            </div>
+
+            <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-lg)' }}>
+              <button
+                  type="button"
+                  className="primary-button"
+                  disabled={runningBot}
+                  onClick={() => void handleRunAutoPilot('source_scan')}
+              >
+                {runningBot ? 'Đang chạy...' : 'Quét nguồn & tự public an toàn'}
+              </button>
+
+              <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={runningBot}
+                  onClick={() => void handleRunAutoPilot('full_safe_run')}
+              >
+                Chạy AutoPilot toàn bộ
+              </button>
+
+              <Link href="/dashboard/products" className="secondary-button">
+                Xem kết quả bot
+              </Link>
+
+              <Link href="/dashboard/token-vault" className="secondary-button">
+                Token Vault
+              </Link>
+            </div>
           </div>
-        </div>
+
+          <div className="command-hero-panel">
+            <div className="card" style={{ minWidth: 280 }}>
+              <div className="detail-meta">
+                <div className="detail-meta-row">
+                  <span>AccessTrade</span>
+                  <span style={{ color: atConfigured ? 'var(--color-success)' : 'var(--color-warning)' }}>
+                  {atConfigured ? 'Đã cấu hình' : 'Cần API key'}
+                </span>
+                </div>
+
+                <div className="detail-meta-row">
+                  <span>Manual source</span>
+                  <span style={{ color: 'var(--color-success)' }}>Hàng chờ an toàn</span>
+                </div>
+
+                <div className="detail-meta-row">
+                  <span>Auto publish</span>
+                  <span style={{ color: 'var(--color-success)' }}>Safe Publish ON</span>
+                </div>
+
+                <div className="detail-meta-row">
+                  <span>Chi phí API</span>
+                  <span style={{ color: 'var(--color-success)' }}>0đ Free Only</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
 
         {/* Source Status Cards */}
         <div className="source-cards">
-          {SOURCE_STATUSES.map(s => (
-            <div key={s.name} className={`source-card${activeTab === (s.name === 'Thủ công' ? 'manual' : s.name === 'CSV' ? 'csv' : s.name.toLowerCase().replace(/\s+/g,'')) ? ' active' : ''}`}
-              onClick={() => {
-                if (s.name === 'Thủ công') setActiveTab('manual');
-                else if (s.name === 'AccessTrade') setActiveTab('accesstrade');
-                else if (s.name === 'Shopee') setActiveTab('shopee');
-                else if (s.name === 'TikTok Shop') setActiveTab('tiktok');
-                else if (s.name === 'Lazada') setActiveTab('lazada');
-                else if (s.name === 'CSV') setActiveTab('csv');
-              }}>
-              <div className="source-card-icon">{s.icon}</div>
-              <div className="source-card-name">{s.name}</div>
-              <div className="source-card-status">
-                <span className={`badge ${s.status === 'active' ? 'badge-success' : s.status === 'pending' ? 'badge-warning' : 'badge-neutral'}`} style={{ fontSize: '9px', padding: '2px 6px' }}>
-                  {s.status === 'active' ? 'Khả dụng' : s.status === 'pending' ? 'Cần cấu hình' : 'Sắp có'}
-                </span>
-              </div>
-            </div>
+          {sourceStatuses.map((source) => (
+              <button
+                  key={source.name}
+                  type="button"
+                  className={`source-card${activeTab === source.tab ? ' active' : ''}`}
+                  onClick={() => setActiveTab(source.tab)}
+                  style={{ textAlign: 'left', cursor: 'pointer' }}
+              >
+                <div className="source-card-icon">{source.icon}</div>
+                <div className="source-card-name">{source.name}</div>
+                <div
+                    style={{
+                      color: 'var(--text-tertiary)',
+                      fontSize: 11,
+                      marginTop: 4,
+                      minHeight: 14,
+                    }}
+                >
+                  {source.note}
+                </div>
+                <div className="source-card-status" style={{ marginTop: 8 }}>
+              <span
+                  className={`badge ${
+                      source.status === 'active'
+                          ? 'badge-success'
+                          : source.status === 'pending'
+                              ? 'badge-warning'
+                              : 'badge-neutral'
+                  }`}
+                  style={{ fontSize: '9px', padding: '2px 6px' }}
+              >
+                {source.status === 'active'
+                    ? 'Khả dụng'
+                    : source.status === 'pending'
+                        ? 'Cần cấu hình'
+                        : 'Sắp có'}
+              </span>
+                </div>
+              </button>
           ))}
         </div>
 
         {/* Tabs */}
         <div className="tabs-bar">
-          {TABS.map(tab => (
-            <button
-              key={tab.id}
-              className={`tab-btn${activeTab === tab.id ? ' tab-btn-active' : ''}`}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              <span>{tab.icon}</span> {tab.label}
-            </button>
+          {TABS.map((tab) => (
+              <button
+                  key={tab.id}
+                  type="button"
+                  className={`tab-btn${activeTab === tab.id ? ' tab-btn-active' : ''}`}
+                  onClick={() => setActiveTab(tab.id)}
+              >
+                <span>{tab.icon}</span> {tab.label}
+              </button>
           ))}
         </div>
 
@@ -302,330 +713,657 @@ export default function ProductSourcesPage() {
         <div className="tab-content">
           {/* ====== MANUAL TAB ====== */}
           {activeTab === 'manual' && (
-            <div className="card" style={{ maxWidth: '900px' }}>
-              <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>Thêm sản phẩm thủ công</h3>
+              <div className="card" style={{ maxWidth: '900px' }}>
+                <div className="flex items-start justify-between gap-md" style={{ marginBottom: 'var(--space-lg)' }}>
+                  <div>
+                    <h3 className="card-title">Thêm sản phẩm thủ công</h3>
+                    <p className="page-subtitle" style={{ marginTop: 6 }}>
+                      Sản phẩm thủ công sẽ được lưu vào hàng chờ, không tự public cho tới khi nguồn được xác minh.
+                    </p>
+                  </div>
+                  <span className="badge badge-warning">Manual cần duyệt</span>
+                </div>
 
-              {/* Basic Info */}
-              <fieldset className="form-fieldset">
-                <legend className="form-legend">Thông tin cơ bản</legend>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 2 }}>
-                    <label className="label">Tên sản phẩm *</label>
-                    <input className="input" name="title" value={form.title} onChange={handleChange} placeholder="VD: Tai nghe Bluetooth TWS Pro Max" />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Nền tảng *</label>
-                    <select className="select" name="platform" value={form.platform} onChange={handleChange}>
-                      <option value="shopee">Shopee</option>
-                      <option value="tiktok_shop">TikTok Shop</option>
-                      <option value="lazada">Lazada</option>
-                      <option value="accesstrade">AccessTrade</option>
-                      <option value="website">Website khác</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label className="label">Mô tả ngắn</label>
-                  <textarea className="textarea" name="description" value={form.description} onChange={handleChange} rows={2} placeholder="Mô tả ngắn gọn về sản phẩm..." />
-                </div>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Loại</label>
-                    <select className="select" name="kind" value={form.kind} onChange={handleChange}>
-                      <option value="product">Sản phẩm</option>
-                      <option value="voucher">Voucher</option>
-                      <option value="campaign">Chiến dịch</option>
-                      <option value="deal">Deal</option>
-                    </select>
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Danh mục</label>
-                    <input className="input" name="category" value={form.category} onChange={handleChange} placeholder="VD: Công nghệ" />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Tags (phân cách bằng dấu phẩy)</label>
-                    <input className="input" name="tags" value={form.tags} onChange={handleChange} placeholder="VD: tai nghe, bluetooth" />
-                  </div>
-                </div>
-              </fieldset>
+                {/* Basic Info */}
+                <fieldset className="form-fieldset">
+                  <legend className="form-legend">Thông tin cơ bản</legend>
 
-              {/* Links & Images */}
-              <fieldset className="form-fieldset">
-                <legend className="form-legend">Liên kết & hình ảnh</legend>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Link sản phẩm gốc</label>
-                    <input className="input" name="originalUrl" value={form.originalUrl} onChange={handleChange} placeholder="https://..." />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Link affiliate *</label>
-                    <input className="input" name="affiliateUrl" value={form.affiliateUrl} onChange={handleChange} placeholder="https://..." />
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Link ảnh sản phẩm</label>
-                    <input className="input" name="imageUrl" value={form.imageUrl} onChange={handleChange} placeholder="https://..." />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Link ảnh phụ (mỗi dòng một URL)</label>
-                    <textarea className="textarea" name="gallery" value={form.gallery} onChange={handleChange} rows={2} placeholder={"https://image1.jpg\nhttps://image2.jpg"} style={{ minHeight: '60px' }} />
-                  </div>
-                </div>
-              </fieldset>
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label className="label">Tên sản phẩm *</label>
+                      <input
+                          className="input"
+                          name="title"
+                          value={form.title}
+                          onChange={handleChange}
+                          placeholder="VD: Tai nghe Bluetooth TWS Pro Max"
+                      />
+                    </div>
 
-              {/* Price */}
-              <fieldset className="form-fieldset">
-                <legend className="form-legend">Giá & ưu đãi</legend>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Giá gốc (VND)</label>
-                    <input className="input" name="price" type="number" value={form.price} onChange={handleChange} placeholder="VD: 299000" />
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Nền tảng *</label>
+                      <select className="select" name="platform" value={form.platform} onChange={handleChange}>
+                        <option value="shopee">Shopee</option>
+                        <option value="tiktok_shop">TikTok Shop</option>
+                        <option value="lazada">Lazada</option>
+                        <option value="accesstrade">AccessTrade</option>
+                        <option value="website">Website khác</option>
+                      </select>
+                    </div>
                   </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Giá khuyến mãi (VND)</label>
-                    <input className="input" name="salePrice" type="number" value={form.salePrice} onChange={handleChange} placeholder="VD: 199000" />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Ghi chú giá</label>
-                    <input className="input" name="priceNote" value={form.priceNote} onChange={handleChange} />
-                  </div>
-                </div>
-              </fieldset>
 
-              {/* Content Intelligence */}
-              <fieldset className="form-fieldset">
-                <legend className="form-legend">Góc nội dung</legend>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Lợi ích chính (mỗi dòng một lợi ích)</label>
-                    <textarea className="textarea" name="benefits" value={form.benefits} onChange={handleChange} rows={3} placeholder={"Chống ồn chủ động\nPin 30 giờ\nBluetooth 5.3"} />
+                  <div className="form-group">
+                    <label className="label">Mô tả ngắn</label>
+                    <textarea
+                        className="textarea"
+                        name="description"
+                        value={form.description}
+                        onChange={handleChange}
+                        rows={2}
+                        placeholder="Mô tả ngắn gọn về sản phẩm..."
+                    />
                   </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Cảnh báo / Không được nói quá</label>
-                    <textarea className="textarea" name="warnings" value={form.warnings} onChange={handleChange} rows={3} placeholder={"Không cam kết chất lượng tuyệt đối\nKhông khẳng định chữa bệnh"} />
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Pain point khách hàng</label>
-                    <textarea className="textarea" name="painPoints" value={form.painPoints} onChange={handleChange} rows={2} placeholder={"Muốn tai nghe không dây\nCần tai nghe cho họp online"} />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Đối tượng phù hợp</label>
-                    <textarea className="textarea" name="targetAudience" value={form.targetAudience} onChange={handleChange} rows={2} placeholder={"Dân văn phòng\nSinh viên"} />
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Gợi ý góc nội dung</label>
-                    <textarea className="textarea" name="contentAngles" value={form.contentAngles} onChange={handleChange} rows={2} placeholder={"Review trung thực\nSo sánh với sản phẩm khác"} />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Ghi chú kiểm duyệt</label>
-                    <textarea className="textarea" name="complianceNotes" value={form.complianceNotes} onChange={handleChange} rows={2} />
-                  </div>
-                </div>
-              </fieldset>
 
-              {/* Kiểm duyệt & rủi ro */}
-              <fieldset className="form-fieldset">
-                <legend className="form-legend">Kiểm duyệt & rủi ro</legend>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Nguồn affiliate</label>
-                    <input className="input" name="affiliateSource" value={form.affiliateSource} onChange={handleChange} />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Tên chiến dịch</label>
-                    <input className="input" name="campaignName" value={form.campaignName} onChange={handleChange} />
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Ghi chú hoa hồng</label>
-                    <input className="input" name="commissionNote" value={form.commissionNote} onChange={handleChange} />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Affiliate disclosure</label>
-                    <input className="input" name="affiliateDisclosure" value={form.affiliateDisclosure} onChange={handleChange} placeholder="VD: Bài viết có chứa link liên kết..." />
-                  </div>
-                </div>
-              </fieldset>
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Loại</label>
+                      <select className="select" name="kind" value={form.kind} onChange={handleChange}>
+                        <option value="product">Sản phẩm</option>
+                        <option value="deal">Deal</option>
+                        <option value="voucher">Voucher</option>
+                        <option value="campaign">Chiến dịch</option>
+                        <option value="store_offer">Ưu đãi shop</option>
+                      </select>
+                    </div>
 
-              {/* Actions */}
-              <div className="form-actions">
-                <button className="btn btn-primary" disabled={saving} onClick={() => handleSave('needs_review')}>
-                  {saving ? 'Đang lưu...' : 'Lưu sản phẩm'}
-                </button>
-                <button className="btn btn-secondary" disabled={saving} onClick={() => handleSave('draft')}>
-                  Lưu nháp
-                </button>
-                <button className="btn btn-accent" disabled={saving} onClick={() => handleSave('needs_review', true)}>
-                  Lưu và chấm điểm
-                </button>
-                <Link href="/dashboard/products" className="btn btn-ghost">
-                  Xem danh sách
-                </Link>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Danh mục</label>
+                      <input
+                          className="input"
+                          name="category"
+                          value={form.category}
+                          onChange={handleChange}
+                          placeholder="VD: Công nghệ"
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Tags</label>
+                      <input
+                          className="input"
+                          name="tags"
+                          value={form.tags}
+                          onChange={handleChange}
+                          placeholder="VD: tai nghe, bluetooth"
+                      />
+                    </div>
+                  </div>
+                </fieldset>
+
+                {/* Links & Images */}
+                <fieldset className="form-fieldset">
+                  <legend className="form-legend">Liên kết & hình ảnh</legend>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Link sản phẩm gốc</label>
+                      <input
+                          className="input"
+                          name="originalUrl"
+                          value={form.originalUrl}
+                          onChange={handleChange}
+                          placeholder="https://..."
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Link affiliate *</label>
+                      <input
+                          className="input"
+                          name="affiliateUrl"
+                          value={form.affiliateUrl}
+                          onChange={handleChange}
+                          placeholder="https://..."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Link ảnh sản phẩm</label>
+                      <input
+                          className="input"
+                          name="imageUrl"
+                          value={form.imageUrl}
+                          onChange={handleChange}
+                          placeholder="https://..."
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Link ảnh phụ, mỗi dòng một URL</label>
+                      <textarea
+                          className="textarea"
+                          name="gallery"
+                          value={form.gallery}
+                          onChange={handleChange}
+                          rows={2}
+                          placeholder={'https://image1.jpg\nhttps://image2.jpg'}
+                          style={{ minHeight: '60px' }}
+                      />
+                    </div>
+                  </div>
+                </fieldset>
+
+                {/* Price */}
+                <fieldset className="form-fieldset">
+                  <legend className="form-legend">Giá & ưu đãi</legend>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Giá gốc, VND</label>
+                      <input
+                          className="input"
+                          name="price"
+                          type="number"
+                          value={form.price}
+                          onChange={handleChange}
+                          placeholder="VD: 299000"
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Giá khuyến mãi, VND</label>
+                      <input
+                          className="input"
+                          name="salePrice"
+                          type="number"
+                          value={form.salePrice}
+                          onChange={handleChange}
+                          placeholder="VD: 199000"
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Ghi chú giá</label>
+                      <input
+                          className="input"
+                          name="priceNote"
+                          value={form.priceNote}
+                          onChange={handleChange}
+                      />
+                    </div>
+                  </div>
+                </fieldset>
+
+                {/* Content Intelligence */}
+                <fieldset className="form-fieldset">
+                  <legend className="form-legend">Góc nội dung</legend>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Lợi ích chính, mỗi dòng một lợi ích</label>
+                      <textarea
+                          className="textarea"
+                          name="benefits"
+                          value={form.benefits}
+                          onChange={handleChange}
+                          rows={3}
+                          placeholder={'Chống ồn chủ động\nPin 30 giờ\nBluetooth 5.3'}
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Cảnh báo / Không được nói quá</label>
+                      <textarea
+                          className="textarea"
+                          name="warnings"
+                          value={form.warnings}
+                          onChange={handleChange}
+                          rows={3}
+                          placeholder={'Không cam kết chất lượng tuyệt đối\nKhông khẳng định chữa bệnh'}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Pain point khách hàng</label>
+                      <textarea
+                          className="textarea"
+                          name="painPoints"
+                          value={form.painPoints}
+                          onChange={handleChange}
+                          rows={2}
+                          placeholder={'Muốn tai nghe không dây\nCần tai nghe cho họp online'}
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Đối tượng phù hợp</label>
+                      <textarea
+                          className="textarea"
+                          name="targetAudience"
+                          value={form.targetAudience}
+                          onChange={handleChange}
+                          rows={2}
+                          placeholder={'Dân văn phòng\nSinh viên'}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Gợi ý góc nội dung</label>
+                      <textarea
+                          className="textarea"
+                          name="contentAngles"
+                          value={form.contentAngles}
+                          onChange={handleChange}
+                          rows={2}
+                          placeholder={'Review trung thực\nSo sánh với sản phẩm khác'}
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Ghi chú kiểm duyệt</label>
+                      <textarea
+                          className="textarea"
+                          name="complianceNotes"
+                          value={form.complianceNotes}
+                          onChange={handleChange}
+                          rows={2}
+                      />
+                    </div>
+                  </div>
+                </fieldset>
+
+                {/* Kiểm duyệt & rủi ro */}
+                <fieldset className="form-fieldset">
+                  <legend className="form-legend">Kiểm duyệt & rủi ro</legend>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Nguồn affiliate</label>
+                      <input
+                          className="input"
+                          name="affiliateSource"
+                          value={form.affiliateSource}
+                          onChange={handleChange}
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Tên chiến dịch</label>
+                      <input
+                          className="input"
+                          name="campaignName"
+                          value={form.campaignName}
+                          onChange={handleChange}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Ghi chú hoa hồng</label>
+                      <input
+                          className="input"
+                          name="commissionNote"
+                          value={form.commissionNote}
+                          onChange={handleChange}
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Affiliate disclosure</label>
+                      <input
+                          className="input"
+                          name="affiliateDisclosure"
+                          value={form.affiliateDisclosure}
+                          onChange={handleChange}
+                          placeholder="VD: Bài viết có chứa link liên kết..."
+                      />
+                    </div>
+                  </div>
+                </fieldset>
+
+                {/* Actions */}
+                <div className="form-actions">
+                  <button
+                      className="btn btn-primary"
+                      disabled={saving}
+                      onClick={() => void handleSave('needs_review')}
+                  >
+                    {saving ? 'Đang lưu...' : 'Lưu vào hàng chờ'}
+                  </button>
+
+                  <button
+                      className="btn btn-secondary"
+                      disabled={saving}
+                      onClick={() => void handleSave('draft')}
+                  >
+                    Lưu nháp
+                  </button>
+
+                  <button
+                      className="btn btn-accent"
+                      disabled={saving}
+                      onClick={() => void handleSave('needs_review', true)}
+                  >
+                    Lưu và chấm điểm
+                  </button>
+
+                  <Link href="/dashboard/products" className="btn btn-ghost">
+                    Xem danh sách
+                  </Link>
+                </div>
               </div>
-            </div>
           )}
 
           {/* ====== ACCESSTRADE TAB ====== */}
           {activeTab === 'accesstrade' && (
-            <div>
-              <div className="card" style={{ maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
-                <h3 className="card-title" style={{ marginBottom: 'var(--space-md)' }}>Tìm kiếm trên AccessTrade</h3>
-                
-                {!atConfigured && (
-                  <div style={{ background: 'var(--color-warning-bg)', border: '1px solid var(--color-warning)', padding: 'var(--space-xl)', borderRadius: 'var(--radius-lg)', textAlign: 'center', marginBottom: 'var(--space-xl)' }}>
-                    <div style={{ fontSize: '32px', marginBottom: 'var(--space-sm)' }}>⚠️</div>
-                    <h4 style={{ fontSize: 'var(--text-lg)', fontWeight: 700, color: 'var(--color-warning)', marginBottom: 'var(--space-xs)' }}>Thiếu API Key AccessTrade</h4>
-                    <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>Bạn cần cấu hình API key của AccessTrade để tìm kiếm và lấy deal tự động.</p>
-                    <Link href="/dashboard/token-vault" className="btn btn-primary">Mở Token Vault</Link>
+              <div>
+                <div className="card" style={{ maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
+                  <div className="flex items-start justify-between gap-md" style={{ marginBottom: 'var(--space-md)' }}>
+                    <div>
+                      <h3 className="card-title">Tìm kiếm trên AccessTrade</h3>
+                      <p className="page-subtitle" style={{ marginTop: 6 }}>
+                        Ưu tiên tìm sản phẩm thật. Voucher/campaign chỉ lưu nội bộ và không public như sản phẩm.
+                      </p>
+                    </div>
+
+                    <span className={`badge ${atConfigured ? 'badge-success' : 'badge-warning'}`}>
+                  {atConfigured ? 'AccessTrade Ready' : 'Cần API Key'}
+                </span>
                   </div>
+
+                  {!atConfigured && (
+                      <div
+                          style={{
+                            background: 'rgba(245,158,11,0.08)',
+                            border: '1px solid rgba(245,158,11,0.22)',
+                            padding: 'var(--space-xl)',
+                            borderRadius: 'var(--radius-lg)',
+                            textAlign: 'center',
+                            marginBottom: 'var(--space-xl)',
+                          }}
+                      >
+                        <div style={{ fontSize: '32px', marginBottom: 'var(--space-sm)' }}>⚠️</div>
+                        <h4
+                            style={{
+                              fontSize: 'var(--text-lg)',
+                              fontWeight: 800,
+                              color: 'var(--color-warning)',
+                              marginBottom: 'var(--space-xs)',
+                            }}
+                        >
+                          Thiếu API Key AccessTrade
+                        </h4>
+                        <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>
+                          Bạn cần cấu hình API key của AccessTrade để tìm kiếm và lấy deal tự động.
+                        </p>
+                        <Link href="/dashboard/token-vault" className="btn btn-primary">
+                          Mở Token Vault
+                        </Link>
+                      </div>
+                  )}
+
+                  <div
+                      className="form-row"
+                      style={{
+                        opacity: atConfigured ? 1 : 0.5,
+                        pointerEvents: atConfigured ? 'auto' : 'none',
+                      }}
+                  >
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label className="label">Từ khoá</label>
+                      <input
+                          className="input"
+                          value={atKeyword}
+                          onChange={(event) => setAtKeyword(event.target.value)}
+                          placeholder="VD: tai nghe, serum, balo..."
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="label">Loại dữ liệu</label>
+                      <select
+                          className="select"
+                          value={atKind}
+                          onChange={(event) => setAtKind(event.target.value)}
+                      >
+                        <option value="product">Sản phẩm</option>
+                        <option value="all">Tất cả</option>
+                        <option value="voucher">Voucher</option>
+                        <option value="campaign">Chiến dịch</option>
+                        <option value="store_offer">Ưu đãi shop</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
+                    <button className="btn btn-primary" onClick={() => void handleAtSearch()} disabled={atLoading}>
+                      {atLoading ? 'Đang tìm...' : 'Tìm kiếm'}
+                    </button>
+
+                    <button
+                        className="btn btn-accent"
+                        onClick={() => void handleRunAutoPilot('source_scan')}
+                        disabled={runningBot}
+                    >
+                      {runningBot ? 'Đang chạy...' : 'Cho bot tự quét AccessTrade'}
+                    </button>
+                  </div>
+                </div>
+
+                {atError && (
+                    <div
+                        className="glass-card"
+                        style={{
+                          borderColor: 'rgba(244, 63, 94, 0.3)',
+                          maxWidth: '900px',
+                          marginBottom: 'var(--space-lg)',
+                        }}
+                    >
+                      <p style={{ color: 'var(--color-danger)' }}>❌ {atError}</p>
+                    </div>
                 )}
 
-                <div className="form-row" style={{ opacity: atConfigured ? 1 : 0.5, pointerEvents: atConfigured ? 'auto' : 'none' }}>
-                  <div className="form-group" style={{ flex: 2 }}>
-                    <label className="label">Từ khoá</label>
-                    <input className="input" value={atKeyword} onChange={e => setAtKeyword(e.target.value)} placeholder="VD: tai nghe, serum, balo..." />
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}>
-                    <label className="label">Loại dữ liệu</label>
-                    <select className="select" value={atKind} onChange={e => setAtKind(e.target.value)}>
-                      <option value="all">Tất cả</option>
-                      <option value="product">Sản phẩm</option>
-                      <option value="voucher">Voucher</option>
-                      <option value="campaign">Chiến dịch</option>
-                    </select>
-                  </div>
-                </div>
-
-                <button className="btn btn-primary" onClick={handleAtSearch} disabled={atLoading} style={{ marginTop: 'var(--space-md)' }}>
-                  {atLoading ? 'Đang tìm...' : 'Tìm kiếm'}
-                </button>
-              </div>
-
-              {atError && (
-                <div className="glass-card" style={{ borderColor: 'rgba(244, 63, 94, 0.3)', maxWidth: '900px', marginBottom: 'var(--space-lg)' }}>
-                  <p style={{ color: 'var(--color-danger)' }}>❌ {atError}</p>
-                </div>
-              )}
-
-              {atResults && (
-                <div style={{ maxWidth: '900px' }}>
-                  {/* Summary */}
-                  <div className="grid grid-4" style={{ marginBottom: 'var(--space-lg)' }}>
-                    <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                      <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>{atResults.summary.total}</div>
-                      <div className="stat-card-label">Tổng kết quả</div>
-                    </div>
-                    <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                      <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>{atResults.summary.products}</div>
-                      <div className="stat-card-label">Sản phẩm</div>
-                    </div>
-                    <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                      <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>{atResults.summary.vouchers}</div>
-                      <div className="stat-card-label">Voucher</div>
-                    </div>
-                    <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                      <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>{atResults.summary.unknown}</div>
-                      <div className="stat-card-label">Chưa xác định</div>
-                    </div>
-                  </div>
-
-                  {/* Results */}
-                  {atResults.items.map((rawItem, idx) => {
-                    const item = {
-                      id: String(rawItem.id || ''),
-                      name: String(rawItem.name || 'Không có tên'),
-                      kind: String(rawItem.kind || 'unknown'),
-                      imageUrl: typeof rawItem.imageUrl === 'string' ? rawItem.imageUrl : '',
-                      price: Number(rawItem.price || 0),
-                      affiliateUrl: typeof rawItem.affiliateUrl === 'string' ? rawItem.affiliateUrl : '',
-                      needsVerification: Boolean(rawItem.needsVerification),
-                      originalItem: rawItem,
-                    };
-                    
-                    return (
-                      <div key={idx} className="glass-card" style={{ marginBottom: 'var(--space-md)', display: 'flex', gap: 'var(--space-md)' }}>
-                        {Boolean(item.imageUrl) && (
-                          <div style={{ width: '80px', height: '80px', borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
-                            <img src={item.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                {atResults && (
+                    <div style={{ maxWidth: '900px' }}>
+                      {/* Summary */}
+                      <div className="grid grid-4" style={{ marginBottom: 'var(--space-lg)' }}>
+                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
+                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                            {atResults.summary.total ?? atResults.items.length}
                           </div>
-                        )}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div className="flex items-center gap-sm" style={{ marginBottom: '4px', flexWrap: 'wrap' }}>
-                            <strong style={{ fontSize: 'var(--text-sm)' }}>{item.name}</strong>
-                            <span className={`badge ${item.kind === 'product' ? 'badge-success' : item.kind === 'voucher' ? 'badge-warning' : 'badge-neutral'}`}>
-                              {item.kind}
-                            </span>
-                            {item.needsVerification && <span className="badge badge-warning">Cần xác minh</span>}
+                          <div className="stat-card-label">Tổng kết quả</div>
+                        </div>
+
+                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
+                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                            {atResults.summary.products ?? 0}
                           </div>
-                          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-                            {item.price > 0 ? `${item.price.toLocaleString('vi-VN')}₫` : ''}
-                            {item.affiliateUrl ? ' • Có link affiliate' : ' • Chưa có link affiliate'}
-                          </p>
-                          <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)' }}>
-                            <button className="btn btn-sm btn-primary" disabled={atSaving === item.id} onClick={() => handleAtSave(item.originalItem)}>
-                              Lưu vào sản phẩm
-                            </button>
-                            <button className="btn btn-sm btn-accent" disabled={atSaving === item.id} onClick={() => handleAtSave(item.originalItem, true)}>
-                              Lưu và chấm điểm
-                            </button>
+                          <div className="stat-card-label">Sản phẩm</div>
+                        </div>
+
+                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
+                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                            {atResults.summary.vouchers ?? 0}
                           </div>
+                          <div className="stat-card-label">Voucher</div>
+                        </div>
+
+                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
+                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                            {atResults.summary.unknown ?? 0}
+                          </div>
+                          <div className="stat-card-label">Chưa xác định</div>
                         </div>
                       </div>
-                    );
-                  })}
-                  {atResults.items.length === 0 && (
-                    <div className="empty-state">
-                      <div className="empty-state-icon">🔍</div>
-                      <div className="empty-state-title">Không tìm thấy kết quả</div>
-                      <div className="empty-state-desc">Thử thay đổi từ khoá hoặc bộ lọc.</div>
+
+                      {/* Results */}
+                      {atResults.items.map((rawItem, index) => {
+                        const item = {
+                          id: getString(rawItem.id) || `${index}`,
+                          name: getString(rawItem.name) || getString(rawItem.title) || 'Không có tên',
+                          kind: getString(rawItem.kind) || 'unknown',
+                          imageUrl: getString(rawItem.imageUrl),
+                          price: getNumber(rawItem.price),
+                          salePrice: getNumber(rawItem.salePrice),
+                          affiliateUrl: getString(rawItem.affiliateUrl),
+                          needsVerification: Boolean(rawItem.needsVerification),
+                          originalItem: rawItem,
+                        };
+
+                        const isProduct = item.kind === 'product' || item.kind === 'deal';
+
+                        return (
+                            <div
+                                key={`${item.id}-${index}`}
+                                className="glass-card"
+                                style={{
+                                  marginBottom: 'var(--space-md)',
+                                  display: 'flex',
+                                  gap: 'var(--space-md)',
+                                }}
+                            >
+                              <SafeThumb src={item.imageUrl} label="AT" size={80} />
+
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div
+                                    className="flex items-center gap-sm"
+                                    style={{ marginBottom: '4px', flexWrap: 'wrap' }}
+                                >
+                                  <strong style={{ fontSize: 'var(--text-sm)' }}>{item.name}</strong>
+
+                                  <span
+                                      className={`badge ${
+                                          isProduct
+                                              ? 'badge-success'
+                                              : item.kind === 'voucher'
+                                                  ? 'badge-warning'
+                                                  : 'badge-neutral'
+                                      }`}
+                                  >
+                            {item.kind}
+                          </span>
+
+                                  {!isProduct && (
+                                      <span className="badge badge-neutral">Không public tự động</span>
+                                  )}
+
+                                  {item.needsVerification && (
+                                      <span className="badge badge-warning">Cần xác minh</span>
+                                  )}
+                                </div>
+
+                                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                                  {formatPrice(item.salePrice || item.price)}
+                                  {item.affiliateUrl ? ' • Có link affiliate' : ' • Chưa có link affiliate'}
+                                </p>
+
+                                <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)' }}>
+                                  <button
+                                      className="btn btn-sm btn-primary"
+                                      disabled={atSaving === item.id}
+                                      onClick={() => void handleAtSave(item.originalItem)}
+                                  >
+                                    {atSaving === item.id ? 'Đang lưu...' : 'Lưu vào hàng chờ'}
+                                  </button>
+
+                                  <button
+                                      className="btn btn-sm btn-accent"
+                                      disabled={atSaving === item.id}
+                                      onClick={() => void handleAtSave(item.originalItem, true)}
+                                  >
+                                    Lưu và chấm điểm
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                        );
+                      })}
+
+                      {atResults.items.length === 0 && (
+                          <div className="empty-state">
+                            <div className="empty-state-icon">🔍</div>
+                            <div className="empty-state-title">Không tìm thấy kết quả</div>
+                            <div className="empty-state-desc">Thử thay đổi từ khoá hoặc bộ lọc.</div>
+                          </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
+                )}
+              </div>
           )}
 
           {/* ====== SHOPEE TAB ====== */}
-          {activeTab === 'shopee' && renderPlaceholderTab('🛒', 'Shopee Affiliate', 'Shopee Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link Shopee thủ công.', 'SHOPEE_AFFILIATE_APP_ID, SHOPEE_AFFILIATE_SECRET')}
+          {activeTab === 'shopee' &&
+              renderPlaceholderTab(
+                  '🛒',
+                  'Shopee Affiliate',
+                  'Shopee Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link Shopee thủ công.',
+                  'SHOPEE_AFFILIATE_APP_ID, SHOPEE_AFFILIATE_SECRET',
+              )}
 
           {/* ====== TIKTOK TAB ====== */}
-          {activeTab === 'tiktok' && renderPlaceholderTab('🎵', 'TikTok Shop Affiliate', 'TikTok Shop Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link sản phẩm thủ công.', 'TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET')}
+          {activeTab === 'tiktok' &&
+              renderPlaceholderTab(
+                  '🎵',
+                  'TikTok Shop Affiliate',
+                  'TikTok Shop Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link sản phẩm thủ công.',
+                  'TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET',
+              )}
 
           {/* ====== LAZADA TAB ====== */}
-          {activeTab === 'lazada' && renderPlaceholderTab('🏪', 'Lazada Affiliate', 'Lazada Affiliate sẽ được kết nối ở bước sau.', 'LAZADA_AFFILIATE_APP_KEY, LAZADA_AFFILIATE_APP_SECRET')}
+          {activeTab === 'lazada' &&
+              renderPlaceholderTab(
+                  '🏪',
+                  'Lazada Affiliate',
+                  'Lazada Affiliate sẽ được kết nối ở bước sau.',
+                  'LAZADA_AFFILIATE_APP_KEY, LAZADA_AFFILIATE_APP_SECRET',
+              )}
 
           {/* ====== CSV TAB ====== */}
           {activeTab === 'csv' && (
-            <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
-              <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
-                <span className="coming-soon-icon">📄</span>
-                <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>Nhập từ CSV</h3>
-                <p className="coming-soon-desc">Tính năng nhập CSV sẽ được thêm ở bước sau.</p>
-                <div className="disclosure-banner" style={{ textAlign: 'left', margin: 'var(--space-lg) 0 0' }}>
-                  <strong>Các cột dự kiến:</strong><br />
-                  title, originalUrl, affiliateUrl, imageUrl, platform, price, salePrice, category, tags
+              <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
+                <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
+                  <span className="coming-soon-icon">📄</span>
+                  <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>
+                    Nhập từ CSV
+                  </h3>
+                  <p className="coming-soon-desc">Tính năng nhập CSV sẽ được thêm ở bước sau.</p>
+
+                  <div
+                      className="disclosure-banner"
+                      style={{ textAlign: 'left', margin: 'var(--space-lg) 0 0' }}
+                  >
+                    <strong>Các cột dự kiến:</strong>
+                    <br />
+                    title, originalUrl, affiliateUrl, imageUrl, platform, price, salePrice, category, tags
+                  </div>
                 </div>
               </div>
-            </div>
           )}
 
           {/* ====== OTHER TAB ====== */}
-          {activeTab === 'other' && renderPlaceholderTab('🔌', 'Nguồn khác', 'Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công hoặc sử dụng API.')}
+          {activeTab === 'other' &&
+              renderPlaceholderTab(
+                  '🔌',
+                  'Nguồn khác',
+                  'Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công hoặc sử dụng API.',
+              )}
         </div>
 
         {/* Recent Products */}
         {recentProducts.length > 0 && (
-          <div style={{ marginTop: 'var(--space-xl)' }}>
-            <h2 className="section-title">Sản phẩm mới thêm gần đây</h2>
-            <div className="table-container">
-              <table>
-                <thead>
+            <div style={{ marginTop: 'var(--space-xl)' }}>
+              <h2 className="section-title">Sản phẩm mới thêm gần đây</h2>
+
+              <div className="table-container">
+                <table>
+                  <thead>
                   <tr>
                     <th>Sản phẩm</th>
                     <th>Nền tảng</th>
@@ -634,41 +1372,50 @@ export default function ProductSourcesPage() {
                     <th>Điểm</th>
                     <th>Cập nhật</th>
                   </tr>
-                </thead>
-                <tbody>
-                  {recentProducts.map(p => (
-                    <tr key={p.id}>
-                      <td>
-                        <div className="flex items-center gap-sm">
-                          {p.imageUrl && (
-                            <div style={{ width: 36, height: 36, borderRadius: 'var(--radius-sm)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
-                              <img src={p.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                            </div>
-                          )}
-                          <Link href={`/dashboard/products/${p.id}`} style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>
-                            {p.title}
-                          </Link>
-                        </div>
-                      </td>
-                      <td><span className="badge badge-neutral">{p.platform}</span></td>
-                      <td style={{ fontSize: 'var(--text-xs)' }}>{p.source}</td>
-                      <td>
-                        <span className={`badge ${p.status === 'approved' ? 'badge-success' : p.status === 'needs_review' ? 'badge-warning' : 'badge-neutral'}`}>
-                          {p.status === 'approved' ? 'Đã duyệt' : p.status === 'needs_review' ? 'Cần xem xét' : p.status === 'draft' ? 'Nháp' : p.status}
-                        </span>
-                      </td>
-                      <td>{p.score != null ? p.score : '—'}</td>
-                      <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-                        {new Date(p.updatedAt).toLocaleDateString('vi-VN')}
-                      </td>
-                    </tr>
+                  </thead>
+
+                  <tbody>
+                  {recentProducts.map((product) => (
+                      <tr key={product.id}>
+                        <td>
+                          <div className="flex items-center gap-sm">
+                            <SafeThumb src={product.imageUrl} label="S" size={36} />
+
+                            <Link
+                                href={`/dashboard/products/${product.id}`}
+                                style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}
+                            >
+                              {product.title}
+                            </Link>
+                          </div>
+                        </td>
+
+                        <td>
+                          <span className="badge badge-neutral">{product.platform}</span>
+                        </td>
+
+                        <td style={{ fontSize: 'var(--text-xs)' }}>{product.source || 'unknown'}</td>
+
+                        <td>
+                      <span className={`badge ${getStatusBadgeClass(product.status)}`}>
+                        {getStatusLabel(product.status)}
+                      </span>
+                        </td>
+
+                        <td>{product.score != null ? product.score : '—'}</td>
+
+                        <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                          {product.updatedAt
+                              ? new Date(product.updatedAt).toLocaleDateString('vi-VN')
+                              : '—'}
+                        </td>
+                      </tr>
                   ))}
-                </tbody>
-              </table>
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
         )}
       </div>
-    </>
   );
 }
