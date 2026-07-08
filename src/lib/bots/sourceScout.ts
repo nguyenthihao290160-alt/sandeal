@@ -3,7 +3,7 @@
 // Finds candidate products from real sources
 // ===========================================
 
-import type { Product } from '../types';
+import type { Product, ProductKind } from '../types';
 import { BotContext } from './context';
 import { listProducts, createProduct, getAllProducts } from '../storage/products';
 import { classifyProductKind } from '../sourceItemClassifier';
@@ -30,6 +30,8 @@ type AccessTradeSearchResult = {
 };
 
 type MutableProductDraft = Partial<Product> & Record<string, unknown>;
+
+type SourceCollectionKind = 'product' | 'voucher' | 'campaign' | 'unknown';
 
 const ACCESS_TRADE_KEYWORDS = [
   'iphone',
@@ -170,7 +172,23 @@ const ACCESS_TRADE_CATEGORY_KEYS = [
 ];
 
 function getText(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+  if (typeof value === 'string') return value.trim();
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim();
+  }
+
+  return '';
+}
+
+function normalizeText(value: unknown): string {
+  return getText(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[–—]/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim();
 }
 
 function getPathValue(item: AccessTradeRawItem, path: string): unknown {
@@ -238,41 +256,78 @@ function getRawNumber(item: AccessTradeRawItem, keys: string[]): number | undefi
 }
 
 function normalizeTitle(value: unknown): string {
-  return getText(value).toLowerCase().replace(/\s+/g, ' ');
+  return normalizeText(value);
 }
 
 function normalizeUrl(value: unknown): string {
-  return getText(value).toLowerCase();
+  return normalizeText(value);
 }
 
 function hasRealPositivePrice(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
-function extractAccessTradeItems(result: unknown): AccessTradeRawItem[] {
-  const payload = result as AccessTradeSearchResult;
+function cloneRawItemWithCollection(
+    item: AccessTradeRawItem,
+    collectionKind: SourceCollectionKind,
+): AccessTradeRawItem {
+  return {
+    ...item,
+    __accessTradeCollection: collectionKind,
+  };
+}
 
-  const groups = [
-    payload.items,
-    payload.products,
-    payload.vouchers,
-    payload.campaigns,
-    payload.data?.items,
-    payload.data?.products,
-    payload.data?.vouchers,
-    payload.data?.campaigns,
+function extractAccessTradeItems(result: unknown): AccessTradeRawItem[] {
+  const payload =
+      result && typeof result === 'object'
+          ? (result as AccessTradeSearchResult)
+          : {};
+
+  const groups: Array<{
+    collectionKind: SourceCollectionKind;
+    items?: AccessTradeRawItem[];
+  }> = [
+    { collectionKind: 'unknown', items: payload.items },
+    { collectionKind: 'product', items: payload.products },
+    { collectionKind: 'voucher', items: payload.vouchers },
+    { collectionKind: 'campaign', items: payload.campaigns },
+    { collectionKind: 'unknown', items: payload.data?.items },
+    { collectionKind: 'product', items: payload.data?.products },
+    { collectionKind: 'voucher', items: payload.data?.vouchers },
+    { collectionKind: 'campaign', items: payload.data?.campaigns },
   ];
 
-  return groups
-      .filter((group): group is AccessTradeRawItem[] => Array.isArray(group))
-      .flat()
-      .filter((item): item is AccessTradeRawItem => Boolean(item && typeof item === 'object'));
+  return groups.flatMap(({ collectionKind, items }) => {
+    if (!Array.isArray(items)) return [];
+
+    return items
+        .filter((item): item is AccessTradeRawItem => Boolean(item && typeof item === 'object'))
+        .map((item) => cloneRawItemWithCollection(item, collectionKind));
+  });
 }
 
 function getRawKind(item: AccessTradeRawItem): string {
+  const collectionKind = normalizeText(item.__accessTradeCollection);
+
+  if (
+      collectionKind === 'product' ||
+      collectionKind === 'voucher' ||
+      collectionKind === 'campaign'
+  ) {
+    return collectionKind;
+  }
+
   return (
-      getRawText(item, ['kind', 'type', 'rawSourceKind', 'categoryType', 'sourceType']) ||
-      'unknown'
+      getRawText(item, [
+        'sourceItemKind',
+        'kind',
+        'type',
+        'rawSourceKind',
+        'categoryType',
+        'sourceType',
+        'itemType',
+        'objectType',
+      ]) || 'unknown'
   ).toLowerCase();
 }
 
@@ -287,12 +342,35 @@ function normalizePlatformText(value: string): string {
   return 'other';
 }
 
-function calculateDiscountPercent(currentPrice?: number, originalPrice?: number): number | undefined {
+function calculateDiscountPercent(
+    currentPrice?: number,
+    originalPrice?: number,
+): number | undefined {
   if (!currentPrice || !originalPrice) return undefined;
   if (originalPrice <= currentPrice) return undefined;
 
   const discount = Math.round(((originalPrice - currentPrice) / originalPrice) * 100);
   return Number.isFinite(discount) && discount > 0 ? discount : undefined;
+}
+
+function isProductLikeKind(kind: ProductKind | string | undefined): boolean {
+  return kind === 'product' || kind === 'deal';
+}
+
+function getKindCounterKey(kind: ProductKind | string | undefined): string {
+  switch (kind) {
+    case 'product':
+    case 'deal':
+      return 'productsFound';
+    case 'voucher':
+      return 'vouchersFound';
+    case 'campaign':
+      return 'campaignsFound';
+    case 'store_offer':
+      return 'storeOffersFound';
+    default:
+      return 'unknownFound';
+  }
 }
 
 function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProductDraft | null {
@@ -324,43 +402,63 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
 
   const discountPercent = calculateDiscountPercent(currentPrice, originalPrice);
 
-  const hasPrice = hasRealPositivePrice(currentPrice) || hasRealPositivePrice(originalPrice);
+  const hasPrice =
+      hasRealPositivePrice(currentPrice) ||
+      hasRealPositivePrice(originalPrice);
+
   const hasAffiliateUrl = Boolean(affiliateUrl);
   const hasImage = Boolean(imageUrl);
-  let needsVerification = !hasAffiliateUrl || !hasImage || !hasPrice;
 
-  // Classify kind using helper — prefer explicit raw kind but fall back to title heuristics
-  const classifiedKind = classifyProductKind({ title, rawSourceKind: rawKind, source: 'accesstrade' });
+  const classifiedKind = classifyProductKind({
+    title,
+    name: title,
+    description,
+    source: 'accesstrade',
+    imageUrl,
+    affiliateUrl: affiliateUrl || undefined,
+    originalUrl: originalUrl || undefined,
+    url: finalUrl,
+    price: originalPrice || currentPrice,
+    salePrice: currentPrice,
+    originalPrice,
+    rawSourceKind: rawKind,
+    sourceType: 'affiliate',
+    raw: rawItem,
+  });
 
-  // For non-product items (voucher/campaign/store offers) keep them internal and unverified
-  const isNonProduct = classifiedKind !== 'product';
+  const isProductLike = isProductLikeKind(classifiedKind);
+  const isNonProduct = !isProductLike;
 
-  if (isNonProduct) {
-    needsVerification = true;
-  }
+  const needsVerification =
+      isNonProduct ||
+      !hasAffiliateUrl ||
+      !hasImage ||
+      !hasPrice;
+
+  const verifiedSource = isProductLike && !needsVerification;
 
   const productDraft = {
     title,
     name: title,
     description: description || undefined,
 
-    // Giữ field chuẩn để các màn hình cũ vẫn đọc được.
     source: 'accesstrade',
     platform: platformText,
 
-    // Thêm field phụ để tránh nhầm giữa platform và nguồn import.
     dataSource: 'accesstrade',
     sourceType: 'affiliate',
     importedFrom: 'accesstrade',
     rawSourceKind: rawKind,
     kind: classifiedKind,
+    sourceItemKind: classifiedKind,
 
-    verifiedSource: !isNonProduct,
-    sourceVerified: !isNonProduct,
+    verifiedSource,
+    sourceVerified: verifiedSource,
     publicHidden: isNonProduct,
     needsVerification,
+    aiApproved: false,
+    approvalMode: 'manual_or_auto_safe_required',
 
-    // Không public tự động. Luôn chờ duyệt.
     status: 'needs_review',
 
     sourceId: sourceId || undefined,
@@ -423,6 +521,7 @@ export class SourceScoutBot {
       source,
       requestedLimit: limit,
       candidatesFound: candidates.length,
+      note: 'Only real product-like candidates are returned to next pipeline steps. Voucher/campaign/store offers stay internal.',
     });
 
     return candidates;
@@ -464,11 +563,22 @@ export class SourceScoutBot {
       const totalLimit = Math.min(Math.max(limit || 10, 1), 20);
       const perKeywordLimit = Math.min(5, Math.max(3, totalLimit));
 
-      const savedProducts: Product[] = [];
+      const pipelineCandidates: Product[] = [];
+
+      let savedInternalCount = 0;
       let returnedCount = 0;
       let duplicateCount = 0;
       let skippedCount = 0;
       let keywordsScanned = 0;
+      let skippedFromPublicCount = 0;
+
+      const kindCounters: Record<string, number> = {
+        productsFound: 0,
+        vouchersFound: 0,
+        campaignsFound: 0,
+        storeOffersFound: 0,
+        unknownFound: 0,
+      };
 
       const existingProducts = await getAllProducts();
 
@@ -495,14 +605,14 @@ export class SourceScoutBot {
       }
 
       for (const keyword of ACCESS_TRADE_KEYWORDS) {
-        if (savedProducts.length >= totalLimit) break;
+        if (savedInternalCount >= totalLimit) break;
 
         keywordsScanned += 1;
 
         await this.ctx.info('Scanning AccessTrade keyword', {
           keyword,
           limit: perKeywordLimit,
-          remainingSlots: totalLimit - savedProducts.length,
+          remainingSlots: totalLimit - savedInternalCount,
         });
 
         let searchResult: unknown;
@@ -531,7 +641,7 @@ export class SourceScoutBot {
         });
 
         for (const rawItem of rawItems) {
-          if (savedProducts.length >= totalLimit) break;
+          if (savedInternalCount >= totalLimit) break;
 
           const productDraft = buildAccessTradeProductDraft(rawItem);
 
@@ -542,6 +652,14 @@ export class SourceScoutBot {
               reason: 'missing_required_real_fields',
             });
             continue;
+          }
+
+          const draftKind = getText(productDraft.sourceItemKind || productDraft.kind) as ProductKind;
+          const kindCounterKey = getKindCounterKey(draftKind);
+          kindCounters[kindCounterKey] = (kindCounters[kindCounterKey] || 0) + 1;
+
+          if (!isProductLikeKind(draftKind)) {
+            skippedFromPublicCount += 1;
           }
 
           const rawSourceId = getText(productDraft.sourceId);
@@ -564,6 +682,7 @@ export class SourceScoutBot {
               keyword,
               sourceId: rawSourceId || null,
               title: mappedTitle || null,
+              kind: draftKind || 'unknown',
             });
             continue;
           }
@@ -578,7 +697,11 @@ export class SourceScoutBot {
                 productDraft as Parameters<typeof createProduct>[0],
             );
 
-            savedProducts.push(saved);
+            savedInternalCount += 1;
+
+            if (isProductLikeKind(draftKind)) {
+              pipelineCandidates.push(saved);
+            }
 
             if (rawSourceId) seenExternalIds.add(rawSourceId);
             if (finalAffiliateUrl) seenUrls.add(normalizeUrl(finalAffiliateUrl));
@@ -591,8 +714,11 @@ export class SourceScoutBot {
               productId: saved.id,
               sourceId: rawSourceId || null,
               title: mappedTitle,
+              kind: draftKind || 'unknown',
               rawSourceKind: productDraft.rawSourceKind,
+              publicHidden: Boolean(productDraft.publicHidden),
               needsVerification: Boolean(productDraft.needsVerification),
+              returnedToPipeline: isProductLikeKind(draftKind),
             });
           } catch (error) {
             skippedCount += 1;
@@ -600,6 +726,7 @@ export class SourceScoutBot {
               keyword,
               sourceId: rawSourceId || null,
               title: mappedTitle || null,
+              kind: draftKind || 'unknown',
               error: error instanceof Error ? error.message : String(error),
             });
           }
@@ -610,12 +737,19 @@ export class SourceScoutBot {
         requestedLimit: limit,
         keywordsScanned,
         returnedCount,
-        savedCount: savedProducts.length,
+        savedInternalCount,
+        pipelineCandidateCount: pipelineCandidates.length,
         duplicateCount,
         skippedCount,
+        skippedFromPublicCount,
+        productsFound: kindCounters.productsFound,
+        vouchersFound: kindCounters.vouchersFound,
+        campaignsFound: kindCounters.campaignsFound,
+        storeOffersFound: kindCounters.storeOffersFound,
+        unknownFound: kindCounters.unknownFound,
       });
 
-      return savedProducts;
+      return pipelineCandidates;
     } catch (error) {
       await this.ctx.error('AccessTrade source scan failed', {
         error: error instanceof Error ? error.message : String(error),
