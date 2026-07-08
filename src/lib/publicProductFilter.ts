@@ -1,50 +1,227 @@
-import type { Product } from './types';
+import type { Product, ProductKind } from './types';
+import {
+  classifyProductKind,
+  looksLikeVoucherOrCampaign,
+} from './sourceItemClassifier';
 
 const DEMO_TITLES = [
   'Tai nghe Bluetooth TWS Pro Max',
   'Balo laptop chống nước 15.6 inch',
 ];
 
-export function looksLikeDemoTitle(title?: string): boolean {
-  if (!title) return false;
-  const t = title.toLowerCase();
-  if (DEMO_TITLES.some(d => d.toLowerCase() === t)) return true;
-  if (t.includes('demo') || t.includes('sample') || t.includes('test product') || t.includes('test')) return true;
-  return false;
+const BROKEN_LINK_STATUSES = new Set<string>([
+  'broken',
+  'broken_link',
+  'not_found',
+  'affiliate_error',
+  'image_broken',
+  'product_unavailable',
+  'server_error',
+  'error',
+  'failed',
+  'dead',
+  'redirect_error',
+  'unavailable',
+  'out_of_stock',
+]);
+
+const UNSAFE_SOURCE_VALUES = new Set<string>([
+  'demo',
+  'sample',
+  'test',
+  'internal',
+  'mock',
+  'placeholder',
+]);
+
+const NON_PUBLIC_KINDS = new Set<ProductKind | string>([
+  'voucher',
+  'campaign',
+  'store_offer',
+  'unknown',
+]);
+
+function normalizeText(value?: unknown): string {
+  if (value === null || value === undefined) return '';
+
+  return String(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[–—]/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim();
 }
 
-export function isPublicSafeProduct(p: Product): boolean {
-  if (!p) return false;
+function hasExternalUrl(product: Product): boolean {
+  const p = product as Product & {
+    url?: unknown;
+    originalUrl?: unknown;
+    affiliateUrl?: unknown;
+    productUrl?: unknown;
+    landingUrl?: unknown;
+  };
 
-  const status = p.status;
-  // Disallowed explicit states
-  if (status === 'archived' || status === 'draft' || status === 'needs_review') return false;
+  const urls = [
+    p.affiliateUrl,
+    p.originalUrl,
+    p.url,
+    p.productUrl,
+    p.landingUrl,
+  ];
 
-  // Must be approved or published
-  if (status !== 'approved' && status !== 'published') return false;
+  return urls.some((url) => typeof url === 'string' && /^https?:\/\//i.test(url));
+}
 
-  // Title must exist and not look demo/test
-  if (!p.title || looksLikeDemoTitle(p.title)) return false;
+function hasPlatformOrSource(product: Product): boolean {
+  const p = product as Product & {
+    platform?: unknown;
+    source?: unknown;
+    dataSource?: unknown;
+  };
 
-  // Must have at least one external link
-  if (!p.affiliateUrl && !p.originalUrl && !(p as any).url) return false;
+  return Boolean(
+      normalizeText(p.platform) ||
+      normalizeText(p.source) ||
+      normalizeText(p.dataSource),
+  );
+}
 
-  // Exclude explicit demo/sample/test flags or sources
-  if ((p as any).isDemo === true || (p as any).isSample === true || (p as any).isTest === true) return false;
-  if ((p as any).source === 'demo' || (p as any).source === 'sample' || (p as any).source === 'test') return false;
+function getEffectiveKind(product: Product): ProductKind {
+  const p = product as Product & {
+    sourceItemKind?: ProductKind;
+    kind?: ProductKind;
+  };
 
-  // Manual source must be verified
-  if (p.source === 'manual' && !(p as any).verifiedSource) return false;
+  return classifyProductKind({
+    ...product,
+    kind: p.sourceItemKind || p.kind,
+  });
+}
 
-  // Platform/source must exist
-  if (!p.platform && !p.source) return false;
+function hasUnsafeFlags(product: Product): boolean {
+  const p = product as Product & {
+    isDemo?: boolean;
+    isSample?: boolean;
+    isTest?: boolean;
+    isInternal?: boolean;
+    publicHidden?: boolean;
+    archived?: boolean;
+    deleted?: boolean;
+    hidden?: boolean;
+  };
 
-  // Link health — treat certain statuses as broken
-  const brokenStatuses = ['not_found', 'affiliate_error', 'image_broken', 'product_unavailable', 'server_error'];
-  if (p.linkHealthStatus && brokenStatuses.includes(p.linkHealthStatus)) return false;
+  return Boolean(
+      p.publicHidden === true ||
+      p.archived === true ||
+      p.deleted === true ||
+      p.hidden === true ||
+      p.isDemo === true ||
+      p.isSample === true ||
+      p.isTest === true ||
+      p.isInternal === true,
+  );
+}
 
-  // Exclude vouchers, campaigns and store offers from public listing
-  if (p.kind === 'voucher' || p.kind === 'campaign' || p.kind === 'store_offer' || p.kind === 'unknown') return false;
+export function looksLikeDemoTitle(title?: string): boolean {
+  if (!title) return false;
+
+  const normalizedTitle = normalizeText(title);
+
+  if (DEMO_TITLES.some((demoTitle) => normalizeText(demoTitle) === normalizedTitle)) {
+    return true;
+  }
+
+  return (
+      normalizedTitle.includes('demo') ||
+      normalizedTitle.includes('sample') ||
+      normalizedTitle.includes('test product') ||
+      normalizedTitle.includes('test san pham') ||
+      normalizedTitle.includes('san pham test') ||
+      normalizedTitle.includes('du lieu test') ||
+      normalizedTitle.includes('placeholder')
+  );
+}
+
+export function isUnsafeSourceValue(source?: unknown): boolean {
+  const normalizedSource = normalizeText(source);
+  if (!normalizedSource) return false;
+
+  return UNSAFE_SOURCE_VALUES.has(normalizedSource);
+}
+
+export function isUnsafePublicKind(kind?: ProductKind | string): boolean {
+  if (!kind) return true;
+  return NON_PUBLIC_KINDS.has(kind);
+}
+
+export function isPublicSafeProduct(product?: Product | null): boolean {
+  if (!product) return false;
+
+  const p = product as Product & {
+    source?: unknown;
+    dataSource?: unknown;
+    linkHealthStatus?: unknown;
+    sourceItemKind?: ProductKind;
+    kind?: ProductKind;
+    verifiedSource?: boolean;
+  };
+
+  const status = normalizeText(p.status);
+
+  // Public chỉ cho approved hoặc published.
+  if (status !== 'approved' && status !== 'published') {
+    return false;
+  }
+
+  // Không cho dữ liệu bị ẩn/lưu trữ/demo/test/sample lọt ra public.
+  if (hasUnsafeFlags(product)) {
+    return false;
+  }
+
+  // Title phải có và không được là demo/test.
+  if (!p.title || looksLikeDemoTitle(p.title)) {
+    return false;
+  }
+
+  // Chặn voucher/campaign/store offer bằng cả kind và heuristic title.
+  const effectiveKind = getEffectiveKind(product);
+
+  if (isUnsafePublicKind(effectiveKind)) {
+    return false;
+  }
+
+  // Dữ liệu cũ có thể chưa có kind/sourceItemKind, nên vẫn phải soi theo title.
+  if (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(p.title)) {
+    return false;
+  }
+
+  // Không cho source demo/sample/test/internal.
+  if (isUnsafeSourceValue(p.source) || isUnsafeSourceValue(p.dataSource)) {
+    return false;
+  }
+
+  // Phải có nền tảng hoặc nguồn dữ liệu.
+  if (!hasPlatformOrSource(product)) {
+    return false;
+  }
+
+  // Phải có link mua hàng/affiliate thật.
+  if (!hasExternalUrl(product)) {
+    return false;
+  }
+
+  // Manual source phải được xác minh.
+  if (normalizeText(p.source) === 'manual' && p.verifiedSource !== true) {
+    return false;
+  }
+
+  // Chặn link lỗi/hết hàng/unavailable.
+  const linkHealthStatus = normalizeText(p.linkHealthStatus);
+
+  if (linkHealthStatus && BROKEN_LINK_STATUSES.has(linkHealthStatus)) {
+    return false;
+  }
 
   return true;
 }
