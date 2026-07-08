@@ -2142,3 +2142,913 @@ tr:hover td {
     min-width: 0;
   }
 }
+
+
+/* ===========================================
+   DASHBOARD COMPATIBILITY PATCH
+   Fix for legacy /dashboard pages after public marketplace redesign.
+   This keeps the public site untouched and restores old dashboard class aliases.
+   =========================================== */
+
+/* Shell aliases used by older dashboard pages */
+.dashboard-shell,
+.dashboard-layout,
+.dashboard-app-shell,
+.admin-shell,
+.admin-layout {
+  display: flex;
+  min-height: 100vh;
+  color: var(--text-primary);
+  background:
+          radial-gradient(circle at 0% 0%, rgba(124, 58, 237, 0.08), transparent 32%),
+          radial-gradient(circle at 100% 0%, rgba(6, 182, 212, 0.05), transparent 30%),
+          var(--bg-primary);
+}
+
+.dashboard-shell *,
+.dashboard-layout *,
+.dashboard-app-shell *,
+.admin-shell *,
+.admin-layout *,
+.app-shell * {
+  box-sizing: border-box;
+}
+
+/* Sidebar aliases */
+.dashboard-sidebar,
+.admin-sidebar,
+.side-nav,
+.left-sidebar,
+.aside-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  color: var(--text-primary);
+  background: rgba(10, 14, 24, 0.96);
+  border-right: 1px solid var(--border-primary);
+  overflow-y: auto;
+}
+
+.dashboard-brand,
+.admin-brand,
+.sidebar-logo {
+  padding: var(--space-lg) var(--space-md) var(--space-md);
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.dashboard-brand h1,
+.dashboard-brand h2,
+.dashboard-brand strong,
+.admin-brand h1,
+.admin-brand h2,
+.admin-brand strong,
+.sidebar-logo h1,
+.sidebar-logo h2 {
+  display: block;
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+  font-weight: 950;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.dashboard-brand p,
+.admin-brand p,
+.sidebar-logo p {
+  margin-top: 4px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dashboard-nav,
+.admin-nav,
+.nav-sections,
+.sidebar-menu {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-sm);
+}
+
+.dashboard-nav-section,
+.nav-section,
+.admin-nav-section {
+  padding: var(--space-xs) 0;
+}
+
+.dashboard-nav-title,
+.nav-section-title,
+.nav-label,
+.admin-nav-title {
+  display: block;
+  padding: var(--space-md) var(--space-sm) var(--space-xs);
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.dashboard-nav a,
+.admin-nav a,
+.nav-sections a,
+.sidebar-menu a,
+.dashboard-nav-link,
+.nav-item,
+.nav-link,
+.admin-nav-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  width: 100%;
+  padding: 9px 12px;
+  margin-bottom: 2px;
+  color: var(--text-tertiary);
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  line-height: 1.25;
+  text-decoration: none;
+  transition: all var(--transition-fast);
+}
+
+.dashboard-nav a:hover,
+.admin-nav a:hover,
+.nav-sections a:hover,
+.sidebar-menu a:hover,
+.dashboard-nav-link:hover,
+.nav-item:hover,
+.nav-link:hover,
+.admin-nav-link:hover {
+  color: var(--text-primary);
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.dashboard-nav a.active,
+.dashboard-nav a[aria-current='page'],
+.admin-nav a.active,
+.admin-nav a[aria-current='page'],
+.nav-sections a.active,
+.nav-sections a[aria-current='page'],
+.sidebar-menu a.active,
+.sidebar-menu a[aria-current='page'],
+.dashboard-nav-link.active,
+.nav-item.active,
+.nav-link.active,
+.admin-nav-link.active {
+  color: #ffffff;
+  background: rgba(124, 58, 237, 0.16);
+}
+
+.dashboard-nav a.active::before,
+.dashboard-nav a[aria-current='page']::before,
+.admin-nav a.active::before,
+.admin-nav a[aria-current='page']::before,
+.nav-sections a.active::before,
+.nav-sections a[aria-current='page']::before,
+.sidebar-menu a.active::before,
+.sidebar-menu a[aria-current='page']::before,
+.dashboard-nav-link.active::before,
+.nav-item.active::before,
+.nav-link.active::before,
+.admin-nav-link.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 0 6px 6px 0;
+  background: var(--gradient-accent);
+}
+
+.dashboard-nav svg,
+.admin-nav svg,
+.nav-sections svg,
+.sidebar-menu svg,
+.sidebar-link svg,
+.dashboard-nav-link svg,
+.nav-item svg,
+.nav-link svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.dashboard-sidebar-footer,
+.admin-sidebar-footer,
+.sidebar-status,
+.sidebar-safe-card {
+  margin-top: auto;
+  padding: var(--space-sm);
+  border-top: 1px solid var(--border-primary);
+}
+
+.dashboard-sidebar-footer > *,
+.admin-sidebar-footer > *,
+.sidebar-status > *,
+.sidebar-safe-card {
+  padding: var(--space-sm) var(--space-md);
+  background: rgba(124, 58, 237, 0.08);
+  border: 1px solid rgba(124, 58, 237, 0.16);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+/* Main aliases */
+.dashboard-main,
+.admin-main,
+.main-panel,
+.content-shell {
+  flex: 1;
+  min-width: 0;
+  margin-left: var(--sidebar-width);
+  color: var(--text-primary);
+}
+
+.dashboard-topbar,
+.admin-topbar,
+.page-topbar,
+.header-bar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  min-height: var(--topbar-height);
+  padding: 0 var(--space-xl);
+  color: var(--text-primary);
+  background: rgba(6, 8, 15, 0.82);
+  border-bottom: 1px solid var(--border-primary);
+  backdrop-filter: blur(18px);
+}
+
+.dashboard-topbar h1,
+.dashboard-topbar h2,
+.admin-topbar h1,
+.admin-topbar h2,
+.page-topbar h1,
+.page-topbar h2,
+.header-bar h1,
+.header-bar h2 {
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.dashboard-content,
+.admin-content,
+.dashboard-page,
+.page-panel,
+.content-panel {
+  width: 100%;
+  max-width: var(--max-content);
+  padding: var(--space-xl);
+}
+
+.dashboard-content > * + *,
+.admin-content > * + *,
+.dashboard-page > * + *,
+.page-panel > * + *,
+.content-panel > * + * {
+  margin-top: var(--space-lg);
+}
+
+/* Make old dashboard headings readable */
+.dashboard-shell h1,
+.dashboard-layout h1,
+.dashboard-app-shell h1,
+.admin-shell h1,
+.admin-layout h1,
+.app-shell h1,
+.main-content h1,
+.dashboard-main h1,
+.admin-main h1 {
+  color: var(--text-primary);
+  font-weight: 950;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.dashboard-shell h2,
+.dashboard-layout h2,
+.dashboard-app-shell h2,
+.admin-shell h2,
+.admin-layout h2,
+.app-shell h2,
+.main-content h2,
+.dashboard-main h2,
+.admin-main h2 {
+  color: var(--text-primary);
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.dashboard-shell p,
+.dashboard-layout p,
+.dashboard-app-shell p,
+.admin-shell p,
+.admin-layout p,
+.app-shell p,
+.main-content p,
+.dashboard-main p,
+.admin-main p {
+  color: var(--text-secondary);
+}
+
+/* Buttons inside dashboard, including buttons without classes */
+.app-shell button:not(.market-chip):not(.market-deal-cta),
+.dashboard-shell button:not(.market-chip):not(.market-deal-cta),
+.dashboard-layout button:not(.market-chip):not(.market-deal-cta),
+.dashboard-app-shell button:not(.market-chip):not(.market-deal-cta),
+.admin-shell button:not(.market-chip):not(.market-deal-cta),
+.admin-layout button:not(.market-chip):not(.market-deal-cta),
+.main-content button:not(.market-chip):not(.market-deal-cta),
+.dashboard-main button:not(.market-chip):not(.market-deal-cta),
+.admin-main button:not(.market-chip):not(.market-deal-cta) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  min-height: 38px;
+  padding: 9px 15px;
+  color: var(--text-primary);
+  background: rgba(148, 163, 184, 0.06);
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 800;
+  line-height: 1.25;
+  transition: all var(--transition-fast);
+}
+
+.app-shell button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.dashboard-shell button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.dashboard-layout button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.dashboard-app-shell button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.admin-shell button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.admin-layout button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.main-content button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.dashboard-main button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled),
+.admin-main button:not(.market-chip):not(.market-deal-cta):hover:not(:disabled) {
+  color: #ffffff;
+  background: rgba(124, 58, 237, 0.16);
+  border-color: rgba(124, 58, 237, 0.34);
+  transform: translateY(-1px);
+}
+
+.app-shell button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.dashboard-shell button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.dashboard-layout button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.dashboard-app-shell button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.admin-shell button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.admin-layout button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.main-content button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.dashboard-main button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip),
+.admin-main button:first-of-type:not(.view-toggle-btn):not(.tab-btn):not(.filter-chip) {
+  color: #ffffff;
+  background: var(--gradient-accent);
+  border-color: transparent;
+}
+
+/* Forms inside dashboard */
+.app-shell input,
+.app-shell select,
+.app-shell textarea,
+.dashboard-shell input,
+.dashboard-shell select,
+.dashboard-shell textarea,
+.dashboard-layout input,
+.dashboard-layout select,
+.dashboard-layout textarea,
+.dashboard-app-shell input,
+.dashboard-app-shell select,
+.dashboard-app-shell textarea,
+.admin-shell input,
+.admin-shell select,
+.admin-shell textarea,
+.admin-layout input,
+.admin-layout select,
+.admin-layout textarea,
+.main-content input,
+.main-content select,
+.main-content textarea,
+.dashboard-main input,
+.dashboard-main select,
+.dashboard-main textarea,
+.admin-main input,
+.admin-main select,
+.admin-main textarea {
+  color: var(--text-primary);
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+.app-shell input,
+.dashboard-shell input,
+.dashboard-layout input,
+.dashboard-app-shell input,
+.admin-shell input,
+.admin-layout input,
+.main-content input,
+.dashboard-main input,
+.admin-main input {
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+.app-shell select,
+.dashboard-shell select,
+.dashboard-layout select,
+.dashboard-app-shell select,
+.admin-shell select,
+.admin-layout select,
+.main-content select,
+.dashboard-main select,
+.admin-main select {
+  min-height: 40px;
+  padding: 0 36px 0 14px;
+}
+
+/* Dashboard command center compatibility */
+.ai-command-center,
+.command-center,
+.command-page,
+.bot-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+}
+
+.command-hero,
+.ai-hero,
+.command-panel,
+.boss-panel,
+.dashboard-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xl);
+  width: 100%;
+  min-height: 260px;
+  padding: var(--space-xl);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(12px);
+}
+
+.command-hero-actions,
+.hero-actions,
+.action-row,
+.actions-row,
+.dashboard-actions,
+.bot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.command-hero-panel,
+.hero-metrics,
+.system-status-panel,
+.status-panel {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 260px;
+}
+
+.command-hero-panel > *,
+.hero-metrics > *,
+.system-status-panel > *,
+.status-panel > *,
+.status-row,
+.metric-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  min-height: 38px;
+  padding: 8px 12px;
+  background: rgba(148, 163, 184, 0.05);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.command-hero-panel strong,
+.hero-metrics strong,
+.system-status-panel strong,
+.status-panel strong,
+.metric-row strong {
+  color: var(--text-primary);
+}
+
+/* Bot cards */
+.bot-grid,
+.ai-bot-grid,
+.bots-grid,
+.agent-grid,
+.ai-team-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
+  gap: var(--space-md);
+}
+
+.bot-card,
+.ai-bot-card,
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-height: 190px;
+  padding: var(--space-lg);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(12px);
+  transition: all var(--transition-base);
+}
+
+.bot-card:hover,
+.ai-bot-card:hover,
+.agent-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.bot-card-header,
+.ai-bot-card-header,
+.agent-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
+.bot-avatar,
+.bot-initial,
+.agent-avatar,
+.ai-bot-avatar {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  color: var(--color-primary-light);
+  background: rgba(124, 58, 237, 0.14);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.bot-title,
+.ai-bot-title,
+.agent-title {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 900;
+  line-height: 1.3;
+}
+
+.bot-desc,
+.ai-bot-desc,
+.agent-desc {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.bot-status,
+.ai-bot-status,
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 4px 10px;
+  color: var(--text-secondary);
+  background: rgba(148, 163, 184, 0.08);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.bot-status.ready,
+.ai-bot-status.ready,
+.agent-status.ready,
+.bot-status.success,
+.ai-bot-status.success,
+.agent-status.success {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.bot-stats,
+.ai-bot-stats,
+.agent-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-sm);
+  margin-top: auto;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-primary);
+}
+
+.bot-stat,
+.ai-bot-stat,
+.agent-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.bot-stat strong,
+.ai-bot-stat strong,
+.agent-stat strong {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 950;
+}
+
+/* Workflow cards and timeline compatibility */
+.workflow,
+.workflow-plan,
+.boss-plan,
+.ai-boss-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.workflow-steps,
+.workflow-timeline,
+.boss-steps,
+.ai-boss-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(140px, 1fr));
+  gap: 4px;
+  width: 100%;
+}
+
+.workflow-step,
+.workflow-step-card,
+.boss-step,
+.ai-boss-step {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  min-height: 110px;
+  padding: var(--space-md);
+  color: var(--text-secondary);
+  text-align: center;
+  background: rgba(148, 163, 184, 0.04);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+}
+
+.workflow-step.active,
+.workflow-step-card.active,
+.boss-step.active,
+.ai-boss-step.active {
+  color: var(--text-primary);
+  border-color: rgba(124, 58, 237, 0.3);
+  background: rgba(124, 58, 237, 0.08);
+}
+
+.workflow-step.done,
+.workflow-step-card.done,
+.boss-step.done,
+.ai-boss-step.done {
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+.workflow-step-number,
+.workflow-step-num,
+.boss-step-number,
+.ai-boss-step-number {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--color-primary-light);
+  background: rgba(124, 58, 237, 0.14);
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+/* Product dashboard compatibility */
+.products-toolbar,
+.dashboard-toolbar,
+.filters-panel,
+.filter-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  margin-bottom: var(--space-lg);
+  background: rgba(148, 163, 184, 0.025);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+}
+
+.products-toolbar input,
+.dashboard-toolbar input,
+.filters-panel input,
+.filter-panel input {
+  min-width: 240px;
+}
+
+.product-table,
+.products-table,
+.dashboard-table {
+  width: 100%;
+  overflow-x: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.product-title-cell,
+.product-cell,
+.table-product-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 260px;
+}
+
+.product-thumb,
+.product-image-thumb,
+.table-thumb {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+}
+
+.product-thumb img,
+.product-image-thumb img,
+.table-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.row-actions,
+.table-actions,
+.product-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.row-actions a,
+.table-actions a,
+.product-actions a {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.row-actions a:hover,
+.table-actions a:hover,
+.product-actions a:hover {
+  color: var(--color-accent-light);
+}
+
+/* Force dashboard sections to keep good spacing even if old pages use plain divs */
+.app-shell section,
+.dashboard-shell section,
+.dashboard-layout section,
+.dashboard-app-shell section,
+.admin-shell section,
+.admin-layout section,
+.main-content section,
+.dashboard-main section,
+.admin-main section {
+  margin-bottom: var(--space-xl);
+}
+
+.app-shell hr,
+.dashboard-shell hr,
+.dashboard-layout hr,
+.dashboard-app-shell hr,
+.admin-shell hr,
+.admin-layout hr,
+.main-content hr,
+.dashboard-main hr,
+.admin-main hr {
+  border: 0;
+  border-top: 1px solid var(--border-primary);
+}
+
+/* Mobile dashboard aliases */
+@media (max-width: 768px) {
+  .dashboard-sidebar,
+  .admin-sidebar,
+  .side-nav,
+  .left-sidebar,
+  .aside-nav {
+    transform: translateX(-100%);
+    transition: transform var(--transition-base);
+  }
+
+  .dashboard-sidebar.open,
+  .admin-sidebar.open,
+  .side-nav.open,
+  .left-sidebar.open,
+  .aside-nav.open {
+    transform: translateX(0);
+  }
+
+  .dashboard-main,
+  .admin-main,
+  .main-panel,
+  .content-shell {
+    margin-left: 0;
+  }
+
+  .dashboard-content,
+  .admin-content,
+  .dashboard-page,
+  .page-panel,
+  .content-panel {
+    padding: var(--space-md);
+  }
+
+  .dashboard-topbar,
+  .admin-topbar,
+  .page-topbar,
+  .header-bar {
+    padding: 0 var(--space-md);
+  }
+
+  .command-hero,
+  .ai-hero,
+  .command-panel,
+  .boss-panel,
+  .dashboard-hero {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workflow-steps,
+  .workflow-timeline,
+  .boss-steps,
+  .ai-boss-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .bot-grid,
+  .ai-bot-grid,
+  .bots-grid,
+  .agent-grid,
+  .ai-team-grid {
+    grid-template-columns: 1fr;
+  }
+}
