@@ -1,6 +1,12 @@
 'use client';
 
-import { type ChangeEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import Link from 'next/link';
 import type { Product, ProductKind } from '@/lib/types';
 
@@ -24,6 +30,8 @@ type Toast = {
 
 type AccessTradeItem = Record<string, unknown> & {
   id?: string;
+  productId?: string;
+  sourceId?: string;
   name?: string;
   title?: string;
   description?: string;
@@ -32,8 +40,11 @@ type AccessTradeItem = Record<string, unknown> & {
   imageUrl?: string;
   originalUrl?: string;
   affiliateUrl?: string;
+  url?: string;
   price?: number | string;
   salePrice?: number | string;
+  currentPrice?: number | string;
+  originalPrice?: number | string;
   category?: string;
   campaignName?: string;
   rawSourceKind?: string;
@@ -45,6 +56,10 @@ type AccessTradeItem = Record<string, unknown> & {
   publicDecision?: string;
   publicBlockReason?: string;
   nonProductReason?: string;
+  autoPublishBlockedReason?: string;
+  unpublishedReason?: string;
+  linkHealthStatus?: string;
+  imageHealthStatus?: string;
   qualityScore?: number | string;
   sourceQualityScore?: number | string;
   rawData?: Record<string, unknown>;
@@ -70,6 +85,7 @@ type AccessTradeResults = {
     needsReview?: number;
     archived?: number;
     blockedFromPublic?: number;
+    nonProducts?: number;
   };
 };
 
@@ -106,7 +122,8 @@ const EMPTY_FORM = {
   affiliateSource: '',
   campaignName: '',
   commissionNote: '',
-  affiliateDisclosure: 'Bài viết có thể chứa link affiliate. Giá của bạn không thay đổi.',
+  affiliateDisclosure:
+      'Bài viết có thể chứa link affiliate. Giá của bạn không thay đổi.',
   benefits: '',
   painPoints: '',
   targetAudience: '',
@@ -135,12 +152,34 @@ const KIND_BADGES: Record<string, string> = {
   unknown: 'badge-neutral',
 };
 
-const PUBLIC_DECISION_LABELS: Record<string, { label: string; badge: string }> = {
-  public_candidate: { label: 'Ứng viên public', badge: 'badge-info' },
-  needs_review: { label: 'Cần xem xét', badge: 'badge-warning' },
-  archived: { label: 'Lưu nội bộ', badge: 'badge-neutral' },
-  blocked: { label: 'Bị chặn', badge: 'badge-danger' },
+const PUBLIC_DECISION_LABELS: Record<string, { label: string; badge: string }> =
+    {
+      public_candidate: { label: 'Ứng viên nguồn', badge: 'badge-info' },
+      needs_review: { label: 'Cần xem xét', badge: 'badge-warning' },
+      archived: { label: 'Lưu nội bộ', badge: 'badge-neutral' },
+      blocked: { label: 'Bị chặn', badge: 'badge-danger' },
+    };
+
+const PLATFORM_LABELS: Record<string, string> = {
+  shopee: 'Shopee',
+  tiktok_shop: 'TikTok Shop',
+  lazada: 'Lazada',
+  accesstrade: 'AccessTrade',
+  website: 'Website',
+  tiki: 'Tiki',
+  sendo: 'Sendo',
+  fahasa: 'Fahasa',
+  other: 'Khác',
 };
+
+const ACCESS_TRADE_KEYWORD_SUGGESTIONS = [
+  'tai nghe',
+  'serum',
+  'sữa tắm',
+  'kem chống nắng',
+  'sạc dự phòng',
+  'nồi chiên không dầu',
+];
 
 function splitLines(value: string): string[] {
   return value
@@ -154,17 +193,6 @@ function splitTags(value: string): string[] {
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean);
-}
-
-function parsePrice(value: string): number | undefined {
-  if (!value.trim()) return undefined;
-
-  const digitsOnly = value.replace(/[^\d]/g, '');
-  if (!digitsOnly) return undefined;
-
-  const parsed = Number(digitsOnly);
-
-  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
 }
 
 function normalizeText(value: unknown): string {
@@ -185,21 +213,213 @@ function getString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function getNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 1000) return value;
+function parseMoneyNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
 
-  if (typeof value === 'string') {
-    if (/%/.test(value)) return undefined;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 1000 ? value : undefined;
+  }
 
-    const parsed = Number(value.replace(/[^\d]/g, ''));
+  if (typeof value !== 'string') return undefined;
+
+  const trimmed = value.trim();
+  if (!trimmed || /%/.test(trimmed)) return undefined;
+
+  const normalized = normalizeText(trimmed);
+
+  if (
+      normalized.includes('mien phi') ||
+      normalized.includes('free') ||
+      normalized.includes('lien he') ||
+      normalized.includes('contact')
+  ) {
+    return undefined;
+  }
+
+  const millionMatch = normalized.match(
+      /(\d+(?:[.,]\d+)?)\s*(trieu|million)\b/i,
+  );
+
+  if (millionMatch) {
+    const parsed = Number(millionMatch[1].replace(',', '.')) * 1_000_000;
+    return Number.isFinite(parsed) && parsed >= 1000
+        ? Math.round(parsed)
+        : undefined;
+  }
+
+  const thousandMatch = normalized.match(
+      /(\d+(?:[.,]\d+)?)\s*(k|nghin|ngan)\b/i,
+  );
+
+  if (thousandMatch) {
+    const parsed = Number(thousandMatch[1].replace(',', '.')) * 1000;
+    return Number.isFinite(parsed) && parsed >= 1000
+        ? Math.round(parsed)
+        : undefined;
+  }
+
+  const groupedNumberMatch = trimmed.match(/\d{1,3}(?:[.,]\d{3})+/);
+
+  if (groupedNumberMatch) {
+    const parsed = Number(groupedNumberMatch[0].replace(/[^\d]/g, ''));
+    return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
+  }
+
+  const plainNumberMatch = trimmed.match(/\d{4,}/);
+
+  if (plainNumberMatch) {
+    const parsed = Number(plainNumberMatch[0]);
     return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
   }
 
   return undefined;
 }
 
+function parsePrice(value: string): number | undefined {
+  return parseMoneyNumber(value);
+}
+
+function getNumber(value: unknown): number | undefined {
+  return parseMoneyNumber(value);
+}
+
 function getBoolean(value: unknown): boolean {
-  return value === true || value === 'true';
+  const normalized = normalizeText(value);
+
+  return (
+      value === true ||
+      value === 1 ||
+      normalized === 'true' ||
+      normalized === 'yes'
+  );
+}
+
+function isValidHttpUrl(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+
+  const url = value.trim();
+
+  if (!/^https?:\/\//i.test(url)) return false;
+
+  try {
+    const parsed = new URL(url);
+
+    return (
+        Boolean(parsed.hostname) &&
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isValidImageUrl(value: unknown): boolean {
+  if (!isValidHttpUrl(value)) return false;
+
+  const normalized = normalizeText(value);
+
+  return !(
+      normalized.includes('placeholder') ||
+      normalized.includes('sample') ||
+      normalized.includes('demo') ||
+      normalized.includes('fake')
+  );
+}
+
+function getPlatformLabel(platform: unknown): string {
+  const value = getString(platform) || 'other';
+
+  return PLATFORM_LABELS[value] || value || 'Khác';
+}
+
+function translateInternalReason(value: unknown): string {
+  const raw = getString(value);
+  const normalized = normalizeText(raw);
+
+  if (!normalized) return '';
+
+  if (normalized === 'auto_mode_disabled') {
+    return 'AutoPilot đang tắt hoặc chưa cho phép tự public.';
+  }
+
+  if (normalized === 'free_only_guard_failed') {
+    return 'Free Only Guard chưa đạt yêu cầu.';
+  }
+
+  if (
+      normalized.startsWith('blocked_non_product_kind_') ||
+      normalized.startsWith('blocked_kind_')
+  ) {
+    return 'Loại dữ liệu này không phải sản phẩm cụ thể.';
+  }
+
+  if (normalized === 'missing_or_too_short_title') {
+    return 'Thiếu tên sản phẩm hoặc tên quá ngắn.';
+  }
+
+  if (normalized === 'title_not_specific_enough') {
+    return 'Tên chưa đủ cụ thể để xác định sản phẩm thật.';
+  }
+
+  if (normalized === 'title_looks_like_voucher_campaign_or_store_offer') {
+    return 'Tên giống voucher/campaign/ưu đãi shop.';
+  }
+
+  if (normalized === 'classifier_detected_voucher_or_campaign') {
+    return 'Bộ phân loại phát hiện dữ liệu giống voucher hoặc campaign.';
+  }
+
+  if (
+      normalized === 'source_not_verified_for_auto_publish' ||
+      normalized === 'source_not_verified'
+  ) {
+    return 'Nguồn sản phẩm chưa được xác minh.';
+  }
+
+  if (normalized === 'missing_platform') {
+    return 'Thiếu nền tảng hoặc nguồn sản phẩm.';
+  }
+
+  if (normalized === 'missing_affiliate_url') {
+    return 'Thiếu affiliate link hợp lệ.';
+  }
+
+  if (normalized === 'missing_product_url') {
+    return 'Thiếu link sản phẩm hợp lệ.';
+  }
+
+  if (
+      normalized === 'missing_image' ||
+      normalized === 'missing_image_before_health_check'
+  ) {
+    return 'Thiếu ảnh sản phẩm.';
+  }
+
+  if (normalized === 'missing_real_price') {
+    return 'Thiếu giá sản phẩm thật.';
+  }
+
+  if (normalized === 'needs_verification') {
+    return 'Sản phẩm đang cần xác minh thêm.';
+  }
+
+  if (normalized.startsWith('public_decision_')) {
+    return 'Quyết định Safe Publish hiện đang chặn sản phẩm.';
+  }
+
+  if (normalized === 'source_quality_score_too_low') {
+    return 'Điểm chất lượng nguồn thấp.';
+  }
+
+  if (normalized === 'missing_link_before_health_check') {
+    return 'Thiếu link trước khi kiểm tra sức khoẻ sản phẩm.';
+  }
+
+  if (normalized.startsWith('health_check_error')) {
+    return 'Lỗi khi kiểm tra link hoặc ảnh, cần xem xét lại.';
+  }
+
+  return raw;
 }
 
 function getKind(value: unknown): ProductKind | 'unknown' {
@@ -224,7 +444,12 @@ function isRealProductKind(kind?: ProductKind | string): boolean {
 }
 
 function isNonProductKind(kind?: ProductKind | string): boolean {
-  return kind === 'voucher' || kind === 'campaign' || kind === 'store_offer' || kind === 'unknown';
+  return (
+      kind === 'voucher' ||
+      kind === 'campaign' ||
+      kind === 'store_offer' ||
+      kind === 'unknown'
+  );
 }
 
 function getKindLabel(kind?: ProductKind | string) {
@@ -237,8 +462,10 @@ function getKindBadge(kind?: ProductKind | string) {
 
 function getNonProductReason(kind?: ProductKind | string): string {
   if (kind === 'store_offer') return 'Chưa phải sản phẩm cụ thể.';
-  if (kind === 'voucher') return 'Voucher/mã giảm giá không public như sản phẩm.';
-  if (kind === 'campaign') return 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
+  if (kind === 'voucher')
+    return 'Voucher/mã giảm giá không public như sản phẩm.';
+  if (kind === 'campaign')
+    return 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
   if (kind === 'unknown') return 'Chưa xác định được đây là sản phẩm thật.';
   return '';
 }
@@ -281,15 +508,69 @@ function getAtItemMainReason(item: AccessTradeItem): string {
   const kind = getAtItemKind(item);
 
   return (
-      getString(item.publicBlockReason) ||
-      getString(item.nonProductReason) ||
+      translateInternalReason(item.publicBlockReason) ||
+      translateInternalReason(item.nonProductReason) ||
+      translateInternalReason(item.autoPublishBlockedReason) ||
+      translateInternalReason(item.unpublishedReason) ||
       getNonProductReason(kind) ||
       (getBoolean(item.needsVerification)
           ? 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.'
           : isRealProductKind(kind)
-              ? 'Sản phẩm sẽ được kiểm link/ảnh/giá trước khi public.'
+              ? 'Đây mới là ứng viên nguồn; vẫn phải qua Health Guard trước khi public.'
               : 'Không public tự động.')
   );
+}
+
+function getAtItemId(item: AccessTradeItem, fallbackIndex?: number): string {
+  return (
+      getString(item.id) ||
+      getString(item.productId) ||
+      getString(item.sourceId) ||
+      getString(item.affiliateUrl) ||
+      getString(item.originalUrl) ||
+      getString(item.name) ||
+      getString(item.title) ||
+      `accesstrade-item-${fallbackIndex ?? 0}`
+  );
+}
+
+function getAtItemValidationIssues(item: AccessTradeItem): string[] {
+  const kind = getAtItemKind(item);
+  const issues: string[] = [];
+
+  if (!isRealProductKind(kind)) {
+    const nonProductReason = getNonProductReason(kind);
+    if (nonProductReason) issues.push(nonProductReason);
+    return issues;
+  }
+
+  if (!getAtItemName(item) || getAtItemName(item) === 'Không có tên') {
+    issues.push('Thiếu tên sản phẩm.');
+  }
+
+  if (!isValidHttpUrl(item.affiliateUrl)) {
+    issues.push('Thiếu affiliate link hợp lệ.');
+  }
+
+  if (!isValidImageUrl(item.imageUrl)) {
+    issues.push('Thiếu ảnh sản phẩm hợp lệ.');
+  }
+
+  if (!getNumber(item.salePrice) && !getNumber(item.price)) {
+    issues.push('Thiếu giá sản phẩm thật.');
+  }
+
+  if (!(item.verifiedSource === true || item.sourceVerified === true)) {
+    issues.push('Nguồn chưa được xác minh đầy đủ.');
+  }
+
+  const qualityScore = getAtQualityScore(item);
+
+  if (qualityScore === null || qualityScore < 70) {
+    issues.push('Điểm chất lượng nguồn chưa đạt 70.');
+  }
+
+  return issues;
 }
 
 function getAtPublicDecision(item: AccessTradeItem) {
@@ -305,7 +586,7 @@ function getAtPublicDecision(item: AccessTradeItem) {
   }
 
   if (getBoolean(item.autoPublishEligible)) {
-    return { label: 'Ứng viên public', badge: 'badge-info' };
+    return { label: 'Ứng viên nguồn', badge: 'badge-info' };
   }
 
   return { label: 'Cần xem xét', badge: 'badge-warning' };
@@ -313,18 +594,28 @@ function getAtPublicDecision(item: AccessTradeItem) {
 
 function getAtQualityScore(item: AccessTradeItem): number | null {
   const raw = item.qualityScore ?? item.sourceQualityScore;
-  const score = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : undefined;
+  const score =
+      typeof raw === 'number'
+          ? raw
+          : typeof raw === 'string'
+              ? Number(raw)
+              : undefined;
 
   if (score === undefined || !Number.isFinite(score)) return null;
 
   return Math.round(score);
 }
 
-function countAtItems(items: AccessTradeItem[], kind: ProductKind | string): number {
+function countAtItems(
+    items: AccessTradeItem[],
+    kind: ProductKind | string,
+): number {
   return items.filter((item) => getAtItemKind(item) === kind).length;
 }
 
-function normalizeAtResults(data: AccessTradeResults | AccessTradeItem[] | undefined): AccessTradeResults {
+function normalizeAtResults(
+    data: AccessTradeResults | AccessTradeItem[] | undefined,
+): AccessTradeResults {
   if (Array.isArray(data)) {
     return {
       items: data,
@@ -335,14 +626,24 @@ function normalizeAtResults(data: AccessTradeResults | AccessTradeItem[] | undef
       unknown: data.filter((item) => getAtItemKind(item) === 'unknown'),
       summary: {
         total: data.length,
-        products: data.filter((item) => isRealProductKind(getAtItemKind(item))).length,
-        realProducts: data.filter((item) => isRealProductKind(getAtItemKind(item))).length,
+        products: data.filter((item) => isRealProductKind(getAtItemKind(item)))
+            .length,
+        realProducts: data.filter((item) =>
+            isRealProductKind(getAtItemKind(item)),
+        ).length,
         vouchers: countAtItems(data, 'voucher'),
         campaigns: countAtItems(data, 'campaign'),
         storeOffers: countAtItems(data, 'store_offer'),
         unknown: countAtItems(data, 'unknown'),
-        publicEligibleProducts: data.filter((item) => getBoolean(item.autoPublishEligible)).length,
-        blockedFromPublic: data.filter((item) => !getBoolean(item.autoPublishEligible)).length,
+        publicEligibleProducts: data.filter((item) =>
+            getBoolean(item.autoPublishEligible),
+        ).length,
+        blockedFromPublic: data.filter(
+            (item) => !getBoolean(item.autoPublishEligible),
+        ).length,
+        nonProducts: data.filter((item) =>
+            isNonProductKind(getAtItemKind(item)),
+        ).length,
       },
     };
   }
@@ -351,13 +652,21 @@ function normalizeAtResults(data: AccessTradeResults | AccessTradeItem[] | undef
 
   return {
     items,
-    products: Array.isArray(data?.products) ? data.products : items.filter((item) => isRealProductKind(getAtItemKind(item))),
-    vouchers: Array.isArray(data?.vouchers) ? data.vouchers : items.filter((item) => getAtItemKind(item) === 'voucher'),
-    campaigns: Array.isArray(data?.campaigns) ? data.campaigns : items.filter((item) => getAtItemKind(item) === 'campaign'),
+    products: Array.isArray(data?.products)
+        ? data.products
+        : items.filter((item) => isRealProductKind(getAtItemKind(item))),
+    vouchers: Array.isArray(data?.vouchers)
+        ? data.vouchers
+        : items.filter((item) => getAtItemKind(item) === 'voucher'),
+    campaigns: Array.isArray(data?.campaigns)
+        ? data.campaigns
+        : items.filter((item) => getAtItemKind(item) === 'campaign'),
     storeOffers: Array.isArray(data?.storeOffers)
         ? data.storeOffers
         : items.filter((item) => getAtItemKind(item) === 'store_offer'),
-    unknown: Array.isArray(data?.unknown) ? data.unknown : items.filter((item) => getAtItemKind(item) === 'unknown'),
+    unknown: Array.isArray(data?.unknown)
+        ? data.unknown
+        : items.filter((item) => getAtItemKind(item) === 'unknown'),
     summary: {
       total: data?.summary?.total ?? items.length,
       products:
@@ -370,7 +679,8 @@ function normalizeAtResults(data: AccessTradeResults | AccessTradeItem[] | undef
           items.filter((item) => isRealProductKind(getAtItemKind(item))).length,
       vouchers: data?.summary?.vouchers ?? countAtItems(items, 'voucher'),
       campaigns: data?.summary?.campaigns ?? countAtItems(items, 'campaign'),
-      storeOffers: data?.summary?.storeOffers ?? countAtItems(items, 'store_offer'),
+      storeOffers:
+          data?.summary?.storeOffers ?? countAtItems(items, 'store_offer'),
       unknown: data?.summary?.unknown ?? countAtItems(items, 'unknown'),
       publicEligibleProducts:
           data?.summary?.publicEligibleProducts ??
@@ -378,16 +688,25 @@ function normalizeAtResults(data: AccessTradeResults | AccessTradeItem[] | undef
           items.filter((item) => getBoolean(item.autoPublishEligible)).length,
       publicCandidates:
           data?.summary?.publicCandidates ??
-          items.filter((item) => normalizeText(item.publicDecision) === 'public_candidate').length,
+          items.filter(
+              (item) => normalizeText(item.publicDecision) === 'public_candidate',
+          ).length,
       needsReview:
           data?.summary?.needsReview ??
-          items.filter((item) => normalizeText(item.publicDecision) === 'needs_review').length,
+          items.filter(
+              (item) => normalizeText(item.publicDecision) === 'needs_review',
+          ).length,
       archived:
           data?.summary?.archived ??
-          items.filter((item) => normalizeText(item.publicDecision) === 'archived').length,
+          items.filter(
+              (item) => normalizeText(item.publicDecision) === 'archived',
+          ).length,
       blockedFromPublic:
           data?.summary?.blockedFromPublic ??
           items.filter((item) => !getBoolean(item.autoPublishEligible)).length,
+      nonProducts:
+          data?.summary?.nonProducts ??
+          items.filter((item) => isNonProductKind(getAtItemKind(item))).length,
     },
   };
 }
@@ -401,6 +720,39 @@ function getRecentSource(product: Product): string {
       getString(record.importedFrom) ||
       'unknown'
   );
+}
+
+function getRecentKind(product: Product): ProductKind | 'unknown' {
+  const record = product as Product & Record<string, unknown>;
+
+  return getKind(record.sourceItemKind || record.kind);
+}
+
+function getRecentPublicState(product: Product): {
+  label: string;
+  badge: string;
+} {
+  const record = product as Product & Record<string, unknown>;
+  const status = normalizeText(product.status);
+  const publicDecision = normalizeText(record.publicDecision);
+
+  if (
+      status === 'published' &&
+      record.publicHidden !== true &&
+      record.needsVerification !== true
+  ) {
+    return { label: 'Đang public', badge: 'badge-success' };
+  }
+
+  if (status === 'archived' || publicDecision === 'archived') {
+    return { label: 'Lưu nội bộ', badge: 'badge-neutral' };
+  }
+
+  if (publicDecision === 'blocked' || record.publicHidden === true) {
+    return { label: 'Đang bị chặn', badge: 'badge-warning' };
+  }
+
+  return { label: 'Cần xem xét', badge: 'badge-warning' };
 }
 
 function SafeThumb({
@@ -459,7 +811,12 @@ function SafeThumb({
             loading="lazy"
             referrerPolicy="no-referrer"
             onError={() => setFailed(true)}
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              display: 'block',
+            }}
         />
       </div>
   );
@@ -488,7 +845,9 @@ export default function ProductSourcesPage() {
           name: 'AccessTrade',
           tab: 'accesstrade',
           status: atConfigured ? 'active' : 'pending',
-          note: atConfigured ? 'Đang hoạt động — ưu tiên sản phẩm thật' : 'Cần cấu hình API key',
+          note: atConfigured
+              ? 'Đang hoạt động — ưu tiên sản phẩm thật'
+              : 'Cần cấu hình API key',
           icon: 'AT',
         },
         {
@@ -538,9 +897,11 @@ export default function ProductSourcesPage() {
   const loadRecent = useCallback(async () => {
     try {
       const res = await fetch('/api/products?limit=10', { cache: 'no-store' });
-      const data = (await res.json()) as ApiEnvelope<Product[]>;
+      const data = (await res.json().catch(() => null)) as ApiEnvelope<
+          Product[]
+      > | null;
 
-      if ((data.ok || data.success) && Array.isArray(data.data)) {
+      if (res.ok && (data?.ok || data?.success) && Array.isArray(data.data)) {
         setRecentProducts(data.data.slice(0, 10));
       }
     } catch {
@@ -549,16 +910,22 @@ export default function ProductSourcesPage() {
 
     try {
       const healthRes = await fetch('/api/app-health', { cache: 'no-store' });
-      const healthData = (await healthRes.json()) as ApiEnvelope<{
+      const healthData = (await healthRes
+          .json()
+          .catch(() => null)) as ApiEnvelope<{
         integrations?: {
           accesstrade?: {
             configured?: boolean;
           };
         };
-      }>;
+      }> | null;
 
-      if (healthData.ok || healthData.success) {
-        setAtConfigured(Boolean(healthData.data?.integrations?.accesstrade?.configured));
+      if (healthRes.ok && (healthData?.ok || healthData?.success)) {
+        setAtConfigured(
+            Boolean(healthData.data?.integrations?.accesstrade?.configured),
+        );
+      } else {
+        setAtConfigured(false);
       }
     } catch {
       setAtConfigured(false);
@@ -570,13 +937,21 @@ export default function ProductSourcesPage() {
   }, [loadRecent]);
 
   const handleChange = (
-      event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
+      event: ChangeEvent<
+          HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+      >,
   ) => {
     setForm((prev) => ({ ...prev, [event.target.name]: event.target.value }));
   };
 
   const handleSave = async (status: string, runScore = false) => {
-    if (!form.title.trim()) {
+    const title = form.title.trim();
+    const originalUrl = form.originalUrl.trim();
+    const affiliateUrl = form.affiliateUrl.trim();
+    const imageUrl = form.imageUrl.trim();
+    const gallery = splitLines(form.gallery);
+
+    if (!title) {
       showToast('error', 'Tên sản phẩm là bắt buộc.');
       return;
     }
@@ -586,17 +961,76 @@ export default function ProductSourcesPage() {
       return;
     }
 
-    if (!form.originalUrl.trim() && !form.affiliateUrl.trim()) {
+    if (!originalUrl && !affiliateUrl) {
       showToast('error', 'Cần ít nhất link sản phẩm gốc hoặc link affiliate.');
+      return;
+    }
+
+    if (originalUrl && !isValidHttpUrl(originalUrl)) {
+      showToast('error', 'Link sản phẩm gốc chưa đúng định dạng http/https.');
+      return;
+    }
+
+    if (affiliateUrl && !isValidHttpUrl(affiliateUrl)) {
+      showToast('error', 'Link affiliate chưa đúng định dạng http/https.');
+      return;
+    }
+
+    if (imageUrl && !isValidImageUrl(imageUrl)) {
+      showToast(
+          'error',
+          'Link ảnh chưa hợp lệ hoặc đang là ảnh demo/placeholder.',
+      );
+      return;
+    }
+
+    const invalidGalleryUrl = gallery.find((url) => !isValidImageUrl(url));
+
+    if (invalidGalleryUrl) {
+      showToast('error', `Link ảnh phụ chưa hợp lệ: ${invalidGalleryUrl}`);
+      return;
+    }
+
+    const price = parsePrice(form.price);
+    const salePrice = parsePrice(form.salePrice);
+
+    if (form.price.trim() && !price) {
+      showToast(
+          'error',
+          'Giá gốc chưa hợp lệ. Hãy nhập số tiền VND từ 1.000đ.',
+      );
+      return;
+    }
+
+    if (form.salePrice.trim() && !salePrice) {
+      showToast(
+          'error',
+          'Giá khuyến mãi chưa hợp lệ. Hãy nhập số tiền VND từ 1.000đ.',
+      );
+      return;
+    }
+
+    if (price && salePrice && salePrice > price) {
+      showToast('error', 'Giá khuyến mãi không nên lớn hơn giá gốc.');
       return;
     }
 
     const kind = getKind(form.kind);
     const isNonProduct = isNonProductKind(kind);
-    const finalStatus = status === 'draft' ? 'draft' : isNonProduct ? 'archived' : 'needs_review';
+    const finalStatus =
+        status === 'draft' ? 'draft' : isNonProduct ? 'archived' : 'needs_review';
+
+    const manualIssues: string[] = [];
+
+    if (!affiliateUrl) manualIssues.push('Thiếu affiliate link.');
+    if (!imageUrl) manualIssues.push('Thiếu ảnh sản phẩm.');
+    if (!price && !salePrice) manualIssues.push('Thiếu giá sản phẩm.');
+
     const blockReason = isNonProduct
         ? getNonProductReason(kind)
-        : 'Sản phẩm thủ công cần xác minh nguồn trước khi public.';
+        : manualIssues.length > 0
+            ? `${manualIssues.join(' ')} Sản phẩm thủ công vẫn cần xác minh nguồn trước khi public.`
+            : 'Sản phẩm thủ công cần xác minh nguồn và chạy Health Guard trước khi public.';
 
     setSaving(true);
 
@@ -606,27 +1040,39 @@ export default function ProductSourcesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...form,
+          title,
+          originalUrl: originalUrl || undefined,
+          affiliateUrl: affiliateUrl || undefined,
+          url: affiliateUrl || originalUrl,
+          imageUrl: imageUrl || undefined,
+
           source: 'manual',
           dataSource: 'manual',
           importedFrom: 'manual',
           sourceType: 'manual',
+
           kind,
           sourceItemKind: kind,
           status: finalStatus,
+
           verifiedSource: false,
           sourceVerified: false,
           needsVerification: true,
           publicHidden: true,
+
           aiApproved: false,
           autoPublished: false,
+          autoPublishEligible: false,
           approvalMode: 'manual_review_required',
+
           publicDecision: isNonProduct ? 'archived' : 'needs_review',
           publicBlockReason: blockReason,
           nonProductReason: isNonProduct ? blockReason : undefined,
           autoPublishBlockedReason: blockReason,
-          price: parsePrice(form.price),
-          salePrice: parsePrice(form.salePrice),
-          gallery: splitLines(form.gallery),
+
+          price,
+          salePrice,
+          gallery,
           tags: splitTags(form.tags),
           benefits: splitLines(form.benefits),
           warnings: [
@@ -636,17 +1082,22 @@ export default function ProductSourcesPage() {
           painPoints: splitLines(form.painPoints),
           targetAudience: splitLines(form.targetAudience),
           contentAngles: splitLines(form.contentAngles),
+
           checkBeforeBuy: [
             'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
             'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
             'SanDeal có thể nhận hoa hồng affiliate nếu bạn mua qua liên kết, giá người mua không đổi.',
           ],
+
+          rawSourceType: 'manual',
         }),
       });
 
-      const data = (await res.json()) as ApiEnvelope<Product>;
+      const data = (await res
+          .json()
+          .catch(() => null)) as ApiEnvelope<Product> | null;
 
-      if (data.ok || data.success) {
+      if (res.ok && (data?.ok || data?.success)) {
         showToast(
             'success',
             status === 'draft'
@@ -659,12 +1110,19 @@ export default function ProductSourcesPage() {
         setForm(EMPTY_FORM);
 
         if (runScore && data.data?.id) {
-          await fetch(`/api/products/${data.data.id}/score`, { method: 'POST' });
+          await fetch(`/api/products/${data.data.id}/score`, {
+            method: 'POST',
+          });
         }
 
         await loadRecent();
       } else {
-        showToast('error', data.message || data.error || 'Không thể thêm sản phẩm.');
+        showToast(
+            'error',
+            data?.message ||
+            data?.error ||
+            `Không thể thêm sản phẩm. HTTP ${res.status}`,
+        );
       }
     } catch {
       showToast('error', 'Lỗi kết nối. Vui lòng thử lại.');
@@ -673,7 +1131,9 @@ export default function ProductSourcesPage() {
     }
   };
 
-  const handleRunAutoPilot = async (mode: 'source_scan' | 'full_safe_run' = 'source_scan') => {
+  const handleRunAutoPilot = async (
+      mode: 'source_scan' | 'full_safe_run' = 'source_scan',
+  ) => {
     setRunningBot(true);
 
     try {
@@ -694,10 +1154,16 @@ export default function ProductSourcesPage() {
         }),
       });
 
-      const data = (await res.json()) as ApiEnvelope<unknown>;
+      const data = (await res
+          .json()
+          .catch(() => null)) as ApiEnvelope<unknown> | null;
 
-      if (!res.ok || (!data.ok && !data.success)) {
-        throw new Error(data.message || data.error || `Không chạy được bot. HTTP ${res.status}`);
+      if (!res.ok || (!data?.ok && !data?.success)) {
+        throw new Error(
+            data?.message ||
+            data?.error ||
+            `Không chạy được bot. HTTP ${res.status}`,
+        );
       }
 
       showToast(
@@ -709,7 +1175,10 @@ export default function ProductSourcesPage() {
 
       await loadRecent();
     } catch (err) {
-      showToast('error', err instanceof Error ? err.message : 'Không chạy được AutoPilot.');
+      showToast(
+          'error',
+          err instanceof Error ? err.message : 'Không chạy được AutoPilot.',
+      );
     } finally {
       setRunningBot(false);
     }
@@ -717,7 +1186,20 @@ export default function ProductSourcesPage() {
 
   const handleAtSearch = async () => {
     if (!atConfigured) {
-      showToast('error', 'AccessTrade chưa được cấu hình. Hãy mở Token Vault để thêm API key.');
+      showToast(
+          'error',
+          'AccessTrade chưa được cấu hình. Hãy mở Token Vault để thêm API key.',
+      );
+      return;
+    }
+
+    const keyword = atKeyword.trim();
+
+    if (keyword.length < 2) {
+      showToast(
+          'error',
+          'Hãy nhập từ khoá sản phẩm cụ thể, ví dụ: serum, sữa tắm, tai nghe.',
+      );
       return;
     }
 
@@ -729,15 +1211,27 @@ export default function ProductSourcesPage() {
       const res = await fetch('/api/product-sources/accesstrade/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword: atKeyword, kind: atKind, limit: 20 }),
+        body: JSON.stringify({
+          keyword,
+          kind: atKind,
+          limit: 20,
+          imageOnly: false,
+          affiliateLinkOnly: false,
+        }),
       });
 
-      const data = (await res.json()) as ApiEnvelope<AccessTradeResults | AccessTradeItem[]>;
+      const data = (await res.json().catch(() => null)) as ApiEnvelope<
+          AccessTradeResults | AccessTradeItem[]
+      > | null;
 
-      if (data.ok || data.success) {
+      if (res.ok && (data?.ok || data?.success)) {
         setAtResults(normalizeAtResults(data.data));
       } else {
-        setAtError(data.message || data.error || 'Lỗi khi tìm kiếm.');
+        setAtError(
+            data?.message ||
+            data?.error ||
+            `Lỗi khi tìm kiếm. HTTP ${res.status}`,
+        );
       }
     } catch {
       setAtError('Không thể kết nối đến server.');
@@ -747,36 +1241,59 @@ export default function ProductSourcesPage() {
   };
 
   const handleAtSave = async (item: AccessTradeItem, runScore = false) => {
-    const itemId =
-        getString(item.id) ||
-        getString(item.productId) ||
-        getString(item.sourceId) ||
-        getString(item.name) ||
-        getString(item.title);
-
-    setAtSaving(itemId);
-
+    const itemId = getAtItemId(item);
     const kind = getAtItemKind(item);
     const isProduct = isRealProductKind(kind);
-    const isPublicCandidate = getBoolean(item.autoPublishEligible);
-    const verifiedSource = Boolean(item.verifiedSource === true || item.sourceVerified === true);
-    const needsVerification =
-        typeof item.needsVerification === 'boolean'
-            ? item.needsVerification
-            : !verifiedSource || !isProduct || !isPublicCandidate;
+    const isNonProduct = isNonProductKind(kind);
 
-    const blockReason = getAtItemMainReason(item);
-    const publicDecision =
-        getString(item.publicDecision) ||
-        (isProduct && isPublicCandidate ? 'needs_review' : isNonProductKind(kind) ? 'archived' : 'needs_review');
+    const title = getAtItemName(item);
+    const description = getString(item.description);
+    const originalUrlCandidate =
+        getString(item.originalUrl) || getString(item.url);
+    const affiliateUrlCandidate = getString(item.affiliateUrl);
+    const imageUrlCandidate = getString(item.imageUrl);
+
+    const originalUrl = isValidHttpUrl(originalUrlCandidate)
+        ? originalUrlCandidate
+        : undefined;
+
+    const affiliateUrl = isValidHttpUrl(affiliateUrlCandidate)
+        ? affiliateUrlCandidate
+        : undefined;
+
+    const imageUrl = isValidImageUrl(imageUrlCandidate)
+        ? imageUrlCandidate
+        : undefined;
+
+    const price = getNumber(item.price) || getNumber(item.originalPrice);
+    const salePrice = getNumber(item.salePrice) || getNumber(item.currentPrice);
+
+    const sourceAutoPublishEligible = getBoolean(item.autoPublishEligible);
+    const sourcePublicDecision =
+        getString(item.publicDecision) || 'needs_review';
+    const verifiedSource = Boolean(
+        isProduct &&
+        (item.verifiedSource === true || item.sourceVerified === true),
+    );
+
+    const validationIssues = getAtItemValidationIssues(item);
+
+    const blockReason = isNonProduct
+        ? getNonProductReason(kind)
+        : validationIssues.length > 0
+            ? validationIssues.join(' ')
+            : 'Đã lưu ứng viên sản phẩm. Cần chạy Product Health Guard để kiểm link và ảnh trước khi public.';
+
+    setAtSaving(itemId);
 
     try {
       const res = await fetch('/api/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: getString(item.name) || getString(item.title) || '',
-          description: getString(item.description) || '',
+          title,
+          description: description || undefined,
+
           kind,
           sourceItemKind: kind,
 
@@ -787,70 +1304,96 @@ export default function ProductSourcesPage() {
           sourceType: 'affiliate',
           rawSourceKind: getString(item.rawSourceKind) || kind,
 
-          verifiedSource: isProduct && verifiedSource,
-          sourceVerified: isProduct && verifiedSource,
-          needsVerification,
+          verifiedSource,
+          sourceVerified: verifiedSource,
+
+          // Mọi item lưu thủ công từ trang tìm kiếm đều phải ở hàng chờ.
+          // Chỉ SourceScout + Product Health Guard mới được mở public.
+          needsVerification: true,
           publicHidden: true,
           aiApproved: false,
           autoPublished: false,
+          autoPublishEligible: false,
           approvalMode: 'manual_or_auto_safe_required',
 
-          originalUrl: getString(item.originalUrl) || getString(item.url) || '',
-          affiliateUrl: getString(item.affiliateUrl) || '',
-          url: getString(item.affiliateUrl) || getString(item.originalUrl) || getString(item.url) || '',
+          originalUrl,
+          affiliateUrl,
+          url: affiliateUrl || originalUrl,
 
-          imageUrl: getString(item.imageUrl) || '',
-          price: getNumber(item.price),
-          salePrice: getNumber(item.salePrice),
-          category: getString(item.category) || '',
-          campaignName: getString(item.campaignName) || '',
+          imageUrl,
+          price,
+          salePrice,
+
+          category: getString(item.category) || undefined,
+          campaignName: getString(item.campaignName) || undefined,
 
           affiliateSource: 'accesstrade',
           priceNote: 'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
-          affiliateDisclosure: 'SanDeal có thể nhận hoa hồng affiliate. Giá của bạn không thay đổi.',
+          affiliateDisclosure:
+              'SanDeal có thể nhận hoa hồng affiliate. Giá của bạn không thay đổi.',
+
           checkBeforeBuy: [
             'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
             'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
             'SanDeal có thể nhận hoa hồng affiliate nếu bạn mua qua liên kết, giá người mua không đổi.',
           ],
+
           warnings: [
-            isNonProductKind(kind)
+            isNonProduct
                 ? getNonProductReason(kind)
                 : 'Không fake giá, ảnh, tồn kho, review hoặc trải nghiệm mua hàng.',
           ],
 
-          status: isNonProductKind(kind) ? 'archived' : 'needs_review',
-          publicDecision,
+          status: isNonProduct ? 'archived' : 'needs_review',
+          publicDecision: isNonProduct ? 'archived' : 'needs_review',
           publicBlockReason: blockReason,
-          nonProductReason: isNonProductKind(kind) ? getNonProductReason(kind) : undefined,
+          nonProductReason: isNonProduct
+              ? getNonProductReason(kind)
+              : undefined,
           autoPublishBlockedReason: blockReason,
 
-          autoPublishEligible: isPublicCandidate,
-          qualityScore: getAtQualityScore(item) || undefined,
-          sourceQualityScore: getAtQualityScore(item) || undefined,
+          // Lưu lại quyết định từ nguồn để dashboard có thể đối chiếu,
+          // nhưng không dùng trực tiếp để public.
+          sourceAutoPublishEligible,
+          sourcePublicDecision,
+
+          qualityScore: getAtQualityScore(item) ?? undefined,
+          sourceQualityScore: getAtQualityScore(item) ?? undefined,
 
           rawSourceType: 'accesstrade',
-          rawData: item.rawData && typeof item.rawData === 'object' ? item.rawData : item,
+          rawData:
+              item.rawData && typeof item.rawData === 'object'
+                  ? item.rawData
+                  : item,
         }),
       });
 
-      const data = (await res.json()) as ApiEnvelope<Product>;
+      const data = (await res
+          .json()
+          .catch(() => null)) as ApiEnvelope<Product> | null;
 
-      if (data.ok || data.success) {
+      if (res.ok && (data?.ok || data?.success)) {
         if (runScore && data.data?.id) {
-          await fetch(`/api/products/${data.data.id}/score`, { method: 'POST' });
+          await fetch(`/api/products/${data.data.id}/score`, {
+            method: 'POST',
+          });
         }
 
         showToast(
             'success',
             isProduct
-                ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ an toàn. Bot/Health Guard sẽ kiểm link, ảnh, giá trước khi public.'
+                ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ. Chưa public cho tới khi Health Guard kiểm link và ảnh OK.'
                 : 'Đã lưu item AccessTrade nội bộ. Voucher/campaign/ưu đãi shop sẽ không public như sản phẩm.',
         );
 
         await loadRecent();
       } else {
-        showToast('error', data.message || data.error || 'Không thể lưu sản phẩm.');
+        showToast(
+            'error',
+            data?.message ||
+            data?.error ||
+            `Không thể lưu sản phẩm. HTTP ${res.status}`,
+        );
       }
     } catch {
       showToast('error', 'Lỗi kết nối.');
@@ -859,11 +1402,22 @@ export default function ProductSourcesPage() {
     }
   };
 
-  const renderPlaceholderTab = (icon: string, title: string, desc: string, keys?: string) => (
-      <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
+  const renderPlaceholderTab = (
+      icon: string,
+      title: string,
+      desc: string,
+      keys?: string,
+  ) => (
+      <div
+          className="coming-soon-container"
+          style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}
+      >
         <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
           <span className="coming-soon-icon">{icon}</span>
-          <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>
+          <h3
+              className="coming-soon-title"
+              style={{ fontSize: 'var(--text-xl)' }}
+          >
             {title}
           </h3>
           <p className="coming-soon-desc">{desc}</p>
@@ -872,12 +1426,16 @@ export default function ProductSourcesPage() {
               className="disclosure-banner"
               style={{ textAlign: 'left', margin: 'var(--space-lg) 0 0' }}
           >
-            Các nguồn này sẽ được thêm sau. Hiện tại nên nhập thủ công vào hàng chờ an toàn,
-            không public trực tiếp nếu chưa kiểm link, ảnh, giá và nguồn xác minh.
+            Các nguồn này sẽ được thêm sau. Hiện tại nên nhập thủ công vào hàng
+            chờ an toàn, không public trực tiếp nếu chưa kiểm link, ảnh, giá và
+            nguồn xác minh.
           </div>
 
           <div className="coming-soon-actions">
-            <button className="btn btn-primary" onClick={() => setActiveTab('manual')}>
+            <button
+                className="btn btn-primary"
+                onClick={() => setActiveTab('manual')}
+            >
               Thêm thủ công
             </button>
             <Link href="/dashboard/token-vault" className="btn btn-secondary">
@@ -910,34 +1468,49 @@ export default function ProductSourcesPage() {
         )}
 
         {/* Header */}
-        <section className="command-hero" style={{ marginBottom: 'var(--space-xl)' }}>
+        <section
+            className="command-hero"
+            style={{ marginBottom: 'var(--space-xl)' }}
+        >
           <div className="command-hero-content">
-            <div className="badge badge-purple" style={{ marginBottom: 'var(--space-md)' }}>
+            <div
+                className="badge badge-purple"
+                style={{ marginBottom: 'var(--space-md)' }}
+            >
               Data Source Center
             </div>
 
             <h1 className="page-title">Trung tâm nguồn dữ liệu</h1>
 
             <p className="page-subtitle" style={{ maxWidth: 760 }}>
-              Kết nối nguồn sản phẩm thật để bot AI tự quét, phân loại, chấm điểm và public an toàn.
-              Voucher, campaign, ưu đãi shop và dữ liệu thiếu link/ảnh/giá chỉ được lưu nội bộ.
+              Kết nối nguồn sản phẩm thật để bot AI tự quét, phân loại, chấm điểm
+              và public an toàn. Voucher, campaign, ưu đãi shop và dữ liệu thiếu
+              link/ảnh/giá chỉ được lưu nội bộ.
             </p>
 
-            <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
+            <div
+                className="flex gap-sm"
+                style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}
+            >
               <span className="badge badge-success">Safe Mode ON</span>
               <span className="badge badge-success">Free Only ON</span>
               <span className="badge badge-info">AutoPilot ON</span>
               <span className="badge badge-success">Safe Publish ON</span>
             </div>
 
-            <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-lg)' }}>
+            <div
+                className="flex gap-sm"
+                style={{ flexWrap: 'wrap', marginTop: 'var(--space-lg)' }}
+            >
               <button
                   type="button"
                   className="primary-button"
                   disabled={runningBot}
                   onClick={() => void handleRunAutoPilot('source_scan')}
               >
-                {runningBot ? 'Đang chạy...' : 'Quét sản phẩm thật & tự public an toàn'}
+                {runningBot
+                    ? 'Đang chạy...'
+                    : 'Quét sản phẩm thật & tự public an toàn'}
               </button>
 
               <button
@@ -964,24 +1537,36 @@ export default function ProductSourcesPage() {
               <div className="detail-meta">
                 <div className="detail-meta-row">
                   <span>AccessTrade</span>
-                  <span style={{ color: atConfigured ? 'var(--color-success)' : 'var(--color-warning)' }}>
+                  <span
+                      style={{
+                        color: atConfigured
+                            ? 'var(--color-success)'
+                            : 'var(--color-warning)',
+                      }}
+                  >
                   {atConfigured ? 'Đã cấu hình' : 'Cần API key'}
                 </span>
                 </div>
 
                 <div className="detail-meta-row">
                   <span>Ưu tiên</span>
-                  <span style={{ color: 'var(--color-success)' }}>Sản phẩm thật/datafeed</span>
+                  <span style={{ color: 'var(--color-success)' }}>
+                  Sản phẩm thật/datafeed
+                </span>
                 </div>
 
                 <div className="detail-meta-row">
                   <span>Voucher/campaign</span>
-                  <span style={{ color: 'var(--color-warning)' }}>Chỉ lưu nội bộ</span>
+                  <span style={{ color: 'var(--color-warning)' }}>
+                  Chỉ lưu nội bộ
+                </span>
                 </div>
 
                 <div className="detail-meta-row">
                   <span>Chi phí API</span>
-                  <span style={{ color: 'var(--color-success)' }}>0đ Free Only</span>
+                  <span style={{ color: 'var(--color-success)' }}>
+                  0đ Free Only
+                </span>
                 </div>
               </div>
             </div>
@@ -1017,29 +1602,54 @@ export default function ProductSourcesPage() {
           >
             <div className="metric-card">
               <span className="badge badge-success">Ưu tiên</span>
-              <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              <div
+                  style={{
+                    fontSize: 'var(--text-sm)',
+                    color: 'var(--text-secondary)',
+                    lineHeight: 1.5,
+                  }}
+              >
                 Sản phẩm thật/datafeed có tên, link, ảnh, giá và nguồn xác minh.
               </div>
             </div>
 
             <div className="metric-card">
               <span className="badge badge-warning">Lưu nội bộ</span>
-              <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              <div
+                  style={{
+                    fontSize: 'var(--text-sm)',
+                    color: 'var(--text-secondary)',
+                    lineHeight: 1.5,
+                  }}
+              >
                 Voucher, campaign, store offer không được public như sản phẩm.
               </div>
             </div>
 
             <div className="metric-card">
               <span className="badge badge-info">Health Guard</span>
-              <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              <div
+                  style={{
+                    fontSize: 'var(--text-sm)',
+                    color: 'var(--text-secondary)',
+                    lineHeight: 1.5,
+                  }}
+              >
                 Chỉ public khi link và ảnh kiểm tra OK, không 404/403/timeout.
               </div>
             </div>
 
             <div className="metric-card">
               <span className="badge badge-success">Affiliate minh bạch</span>
-              <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                Luôn nhắc giá/ưu đãi có thể thay đổi và SanDeal có thể nhận hoa hồng.
+              <div
+                  style={{
+                    fontSize: 'var(--text-sm)',
+                    color: 'var(--text-secondary)',
+                    lineHeight: 1.5,
+                  }}
+              >
+                Luôn nhắc giá/ưu đãi có thể thay đổi và SanDeal có thể nhận hoa
+                hồng.
               </div>
             </div>
           </div>
@@ -1109,12 +1719,15 @@ export default function ProductSourcesPage() {
           {/* ====== MANUAL TAB ====== */}
           {activeTab === 'manual' && (
               <div className="card" style={{ maxWidth: '900px' }}>
-                <div className="flex items-start justify-between gap-md" style={{ marginBottom: 'var(--space-lg)' }}>
+                <div
+                    className="flex items-start justify-between gap-md"
+                    style={{ marginBottom: 'var(--space-lg)' }}
+                >
                   <div>
                     <h3 className="card-title">Thêm sản phẩm thủ công</h3>
                     <p className="page-subtitle" style={{ marginTop: 6 }}>
-                      Sản phẩm thủ công sẽ được lưu vào hàng chờ, không tự public cho tới khi nguồn, link,
-                      ảnh và giá được kiểm tra.
+                      Sản phẩm thủ công sẽ được lưu vào hàng chờ, không tự public
+                      cho tới khi nguồn, link, ảnh và giá được kiểm tra.
                     </p>
                   </div>
                   <span className="badge badge-warning">Manual cần duyệt</span>
@@ -1138,7 +1751,12 @@ export default function ProductSourcesPage() {
 
                     <div className="form-group" style={{ flex: 1 }}>
                       <label className="label">Nền tảng *</label>
-                      <select className="select" name="platform" value={form.platform} onChange={handleChange}>
+                      <select
+                          className="select"
+                          name="platform"
+                          value={form.platform}
+                          onChange={handleChange}
+                      >
                         <option value="shopee">Shopee</option>
                         <option value="tiktok_shop">TikTok Shop</option>
                         <option value="lazada">Lazada</option>
@@ -1163,7 +1781,12 @@ export default function ProductSourcesPage() {
                   <div className="form-row">
                     <div className="form-group" style={{ flex: 1 }}>
                       <label className="label">Loại</label>
-                      <select className="select" name="kind" value={form.kind} onChange={handleChange}>
+                      <select
+                          className="select"
+                          name="kind"
+                          value={form.kind}
+                          onChange={handleChange}
+                      >
                         <option value="product">Sản phẩm</option>
                         <option value="deal">Deal</option>
                         <option value="voucher">Voucher</option>
@@ -1213,7 +1836,7 @@ export default function ProductSourcesPage() {
                     </div>
 
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="label">Link affiliate *</label>
+                      <label className="label">Link affiliate (khuyến nghị)</label>
                       <input
                           className="input"
                           name="affiliateUrl"
@@ -1237,7 +1860,9 @@ export default function ProductSourcesPage() {
                     </div>
 
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="label">Link ảnh phụ, mỗi dòng một URL</label>
+                      <label className="label">
+                        Link ảnh phụ, mỗi dòng một URL
+                      </label>
                       <textarea
                           className="textarea"
                           name="gallery"
@@ -1298,7 +1923,9 @@ export default function ProductSourcesPage() {
 
                   <div className="form-row">
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="label">Lợi ích chính, mỗi dòng một lợi ích</label>
+                      <label className="label">
+                        Lợi ích chính, mỗi dòng một lợi ích
+                      </label>
                       <textarea
                           className="textarea"
                           name="benefits"
@@ -1317,7 +1944,9 @@ export default function ProductSourcesPage() {
                           value={form.warnings}
                           onChange={handleChange}
                           rows={3}
-                          placeholder={'Không cam kết chất lượng tuyệt đối\nKhông khẳng định chữa bệnh'}
+                          placeholder={
+                            'Không cam kết chất lượng tuyệt đối\nKhông khẳng định chữa bệnh'
+                          }
                       />
                     </div>
                   </div>
@@ -1331,7 +1960,9 @@ export default function ProductSourcesPage() {
                           value={form.painPoints}
                           onChange={handleChange}
                           rows={2}
-                          placeholder={'Muốn tai nghe không dây\nCần tai nghe cho họp online'}
+                          placeholder={
+                            'Muốn tai nghe không dây\nCần tai nghe cho họp online'
+                          }
                       />
                     </div>
 
@@ -1460,18 +2091,30 @@ export default function ProductSourcesPage() {
           {/* ====== ACCESSTRADE TAB ====== */}
           {activeTab === 'accesstrade' && (
               <div>
-                <div className="card" style={{ maxWidth: '960px', marginBottom: 'var(--space-lg)' }}>
-                  <div className="flex items-start justify-between gap-md" style={{ marginBottom: 'var(--space-md)' }}>
+                <div
+                    className="card"
+                    style={{ maxWidth: '960px', marginBottom: 'var(--space-lg)' }}
+                >
+                  <div
+                      className="flex items-start justify-between gap-md"
+                      style={{ marginBottom: 'var(--space-md)' }}
+                  >
                     <div>
                       <h3 className="card-title">AccessTrade Real Product Feed</h3>
-                      <p className="page-subtitle" style={{ marginTop: 6, maxWidth: 720 }}>
-                        Tìm và kiểm tra dữ liệu AccessTrade. Hệ thống sẽ phân loại rõ sản phẩm thật,
-                        voucher, campaign và ưu đãi shop. Chỉ sản phẩm thật có link/ảnh/giá hợp lệ mới
-                        có thể đi tiếp vào Safe Publish.
+                      <p
+                          className="page-subtitle"
+                          style={{ marginTop: 6, maxWidth: 720 }}
+                      >
+                        Tìm và kiểm tra dữ liệu AccessTrade. Hệ thống sẽ phân loại
+                        rõ sản phẩm thật, voucher, campaign và ưu đãi shop. Chỉ sản
+                        phẩm thật có link/ảnh/giá hợp lệ mới có thể đi tiếp vào Safe
+                        Publish.
                       </p>
                     </div>
 
-                    <span className={`badge ${atConfigured ? 'badge-success' : 'badge-warning'}`}>
+                    <span
+                        className={`badge ${atConfigured ? 'badge-success' : 'badge-warning'}`}
+                    >
                   {atConfigured ? 'AccessTrade Ready' : 'Cần API Key'}
                 </span>
                   </div>
@@ -1512,11 +2155,19 @@ export default function ProductSourcesPage() {
                         >
                           Thiếu API Key AccessTrade
                         </h4>
-                        <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>
-                          Bạn cần cấu hình API key của AccessTrade trong Token Vault để tìm kiếm và quét sản phẩm.
-                          Không gửi API key vào chat.
+                        <p
+                            style={{
+                              color: 'var(--text-secondary)',
+                              marginBottom: 'var(--space-lg)',
+                            }}
+                        >
+                          Bạn cần cấu hình API key của AccessTrade trong Token Vault
+                          để tìm kiếm và quét sản phẩm. Không gửi API key vào chat.
                         </p>
-                        <Link href="/dashboard/token-vault" className="btn btn-primary">
+                        <Link
+                            href="/dashboard/token-vault"
+                            className="btn btn-primary"
+                        >
                           Mở Token Vault
                         </Link>
                       </div>
@@ -1530,8 +2181,9 @@ export default function ProductSourcesPage() {
                         opacity: atConfigured ? 1 : 0.65,
                       }}
                   >
-                    <strong>Luồng an toàn:</strong> ưu tiên sản phẩm thật/datafeed → lưu nội bộ →
-                    kiểm link/ảnh/giá → chỉ public nếu đạt chuẩn. Voucher/campaign/store offer không public như sản phẩm.
+                    <strong>Luồng an toàn:</strong> ưu tiên sản phẩm thật/datafeed →
+                    lưu nội bộ → kiểm link/ảnh/giá → chỉ public nếu đạt chuẩn.
+                    Voucher/campaign/store offer không public như sản phẩm.
                   </div>
 
                   <div
@@ -1542,13 +2194,36 @@ export default function ProductSourcesPage() {
                       }}
                   >
                     <div className="form-group" style={{ flex: 2 }}>
-                      <label className="label">Từ khoá</label>
+                      <label className="label">Từ khoá sản phẩm cụ thể</label>
                       <input
                           className="input"
                           value={atKeyword}
                           onChange={(event) => setAtKeyword(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' && !atLoading) {
+                              event.preventDefault();
+                              void handleAtSearch();
+                            }
+                          }}
                           placeholder="VD: tai nghe, serum, sữa tắm, laptop..."
                       />
+
+                      <div
+                          className="flex gap-xs"
+                          style={{ flexWrap: 'wrap', marginTop: 'var(--space-xs)' }}
+                      >
+                        {ACCESS_TRADE_KEYWORD_SUGGESTIONS.map((keyword) => (
+                            <button
+                                key={keyword}
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => setAtKeyword(keyword)}
+                                disabled={atLoading}
+                            >
+                              {keyword}
+                            </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="form-group" style={{ flex: 1 }}>
@@ -1568,15 +2243,24 @@ export default function ProductSourcesPage() {
                     </div>
                   </div>
 
-                  <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
-                    <button className="btn btn-primary" onClick={() => void handleAtSearch()} disabled={atLoading}>
+                  <div
+                      className="flex gap-sm"
+                      style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}
+                  >
+                    <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => void handleAtSearch()}
+                        disabled={atLoading || !atConfigured}
+                    >
                       {atLoading ? 'Đang tìm...' : 'Tìm kiếm AccessTrade'}
                     </button>
 
                     <button
+                        type="button"
                         className="btn btn-accent"
                         onClick={() => void handleRunAutoPilot('source_scan')}
-                        disabled={runningBot}
+                        disabled={runningBot || !atConfigured}
                     >
                       {runningBot ? 'Đang chạy...' : 'Cho bot quét sản phẩm thật'}
                     </button>
@@ -1606,66 +2290,145 @@ export default function ProductSourcesPage() {
                       <div
                           className="grid"
                           style={{
-                            gridTemplateColumns: 'repeat(auto-fill, minmax(135px, 1fr))',
+                            gridTemplateColumns:
+                                'repeat(auto-fill, minmax(135px, 1fr))',
                             gap: 'var(--space-sm)',
                             marginBottom: 'var(--space-lg)',
                           }}
                       >
-                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
                             {atResults.summary.total ?? atResults.items.length}
                           </div>
                           <div className="stat-card-label">Tổng kết quả</div>
                         </div>
 
-                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
-                            {atResults.summary.realProducts ?? atResults.summary.products ?? 0}
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
+                            {atResults.summary.realProducts ??
+                                atResults.summary.products ??
+                                0}
                           </div>
                           <div className="stat-card-label">Sản phẩm thật</div>
                         </div>
 
-                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
                             {atResults.summary.storeOffers ?? 0}
                           </div>
                           <div className="stat-card-label">Ưu đãi shop</div>
                         </div>
 
-                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
                             {atResults.summary.vouchers ?? 0}
                           </div>
                           <div className="stat-card-label">Voucher</div>
                         </div>
 
-                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
                             {atResults.summary.campaigns ?? 0}
                           </div>
                           <div className="stat-card-label">Campaign</div>
                         </div>
 
-                        <div className="stat-card" style={{ padding: 'var(--space-md)' }}>
-                          <div className="stat-card-value" style={{ fontSize: 'var(--text-xl)' }}>
-                            {atResults.summary.publicEligibleProducts ?? atResults.summary.publicCandidates ?? 0}
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
+                            {atResults.summary.publicEligibleProducts ??
+                                atResults.summary.publicCandidates ??
+                                0}
                           </div>
-                          <div className="stat-card-label">Ứng viên public</div>
+                          <div className="stat-card-label">Ứng viên nguồn</div>
+                        </div>
+
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
+                            {atResults.summary.needsReview ?? 0}
+                          </div>
+                          <div className="stat-card-label">Cần xem xét</div>
+                        </div>
+
+                        <div
+                            className="stat-card"
+                            style={{ padding: 'var(--space-md)' }}
+                        >
+                          <div
+                              className="stat-card-value"
+                              style={{ fontSize: 'var(--text-xl)' }}
+                          >
+                            {atResults.summary.blockedFromPublic ??
+                                atResults.summary.nonProducts ??
+                                0}
+                          </div>
+                          <div className="stat-card-label">Chưa được public</div>
                         </div>
                       </div>
 
                       {/* Results */}
                       {atResults.items.map((rawItem, index) => {
                         const item = rawItem as AccessTradeItem;
-                        const itemId = getString(item.id) || `${index}`;
+                        const itemId = getAtItemId(item, index);
                         const name = getAtItemName(item);
                         const kind = getAtItemKind(item);
                         const isProduct = isRealProductKind(kind);
                         const publicDecision = getAtPublicDecision(item);
                         const qualityScore = getAtQualityScore(item);
                         const reason = getAtItemMainReason(item);
+                        const validationIssues = getAtItemValidationIssues(item);
                         const imageUrl = getString(item.imageUrl);
                         const affiliateUrl = getString(item.affiliateUrl);
+                        const hasAffiliateLink = isValidHttpUrl(affiliateUrl);
+                        const hasImage = isValidImageUrl(imageUrl);
+                        const hasPrice = Boolean(
+                            getNumber(item.salePrice) || getNumber(item.price),
+                        );
+                        const sourceVerified = Boolean(
+                            item.verifiedSource === true ||
+                            item.sourceVerified === true,
+                        );
 
                         return (
                             <div
@@ -1684,7 +2447,9 @@ export default function ProductSourcesPage() {
                                     className="flex items-center gap-sm"
                                     style={{ marginBottom: '4px', flexWrap: 'wrap' }}
                                 >
-                                  <strong style={{ fontSize: 'var(--text-sm)' }}>{name}</strong>
+                                  <strong style={{ fontSize: 'var(--text-sm)' }}>
+                                    {name}
+                                  </strong>
 
                                   <span className={`badge ${getKindBadge(kind)}`}>
                             {getKindLabel(kind)}
@@ -1708,44 +2473,95 @@ export default function ProductSourcesPage() {
                             </span>
                                   )}
 
+                                  <span
+                                      className={`badge ${sourceVerified ? 'badge-success' : 'badge-warning'}`}
+                                  >
+                            {sourceVerified
+                                ? 'Nguồn xác minh'
+                                : 'Nguồn chưa xác minh'}
+                          </span>
+
                                   {!isProduct && (
-                                      <span className="badge badge-neutral">Không public tự động</span>
+                                      <span className="badge badge-neutral">
+                              Không public tự động
+                            </span>
                                   )}
 
-                                  {getBoolean(item.needsVerification) && (
-                                      <span className="badge badge-warning">Cần xác minh</span>
+                                  {(getBoolean(item.needsVerification) ||
+                                      validationIssues.length > 0) && (
+                                      <span className="badge badge-warning">
+                              Cần kiểm tra thêm
+                            </span>
                                   )}
                                 </div>
 
-                                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', lineHeight: 1.55 }}>
-                                  {formatPrice(item.salePrice || item.price)}
-                                  {affiliateUrl ? ' • Có link affiliate' : ' • Chưa có link affiliate'}
-                                  {imageUrl ? ' • Có ảnh' : ' • Chưa có ảnh'}
-                                </p>
+                                <div
+                                    className="flex gap-xs"
+                                    style={{
+                                      flexWrap: 'wrap',
+                                      marginTop: 6,
+                                      marginBottom: 4,
+                                    }}
+                                >
+                          <span
+                              className={`badge ${hasPrice ? 'badge-success' : 'badge-danger'}`}
+                          >
+                            Giá:{' '}
+                            {hasPrice
+                                ? formatPrice(item.salePrice || item.price)
+                                : 'Thiếu'}
+                          </span>
+
+                                  <span
+                                      className={`badge ${hasAffiliateLink ? 'badge-success' : 'badge-danger'}`}
+                                  >
+                            Link affiliate: {hasAffiliateLink ? 'Có' : 'Thiếu'}
+                          </span>
+
+                                  <span
+                                      className={`badge ${hasImage ? 'badge-success' : 'badge-danger'}`}
+                                  >
+                            Ảnh: {hasImage ? 'Có' : 'Thiếu'}
+                          </span>
+                                </div>
 
                                 <p
                                     style={{
                                       fontSize: 'var(--text-xs)',
-                                      color: isProduct ? 'var(--text-secondary)' : '#f59e0b',
+                                      color: isProduct
+                                          ? 'var(--text-secondary)'
+                                          : '#f59e0b',
                                       lineHeight: 1.55,
                                       marginTop: 4,
                                     }}
                                 >
-                                  {reason}
+                                  {validationIssues.length > 0
+                                      ? validationIssues.join(' ')
+                                      : reason}
                                 </p>
 
-                                <div className="flex gap-sm" style={{ marginTop: 'var(--space-sm)', flexWrap: 'wrap' }}>
+                                <div
+                                    className="flex gap-sm"
+                                    style={{
+                                      marginTop: 'var(--space-sm)',
+                                      flexWrap: 'wrap',
+                                    }}
+                                >
                                   <button
+                                      type="button"
                                       className="btn btn-sm btn-primary"
-                                      disabled={atSaving === itemId}
+                                      disabled={Boolean(atSaving)}
                                       onClick={() => void handleAtSave(item)}
                                   >
-                                    {atSaving === itemId ? 'Đang lưu...' : 'Lưu vào hàng chờ'}
+                                    {atSaving === itemId
+                                        ? 'Đang lưu...'
+                                        : 'Lưu vào hàng chờ'}
                                   </button>
 
                                   <button
+                                      type="button"
                                       className="btn btn-sm btn-accent"
-                                      disabled={atSaving === itemId}
+                                      disabled={Boolean(atSaving)}
                                       onClick={() => void handleAtSave(item, true)}
                                   >
                                     Lưu và chấm điểm
@@ -1758,11 +2574,18 @@ export default function ProductSourcesPage() {
 
                       {atResults.items.length === 0 && (
                           <div className="empty-state">
-                            <div className="empty-state-icon" style={{ fontSize: 32, opacity: 0.35 }}>
+                            <div
+                                className="empty-state-icon"
+                                style={{ fontSize: 32, opacity: 0.35 }}
+                            >
                               AT
                             </div>
-                            <div className="empty-state-title">Không tìm thấy kết quả</div>
-                            <div className="empty-state-desc">Thử thay đổi từ khoá hoặc bộ lọc.</div>
+                            <div className="empty-state-title">
+                              Không tìm thấy kết quả
+                            </div>
+                            <div className="empty-state-desc">
+                              Thử thay đổi từ khoá hoặc bộ lọc.
+                            </div>
                           </div>
                       )}
                     </div>
@@ -1799,13 +2622,24 @@ export default function ProductSourcesPage() {
 
           {/* ====== CSV TAB ====== */}
           {activeTab === 'csv' && (
-              <div className="coming-soon-container" style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}>
-                <div className="coming-soon-card" style={{ padding: 'var(--space-xl)' }}>
+              <div
+                  className="coming-soon-container"
+                  style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}
+              >
+                <div
+                    className="coming-soon-card"
+                    style={{ padding: 'var(--space-xl)' }}
+                >
                   <span className="coming-soon-icon">CSV</span>
-                  <h3 className="coming-soon-title" style={{ fontSize: 'var(--text-xl)' }}>
+                  <h3
+                      className="coming-soon-title"
+                      style={{ fontSize: 'var(--text-xl)' }}
+                  >
                     Nhập từ CSV
                   </h3>
-                  <p className="coming-soon-desc">Tính năng nhập CSV sẽ được thêm ở bước sau.</p>
+                  <p className="coming-soon-desc">
+                    Tính năng nhập CSV sẽ được thêm ở bước sau.
+                  </p>
 
                   <div
                       className="disclosure-banner"
@@ -1813,7 +2647,8 @@ export default function ProductSourcesPage() {
                   >
                     <strong>Các cột dự kiến:</strong>
                     <br />
-                    title, originalUrl, affiliateUrl, imageUrl, platform, price, salePrice, category, tags
+                    title, originalUrl, affiliateUrl, imageUrl, platform, price,
+                    salePrice, category, tags
                   </div>
                 </div>
               </div>
@@ -1838,9 +2673,11 @@ export default function ProductSourcesPage() {
                   <thead>
                   <tr>
                     <th>Sản phẩm</th>
+                    <th>Loại</th>
                     <th>Nền tảng</th>
                     <th>Nguồn</th>
                     <th>Trạng thái</th>
+                    <th>Safe Publish</th>
                     <th>Điểm</th>
                     <th>Cập nhật</th>
                   </tr>
@@ -1849,16 +2686,25 @@ export default function ProductSourcesPage() {
                   <tbody>
                   {recentProducts.map((product) => {
                     const source = getRecentSource(product);
+                    const kind = getRecentKind(product);
+                    const publicState = getRecentPublicState(product);
 
                     return (
                         <tr key={product.id}>
                           <td>
                             <div className="flex items-center gap-sm">
-                              <SafeThumb src={product.imageUrl} label="S" size={36} />
+                              <SafeThumb
+                                  src={product.imageUrl}
+                                  label="S"
+                                  size={36}
+                              />
 
                               <Link
                                   href={`/dashboard/products/${product.id}`}
-                                  style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: 'var(--text-sm)',
+                                  }}
                               >
                                 {product.title}
                               </Link>
@@ -1866,22 +2712,45 @@ export default function ProductSourcesPage() {
                           </td>
 
                           <td>
-                            <span className="badge badge-neutral">{product.platform}</span>
+                        <span className={`badge ${getKindBadge(kind)}`}>
+                          {getKindLabel(kind)}
+                        </span>
+                          </td>
+
+                          <td>
+                        <span className="badge badge-neutral">
+                          {getPlatformLabel(product.platform)}
+                        </span>
                           </td>
 
                           <td style={{ fontSize: 'var(--text-xs)' }}>{source}</td>
 
                           <td>
-                        <span className={`badge ${getStatusBadgeClass(product.status)}`}>
+                        <span
+                            className={`badge ${getStatusBadgeClass(product.status)}`}
+                        >
                           {getStatusLabel(product.status)}
+                        </span>
+                          </td>
+
+                          <td>
+                        <span className={`badge ${publicState.badge}`}>
+                          {publicState.label}
                         </span>
                           </td>
 
                           <td>{product.score != null ? product.score : '—'}</td>
 
-                          <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+                          <td
+                              style={{
+                                fontSize: 'var(--text-xs)',
+                                color: 'var(--text-tertiary)',
+                              }}
+                          >
                             {product.updatedAt
-                                ? new Date(product.updatedAt).toLocaleDateString('vi-VN')
+                                ? new Date(product.updatedAt).toLocaleDateString(
+                                    'vi-VN',
+                                )
                                 : '—'}
                           </td>
                         </tr>

@@ -6,52 +6,26 @@
 // Rules:
 // - Safe Mode ON by default.
 // - Free Only ON by policy. This bot does not call paid AI.
-// - Store offers / vouchers / campaigns are saved internally only.
-// - Real products are saved first, then link/image health is checked.
-// - Public publish happens only after strict checks pass.
+// - AccessTrade product/datafeed items are prioritized.
+// - Voucher / campaign / store offer / unknown items never auto-publish.
+// - A real product is health-checked before its final public state is saved.
+// - No fake product, price, image, stock, review, or user experience.
 
 import type { Product, ProductKind } from '../types';
 import { BotContext } from './context';
 import { listProducts, createProduct, getAllProducts } from '../storage/products';
-import { classifyProductKind, looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
+import { looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import {
   isAccessTradeConfigured,
+  mapAccessTradeToProduct,
   searchAccessTrade,
+  type NormalizedAccessTradeItem,
 } from '../integrations/accesstrade';
 import { checkLinkHealth, checkImageHealth } from './productHealthCheck';
 
 type SourceName = 'local' | 'accesstrade' | 'manual' | 'all';
 
-type AccessTradeRawItem = Record<string, unknown>;
-
-type AccessTradeSearchResult = {
-  items?: AccessTradeRawItem[];
-  products?: AccessTradeRawItem[];
-  vouchers?: AccessTradeRawItem[];
-  campaigns?: AccessTradeRawItem[];
-  storeOffers?: AccessTradeRawItem[];
-  unknown?: AccessTradeRawItem[];
-  summary?: Record<string, unknown>;
-  data?: {
-    items?: AccessTradeRawItem[];
-    products?: AccessTradeRawItem[];
-    vouchers?: AccessTradeRawItem[];
-    campaigns?: AccessTradeRawItem[];
-    storeOffers?: AccessTradeRawItem[];
-    unknown?: AccessTradeRawItem[];
-    summary?: Record<string, unknown>;
-  };
-};
-
 type MutableProductDraft = Partial<Product> & Record<string, unknown>;
-
-type SourceCollectionKind =
-    | 'product'
-    | 'deal'
-    | 'voucher'
-    | 'campaign'
-    | 'store_offer'
-    | 'unknown';
 
 type SafeAutoPublishDecision = {
   allowed: boolean;
@@ -65,6 +39,31 @@ type HealthGuardDecision = {
   updates: MutableProductDraft;
 };
 
+type ScanCounters = {
+  found: number;
+  saved: number;
+  candidates: number;
+  realProducts: number;
+  storeOffers: number;
+  vouchers: number;
+  campaigns: number;
+  unknown: number;
+  autoPublished: number;
+  needsReview: number;
+  archived: number;
+  blockedByLink: number;
+  blockedByImage: number;
+  healthErrors: number;
+  duplicatesSkipped: number;
+  skipped: number;
+};
+
+type ExistingProductIndex = {
+  externalIds: Set<string>;
+  urls: Set<string>;
+  fallbackKeys: Set<string>;
+};
+
 const AUTO_SAFE_MODE = process.env.AI_AUTO_MODE !== 'false';
 const AUTO_APPROVE_SAFE_PRODUCTS = process.env.AUTO_APPROVE_SAFE_PRODUCTS !== 'false';
 const AUTO_PUBLISH_SAFE_PRODUCTS = process.env.AUTO_PUBLISH_SAFE_PRODUCTS !== 'false';
@@ -74,6 +73,10 @@ const AUTO_PUBLISH_SAFE_PRODUCTS = process.env.AUTO_PUBLISH_SAFE_PRODUCTS !== 'f
 const FREE_ONLY_ENFORCED = true;
 const ALLOW_PAID_AI = false;
 const COST_MODE = 'safe_free';
+
+// Source Scout should prioritize real product/datafeed results.
+// The AccessTrade dashboard can still search "all" kinds for inspection.
+const ACCESS_TRADE_SCAN_KIND = 'product' as const;
 
 const ACCESS_TRADE_KEYWORDS = [
   'iphone',
@@ -98,144 +101,39 @@ const ACCESS_TRADE_KEYWORDS = [
   'serum',
 ];
 
-const ACCESS_TRADE_ID_KEYS = [
-  'sourceId',
-  'source_id',
-  'externalId',
-  'external_id',
-  'id',
-  'productId',
-  'product_id',
-  'sku',
-  'skuId',
-  'sku_id',
-  'itemId',
-  'item_id',
-  'campaignId',
-  'campaign_id',
-  'offerId',
-  'offer_id',
-];
-
-const ACCESS_TRADE_TITLE_KEYS = [
-  'name',
-  'title',
-  'productName',
-  'product_name',
-  'voucherName',
-  'voucher_name',
-  'campaignName',
-  'campaign_name',
-  'offerName',
-  'offer_name',
-];
-
-const ACCESS_TRADE_DESCRIPTION_KEYS = [
-  'description',
-  'desc',
-  'shortDescription',
-  'short_description',
-  'summary',
-  'content',
-  'promotion',
-];
-
-const ACCESS_TRADE_IMAGE_KEYS = [
-  'imageUrl',
-  'image_url',
-  'image',
-  'productImage',
-  'product_image',
-  'thumbnail',
-  'thumbnailUrl',
-  'thumbnail_url',
-  'logo',
-  'banner',
-  'image.url',
-  'media.image',
-];
-
-const ACCESS_TRADE_AFFILIATE_URL_KEYS = [
-  'affiliateUrl',
-  'affiliate_url',
-  'aff_link',
-  'affiliateLink',
-  'affiliate_link',
-  'trackingLink',
-  'tracking_link',
-  'deeplink',
-  'deepLink',
-  'deep_link',
-];
-
-const ACCESS_TRADE_ORIGINAL_URL_KEYS = [
-  'originalUrl',
-  'original_url',
-  'productUrl',
-  'product_url',
-  'url',
-  'link',
-  'landingPage',
-  'landing_page',
-  'merchantUrl',
-  'merchant_url',
-];
-
-const ACCESS_TRADE_CURRENT_PRICE_KEYS = [
-  'salePrice',
-  'sale_price',
-  'currentPrice',
-  'current_price',
-  'discountedPrice',
-  'discounted_price',
-  'discountPrice',
-  'discount_price',
-  'discount',
-  'priceValue',
-  'price_value',
-  'price',
-];
-
-const ACCESS_TRADE_ORIGINAL_PRICE_KEYS = [
-  'originalPrice',
-  'original_price',
-  'listPrice',
-  'list_price',
-  'oldPrice',
-  'old_price',
-  'marketPrice',
-  'market_price',
-  'priceBeforeDiscount',
-  'price_before_discount',
-  'price',
-];
-
-const ACCESS_TRADE_PLATFORM_KEYS = [
-  'platform',
-  'network',
-  'domain',
-  'merchant',
-  'merchantName',
-  'merchant_name',
-  'shop',
-  'shopName',
-  'shop_name',
-  'advertiser',
-  'advertiserName',
-  'advertiser_name',
-  'campaignName',
-  'campaign_name',
+const NON_PUBLIC_KINDS = new Set<string>([
+  'voucher',
   'campaign',
-];
+  'store_offer',
+  'unknown',
+]);
 
-const ACCESS_TRADE_CATEGORY_KEYS = [
-  'cate',
-  'category',
-  'categoryName',
-  'category_name',
-  'cat_name',
-  'vertical',
-  'industry',
+const GENERIC_OR_UNSAFE_TITLE_TERMS = [
+  'demo',
+  'test product',
+  'san pham test',
+  'sample',
+  'internal',
+  'placeholder',
+  'fake',
+  'voucher',
+  'coupon',
+  'ma giam gia',
+  'ma uu dai',
+  'ma khuyen mai',
+  'code giam',
+  'nhap ma',
+  'official store',
+  'official shop',
+  'uu dai shop',
+  'khuyen mai shop',
+  'chien dich',
+  'campaign',
+  'cashback',
+  'hoan tien',
+  'toan shop',
+  'toan san',
+  'tat ca san pham',
 ];
 
 function getText(value: unknown): string {
@@ -248,38 +146,10 @@ function getText(value: unknown): string {
   return '';
 }
 
-function stringifyValue(value: unknown): string {
+function normalizeText(value: unknown): string {
   if (value === null || value === undefined) return '';
 
-  if (typeof value === 'string') return value.trim();
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value).trim();
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const text = stringifyValue(item);
-      if (text) return text;
-    }
-
-    return '';
-  }
-
-  if (typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-
-    for (const key of ['url', 'link', 'src', 'name', 'title', 'value']) {
-      const text = stringifyValue(record[key]);
-      if (text) return text;
-    }
-  }
-
-  return '';
-}
-
-function normalizeText(value: unknown): string {
-  return stringifyValue(value)
+  return String(value)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/đ/g, 'd')
@@ -290,30 +160,6 @@ function normalizeText(value: unknown): string {
       .trim();
 }
 
-function getPathValue(item: AccessTradeRawItem, path: string): unknown {
-  const parts = path.split('.');
-  let cursor: unknown = item;
-
-  for (const part of parts) {
-    if (!cursor || typeof cursor !== 'object') {
-      return undefined;
-    }
-
-    cursor = (cursor as Record<string, unknown>)[part];
-  }
-
-  return cursor;
-}
-
-function getRawText(item: AccessTradeRawItem, keys: string[]): string {
-  for (const key of keys) {
-    const value = stringifyValue(getPathValue(item, key));
-    if (value) return value;
-  }
-
-  return '';
-}
-
 function parsePriceNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
 
@@ -321,14 +167,11 @@ function parsePriceNumber(value: unknown): number | undefined {
     return Number.isFinite(value) && value >= 1000 ? value : undefined;
   }
 
-  if (typeof value !== 'string') {
-    return undefined;
-  }
+  if (typeof value !== 'string') return undefined;
 
   const trimmed = value.trim();
-  if (!trimmed) return undefined;
 
-  if (/%/.test(trimmed)) return undefined;
+  if (!trimmed || /%/.test(trimmed)) return undefined;
 
   const normalizedText = normalizeText(trimmed);
 
@@ -341,167 +184,52 @@ function parsePriceNumber(value: unknown): number | undefined {
     return undefined;
   }
 
-  const kMatch = trimmed.match(/^(\d+(?:[.,]\d+)?)\s?k$/i);
+  const kMatch = trimmed.match(/^(\d+(?:[.,]\d+)?)\s*k$/i);
+
   if (kMatch) {
     const parsedK = Number(kMatch[1].replace(',', '.')) * 1000;
-    return Number.isFinite(parsedK) && parsedK >= 1000 ? Math.round(parsedK) : undefined;
+    return Number.isFinite(parsedK) && parsedK >= 1000
+        ? Math.round(parsedK)
+        : undefined;
   }
 
-  const digitsOnly = trimmed.replace(/[^\d]/g, '');
+  // For ranges such as "1.299.000 - 1.599.000", use the first valid amount.
+  const firstSegment = trimmed.split(/\s*(?:-|–|—|~|đến|toi|to)\s*/i)[0]?.trim() || trimmed;
+  const digitsOnly = firstSegment.replace(/[^\d]/g, '');
+
   if (!digitsOnly) return undefined;
 
-  const looksLikeVnd =
-      /₫|đ|vnd/i.test(trimmed) ||
-      /\d+[.,]\d{3}/.test(trimmed) ||
-      digitsOnly.length >= 4;
-
-  if (looksLikeVnd) {
-    const parsedVnd = Number(digitsOnly);
-    return Number.isFinite(parsedVnd) && parsedVnd >= 1000 ? parsedVnd : undefined;
-  }
-
-  const normalized = trimmed.replace(',', '.').replace(/[^\d.]/g, '');
-  const parsed = Number(normalized);
+  const parsed = Number(digitsOnly);
 
   return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
 }
 
-function getRawNumber(item: AccessTradeRawItem, keys: string[]): number | undefined {
-  for (const key of keys) {
-    const value = parsePriceNumber(getPathValue(item, key));
-    if (value) return value;
-  }
+function isValidHttpUrl(value: unknown): boolean {
+  const text = getText(value);
 
-  return undefined;
-}
+  if (!text) return false;
 
-function normalizeTitle(value: unknown): string {
-  return normalizeText(value);
-}
-
-function normalizeUrl(value: unknown): string {
-  return normalizeText(value);
-}
-
-function hasRealPositivePrice(value: unknown): boolean {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1000;
-}
-
-function cloneRawItemWithCollection(
-    item: AccessTradeRawItem,
-    collectionKind: SourceCollectionKind,
-): AccessTradeRawItem {
-  return {
-    ...item,
-    __accessTradeCollection: collectionKind,
-  };
-}
-
-function extractAccessTradeItems(result: unknown): AccessTradeRawItem[] {
-  const payload =
-      result && typeof result === 'object'
-          ? (result as AccessTradeSearchResult)
-          : {};
-
-  const groups: Array<{
-    collectionKind: SourceCollectionKind;
-    items?: AccessTradeRawItem[];
-  }> = [
-    { collectionKind: 'unknown', items: payload.items },
-    { collectionKind: 'product', items: payload.products },
-    { collectionKind: 'voucher', items: payload.vouchers },
-    { collectionKind: 'campaign', items: payload.campaigns },
-    { collectionKind: 'store_offer', items: payload.storeOffers },
-    { collectionKind: 'unknown', items: payload.unknown },
-    { collectionKind: 'unknown', items: payload.data?.items },
-    { collectionKind: 'product', items: payload.data?.products },
-    { collectionKind: 'voucher', items: payload.data?.vouchers },
-    { collectionKind: 'campaign', items: payload.data?.campaigns },
-    { collectionKind: 'store_offer', items: payload.data?.storeOffers },
-    { collectionKind: 'unknown', items: payload.data?.unknown },
-  ];
-
-  return groups.flatMap(({ collectionKind, items }) => {
-    if (!Array.isArray(items)) return [];
-
-    return items
-        .filter((item): item is AccessTradeRawItem => Boolean(item && typeof item === 'object'))
-        .map((item) => cloneRawItemWithCollection(item, collectionKind));
-  });
-}
-
-function toKnownProductKind(value: unknown): ProductKind | null {
-  const normalized = normalizeText(value);
-
-  switch (normalized) {
-    case 'product':
-    case 'deal':
-    case 'voucher':
-    case 'campaign':
-    case 'store_offer':
-    case 'unknown':
-      return normalized as ProductKind;
-    default:
-      return null;
+  try {
+    const url = new URL(text);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && Boolean(url.hostname);
+  } catch {
+    return false;
   }
 }
 
-function getRawKind(item: AccessTradeRawItem): string {
-  const collectionKind = normalizeText(item.__accessTradeCollection);
+function normalizeComparableUrl(value: unknown): string {
+  const text = getText(value);
 
-  if (
-      collectionKind === 'product' ||
-      collectionKind === 'deal' ||
-      collectionKind === 'voucher' ||
-      collectionKind === 'campaign' ||
-      collectionKind === 'store_offer'
-  ) {
-    return collectionKind;
+  if (!text) return '';
+
+  try {
+    const url = new URL(text);
+    url.hash = '';
+
+    return `${url.protocol}//${url.hostname.toLowerCase()}${url.port ? `:${url.port}` : ''}${url.pathname.replace(/\/+$/, '')}${url.search}`;
+  } catch {
+    return normalizeText(text).replace(/\/+$/, '');
   }
-
-  return (
-      getRawText(item, [
-        'sourceItemKind',
-        'kind',
-        'type',
-        'rawSourceKind',
-        'categoryType',
-        'category_type',
-        'sourceType',
-        'source_type',
-        'itemType',
-        'item_type',
-        'objectType',
-        'object_type',
-        '__sandealSourceKind',
-        '__sandealEndpoint',
-      ]) || 'unknown'
-  ).toLowerCase();
-}
-
-function normalizePlatformText(value: string): string {
-  const lower = value.toLowerCase();
-
-  if (lower.includes('shopee')) return 'shopee';
-  if (lower.includes('lazada')) return 'lazada';
-  if (lower.includes('tiktok')) return 'tiktok_shop';
-  if (lower.includes('tiki')) return 'tiki';
-  if (lower.includes('sendo')) return 'sendo';
-  if (lower.includes('fahasa')) return 'fahasa';
-  if (lower.includes('access')) return 'accesstrade';
-
-  return 'accesstrade';
-}
-
-function calculateDiscountPercent(
-    currentPrice?: number,
-    originalPrice?: number,
-): number | undefined {
-  if (!currentPrice || !originalPrice) return undefined;
-  if (originalPrice <= currentPrice) return undefined;
-
-  const discount = Math.round(((originalPrice - currentPrice) / originalPrice) * 100);
-  return Number.isFinite(discount) && discount > 0 ? discount : undefined;
 }
 
 function isProductLikeKind(kind: ProductKind | string | undefined): boolean {
@@ -509,23 +237,7 @@ function isProductLikeKind(kind: ProductKind | string | undefined): boolean {
 }
 
 function isBlockedNonProductKind(kind: ProductKind | string | undefined): boolean {
-  return kind === 'voucher' || kind === 'campaign' || kind === 'store_offer' || kind === 'unknown';
-}
-
-function getKindCounterKey(kind: ProductKind | string | undefined): string {
-  switch (kind) {
-    case 'product':
-    case 'deal':
-      return 'realProducts';
-    case 'voucher':
-      return 'vouchers';
-    case 'campaign':
-      return 'campaigns';
-    case 'store_offer':
-      return 'storeOffers';
-    default:
-      return 'unknown';
-  }
+  return !kind || NON_PUBLIC_KINDS.has(kind);
 }
 
 function getNonProductReason(kind: ProductKind | string | undefined): string {
@@ -537,9 +249,8 @@ function getNonProductReason(kind: ProductKind | string | undefined): string {
     case 'campaign':
       return 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
     case 'unknown':
-      return 'Chưa xác định được đây là sản phẩm thật.';
     default:
-      return '';
+      return 'Chưa xác định được đây là sản phẩm thật.';
   }
 }
 
@@ -548,50 +259,78 @@ function isUnsafeTitleForAutoPublish(title: string): boolean {
 
   if (!normalized) return true;
 
-  const blockedTerms = [
-    'demo',
-    'test',
-    'sample',
-    'internal',
-    'placeholder',
-    'fake',
-    'voucher',
-    'coupon',
-    'ma giam gia',
-    'ma uu dai',
-    'ma khuyen mai',
-    'code giam',
-    'nhap ma',
-    'giam gia',
-    'cho don',
-    'don toi thieu',
-    'official store',
-    'official shop',
-    'uu dai shop',
-    'khuyen mai shop',
-    'chien dich',
-    'campaign',
-    'cashback',
-    'hoan tien',
-    'toan shop',
-    'toan san',
-    'tat ca san pham',
-  ];
+  if (GENERIC_OR_UNSAFE_TITLE_TERMS.some((term) => normalized.includes(term))) {
+    return true;
+  }
 
-  return blockedTerms.some((term) => normalized.includes(term));
+  const merchantOfferMatch = title.match(/^\s*\[[^\]]+\]\s*-\s*(.+)$/);
+  const offerBody = normalizeText(merchantOfferMatch?.[1] || '');
+  const startsLikeGenericOffer =
+      offerBody.startsWith('giam ') ||
+      offerBody.startsWith('uu dai ') ||
+      offerBody.startsWith('khuyen mai ') ||
+      offerBody.startsWith('flash sale ') ||
+      offerBody.startsWith('sale ');
+
+  return Boolean(merchantOfferMatch && startsLikeGenericOffer);
 }
 
 function hasSpecificProductTitle(title: string): boolean {
-  const text = normalizeText(title);
+  const normalized = normalizeText(title);
 
-  if (!text) return false;
+  if (!normalized || normalized.length < 8) return false;
+  if (isUnsafeTitleForAutoPublish(title)) return false;
 
-  const hasModelOrVariant =
-      /\b[a-z0-9]{2,}[-_/]?[a-z0-9]{2,}\b/i.test(title) ||
-      /\d+\s?(ml|g|gram|kg|l|lit|cm|mm|inch|w|mah|gb|tb|pack|pcs|vien|chai|hop|tuyp|bo|cai)\b/i.test(text) ||
-      /\b(iphone|ipad|macbook|samsung|xiaomi|oppo|vivo|asus|acer|lenovo|dell|hp|sony|lg|dabo|serum|kem|sua tam|sua rua mat|tai nghe|laptop|dien thoai|may loc|noi chien|binh giu nhiet)\b/i.test(text);
+  const meaningfulWords = normalized
+      .split(/\s+/)
+      .filter((word) => word.length >= 2);
 
-  return hasModelOrVariant && !isUnsafeTitleForAutoPublish(title);
+  if (meaningfulWords.length < 2) return false;
+
+  const hasDigitOrVariant =
+      /\d/.test(normalized) ||
+      /\b(?:pro|max|plus|ultra|mini|lite|air|series|gen|version|v\d+)\b/i.test(normalized);
+
+  const hasKnownProductWord =
+      /\b(?:iphone|ipad|macbook|dien thoai|laptop|tai nghe|ban phim|chuot|sac|pin|serum|kem|sua tam|sua rua mat|dau goi|may loc|noi chien|may hut bui|may xay|dong ho|balo|quan|ao|giay|dep|ta|bim|binh|noi|chao)\b/i.test(
+          normalized,
+      );
+
+  return hasDigitOrVariant || hasKnownProductWord || meaningfulWords.length >= 4;
+}
+
+function getDraftKind(productDraft: MutableProductDraft): ProductKind | string {
+  return getText(productDraft.sourceItemKind || productDraft.kind) || 'unknown';
+}
+
+function getDraftPrice(productDraft: MutableProductDraft): number | undefined {
+  return (
+      parsePriceNumber(productDraft.salePrice) ||
+      parsePriceNumber(productDraft.currentPrice) ||
+      parsePriceNumber(productDraft.price) ||
+      parsePriceNumber(productDraft.originalPrice)
+  );
+}
+
+function getDraftUrl(productDraft: MutableProductDraft): string {
+  const candidates = [
+    productDraft.affiliateUrl,
+    productDraft.originalUrl,
+    productDraft.url,
+  ];
+
+  for (const candidate of candidates) {
+    if (isValidHttpUrl(candidate)) return getText(candidate);
+  }
+
+  return '';
+}
+
+function getDraftQualityScore(productDraft: MutableProductDraft): number {
+  const raw = productDraft.sourceQualityScore ?? productDraft.qualityScore;
+  const score = typeof raw === 'number' ? raw : Number(raw || 0);
+
+  return Number.isFinite(score) ? score : 0;
 }
 
 function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPublishDecision {
@@ -612,22 +351,14 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
   const title = getText(productDraft.title);
   const description = getText(productDraft.description);
   const rawSourceKind = getText(productDraft.rawSourceKind);
-  const kind = getText(productDraft.sourceItemKind || productDraft.kind);
-
-  const affiliateUrl = getText(productDraft.affiliateUrl);
-  const imageUrl = getText(productDraft.imageUrl);
-  const url = getText(productDraft.url || productDraft.originalUrl);
-  const source = getText(productDraft.source);
+  const kind = getDraftKind(productDraft);
+  const source = normalizeText(productDraft.source);
   const platform = getText(productDraft.platform);
-
-  const price =
-      parsePriceNumber(productDraft.salePrice) ||
-      parsePriceNumber(productDraft.price) ||
-      parsePriceNumber(productDraft.currentPrice) ||
-      parsePriceNumber(productDraft.originalPrice);
-
-  const publicDecision = getText(productDraft.publicDecision);
-  const sourceQualityScore = Number(productDraft.sourceQualityScore || productDraft.qualityScore || 0);
+  const imageUrl = getText(productDraft.imageUrl);
+  const productUrl = getDraftUrl(productDraft);
+  const price = getDraftPrice(productDraft);
+  const publicDecision = normalizeText(productDraft.publicDecision);
+  const sourceQualityScore = getDraftQualityScore(productDraft);
 
   if (!isProductLikeKind(kind)) {
     return {
@@ -643,17 +374,10 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
-  if (!title || title.length < 8) {
+  if (!title || !hasSpecificProductTitle(title)) {
     return {
       allowed: false,
-      reason: 'missing_or_too_short_title',
-    };
-  }
-
-  if (!hasSpecificProductTitle(title)) {
-    return {
-      allowed: false,
-      reason: 'title_not_specific_enough',
+      reason: 'missing_or_non_specific_product_title',
     };
   }
 
@@ -679,7 +403,7 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
-  if (!source || source !== 'accesstrade') {
+  if (source !== 'accesstrade') {
     return {
       allowed: false,
       reason: 'source_not_verified_for_auto_publish',
@@ -693,24 +417,17 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
-  if (!affiliateUrl) {
+  if (!productUrl) {
     return {
       allowed: false,
-      reason: 'missing_affiliate_url',
+      reason: 'missing_or_invalid_product_url',
     };
   }
 
-  if (!url) {
+  if (!isValidHttpUrl(imageUrl)) {
     return {
       allowed: false,
-      reason: 'missing_product_url',
-    };
-  }
-
-  if (!imageUrl) {
-    return {
-      allowed: false,
-      reason: 'missing_image',
+      reason: 'missing_or_invalid_image_url',
     };
   }
 
@@ -735,6 +452,13 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
+  if (!Boolean(productDraft.autoPublishEligible)) {
+    return {
+      allowed: false,
+      reason: 'source_item_not_auto_publish_eligible',
+    };
+  }
+
   if (publicDecision && publicDecision !== 'public_candidate') {
     return {
       allowed: false,
@@ -742,7 +466,7 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
-  if (sourceQualityScore > 0 && sourceQualityScore < 70) {
+  if (sourceQualityScore < 70) {
     return {
       allowed: false,
       reason: 'source_quality_score_too_low',
@@ -755,243 +479,182 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
   };
 }
 
-function getBlockedStatus(kind: ProductKind | string | undefined): string {
-  if (isProductLikeKind(kind)) return 'needs_review';
-  return 'archived';
+function getBlockedStatus(kind: ProductKind | string | undefined): Product['status'] {
+  return (isProductLikeKind(kind) ? 'needs_review' : 'archived') as Product['status'];
 }
 
-function getPublicDecisionForDraft(
-    kind: ProductKind | string | undefined,
-    verifiedSource: boolean,
-    autoPublishEligible: boolean,
-): string {
-  if (kind === 'store_offer' || kind === 'voucher' || kind === 'campaign') return 'archived';
-  if (kind === 'unknown') return 'needs_review';
-  if (autoPublishEligible && verifiedSource) return 'public_candidate';
-  return 'needs_review';
+function getNormalizedItemKind(item: NormalizedAccessTradeItem): ProductKind {
+  return item.sourceItemKind || item.kind || 'unknown';
 }
 
-function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProductDraft | null {
-  const title = getRawText(rawItem, ACCESS_TRADE_TITLE_KEYS);
+function buildAccessTradeProductDraft(
+    item: NormalizedAccessTradeItem,
+): MutableProductDraft | null {
+  const title = getText(item.name);
+
   if (!title) return null;
 
-  const sourceId = getRawText(rawItem, ACCESS_TRADE_ID_KEYS);
-  const affiliateUrl = getRawText(rawItem, ACCESS_TRADE_AFFILIATE_URL_KEYS);
-  const originalUrl = getRawText(rawItem, ACCESS_TRADE_ORIGINAL_URL_KEYS);
+  const mapped = mapAccessTradeToProduct(item) as MutableProductDraft;
+  const kind = getNormalizedItemKind(item);
+  const isRealProduct = isProductLikeKind(kind);
+  const isNonProduct = isBlockedNonProductKind(kind);
+
+  const affiliateUrl = isValidHttpUrl(item.affiliateUrl)
+      ? item.affiliateUrl
+      : undefined;
+
+  const originalUrl = isValidHttpUrl(item.originalUrl)
+      ? item.originalUrl
+      : undefined;
+
   const finalUrl = affiliateUrl || originalUrl;
+  const imageUrl = isValidHttpUrl(item.imageUrl)
+      ? item.imageUrl
+      : undefined;
 
-  if (!finalUrl) return null;
+  const price = parsePriceNumber(item.price);
+  const salePrice = parsePriceNumber(item.salePrice);
 
-  const imageUrl = getRawText(rawItem, ACCESS_TRADE_IMAGE_KEYS);
-  const description = getRawText(rawItem, ACCESS_TRADE_DESCRIPTION_KEYS);
-  const rawKind = getRawKind(rawItem);
-  const knownKind = toKnownProductKind(rawKind);
-
-  const rawPlatform = getRawText(rawItem, ACCESS_TRADE_PLATFORM_KEYS);
-  const platformText = normalizePlatformText(rawPlatform || 'AccessTrade');
-
-  const category = getRawText(rawItem, ACCESS_TRADE_CATEGORY_KEYS);
-
-  const currentPrice = getRawNumber(rawItem, ACCESS_TRADE_CURRENT_PRICE_KEYS);
-  const originalPriceRaw = getRawNumber(rawItem, ACCESS_TRADE_ORIGINAL_PRICE_KEYS);
-
-  const originalPrice =
-      originalPriceRaw && currentPrice && originalPriceRaw > currentPrice
-          ? originalPriceRaw
-          : undefined;
-
-  const displayPrice = originalPrice || originalPriceRaw || currentPrice;
-  const discountPercent = calculateDiscountPercent(currentPrice, originalPrice);
-
-  const hasPrice =
-      hasRealPositivePrice(currentPrice) ||
-      hasRealPositivePrice(originalPriceRaw) ||
-      hasRealPositivePrice(displayPrice);
-
-  const hasAffiliateUrl = Boolean(affiliateUrl);
-  const hasImage = Boolean(imageUrl);
-
-  const classifiedKind =
-      knownKind ||
-      classifyProductKind({
-        title,
-        name: title,
-        description,
-        source: 'accesstrade',
-        imageUrl,
-        affiliateUrl: affiliateUrl || undefined,
-        originalUrl: originalUrl || undefined,
-        url: finalUrl,
-        price: displayPrice,
-        salePrice: currentPrice,
-        originalPrice,
-        rawSourceKind: rawKind,
-        sourceType: 'affiliate',
-        raw: rawItem,
-      });
-
-  const isProductLike = isProductLikeKind(classifiedKind);
-  const nonProductReason = getNonProductReason(classifiedKind);
-
-  const normalizedVerifiedSource = Boolean(rawItem.verifiedSource || rawItem.sourceVerified);
-  const normalizedNeedsVerification =
-      typeof rawItem.needsVerification === 'boolean' ? Boolean(rawItem.needsVerification) : undefined;
-
-  const normalizedAutoPublishEligible = Boolean(rawItem.autoPublishEligible);
-  const normalizedPublicDecision = getText(rawItem.publicDecision);
-  const normalizedBlockReason = getText(rawItem.publicBlockReason);
-  const normalizedQualityScore = Number(rawItem.qualityScore || rawItem.sourceQualityScore || 0);
-
-  const titleUnsafe = isUnsafeTitleForAutoPublish(title);
-  const looksUnsafe = looksLikeVoucherOrCampaign({
-    title,
-    description,
-    rawSourceKind: rawKind,
-    source: 'accesstrade',
-    raw: rawItem,
-  });
-
-  const hasMinimumProductSignals =
-      isProductLike &&
-      hasAffiliateUrl &&
-      hasImage &&
-      hasPrice &&
-      hasSpecificProductTitle(title) &&
-      !titleUnsafe &&
-      !looksUnsafe;
-
-  const verifiedSource =
-      normalizedVerifiedSource ||
-      (hasMinimumProductSignals &&
-          normalizedPublicDecision !== 'archived' &&
-          !isBlockedNonProductKind(classifiedKind));
-
-  const needsVerification =
-      normalizedNeedsVerification ??
-      (!verifiedSource || !isProductLike || !hasAffiliateUrl || !hasImage || !hasPrice);
-
-  const publicDecision =
-      normalizedPublicDecision ||
-      getPublicDecisionForDraft(classifiedKind, verifiedSource, normalizedAutoPublishEligible);
-
-  const publicBlockReason =
-      normalizedBlockReason ||
-      nonProductReason ||
-      (!hasAffiliateUrl
-          ? 'Thiếu affiliate link.'
-          : !hasImage
-              ? 'Thiếu ảnh sản phẩm.'
-              : !hasPrice
-                  ? 'Thiếu giá sản phẩm.'
-                  : !verifiedSource
+  const blockReason =
+      getText(item.publicBlockReason) ||
+      getText(item.nonProductReason) ||
+      (!finalUrl
+          ? 'Thiếu link sản phẩm hoặc affiliate link hợp lệ.'
+          : !imageUrl
+              ? 'Thiếu ảnh sản phẩm hợp lệ.'
+              : !price && !salePrice
+                  ? 'Thiếu giá sản phẩm thật.'
+                  : !item.verifiedSource
                       ? 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.'
                       : '');
 
-  const baseDraft = {
+  const nonProductReason = isNonProduct
+      ? getText(item.nonProductReason) || getNonProductReason(kind)
+      : undefined;
+
+  const publicDecision = isNonProduct
+      ? kind === 'unknown'
+          ? 'needs_review'
+          : 'archived'
+      : item.publicDecision;
+
+  const draft: MutableProductDraft = {
+    ...mapped,
+
     title,
     name: title,
-    description: description || undefined,
+    description: item.description || undefined,
+
+    kind,
+    sourceItemKind: kind,
+    rawSourceKind: item.rawSourceKind,
 
     source: 'accesstrade',
-    platform: platformText,
-
     dataSource: 'accesstrade',
-    sourceType: 'affiliate',
     importedFrom: 'accesstrade',
-    rawSourceKind: rawKind,
-    kind: classifiedKind,
-    sourceItemKind: classifiedKind,
+    sourceType: 'affiliate',
+    platform: item.platform || 'accesstrade',
 
-    verifiedSource,
-    sourceVerified: verifiedSource,
+    sourceId: item.id,
+    externalId: item.id,
+
+    affiliateUrl,
+    originalUrl,
+    url: finalUrl,
+
+    imageUrl,
+
+    price,
+    salePrice,
+
+    verifiedSource: isRealProduct && item.verifiedSource,
+    sourceVerified: isRealProduct && item.verifiedSource,
+    needsVerification:
+        !isRealProduct ||
+        !item.verifiedSource ||
+        !item.autoPublishEligible ||
+        item.needsVerification,
+
+    status: getBlockedStatus(kind),
     publicHidden: true,
-    needsVerification,
     aiApproved: false,
     autoPublished: false,
     approvalMode: 'manual_or_auto_safe_required',
 
-    status: getBlockedStatus(classifiedKind),
+    autoPublishEligible: isRealProduct && item.autoPublishEligible,
+    publicDecision,
+    publicBlockReason: blockReason || undefined,
+    nonProductReason,
+    autoPublishBlockedReason: blockReason || undefined,
 
-    sourceId: sourceId || undefined,
-    externalId: sourceId || undefined,
-
-    affiliateUrl: affiliateUrl || undefined,
-    originalUrl: originalUrl || finalUrl,
-    url: finalUrl,
-
-    imageUrl: imageUrl || undefined,
-
-    category: category || undefined,
-
-    price: displayPrice,
-    salePrice: currentPrice,
-    currentPrice,
-    originalPrice,
-    discountPercent,
+    qualityScore: item.qualityScore,
+    sourceQualityScore: item.qualityScore,
 
     benefits: [],
     tags: [],
     warnings: [
-      nonProductReason || 'Không fake giá, ảnh, review, tồn kho hoặc trải nghiệm mua hàng.',
-    ].filter(Boolean),
+      nonProductReason ||
+      'Không fake giá, ảnh, review, tồn kho hoặc trải nghiệm mua hàng.',
+    ],
     checkBeforeBuy: [
       'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
       'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
       'SanDeal có thể nhận hoa hồng affiliate nếu bạn mua qua liên kết, giá người mua không đổi.',
     ],
 
-    riskLevel: needsVerification ? 'unknown' : 'low',
+    riskLevel: item.needsVerification ? 'unknown' : 'low',
     complianceStatus: 'needs_edit',
     contentPackageStatus: 'none',
 
     affiliateSource: 'accesstrade',
-
-    autoPublishEligible: normalizedAutoPublishEligible || publicDecision === 'public_candidate',
-    publicDecision,
-    publicBlockReason,
-    nonProductReason: nonProductReason || undefined,
-    qualityScore: normalizedQualityScore || undefined,
-    sourceQualityScore: normalizedQualityScore || undefined,
-
-    autoPublishBlockedReason: publicBlockReason || undefined,
-
     rawSourceType: 'accesstrade',
-    rawData: rawItem.rawData && typeof rawItem.rawData === 'object' ? rawItem.rawData : rawItem,
-  } as MutableProductDraft;
+    rawData: item.rawData,
+  };
 
-  if (!isProductLike || isBlockedNonProductKind(classifiedKind)) {
-    baseDraft.status = 'archived';
-    baseDraft.publicHidden = true;
-    baseDraft.aiApproved = false;
-    baseDraft.autoPublished = false;
-    baseDraft.needsVerification = true;
-    baseDraft.verifiedSource = false;
-    baseDraft.sourceVerified = false;
-    baseDraft.publicDecision = classifiedKind === 'unknown' ? 'needs_review' : 'archived';
-    baseDraft.publicBlockReason = nonProductReason || 'Không phải sản phẩm cụ thể.';
-    baseDraft.autoPublishBlockedReason = baseDraft.publicBlockReason;
+  if (isNonProduct) {
+    draft.status = getBlockedStatus(kind);
+    draft.publicHidden = true;
+    draft.aiApproved = false;
+    draft.autoPublished = false;
+    draft.autoPublishEligible = false;
+    draft.needsVerification = true;
+    draft.verifiedSource = false;
+    draft.sourceVerified = false;
+    draft.publicDecision = kind === 'unknown' ? 'needs_review' : 'archived';
+    draft.publicBlockReason = nonProductReason;
+    draft.autoPublishBlockedReason = nonProductReason;
   }
 
-  return baseDraft;
+  return draft;
 }
 
 async function runHealthGuardBeforePublish(
     productDraft: MutableProductDraft,
 ): Promise<HealthGuardDecision> {
-  const checkUrl =
-      getText(productDraft.affiliateUrl) ||
-      getText(productDraft.originalUrl) ||
-      getText(productDraft.url);
+  const checkUrl = getDraftUrl(productDraft);
 
   if (!checkUrl) {
     return {
       allowed: false,
-      reason: 'missing_link_before_health_check',
+      reason: 'missing_or_invalid_link_before_health_check',
       blockedBy: 'link',
       updates: {
-        linkHealthStatus: 'missing',
         publicHidden: true,
-        unpublishedReason: 'Thiếu link sản phẩm hoặc affiliate link.',
+        unpublishedReason: 'Thiếu link sản phẩm hoặc affiliate link hợp lệ.',
+      },
+    };
+  }
+
+  const imageUrl = getText(productDraft.imageUrl);
+
+  if (!isValidHttpUrl(imageUrl)) {
+    return {
+      allowed: false,
+      reason: 'missing_or_invalid_image_before_health_check',
+      blockedBy: 'image',
+      updates: {
+        publicHidden: true,
+        unpublishedReason: 'Thiếu ảnh sản phẩm hợp lệ.',
       },
     };
   }
@@ -1013,21 +676,6 @@ async function runHealthGuardBeforePublish(
       };
     }
 
-    const imageUrl = getText(productDraft.imageUrl);
-
-    if (!imageUrl) {
-      return {
-        allowed: false,
-        reason: 'missing_image_before_health_check',
-        blockedBy: 'image',
-        updates: {
-          imageHealthStatus: 'missing',
-          publicHidden: true,
-          unpublishedReason: 'Thiếu ảnh sản phẩm.',
-        },
-      };
-    }
-
     const imageResult = await checkImageHealth(imageUrl);
 
     if (!imageResult.ok) {
@@ -1037,11 +685,14 @@ async function runHealthGuardBeforePublish(
         blockedBy: 'image',
         updates: {
           imageHealthStatus: imageResult.status as Product['imageHealthStatus'],
+          imageLastCheckedAt: new Date().toISOString(),
           publicHidden: true,
           unpublishedReason: `Ảnh lỗi: ${imageResult.reason}`,
         },
       };
     }
+
+    const now = new Date().toISOString();
 
     return {
       allowed: true,
@@ -1049,8 +700,8 @@ async function runHealthGuardBeforePublish(
       updates: {
         linkHealthStatus: 'ok' as Product['linkHealthStatus'],
         imageHealthStatus: 'ok' as Product['imageHealthStatus'],
-        linkLastCheckedAt: new Date().toISOString(),
-        imageLastCheckedAt: new Date().toISOString(),
+        linkLastCheckedAt: now,
+        imageLastCheckedAt: now,
       },
     };
   } catch (error) {
@@ -1066,27 +717,39 @@ async function runHealthGuardBeforePublish(
   }
 }
 
-function markDraftAsAutoPublished(productDraft: MutableProductDraft, reason: string): MutableProductDraft {
+function markDraftAsAutoPublished(
+    productDraft: MutableProductDraft,
+    reason: string,
+    healthUpdates: MutableProductDraft,
+): MutableProductDraft {
   const now = new Date().toISOString();
 
   return {
     ...productDraft,
-    status: 'published',
+    ...healthUpdates,
+
+    status: 'published' as Product['status'],
     publicHidden: false,
+
     needsVerification: false,
     verifiedSource: true,
     sourceVerified: true,
+
     aiApproved: true,
     approvalMode: 'ai_auto_safe_publish',
     approvedAt: now,
     publishedAt: now,
+
     autoPublished: true,
     autoPublishReason: reason,
     autoPublishBlockedReason: undefined,
+
     publicDecision: 'published',
     publicBlockReason: undefined,
+
+    // Do not claim generated content when Source Scout did not generate it.
+    contentPackageStatus: 'none',
     complianceStatus: 'needs_edit',
-    contentPackageStatus: 'generated',
     riskLevel: 'low',
   };
 }
@@ -1096,19 +759,173 @@ function markDraftAsBlocked(
     reason: string,
     updates?: MutableProductDraft,
 ): MutableProductDraft {
-  const kind = getText(productDraft.kind || productDraft.sourceItemKind);
+  const kind = getDraftKind(productDraft);
 
   return {
     ...productDraft,
     ...(updates || {}),
+
     status: getBlockedStatus(kind),
     publicHidden: true,
+
     aiApproved: false,
     autoPublished: false,
+
     autoPublishBlockedReason: reason,
     publicBlockReason: reason,
+
     needsVerification: true,
     approvalMode: 'manual_or_auto_safe_required',
+  };
+}
+
+function getKindCounterKey(kind: ProductKind | string | undefined): keyof Pick<
+    ScanCounters,
+    'realProducts' | 'storeOffers' | 'vouchers' | 'campaigns' | 'unknown'
+> {
+  switch (kind) {
+    case 'product':
+    case 'deal':
+      return 'realProducts';
+    case 'store_offer':
+      return 'storeOffers';
+    case 'voucher':
+      return 'vouchers';
+    case 'campaign':
+      return 'campaigns';
+    default:
+      return 'unknown';
+  }
+}
+
+function getItemFallbackKey(item: NormalizedAccessTradeItem): string {
+  const price = item.salePrice || item.price || 0;
+
+  return normalizeText(
+      [
+        item.name,
+        item.platform,
+        item.category,
+        price,
+      ].join('|'),
+  );
+}
+
+function buildExistingProductIndex(products: Product[]): ExistingProductIndex {
+  const index: ExistingProductIndex = {
+    externalIds: new Set<string>(),
+    urls: new Set<string>(),
+    fallbackKeys: new Set<string>(),
+  };
+
+  for (const product of products) {
+    const record = product as Product & Record<string, unknown>;
+
+    for (const id of [
+      getText(record.sourceId),
+      getText(record.externalId),
+    ]) {
+      if (id) index.externalIds.add(id);
+    }
+
+    for (const rawUrl of [
+      record.affiliateUrl,
+      record.originalUrl,
+      record.url,
+    ]) {
+      const url = normalizeComparableUrl(rawUrl);
+      if (url) index.urls.add(url);
+    }
+
+    const fallbackKey = normalizeText(
+        [
+          product.title,
+          product.platform,
+          product.salePrice || product.price || 0,
+        ].join('|'),
+    );
+
+    if (fallbackKey) index.fallbackKeys.add(fallbackKey);
+  }
+
+  return index;
+}
+
+function isDuplicateItem(
+    item: NormalizedAccessTradeItem,
+    index: ExistingProductIndex,
+): boolean {
+  const externalId = getText(item.id);
+
+  if (externalId && index.externalIds.has(externalId)) {
+    return true;
+  }
+
+  const comparableUrls = [
+    normalizeComparableUrl(item.affiliateUrl),
+    normalizeComparableUrl(item.originalUrl),
+  ].filter(Boolean);
+
+  if (comparableUrls.some((url) => index.urls.has(url))) {
+    return true;
+  }
+
+  // Use title/platform/price only as a final fallback when no strong identifier exists.
+  if (!externalId && comparableUrls.length === 0) {
+    const fallbackKey = getItemFallbackKey(item);
+    return Boolean(fallbackKey && index.fallbackKeys.has(fallbackKey));
+  }
+
+  return false;
+}
+
+function addItemToIndex(
+    item: NormalizedAccessTradeItem,
+    index: ExistingProductIndex,
+): void {
+  const externalId = getText(item.id);
+
+  if (externalId) {
+    index.externalIds.add(externalId);
+  }
+
+  for (const rawUrl of [
+    item.affiliateUrl,
+    item.originalUrl,
+  ]) {
+    const url = normalizeComparableUrl(rawUrl);
+    if (url) index.urls.add(url);
+  }
+
+  const fallbackKey = getItemFallbackKey(item);
+
+  if (fallbackKey) {
+    index.fallbackKeys.add(fallbackKey);
+  }
+}
+
+function createEmptyScanCounters(): ScanCounters {
+  return {
+    found: 0,
+    saved: 0,
+    candidates: 0,
+
+    realProducts: 0,
+    storeOffers: 0,
+    vouchers: 0,
+    campaigns: 0,
+    unknown: 0,
+
+    autoPublished: 0,
+    needsReview: 0,
+    archived: 0,
+
+    blockedByLink: 0,
+    blockedByImage: 0,
+    healthErrors: 0,
+
+    duplicatesSkipped: 0,
+    skipped: 0,
   };
 }
 
@@ -1142,14 +959,17 @@ export class SourceScoutBot {
       source,
       requestedLimit: limit,
       candidatesFound: candidates.length,
+
       safeMode: AUTO_SAFE_MODE,
       freeOnly: FREE_ONLY_ENFORCED,
       allowPaidAi: ALLOW_PAID_AI,
       costMode: COST_MODE,
+
       autoApproveSafeProducts: AUTO_APPROVE_SAFE_PRODUCTS,
       autoPublishSafeProducts: AUTO_PUBLISH_SAFE_PRODUCTS,
+
       note:
-          'Verified real products can be auto-published only after link/image health checks. Voucher/campaign/store offers stay internal or archived.',
+          'Only verified real products can auto-publish after link/image health checks. Voucher/campaign/store offers remain internal or archived.',
     });
 
     return candidates;
@@ -1166,12 +986,16 @@ export class SourceScoutBot {
           .filter((product) => product.source === 'manual' && product.status === 'draft')
           .slice(0, limit);
 
-      await this.ctx.info('Local source scan complete', { count: candidates.length });
+      await this.ctx.info('Local source scan complete', {
+        count: candidates.length,
+      });
+
       return candidates;
     } catch (error) {
       await this.ctx.error('Local source scan failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+
       return [];
     }
   }
@@ -1179,8 +1003,13 @@ export class SourceScoutBot {
   private async scanAccessTradeSource(limit: number): Promise<Product[]> {
     if (limit <= 0) return [];
 
+    const counters = createEmptyScanCounters();
+
     try {
       await this.ctx.info('Checking AccessTrade token status', {
+        scanMode: 'real_products_only',
+        requestedKind: ACCESS_TRADE_SCAN_KIND,
+
         safeMode: AUTO_SAFE_MODE,
         freeOnly: FREE_ONLY_ENFORCED,
         allowPaidAi: ALLOW_PAID_AI,
@@ -1188,151 +1017,109 @@ export class SourceScoutBot {
       });
 
       const configured = await isAccessTradeConfigured();
+
       if (!configured) {
         await this.ctx.warn('AccessTrade token not configured. Skipping AccessTrade scan');
         return [];
       }
 
       const totalLimit = Math.min(Math.max(limit || 10, 1), 30);
-      const internalSaveLimit = Math.min(totalLimit * 3, 90);
-      const perKeywordLimit = Math.min(10, Math.max(5, totalLimit));
+      const internalSaveLimit = Math.min(Math.max(totalLimit * 3, 15), 90);
+      const perKeywordLimit = Math.min(12, Math.max(5, totalLimit));
 
       const pipelineCandidates: Product[] = [];
 
-      let foundCount = 0;
-      let savedInternalCount = 0;
-      let duplicateCount = 0;
-      let skippedCount = 0;
+      const existingProducts = await getAllProducts();
+      const existingIndex = buildExistingProductIndex(existingProducts);
+
       let keywordsScanned = 0;
 
-      let autoPublishedCount = 0;
-      let candidatesCount = 0;
-      let needsReviewCount = 0;
-      let archivedCount = 0;
-      let blockedByLinkCount = 0;
-      let blockedByImageCount = 0;
-
-      const kindCounters: Record<string, number> = {
-        realProducts: 0,
-        vouchers: 0,
-        campaigns: 0,
-        storeOffers: 0,
-        unknown: 0,
-      };
-
-      const existingProducts = await getAllProducts();
-
-      const seenExternalIds = new Set<string>();
-      const seenUrls = new Set<string>();
-      const seenTitles = new Set<string>();
-
-      for (const product of existingProducts) {
-        const productRecord = product as Product & Record<string, unknown>;
-
-        const sourceId = getText(productRecord.sourceId);
-        const externalId = getText(productRecord.externalId);
-        const affiliateUrl = normalizeUrl(productRecord.affiliateUrl);
-        const originalUrl = normalizeUrl(productRecord.originalUrl);
-        const url = normalizeUrl(productRecord.url);
-        const title = normalizeTitle(productRecord.title);
-
-        if (sourceId) seenExternalIds.add(sourceId);
-        if (externalId) seenExternalIds.add(externalId);
-        if (affiliateUrl) seenUrls.add(affiliateUrl);
-        if (originalUrl) seenUrls.add(originalUrl);
-        if (url) seenUrls.add(url);
-        if (title) seenTitles.add(title);
-      }
-
       for (const keyword of ACCESS_TRADE_KEYWORDS) {
-        if (pipelineCandidates.length >= totalLimit && savedInternalCount >= totalLimit) break;
-        if (savedInternalCount >= internalSaveLimit) break;
+        if (pipelineCandidates.length >= totalLimit) break;
+        if (counters.saved >= internalSaveLimit) break;
 
         keywordsScanned += 1;
 
-        await this.ctx.info('Scanning AccessTrade keyword', {
+        await this.ctx.info('Scanning AccessTrade real-product keyword', {
           keyword,
+          requestedKind: ACCESS_TRADE_SCAN_KIND,
           limit: perKeywordLimit,
+
           remainingPipelineSlots: Math.max(totalLimit - pipelineCandidates.length, 0),
-          remainingInternalSlots: Math.max(internalSaveLimit - savedInternalCount, 0),
+          remainingInternalSlots: Math.max(internalSaveLimit - counters.saved, 0),
+
           safeMode: AUTO_SAFE_MODE,
           freeOnly: FREE_ONLY_ENFORCED,
           costMode: COST_MODE,
         });
 
-        let searchResult: unknown;
+        let items: NormalizedAccessTradeItem[] = [];
 
         try {
-          searchResult = await searchAccessTrade({
+          const searchResult = await searchAccessTrade({
             keyword,
             limit: perKeywordLimit,
-            kind: 'all',
+            kind: ACCESS_TRADE_SCAN_KIND,
             imageOnly: false,
             affiliateLinkOnly: false,
           });
+
+          items = Array.isArray(searchResult.items)
+              ? searchResult.items
+              : [];
+
+          counters.found += items.length;
+
+          await this.ctx.info('AccessTrade real-product keyword returned', {
+            keyword,
+            count: items.length,
+            summary: searchResult.summary,
+          });
         } catch (error) {
-          skippedCount += 1;
+          counters.skipped += 1;
+
           await this.ctx.error('AccessTrade keyword search failed', {
             keyword,
             error: error instanceof Error ? error.message : String(error),
           });
+
           continue;
         }
 
-        const rawItems = extractAccessTradeItems(searchResult);
-        foundCount += rawItems.length;
+        for (const item of items) {
+          if (pipelineCandidates.length >= totalLimit) break;
+          if (counters.saved >= internalSaveLimit) break;
 
-        await this.ctx.info('AccessTrade keyword returned', {
-          keyword,
-          count: rawItems.length,
-          summary:
-              searchResult && typeof searchResult === 'object'
-                  ? (searchResult as AccessTradeSearchResult).summary || null
-                  : null,
-        });
+          const kind = getNormalizedItemKind(item);
+          const kindCounterKey = getKindCounterKey(kind);
+          counters[kindCounterKey] += 1;
 
-        for (const rawItem of rawItems) {
-          if (savedInternalCount >= internalSaveLimit) break;
+          if (isDuplicateItem(item, existingIndex)) {
+            counters.duplicatesSkipped += 1;
 
-          const productDraftInitial = buildAccessTradeProductDraft(rawItem);
-
-          if (!productDraftInitial) {
-            skippedCount += 1;
-            await this.ctx.warn('AccessTrade item skipped', {
+            await this.ctx.info('AccessTrade duplicate skipped', {
               keyword,
-              reason: 'missing_title_or_link',
+              sourceId: item.id || null,
+              title: item.name || null,
+              kind,
             });
+
             continue;
           }
 
-          let productDraft = productDraftInitial;
+          let productDraft = buildAccessTradeProductDraft(item);
 
-          const draftKind = getText(productDraft.sourceItemKind || productDraft.kind) as ProductKind;
-          const kindCounterKey = getKindCounterKey(draftKind);
-          kindCounters[kindCounterKey] = (kindCounters[kindCounterKey] || 0) + 1;
+          if (!productDraft) {
+            counters.skipped += 1;
 
-          const rawSourceId = getText(productDraft.sourceId);
-          const mappedTitle = getText(productDraft.title);
-          const finalAffiliateUrl = getText(productDraft.affiliateUrl);
-          const finalOriginalUrl = getText(productDraft.originalUrl);
-          const finalUrl = getText(productDraft.url);
-          const normalizedTitle = normalizeTitle(mappedTitle);
-
-          const isDuplicate =
-              Boolean(rawSourceId && seenExternalIds.has(rawSourceId)) ||
-              Boolean(finalAffiliateUrl && seenUrls.has(normalizeUrl(finalAffiliateUrl))) ||
-              Boolean(finalOriginalUrl && seenUrls.has(normalizeUrl(finalOriginalUrl))) ||
-              Boolean(finalUrl && seenUrls.has(normalizeUrl(finalUrl))) ||
-              Boolean(normalizedTitle && seenTitles.has(normalizedTitle));
-
-          if (isDuplicate) {
-            duplicateCount += 1;
-            await this.ctx.info('AccessTrade duplicate skipped', {
+            await this.ctx.warn('AccessTrade item skipped', {
               keyword,
-              sourceId: rawSourceId || null,
-              title: mappedTitle || null,
-              kind: draftKind || 'unknown',
+              sourceId: item.id || null,
+              title: item.name || null,
+              kind,
+              reason: 'missing_title',
             });
+
             continue;
           }
 
@@ -1341,149 +1128,188 @@ export class SourceScoutBot {
           if (autoDecision.allowed) {
             const healthDecision = await runHealthGuardBeforePublish(productDraft);
 
-            productDraft = {
-              ...productDraft,
-              ...healthDecision.updates,
-            };
-
             if (healthDecision.allowed) {
               productDraft = markDraftAsAutoPublished(
                   productDraft,
                   'auto_published_verified_real_product_link_image_ok',
+                  healthDecision.updates,
               );
             } else {
-              productDraft = markDraftAsBlocked(productDraft, healthDecision.reason, healthDecision.updates);
+              productDraft = markDraftAsBlocked(
+                  productDraft,
+                  healthDecision.reason,
+                  healthDecision.updates,
+              );
 
               if (healthDecision.blockedBy === 'link') {
-                blockedByLinkCount += 1;
+                counters.blockedByLink += 1;
               } else if (healthDecision.blockedBy === 'image') {
-                blockedByImageCount += 1;
+                counters.blockedByImage += 1;
+              } else if (healthDecision.blockedBy === 'health_error') {
+                counters.healthErrors += 1;
               }
 
               await this.ctx.warn('Auto-publish blocked by Product Health Guard', {
                 keyword,
-                title: mappedTitle,
-                kind: draftKind,
+                sourceId: item.id || null,
+                title: item.name,
+                kind,
                 reason: healthDecision.reason,
                 blockedBy: healthDecision.blockedBy || null,
               });
             }
           } else {
-            productDraft = markDraftAsBlocked(productDraft, autoDecision.reason);
+            productDraft = markDraftAsBlocked(
+                productDraft,
+                autoDecision.reason,
+            );
           }
 
           try {
-            if (productDraft.price === 0) productDraft.price = undefined;
-            if (productDraft.salePrice === 0) productDraft.salePrice = undefined;
-            if (productDraft.currentPrice === 0) productDraft.currentPrice = undefined;
-            if (productDraft.originalPrice === 0) productDraft.originalPrice = undefined;
-
             const saved = await createProduct(
                 productDraft as Parameters<typeof createProduct>[0],
             );
 
-            savedInternalCount += 1;
+            counters.saved += 1;
 
             const savedRecord = saved as Product & Record<string, unknown>;
-            const autoPublished = Boolean(savedRecord.autoPublished || productDraft.autoPublished);
-            const savedStatus = getText(savedRecord.status || productDraft.status);
+            const autoPublished = Boolean(
+                savedRecord.autoPublished || productDraft.autoPublished,
+            );
+            const savedStatus = getText(
+                savedRecord.status || productDraft.status,
+            );
 
             if (autoPublished || savedStatus === 'published') {
-              autoPublishedCount += 1;
-            } else if (isProductLikeKind(draftKind)) {
-              needsReviewCount += 1;
+              counters.autoPublished += 1;
+            } else if (isProductLikeKind(kind)) {
+              counters.needsReview += 1;
             } else {
-              archivedCount += 1;
+              counters.archived += 1;
             }
 
-            if (isProductLikeKind(draftKind)) {
-              candidatesCount += 1;
+            if (isProductLikeKind(kind)) {
+              counters.candidates += 1;
               pipelineCandidates.push(saved);
             }
 
-            if (rawSourceId) seenExternalIds.add(rawSourceId);
-            if (finalAffiliateUrl) seenUrls.add(normalizeUrl(finalAffiliateUrl));
-            if (finalOriginalUrl) seenUrls.add(normalizeUrl(finalOriginalUrl));
-            if (finalUrl) seenUrls.add(normalizeUrl(finalUrl));
-            if (normalizedTitle) seenTitles.add(normalizedTitle);
+            addItemToIndex(item, existingIndex);
 
             await this.ctx.info(
-                autoPublished ? 'AccessTrade auto-published safe product' : 'AccessTrade saved internal item',
+                autoPublished
+                    ? 'AccessTrade auto-published safe product'
+                    : 'AccessTrade saved internal item',
                 {
                   keyword,
+
                   productId: saved.id,
-                  sourceId: rawSourceId || null,
-                  title: mappedTitle,
-                  kind: draftKind || 'unknown',
+                  sourceId: item.id || null,
+
+                  title: item.name,
+                  kind,
                   status: savedStatus || productDraft.status,
-                  rawSourceKind: productDraft.rawSourceKind,
+                  rawSourceKind: item.rawSourceKind,
+
                   publicHidden: Boolean(productDraft.publicHidden),
                   needsVerification: Boolean(productDraft.needsVerification),
-                  verifiedSource: Boolean(productDraft.verifiedSource || productDraft.sourceVerified),
+                  verifiedSource: Boolean(
+                      productDraft.verifiedSource ||
+                      productDraft.sourceVerified,
+                  ),
+
                   aiApproved: Boolean(productDraft.aiApproved),
                   autoPublished,
+
                   autoPublishReason:
                       getText(productDraft.autoPublishReason) ||
                       getText(productDraft.autoPublishBlockedReason) ||
                       getText(productDraft.publicBlockReason) ||
                       null,
-                  publicDecision: getText(productDraft.publicDecision) || null,
-                  publicBlockReason: getText(productDraft.publicBlockReason) || null,
-                  nonProductReason: getText(productDraft.nonProductReason) || null,
-                  linkHealthStatus: getText(productDraft.linkHealthStatus) || null,
-                  imageHealthStatus: getText(productDraft.imageHealthStatus) || null,
-                  returnedToPipeline: isProductLikeKind(draftKind),
+
+                  publicDecision:
+                      getText(productDraft.publicDecision) || null,
+
+                  publicBlockReason:
+                      getText(productDraft.publicBlockReason) || null,
+
+                  nonProductReason:
+                      getText(productDraft.nonProductReason) || null,
+
+                  linkHealthStatus:
+                      getText(productDraft.linkHealthStatus) || null,
+
+                  imageHealthStatus:
+                      getText(productDraft.imageHealthStatus) || null,
+
+                  qualityScore:
+                      getDraftQualityScore(productDraft) || null,
+
+                  returnedToPipeline: isProductLikeKind(kind),
                 },
             );
           } catch (error) {
-            skippedCount += 1;
+            counters.skipped += 1;
+
             await this.ctx.error('AccessTrade item save failed', {
               keyword,
-              sourceId: rawSourceId || null,
-              title: mappedTitle || null,
-              kind: draftKind || 'unknown',
+              sourceId: item.id || null,
+              title: item.name || null,
+              kind,
               error: error instanceof Error ? error.message : String(error),
             });
           }
         }
       }
 
-      await this.ctx.info('AccessTrade keyword scan complete', {
+      await this.ctx.info('AccessTrade real-product scan complete', {
         requestedLimit: limit,
+        requestedKind: ACCESS_TRADE_SCAN_KIND,
         keywordsScanned,
 
-        found: foundCount,
-        saved: savedInternalCount,
-        candidates: candidatesCount,
+        found: counters.found,
+        saved: counters.saved,
+        candidates: counters.candidates,
 
-        realProducts: kindCounters.realProducts,
-        storeOffers: kindCounters.storeOffers,
-        vouchers: kindCounters.vouchers,
-        campaigns: kindCounters.campaigns,
-        unknown: kindCounters.unknown,
+        realProducts: counters.realProducts,
+        storeOffers: counters.storeOffers,
+        vouchers: counters.vouchers,
+        campaigns: counters.campaigns,
+        unknown: counters.unknown,
 
-        autoPublished: autoPublishedCount,
-        needsReview: needsReviewCount,
-        archived: archivedCount,
+        autoPublished: counters.autoPublished,
+        needsReview: counters.needsReview,
+        archived: counters.archived,
 
-        blockedByLink: blockedByLinkCount,
-        blockedByImage: blockedByImageCount,
-        duplicatesSkipped: duplicateCount,
-        skipped: skippedCount,
+        blockedByLink: counters.blockedByLink,
+        blockedByImage: counters.blockedByImage,
+        healthErrors: counters.healthErrors,
+
+        duplicatesSkipped: counters.duplicatesSkipped,
+        skipped: counters.skipped,
 
         safeMode: AUTO_SAFE_MODE,
         freeOnly: FREE_ONLY_ENFORCED,
         allowPaidAi: ALLOW_PAID_AI,
         costMode: COST_MODE,
+
         autoApproveSafeProducts: AUTO_APPROVE_SAFE_PRODUCTS,
         autoPublishSafeProducts: AUTO_PUBLISH_SAFE_PRODUCTS,
+
+        note:
+            'Source Scout requests product-only AccessTrade results. Voucher/campaign/store-offer inspection remains available in the dashboard.',
       });
 
       return pipelineCandidates.slice(0, totalLimit);
     } catch (error) {
       await this.ctx.error('AccessTrade source scan failed', {
         error: error instanceof Error ? error.message : String(error),
+
+        safeMode: AUTO_SAFE_MODE,
+        freeOnly: FREE_ONLY_ENFORCED,
+        allowPaidAi: ALLOW_PAID_AI,
+        costMode: COST_MODE,
       });
+
       return [];
     }
   }
@@ -1494,12 +1320,16 @@ export class SourceScoutBot {
     try {
       await this.ctx.info('Scanning manual product submissions');
 
-      await this.ctx.info('Manual source scan complete', { count: 0 });
+      await this.ctx.info('Manual source scan complete', {
+        count: 0,
+      });
+
       return [];
     } catch (error) {
       await this.ctx.error('Manual source scan failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+
       return [];
     }
   }

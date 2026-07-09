@@ -554,7 +554,10 @@ export function normalizeAccessTradeItem(
 
   const autoPublishEligible = publicDecision === 'public_candidate';
   const needsVerification = !autoPublishEligible;
-  const publicHidden = !autoPublishEligible;
+
+  // Integration layer never exposes an item directly.
+  // SourceScout must run link + image health checks before publicHidden can become false.
+  const publicHidden = true;
 
   return {
     id: getItemId(item),
@@ -762,8 +765,12 @@ export function mapAccessTradeToProduct(
 
     verifiedSource: item.verifiedSource,
     sourceVerified: item.verifiedSource,
-    publicHidden: !isRealProduct || item.publicHidden,
+
+    // Always keep imported records hidden at the integration boundary.
+    // SourceScout is the only layer allowed to unhide after strict health checks.
+    publicHidden: true,
     needsVerification: item.needsVerification,
+    healthCheckRequired: isRealProduct,
 
     aiApproved: false,
     autoPublished: false,
@@ -850,6 +857,9 @@ async function fetchAccessTradeEndpoint(
 ): Promise<AccessTradeFetchResult> {
   let response: Response;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+
   try {
     response = await fetch(url.toString(), {
       method: 'GET',
@@ -858,6 +868,7 @@ async function fetchAccessTradeEndpoint(
         Accept: 'application/json',
       },
       cache: 'no-store',
+      signal: controller.signal,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Lỗi kết nối';
@@ -866,8 +877,13 @@ async function fetchAccessTradeEndpoint(
       endpoint,
       ok: false,
       items: [],
-      error: message,
+      error:
+          err instanceof Error && err.name === 'AbortError'
+              ? 'Request timeout after 15 seconds'
+              : message,
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok) {
@@ -950,7 +966,7 @@ function applySearchFilters(
           ].join(' '),
       );
 
-      return haystack.includes(keyword) || haystack.includes(toAsciiSlug(keyword));
+      return matchesSearchQuery(haystack, keyword);
     });
   }
 
@@ -958,7 +974,7 @@ function applySearchFilters(
   if (category) {
     filtered = filtered.filter((item) => {
       const haystack = normalizeText([item.category, item.name, item.description].join(' '));
-      return haystack.includes(category) || haystack.includes(toAsciiSlug(category));
+      return matchesSearchQuery(haystack, category);
     });
   }
 
@@ -1028,11 +1044,11 @@ function hasDatafeedProductSignals(item: AccessTradeRawItem): boolean {
       getFirstText(item, ['product_id', 'productId', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id']),
   );
 
-  const hasOfficialProductUrl = Boolean(
+  const hasOfficialProductUrl = isValidHttpUrl(
       getFirstText(item, ['productUrl', 'product_url', 'url', 'aff_link', 'affiliate_url', 'affiliateUrl']),
   );
 
-  const hasOfficialProductImage = Boolean(
+  const hasOfficialProductImage = isValidHttpUrl(
       getFirstText(item, ['productImage', 'product_image', 'image', 'image_url', 'imageUrl', 'thumbnail']),
   );
 
@@ -1084,7 +1100,7 @@ function hasProductSignals(item: AccessTradeRawItem): boolean {
       parsePriceNumber(item.discountPrice),
   );
 
-  const hasImage = Boolean(
+  const hasImage = isValidHttpUrl(
       getFirstText(item, [
         'productImage',
         'product_image',
@@ -1097,7 +1113,7 @@ function hasProductSignals(item: AccessTradeRawItem): boolean {
       ]),
   );
 
-  const hasUrl = Boolean(
+  const hasUrl = isValidHttpUrl(
       getFirstText(item, [
         'aff_link',
         'affiliate_url',
@@ -1175,9 +1191,9 @@ interface ProductCompleteness {
 function getProductCompleteness(input: ProductCompletenessInput): ProductCompleteness {
   return {
     hasTitle: Boolean(input.name && input.name.trim().length >= 5),
-    hasImage: Boolean(input.imageUrl),
-    hasUrl: Boolean(input.affiliateUrl || input.originalUrl),
-    hasAffiliateUrl: Boolean(input.affiliateUrl),
+    hasImage: isValidHttpUrl(input.imageUrl),
+    hasUrl: isValidHttpUrl(input.affiliateUrl) || isValidHttpUrl(input.originalUrl),
+    hasAffiliateUrl: isValidHttpUrl(input.affiliateUrl),
     hasPrice: Boolean((input.price && input.price > 0) || (input.salePrice && input.salePrice > 0)),
   };
 }
@@ -1230,8 +1246,8 @@ function getPublicBlockReason(input: {
 
   if (!input.completeness.hasTitle) return 'Thiếu tên sản phẩm cụ thể.';
   if (!input.completeness.hasPrice) return 'Thiếu giá hoặc giá khuyến mãi.';
-  if (!input.completeness.hasImage) return 'Thiếu ảnh sản phẩm.';
-  if (!input.completeness.hasUrl) return 'Thiếu link sản phẩm hoặc affiliate link.';
+  if (!input.completeness.hasImage) return 'Thiếu ảnh sản phẩm hoặc URL ảnh không hợp lệ.';
+  if (!input.completeness.hasUrl) return 'Thiếu link sản phẩm/affiliate hoặc URL không hợp lệ.';
   if (input.titleLooksUnsafe) return 'Tiêu đề giống voucher/campaign/store offer, cần kiểm tra thủ công.';
   if (!input.verifiedSource) return 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.';
   if (input.qualityScore < 70) return 'Điểm nguồn thấp, cần xem xét thêm.';
@@ -1321,15 +1337,34 @@ function getHardNonProductKind(
     return 'voucher';
   }
 
-  if (isStoreOfferText(title, description, rawSourceKind)) {
+  const strongDatafeedProduct =
+      item.__sandealEndpoint === 'datafeed' &&
+      hasProductSignalsWithoutNonProductCheck(item) &&
+      Boolean(
+          getFirstText(item, [
+            'product_id',
+            'productId',
+            'sku',
+            'skuId',
+            'sku_id',
+            'itemId',
+            'item_id',
+          ]),
+      );
+
+  // For a strong datafeed product, use title-only heuristics to avoid
+  // misclassifying a real product because its description mentions a shop-wide offer.
+  const heuristicDescription = strongDatafeedProduct ? '' : description;
+
+  if (isStoreOfferText(title, heuristicDescription, rawSourceKind)) {
     return 'store_offer';
   }
 
-  if (isVoucherText(title, description, rawSourceKind)) {
+  if (isVoucherText(title, heuristicDescription, rawSourceKind)) {
     return 'voucher';
   }
 
-  if (isCampaignText(title, description, rawSourceKind)) {
+  if (isCampaignText(title, heuristicDescription, rawSourceKind)) {
     return 'campaign';
   }
 
@@ -1351,7 +1386,7 @@ function hasProductSignalsWithoutNonProductCheck(item: AccessTradeRawItem): bool
       parsePriceNumber(item.discountPrice),
   );
 
-  const hasImage = Boolean(
+  const hasImage = isValidHttpUrl(
       getFirstText(item, [
         'productImage',
         'product_image',
@@ -1364,7 +1399,7 @@ function hasProductSignalsWithoutNonProductCheck(item: AccessTradeRawItem): bool
       ]),
   );
 
-  const hasUrl = Boolean(
+  const hasUrl = isValidHttpUrl(
       getFirstText(item, [
         'aff_link',
         'affiliate_url',
@@ -1634,27 +1669,38 @@ function stringifyValue(value: unknown): string {
 }
 
 function getItemId(item: AccessTradeRawItem): string {
-  return (
-      getFirstText(item, [
-        'product_id',
-        'productId',
-        'sku',
-        'skuId',
-        'sku_id',
-        'itemId',
-        'item_id',
-        'id',
-        '_id',
-        'sourceId',
-        'source_id',
-        'externalId',
-        'external_id',
-        'campaignId',
-        'campaign_id',
-        'offerId',
-        'offer_id',
-      ]) || `accesstrade-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const officialId = getFirstText(item, [
+    'product_id',
+    'productId',
+    'sku',
+    'skuId',
+    'sku_id',
+    'itemId',
+    'item_id',
+    'id',
+    '_id',
+    'sourceId',
+    'source_id',
+    'externalId',
+    'external_id',
+    'campaignId',
+    'campaign_id',
+    'offerId',
+    'offer_id',
+  ]);
+
+  if (officialId) return officialId;
+
+  const fingerprint = normalizeText(
+      [
+        item.__sandealEndpoint,
+        getFirstText(item, ['aff_link', 'affiliate_url', 'affiliateUrl']),
+        getFirstText(item, ['productUrl', 'product_url', 'url', 'link']),
+        getFirstText(item, ['productName', 'product_name', 'title', 'name']),
+      ].join('|'),
   );
+
+  return `accesstrade-${stableHash(fingerprint || JSON.stringify(item).slice(0, 500))}`;
 }
 
 function getRawSourceKind(item: AccessTradeRawItem): string {
@@ -1737,7 +1783,7 @@ function parsePriceNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
 
   if (typeof value === 'number') {
-    return Number.isFinite(value) && value >= 1000 ? value : undefined;
+    return Number.isFinite(value) && value >= 1000 ? Math.round(value) : undefined;
   }
 
   if (typeof value !== 'string') {
@@ -1746,9 +1792,7 @@ function parsePriceNumber(value: unknown): number | undefined {
 
   const trimmed = value.trim();
 
-  if (!trimmed) return undefined;
-
-  if (/%/.test(trimmed)) return undefined;
+  if (!trimmed || /%/.test(trimmed)) return undefined;
 
   const normalizedText = normalizeText(trimmed);
 
@@ -1761,30 +1805,72 @@ function parsePriceNumber(value: unknown): number | undefined {
     return undefined;
   }
 
-  const kMatch = trimmed.match(/^(\d+(?:[.,]\d+)?)\s?k$/i);
+  const kMatch = trimmed.match(/(\d+(?:[.,]\d+)?)\s?k\b/i);
   if (kMatch) {
     const parsedK = Number(kMatch[1].replace(',', '.')) * 1000;
     return Number.isFinite(parsedK) && parsedK >= 1000 ? Math.round(parsedK) : undefined;
   }
 
-  const digitsOnly = trimmed.replace(/[^\d]/g, '');
-
-  if (!digitsOnly) return undefined;
-
-  const looksLikeVnd =
-      /₫|đ|vnd/i.test(trimmed) ||
-      /\d+[.,]\d{3}/.test(trimmed) ||
-      digitsOnly.length >= 4;
-
-  if (looksLikeVnd) {
-    const parsedVnd = Number(digitsOnly);
-    return Number.isFinite(parsedVnd) && parsedVnd >= 1000 ? parsedVnd : undefined;
+  // Prefer the first complete price token so ranges such as
+  // "1.299.000 - 1.599.000" do not become one huge invalid number.
+  const groupedPriceMatch = trimmed.match(/\d{1,3}(?:[.,]\d{3})+/);
+  if (groupedPriceMatch) {
+    const parsedGrouped = Number(groupedPriceMatch[0].replace(/[^\d]/g, ''));
+    return Number.isFinite(parsedGrouped) && parsedGrouped >= 1000
+        ? parsedGrouped
+        : undefined;
   }
 
-  const normalized = trimmed.replace(',', '.').replace(/[^\d.]/g, '');
-  const parsed = Number(normalized);
+  const plainNumberMatch = trimmed.match(/\d{4,}/);
+  if (plainNumberMatch) {
+    const parsedPlain = Number(plainNumberMatch[0]);
+    return Number.isFinite(parsedPlain) && parsedPlain >= 1000
+        ? parsedPlain
+        : undefined;
+  }
 
-  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
+  return undefined;
+}
+
+function isValidHttpUrl(value: unknown): boolean {
+  const text = stringifyValue(value);
+
+  if (!text) return false;
+
+  try {
+    const parsed = new URL(text);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function matchesSearchQuery(haystackValue: string, queryValue: string): boolean {
+  const haystack = normalizeText(haystackValue);
+  const query = normalizeText(queryValue);
+
+  if (!query) return true;
+  if (haystack.includes(query)) return true;
+
+  const tokens = query
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2);
+
+  if (!tokens.length) return false;
+
+  return tokens.every((token) => haystack.includes(token));
+}
+
+function stableHash(value: string): string {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(36);
 }
 
 function resolveAccessTradeDomain(platform?: string): string | null {
@@ -1816,6 +1902,11 @@ function resolveAccessTradeCampaign(platform?: string): string | null {
 
 function sanitizeEndpointUrl(url: URL): string {
   const cloned = new URL(url.toString());
+
+  for (const key of ['token', 'access_token', 'api_key', 'apikey', 'key']) {
+    cloned.searchParams.delete(key);
+  }
+
   return cloned.toString();
 }
 
