@@ -880,7 +880,7 @@ export default function DealsPage() {
                                         color: '#0f172a',
                                     }}
                                 >
-                                    Chưa có deal thật đã duyệt
+                                    Hiện chưa có deal đủ chuẩn an toàn để hiển thị
                                 </h3>
                                 <p
                                     style={{
@@ -890,8 +890,8 @@ export default function DealsPage() {
                                         lineHeight: 1.7,
                                     }}
                                 >
-                                    Hệ thống đang chờ nguồn sản phẩm thật từ AccessTrade hoặc nguồn nội bộ.
-                                    Voucher, chiến dịch và ưu đãi shop sẽ không public như sản phẩm.
+                                    Bot đang lọc link, ảnh và sản phẩm thật trước khi public.
+                                    Voucher, chiến dịch và ưu đãi shop sẽ không hiển thị như sản phẩm.
                                 </p>
 
                                 <button

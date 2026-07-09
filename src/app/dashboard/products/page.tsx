@@ -34,6 +34,7 @@ type ProductRecord = Product & {
   productUrl?: string;
   landingUrl?: string;
   linkHealthStatus?: string;
+  imageHealthStatus?: string;
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -426,6 +427,15 @@ export default function ProductsPage() {
     const needsReview = products.filter((product) => product.status === 'needs_review').length;
     const nonProducts = products.filter((product) => isNonProductKind(getEffectiveKind(product))).length;
     const brokenLinks = products.filter((product) => hasBrokenLink(product)).length;
+    const brokenImages = products.filter((product) => {
+      const p = getProductRecord(product);
+      const imgStatus = normalizeText(p.imageHealthStatus as unknown as string | undefined);
+      return imgStatus && BROKEN_LINK_STATUSES.has(imgStatus);
+    }).length;
+    const hidden = products.filter((product) => {
+      const p = getProductRecord(product);
+      return p.publicHidden === true;
+    }).length;
 
     return {
       total: products.length,
@@ -433,6 +443,8 @@ export default function ProductsPage() {
       needsReview,
       nonProducts,
       brokenLinks,
+      brokenImages,
+      hidden,
     };
   }, [products]);
 
@@ -751,6 +763,47 @@ export default function ProductsPage() {
             </div>
         )}
 
+        {/* Safe Publish Summary Card */}
+        {!loading && stats.total > 0 && (
+          <div className="card" style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-lg)' }}>
+            <h3 style={{ fontWeight: 800, fontSize: 'var(--text-base)', marginBottom: 'var(--space-md)', color: 'var(--text-primary)' }}>
+              Safe Publish — Tổng hợp trạng thái
+            </h3>
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 'var(--space-sm)', marginBottom: 'var(--space-md)' }}>
+              <div className="metric-card">
+                <span className="badge badge-success" style={{ alignSelf: 'flex-start' }}>Đã public</span>
+                <div className="stat-card-value">{stats.published}</div>
+              </div>
+              <div className="metric-card">
+                <span className="badge badge-warning" style={{ alignSelf: 'flex-start' }}>Chờ duyệt</span>
+                <div className="stat-card-value">{stats.needsReview}</div>
+              </div>
+              <div className="metric-card">
+                <span className="badge badge-danger" style={{ alignSelf: 'flex-start' }}>Link lỗi</span>
+                <div className="stat-card-value">{stats.brokenLinks}</div>
+              </div>
+              <div className="metric-card">
+                <span className="badge badge-danger" style={{ alignSelf: 'flex-start' }}>Ảnh lỗi</span>
+                <div className="stat-card-value">{stats.brokenImages}</div>
+              </div>
+              <div className="metric-card">
+                <span className="badge badge-neutral" style={{ alignSelf: 'flex-start' }}>Không phải SP</span>
+                <div className="stat-card-value">{stats.nonProducts}</div>
+              </div>
+              <div className="metric-card">
+                <span className="badge badge-neutral" style={{ alignSelf: 'flex-start' }}>Đã ẩn</span>
+                <div className="stat-card-value">{stats.hidden}</div>
+              </div>
+            </div>
+            {stats.published === 0 && stats.total > 0 && (
+              <div style={{ padding: '12px 16px', borderRadius: 'var(--radius-md)', background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
+                Public site có thể tạm không có deal nếu toàn bộ sản phẩm hiện tại bị chặn bởi Safe Publish.
+                Nguyên nhân phổ biến: link lỗi, ảnh lỗi, loại không phải sản phẩm, hoặc chưa đạt chuẩn an toàn.
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="filter-bar">
           <input
               className="input"
@@ -880,6 +933,8 @@ export default function ProductsPage() {
                   <th>Nền tảng</th>
                   <th>Giá</th>
                   <th>Trạng thái</th>
+                  <th>Link</th>
+                  <th>Ảnh</th>
                   <th>Điểm</th>
                   <th>Rủi ro</th>
                   <th>Hành động</th>
@@ -944,6 +999,32 @@ export default function ProductsPage() {
                     <span className={`badge ${getStatusBadge(product.status)}`}>
                       {getStatusLabel(product.status)}
                     </span>
+                      </td>
+
+                      <td>
+                        {(() => {
+                          const p = getProductRecord(product);
+                          const ls = (p.linkHealthStatus || '') as string;
+                          const isBroken = ls && BROKEN_LINK_STATUSES.has(normalizeText(ls));
+                          return (
+                            <span className={`badge ${isBroken ? 'badge-danger' : ls ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
+                              {ls || '—'}
+                            </span>
+                          );
+                        })()}
+                      </td>
+
+                      <td>
+                        {(() => {
+                          const p = getProductRecord(product);
+                          const is = normalizeText(p.imageHealthStatus as unknown as string | undefined);
+                          const isBroken = is && BROKEN_LINK_STATUSES.has(is);
+                          return (
+                            <span className={`badge ${isBroken ? 'badge-danger' : is ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
+                              {(p.imageHealthStatus as unknown as string) || '—'}
+                            </span>
+                          );
+                        })()}
                       </td>
 
                       <td>

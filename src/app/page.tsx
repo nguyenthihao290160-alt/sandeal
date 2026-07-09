@@ -748,19 +748,33 @@ export default async function HomePage() {
                                         color: '#0f172a',
                                     }}
                                 >
-                                    Chưa có deal thật đã duyệt
+                                    Hiện chưa có deal đủ chuẩn an toàn để hiển thị
                                 </h3>
                                 <p
                                     style={{
                                         color: '#64748b',
                                         maxWidth: 560,
-                                        margin: '0 auto',
+                                        margin: '0 auto 18px',
                                         lineHeight: 1.7,
                                     }}
                                 >
-                                    Hệ thống đang chờ nguồn sản phẩm từ AccessTrade hoặc nguồn nội bộ.
-                                    Các deal sẽ xuất hiện ở đây sau khi được kiểm duyệt.
+                                    Bot đang lọc link, ảnh và sản phẩm thật trước khi public.
+                                    Voucher, chiến dịch và ưu đãi shop sẽ không hiển thị như sản phẩm.
                                 </p>
+                                <Link
+                                    href="/deals"
+                                    style={{
+                                        display: 'inline-block',
+                                        padding: '12px 24px',
+                                        borderRadius: 999,
+                                        background: 'linear-gradient(135deg, #4f46e5, #06b6d4)',
+                                        color: '#ffffff',
+                                        fontWeight: 800,
+                                        textDecoration: 'none',
+                                    }}
+                                >
+                                    Xem lại sau
+                                </Link>
                             </div>
                         ) : (
                             <div

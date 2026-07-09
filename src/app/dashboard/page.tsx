@@ -123,7 +123,7 @@ export default async function DashboardPage() {
           <div className="dashboard-card" style={{ height: '100%' }}>
             <h3 style={{ fontSize: 'var(--text-lg)', fontWeight: 800, marginBottom: 'var(--space-xs)', color: 'var(--dash-text-primary)' }}>Bot Automation Pipeline</h3>
             <p style={{ fontSize: 'var(--text-sm)', color: 'var(--dash-text-muted)', marginBottom: 'var(--space-xl)' }}>
-              Mỗi bước đều yêu cầu xác nhận thủ công. Không tự động đăng bài.
+              AutoPilot tự quét, kiểm tra link/ảnh/nội dung và chỉ public sản phẩm thật đạt chuẩn an toàn.
             </p>
             <div className="workflow-timeline-premium" style={{ display: 'flex', justifyContent: 'space-between', position: 'relative' }}>
               <div style={{ position: 'absolute', top: '16px', left: '20px', right: '20px', height: '2px', background: 'rgba(148,163,184,0.1)', zIndex: 0 }} />
@@ -153,7 +153,7 @@ export default async function DashboardPage() {
                 { n: '2', l: 'Bot AI Boss quét nguồn thật' },
                 { n: '3', l: 'AI phân tích rủi ro và chấm điểm' },
                 { n: '4', l: 'Bot tạo bài review an toàn' },
-                { n: '5', l: 'Admin duyệt trước khi public' },
+                { n: '5', l: 'Safe Publish kiểm tra trước khi public' },
               ].map(s => (
                 <div key={s.n} style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                   <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(148,163,184,0.1)', color: '#cbd5e1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700 }}>{s.n}</div>
@@ -168,14 +168,13 @@ export default async function DashboardPage() {
         <h3 className="dashboard-section-title">Truy cập nhanh</h3>
         <div className="quick-actions" style={{ marginBottom: 'var(--space-xl)' }}>
           {[
-            { href: '/dashboard/ai-bots', icon: 'B', label: 'Đội Bot AI' },
-            { href: '/dashboard/token-vault', icon: 'T', label: 'Token Vault' },
-            { href: '/dashboard/product-sources', icon: 'N', label: 'Nguồn dữ liệu' },
-            { href: '/dashboard/products', icon: 'K', label: 'Kết quả bot' },
-            { href: '/dashboard/app-health', icon: 'H', label: 'Sức khỏe hệ thống' },
+            { href: '/dashboard/ai-bots', label: 'Đội Bot AI' },
+            { href: '/dashboard/token-vault', label: 'Token Vault' },
+            { href: '/dashboard/product-sources', label: 'Nguồn dữ liệu' },
+            { href: '/dashboard/products', label: 'Kết quả bot' },
+            { href: '/dashboard/app-health', label: 'Sức khỏe hệ thống' },
           ].map(a => (
             <Link key={a.href} href={a.href} className="dashboard-quick-action">
-              <span className="dashboard-quick-action-icon">{a.icon}</span>
               {a.label}
             </Link>
           ))}
