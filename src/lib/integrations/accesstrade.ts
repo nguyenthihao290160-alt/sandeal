@@ -5,9 +5,10 @@
 // - This module must ONLY be imported from server-side code.
 // - Never import this in client components.
 // - Never expose API keys to frontend.
-// - Does NOT fake products.
-// - Product feed items are preferred.
+// - Never fake products, prices, stock, images, reviews, or experience.
+// - Product/datafeed items are preferred.
 // - Voucher/campaign/store offers are stored internally only and blocked from public.
+// - Public auto-publish must be decided again by SourceScout + ProductHealthGuard.
 
 import { getServerConfig } from '../config';
 import { getRawPrimaryCredentialValue } from '../storage/tokenVault';
@@ -26,6 +27,12 @@ export interface AccessTradeSearchParams {
   affiliateLinkOnly?: boolean;
 }
 
+export type AccessTradePublicDecision =
+    | 'public_candidate'
+    | 'needs_review'
+    | 'blocked'
+    | 'archived';
+
 export interface NormalizedAccessTradeItem {
   id: string;
   name: string;
@@ -42,9 +49,17 @@ export interface NormalizedAccessTradeItem {
   commissionRate?: number;
   campaignName?: string;
   rawSourceKind: string;
+
   needsVerification: boolean;
   verifiedSource: boolean;
   publicHidden: boolean;
+
+  autoPublishEligible: boolean;
+  publicDecision: AccessTradePublicDecision;
+  publicBlockReason: string;
+  nonProductReason?: string;
+  qualityScore: number;
+
   rawData?: Record<string, unknown>;
 }
 
@@ -62,7 +77,12 @@ export interface AccessTradeSearchResult {
     campaigns: number;
     storeOffers: number;
     unknown: number;
+    realProducts: number;
+    nonProducts: number;
     publicEligibleProducts: number;
+    publicCandidates: number;
+    needsReview: number;
+    archived: number;
     blockedFromPublic: number;
   };
 }
@@ -309,9 +329,10 @@ export async function searchAccessTrade(
   const storeOffers = items.filter((item) => item.kind === 'store_offer');
   const unknown = items.filter((item) => item.kind === 'unknown');
 
-  const publicEligibleProducts = products.filter(
-      (item) => !item.publicHidden && item.verifiedSource && !item.needsVerification,
-  ).length;
+  const publicEligibleProducts = products.filter((item) => item.autoPublishEligible).length;
+  const publicCandidates = items.filter((item) => item.publicDecision === 'public_candidate').length;
+  const needsReview = items.filter((item) => item.publicDecision === 'needs_review').length;
+  const archived = items.filter((item) => item.publicDecision === 'archived').length;
 
   return {
     items,
@@ -327,7 +348,12 @@ export async function searchAccessTrade(
       campaigns: campaigns.length,
       storeOffers: storeOffers.length,
       unknown: unknown.length,
+      realProducts: products.length,
+      nonProducts: vouchers.length + campaigns.length + storeOffers.length + unknown.length,
       publicEligibleProducts,
+      publicCandidates,
+      needsReview,
+      archived,
       blockedFromPublic: items.length - publicEligibleProducts,
     },
   };
@@ -337,16 +363,16 @@ export function normalizeAccessTradeItem(
     item: AccessTradeRawItem,
 ): NormalizedAccessTradeItem {
   const name = getFirstText(item, [
-    'name',
-    'title',
     'productName',
     'product_name',
+    'title',
+    'name',
     'voucherName',
     'voucher_name',
-    'campaignName',
-    'campaign_name',
     'offerName',
     'offer_name',
+    'campaignName',
+    'campaign_name',
   ]);
 
   const description = getFirstText(item, [
@@ -360,11 +386,11 @@ export function normalizeAccessTradeItem(
   ]);
 
   const imageUrl = getFirstText(item, [
+    'productImage',
+    'product_image',
     'image',
     'image_url',
     'imageUrl',
-    'productImage',
-    'product_image',
     'thumbnail',
     'thumbnail_url',
     'thumbnailUrl',
@@ -373,14 +399,14 @@ export function normalizeAccessTradeItem(
   ]);
 
   const originalUrl = getFirstText(item, [
-    'url',
-    'link',
-    'final_url',
-    'finalUrl',
-    'originalUrl',
-    'original_url',
     'productUrl',
     'product_url',
+    'originalUrl',
+    'original_url',
+    'final_url',
+    'finalUrl',
+    'url',
+    'link',
     'landingPage',
     'landing_page',
     'merchantUrl',
@@ -428,26 +454,28 @@ export function normalizeAccessTradeItem(
   ]);
 
   const price =
-      parseNumber(item.price) ||
-      parseNumber(item.currentPrice) ||
-      parseNumber(item.current_price) ||
-      parseNumber(item.originalPrice) ||
-      parseNumber(item.original_price) ||
-      parseNumber(item.listPrice) ||
-      parseNumber(item.list_price) ||
-      parseNumber(item.marketPrice) ||
-      parseNumber(item.market_price) ||
+      parsePriceNumber(item.price) ||
+      parsePriceNumber(item.currentPrice) ||
+      parsePriceNumber(item.current_price) ||
+      parsePriceNumber(item.originalPrice) ||
+      parsePriceNumber(item.original_price) ||
+      parsePriceNumber(item.listPrice) ||
+      parsePriceNumber(item.list_price) ||
+      parsePriceNumber(item.oldPrice) ||
+      parsePriceNumber(item.old_price) ||
+      parsePriceNumber(item.marketPrice) ||
+      parsePriceNumber(item.market_price) ||
       0;
 
   const salePrice =
-      parseNumber(item.discount) ||
-      parseNumber(item.discount_price) ||
-      parseNumber(item.discountPrice) ||
-      parseNumber(item.discountedPrice) ||
-      parseNumber(item.discounted_price) ||
-      parseNumber(item.salePrice) ||
-      parseNumber(item.sale_price) ||
-      price ||
+      parsePriceNumber(item.salePrice) ||
+      parsePriceNumber(item.sale_price) ||
+      parsePriceNumber(item.discountedPrice) ||
+      parsePriceNumber(item.discounted_price) ||
+      parsePriceNumber(item.discount_price) ||
+      parsePriceNumber(item.discountPrice) ||
+      parsePriceNumber(item.currentPrice) ||
+      parsePriceNumber(item.current_price) ||
       0;
 
   const commissionRate =
@@ -459,11 +487,14 @@ export function normalizeAccessTradeItem(
   const kind = detectAccessTradeItemKind(item);
   const isRealProduct = kind === 'product' || kind === 'deal';
 
-  const hasRequiredProductData =
-      Boolean(name) &&
-      Boolean(imageUrl) &&
-      Boolean(affiliateUrl || originalUrl) &&
-      (price > 0 || salePrice > 0);
+  const completeness = getProductCompleteness({
+    name,
+    imageUrl,
+    originalUrl,
+    affiliateUrl,
+    price,
+    salePrice,
+  });
 
   const titleLooksUnsafe = looksLikeVoucherOrCampaign({
     title: name,
@@ -473,15 +504,57 @@ export function normalizeAccessTradeItem(
     raw: item,
   });
 
+  const hardNonProductKind = getHardNonProductKind(item, name, description, rawSourceKind);
   const isDatafeedProduct = item.__sandealEndpoint === 'datafeed' && hasDatafeedProductSignals(item);
+  const hasStrongProductSource =
+      isDatafeedProduct ||
+      normalizeText(rawSourceKind).includes('product_feed') ||
+      normalizeText(rawSourceKind).includes('datafeed');
+
+  const hasStrongProductSignals = hasProductSignals(item);
+  const nonProductReason = getNonProductReason(kind, hardNonProductKind);
 
   const verifiedSource =
       isRealProduct &&
-      hasRequiredProductData &&
-      (isDatafeedProduct || !titleLooksUnsafe);
+      completeness.hasTitle &&
+      completeness.hasImage &&
+      completeness.hasUrl &&
+      completeness.hasPrice &&
+      hasStrongProductSignals &&
+      hasStrongProductSource &&
+      !titleLooksUnsafe &&
+      !hardNonProductKind;
 
-  const needsVerification = !verifiedSource || !isRealProduct;
-  const publicHidden = !verifiedSource || !isRealProduct;
+  const qualityScore = computeSourceQualityScore({
+    kind,
+    verifiedSource,
+    isDatafeedProduct,
+    hasStrongProductSignals,
+    completeness,
+    titleLooksUnsafe,
+    hardNonProductKind,
+  });
+
+  const publicBlockReason = getPublicBlockReason({
+    kind,
+    verifiedSource,
+    completeness,
+    titleLooksUnsafe,
+    hardNonProductKind,
+    nonProductReason,
+    qualityScore,
+  });
+
+  const publicDecision = getPublicDecision({
+    kind,
+    verifiedSource,
+    publicBlockReason,
+    qualityScore,
+  });
+
+  const autoPublishEligible = publicDecision === 'public_candidate';
+  const needsVerification = !autoPublishEligible;
+  const publicHidden = !autoPublishEligible;
 
   return {
     id: getItemId(item),
@@ -502,6 +575,11 @@ export function normalizeAccessTradeItem(
     needsVerification,
     verifiedSource,
     publicHidden,
+    autoPublishEligible,
+    publicDecision,
+    publicBlockReason,
+    nonProductReason,
+    qualityScore,
     rawData: item,
   };
 }
@@ -510,10 +588,10 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
   const rawSourceKind = getRawSourceKind(item);
 
   const title = getFirstText(item, [
-    'name',
-    'title',
     'productName',
     'product_name',
+    'title',
+    'name',
     'voucherName',
     'voucher_name',
     'campaignName',
@@ -531,8 +609,6 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
     'content',
     'promotion',
   ]);
-
-  const nameText = normalizeText(title);
 
   const rawText = normalizeText(
       [
@@ -552,6 +628,12 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
       ].join(' '),
   );
 
+  const hardNonProductKind = getHardNonProductKind(item, title, description, rawSourceKind);
+
+  if (hardNonProductKind) {
+    return hardNonProductKind;
+  }
+
   if (item.__sandealEndpoint === 'datafeed' && hasDatafeedProductSignals(item)) {
     return 'product';
   }
@@ -559,31 +641,12 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
   if (
       rawText.includes('product') ||
       rawText.includes('datafeed') ||
+      rawText.includes('product feed') ||
       rawText.includes('product_feed')
   ) {
     if (hasProductSignals(item)) {
       return 'product';
     }
-  }
-
-  if (rawText.includes('voucher') || rawText.includes('coupon')) {
-    return 'voucher';
-  }
-
-  if (rawText.includes('campaign')) {
-    return 'campaign';
-  }
-
-  if (
-      rawText.includes('store_offer') ||
-      rawText.includes('store offer') ||
-      rawText.includes('shop offer')
-  ) {
-    return 'store_offer';
-  }
-
-  if (item.coupon_code || item.voucher_code || item.voucherCode || item.couponCode) {
-    return 'voucher';
   }
 
   const looksLikeOffer = looksLikeVoucherOrCampaign({
@@ -595,14 +658,12 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
   });
 
   if (looksLikeOffer) {
-    if (
-        /^\[[^\]]+\]\s*-\s*/.test(title.trim()) ||
-        nameText.includes('official store') ||
-        nameText.includes('official shop') ||
-        nameText.includes('shop') ||
-        nameText.includes('store')
-    ) {
+    if (isStoreOfferText(title, description, rawSourceKind)) {
       return 'store_offer';
+    }
+
+    if (isCampaignText(title, description, rawSourceKind)) {
+      return 'campaign';
     }
 
     return 'voucher';
@@ -616,7 +677,7 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
     return 'campaign';
   }
 
-  return classifyProductKind({
+  const classified = classifyProductKind({
     title,
     name: title,
     description,
@@ -631,18 +692,25 @@ export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind
     ]),
     originalUrl: getFirstText(item, ['url', 'link', 'productUrl', 'product_url']),
     url: getFirstText(item, ['url', 'link', 'productUrl', 'product_url']),
-    price: parseNumber(item.price),
-    salePrice: parseNumber(item.discount) || parseNumber(item.sale_price),
+    price: parsePriceNumber(item.price),
+    salePrice: parsePriceNumber(item.sale_price) || parsePriceNumber(item.salePrice),
     rawSourceKind,
     sourceType: 'affiliate',
     raw: item,
   });
+
+  const classifiedNonProductKind = getHardNonProductKind(item, title, description, rawSourceKind);
+  if (classifiedNonProductKind) return classifiedNonProductKind;
+
+  return classified;
 }
 
 export function mapAccessTradeToProduct(
     item: NormalizedAccessTradeItem,
 ): Omit<Product, 'id' | 'slug' | 'createdAt' | 'updatedAt'> {
   const isRealProduct = item.kind === 'product' || item.kind === 'deal';
+  const shouldArchive = item.publicDecision === 'archived' || !isRealProduct;
+  const status = shouldArchive ? 'archived' : 'needs_review';
 
   const product = {
     title: item.name,
@@ -672,10 +740,14 @@ export function mapAccessTradeToProduct(
     category: item.category || undefined,
     tags: [],
     benefits: [],
-    warnings: [],
+    warnings: [
+      'SanDeal không tự tạo giá, ảnh, tồn kho hoặc trải nghiệm mua hàng.',
+      'Sản phẩm/ưu đãi cần được kiểm tra lại trước khi hiển thị công khai.',
+    ],
     checkBeforeBuy: [
       'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
-      'Giá và ưu đãi có thể thay đổi theo thời điểm.',
+      'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
+      'SanDeal có thể nhận hoa hồng tiếp thị liên kết, giá người mua không đổi.',
     ],
 
     affiliateSource: 'accesstrade',
@@ -683,7 +755,7 @@ export function mapAccessTradeToProduct(
     commissionNote: item.commissionRate ? `Hoa hồng: ${item.commissionRate}%` : undefined,
 
     riskLevel: item.needsVerification ? 'unknown' : 'low',
-    status: 'needs_review',
+    status,
 
     externalId: item.id,
     sourceId: item.id,
@@ -694,10 +766,18 @@ export function mapAccessTradeToProduct(
     needsVerification: item.needsVerification,
 
     aiApproved: false,
+    autoPublished: false,
     approvalMode: 'manual_or_auto_safe_required',
 
     complianceStatus: 'needs_edit',
     contentPackageStatus: 'none',
+
+    autoPublishEligible: item.autoPublishEligible,
+    publicDecision: item.publicDecision,
+    publicBlockReason: item.publicBlockReason,
+    nonProductReason: item.nonProductReason,
+    qualityScore: item.qualityScore,
+    sourceQualityScore: item.qualityScore,
 
     rawSourceType: 'accesstrade',
     rawData: item.rawData,
@@ -814,8 +894,8 @@ async function fetchAccessTradeEndpoint(
     };
   }
 
-  const items = extractRawItems(data).map((item) => ({
-    ...item,
+  const items = extractRawItems(data).map((rawItem) => ({
+    ...rawItem,
     __sandealEndpoint: endpoint,
     __sandealSourceKind: sourceKind,
     __sandealEndpointUrl: sanitizeEndpointUrl(url),
@@ -862,11 +942,15 @@ function applySearchFilters(
             item.rawSourceKind,
             getRawValueText(item.rawData, 'domain'),
             getRawValueText(item.rawData, 'merchant'),
+            getRawValueText(item.rawData, 'merchantName'),
             getRawValueText(item.rawData, 'campaign'),
+            getRawValueText(item.rawData, 'campaign_name'),
+            getRawValueText(item.rawData, 'shop'),
+            getRawValueText(item.rawData, 'shopName'),
           ].join(' '),
       );
 
-      return haystack.includes(keyword);
+      return haystack.includes(keyword) || haystack.includes(toAsciiSlug(keyword));
     });
   }
 
@@ -889,7 +973,11 @@ function applySearchFilters(
             item.affiliateUrl,
             getRawValueText(item.rawData, 'domain'),
             getRawValueText(item.rawData, 'merchant'),
+            getRawValueText(item.rawData, 'merchantName'),
             getRawValueText(item.rawData, 'campaign'),
+            getRawValueText(item.rawData, 'campaign_name'),
+            getRawValueText(item.rawData, 'shop'),
+            getRawValueText(item.rawData, 'shopName'),
           ].join(' '),
       );
 
@@ -911,6 +999,14 @@ function sortAccessTradeItems(items: NormalizedAccessTradeItem[]): NormalizedAcc
   };
 
   return [...items].sort((a, b) => {
+    if (a.autoPublishEligible !== b.autoPublishEligible) {
+      return Number(b.autoPublishEligible) - Number(a.autoPublishEligible);
+    }
+
+    if (a.qualityScore !== b.qualityScore) {
+      return b.qualityScore - a.qualityScore;
+    }
+
     const aWeight = kindWeight[a.kind] ?? 10;
     const bWeight = kindWeight[b.kind] ?? 10;
 
@@ -921,7 +1017,7 @@ function sortAccessTradeItems(items: NormalizedAccessTradeItem[]): NormalizedAcc
 
     if (aComplete !== bComplete) return bComplete - aComplete;
 
-    return a.name.localeCompare(b.name);
+    return a.name.localeCompare(b.name, 'vi');
   });
 }
 
@@ -929,37 +1025,72 @@ function sortAccessTradeItems(items: NormalizedAccessTradeItem[]): NormalizedAcc
 
 function hasDatafeedProductSignals(item: AccessTradeRawItem): boolean {
   const hasOfficialProductId = Boolean(
-      getFirstText(item, ['product_id', 'productId', 'sku', 'skuId', 'sku_id']),
+      getFirstText(item, ['product_id', 'productId', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id']),
   );
 
-  const hasOfficialProductUrl = Boolean(getFirstText(item, ['url', 'aff_link']));
-  const hasOfficialProductImage = Boolean(getFirstText(item, ['image']));
-  const hasOfficialProductPrice = Boolean(parseNumber(item.price) || parseNumber(item.discount));
+  const hasOfficialProductUrl = Boolean(
+      getFirstText(item, ['productUrl', 'product_url', 'url', 'aff_link', 'affiliate_url', 'affiliateUrl']),
+  );
 
-  return hasOfficialProductId && hasOfficialProductUrl && hasOfficialProductImage && hasOfficialProductPrice;
+  const hasOfficialProductImage = Boolean(
+      getFirstText(item, ['productImage', 'product_image', 'image', 'image_url', 'imageUrl', 'thumbnail']),
+  );
+
+  const hasOfficialProductPrice = Boolean(
+      parsePriceNumber(item.price) ||
+      parsePriceNumber(item.sale_price) ||
+      parsePriceNumber(item.salePrice) ||
+      parsePriceNumber(item.discountedPrice) ||
+      parsePriceNumber(item.discounted_price) ||
+      parsePriceNumber(item.currentPrice) ||
+      parsePriceNumber(item.current_price),
+  );
+
+  const title = getFirstText(item, ['productName', 'product_name', 'title', 'name']);
+  const rawSourceKind = getRawSourceKind(item);
+  const hardNonProductKind = getHardNonProductKind(item, title, '', rawSourceKind);
+
+  return (
+      hasOfficialProductId &&
+      hasOfficialProductUrl &&
+      hasOfficialProductImage &&
+      hasOfficialProductPrice &&
+      !hardNonProductKind
+  );
 }
 
 function hasProductSignals(item: AccessTradeRawItem): boolean {
-  const title = getFirstText(item, ['name', 'title', 'productName', 'product_name']);
+  const title = getFirstText(item, ['productName', 'product_name', 'title', 'name']);
+  const description = getFirstText(item, [
+    'desc',
+    'description',
+    'shortDescription',
+    'short_description',
+    'summary',
+    'content',
+    'promotion',
+  ]);
+  const rawSourceKind = getRawSourceKind(item);
 
   const hasPrice = Boolean(
-      parseNumber(item.price) ||
-      parseNumber(item.currentPrice) ||
-      parseNumber(item.current_price) ||
-      parseNumber(item.salePrice) ||
-      parseNumber(item.sale_price) ||
-      parseNumber(item.discount) ||
-      parseNumber(item.discount_price) ||
-      parseNumber(item.discountPrice),
+      parsePriceNumber(item.price) ||
+      parsePriceNumber(item.currentPrice) ||
+      parsePriceNumber(item.current_price) ||
+      parsePriceNumber(item.salePrice) ||
+      parsePriceNumber(item.sale_price) ||
+      parsePriceNumber(item.discountedPrice) ||
+      parsePriceNumber(item.discounted_price) ||
+      parsePriceNumber(item.discount_price) ||
+      parsePriceNumber(item.discountPrice),
   );
 
   const hasImage = Boolean(
       getFirstText(item, [
+        'productImage',
+        'product_image',
         'image',
         'image_url',
         'imageUrl',
-        'productImage',
-        'product_image',
         'thumbnail',
         'thumbnail_url',
         'thumbnailUrl',
@@ -978,10 +1109,10 @@ function hasProductSignals(item: AccessTradeRawItem): boolean {
         'deep_link',
         'deepLink',
         'deeplink',
-        'url',
-        'link',
         'productUrl',
         'product_url',
+        'url',
+        'link',
       ]),
   );
 
@@ -997,7 +1128,347 @@ function hasProductSignals(item: AccessTradeRawItem): boolean {
       ]),
   );
 
-  return Boolean(title && hasUrl && hasImage && (hasPrice || hasProductId));
+  const hardNonProductKind = getHardNonProductKind(item, title, description, rawSourceKind);
+
+  return Boolean(title && hasUrl && hasImage && hasPrice && (hasProductId || hasSpecificProductTitle(title)) && !hardNonProductKind);
+}
+
+function hasSpecificProductTitle(title: string): boolean {
+  const text = normalizeText(title);
+
+  if (!text) return false;
+
+  const hasModelOrVariant =
+      /\b[a-z0-9]{2,}[-_/]?[a-z0-9]{2,}\b/i.test(title) ||
+      /\d+\s?(ml|g|gram|kg|l|lit|cm|mm|inch|w|mah|gb|tb|pack|pcs|vien|chai|hop|tuyp|bo|cai)\b/i.test(text) ||
+      /\b(iphone|ipad|macbook|samsung|xiaomi|oppo|vivo|asus|acer|lenovo|dell|hp|sony|lg|dabo|serum|kem|sua tam|sua rua mat|tai nghe|laptop|dien thoai|may loc|noi chien|binh giu nhiet)\b/i.test(text);
+
+  const tooGenericOffer =
+      text.includes('giam gia') ||
+      text.includes('uu dai') ||
+      text.includes('khuyen mai') ||
+      text.includes('voucher') ||
+      text.includes('ma giam') ||
+      text.includes('hoan tien') ||
+      text.includes('cashback');
+
+  return hasModelOrVariant && !tooGenericOffer;
+}
+
+interface ProductCompletenessInput {
+  name: string;
+  imageUrl: string;
+  originalUrl: string;
+  affiliateUrl: string;
+  price: number;
+  salePrice: number;
+}
+
+interface ProductCompleteness {
+  hasTitle: boolean;
+  hasImage: boolean;
+  hasUrl: boolean;
+  hasAffiliateUrl: boolean;
+  hasPrice: boolean;
+}
+
+function getProductCompleteness(input: ProductCompletenessInput): ProductCompleteness {
+  return {
+    hasTitle: Boolean(input.name && input.name.trim().length >= 5),
+    hasImage: Boolean(input.imageUrl),
+    hasUrl: Boolean(input.affiliateUrl || input.originalUrl),
+    hasAffiliateUrl: Boolean(input.affiliateUrl),
+    hasPrice: Boolean((input.price && input.price > 0) || (input.salePrice && input.salePrice > 0)),
+  };
+}
+
+function computeSourceQualityScore(input: {
+  kind: ProductKind;
+  verifiedSource: boolean;
+  isDatafeedProduct: boolean;
+  hasStrongProductSignals: boolean;
+  completeness: ProductCompleteness;
+  titleLooksUnsafe: boolean;
+  hardNonProductKind: ProductKind | null;
+}): number {
+  let score = 0;
+
+  if (input.kind === 'product' || input.kind === 'deal') score += 20;
+  if (input.verifiedSource) score += 30;
+  if (input.isDatafeedProduct) score += 20;
+  if (input.hasStrongProductSignals) score += 15;
+
+  if (input.completeness.hasTitle) score += 5;
+  if (input.completeness.hasImage) score += 5;
+  if (input.completeness.hasUrl) score += 5;
+  if (input.completeness.hasAffiliateUrl) score += 5;
+  if (input.completeness.hasPrice) score += 5;
+
+  if (input.titleLooksUnsafe) score -= 30;
+  if (input.hardNonProductKind) score -= 40;
+
+  return Math.max(0, Math.min(100, score));
+}
+
+function getPublicBlockReason(input: {
+  kind: ProductKind;
+  verifiedSource: boolean;
+  completeness: ProductCompleteness;
+  titleLooksUnsafe: boolean;
+  hardNonProductKind: ProductKind | null;
+  nonProductReason?: string;
+  qualityScore: number;
+}): string {
+  if (input.kind === 'store_offer') return input.nonProductReason || 'Chưa phải sản phẩm cụ thể.';
+  if (input.kind === 'voucher') return input.nonProductReason || 'Voucher/mã giảm giá không public như sản phẩm.';
+  if (input.kind === 'campaign') return input.nonProductReason || 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
+  if (input.kind === 'unknown') return 'Chưa xác định được đây là sản phẩm thật.';
+
+  if (input.hardNonProductKind) {
+    return getNonProductReason(input.hardNonProductKind, input.hardNonProductKind) || 'Không phải sản phẩm cụ thể.';
+  }
+
+  if (!input.completeness.hasTitle) return 'Thiếu tên sản phẩm cụ thể.';
+  if (!input.completeness.hasPrice) return 'Thiếu giá hoặc giá khuyến mãi.';
+  if (!input.completeness.hasImage) return 'Thiếu ảnh sản phẩm.';
+  if (!input.completeness.hasUrl) return 'Thiếu link sản phẩm hoặc affiliate link.';
+  if (input.titleLooksUnsafe) return 'Tiêu đề giống voucher/campaign/store offer, cần kiểm tra thủ công.';
+  if (!input.verifiedSource) return 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.';
+  if (input.qualityScore < 70) return 'Điểm nguồn thấp, cần xem xét thêm.';
+
+  return '';
+}
+
+function getPublicDecision(input: {
+  kind: ProductKind;
+  verifiedSource: boolean;
+  publicBlockReason: string;
+  qualityScore: number;
+}): AccessTradePublicDecision {
+  if (input.kind === 'store_offer' || input.kind === 'voucher' || input.kind === 'campaign') {
+    return 'archived';
+  }
+
+  if (input.kind === 'unknown') {
+    return 'needs_review';
+  }
+
+  if (input.verifiedSource && !input.publicBlockReason && input.qualityScore >= 70) {
+    return 'public_candidate';
+  }
+
+  return 'needs_review';
+}
+
+function getNonProductReason(
+    kind: ProductKind,
+    hardNonProductKind?: ProductKind | null,
+): string | undefined {
+  const resolvedKind = hardNonProductKind || kind;
+
+  if (resolvedKind === 'store_offer') return 'Chưa phải sản phẩm cụ thể.';
+  if (resolvedKind === 'voucher') return 'Voucher/mã giảm giá không public như sản phẩm.';
+  if (resolvedKind === 'campaign') return 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
+  if (resolvedKind === 'unknown') return 'Chưa rõ loại dữ liệu nguồn.';
+
+  return undefined;
+}
+
+function getHardNonProductKind(
+    item: AccessTradeRawItem,
+    title: string,
+    description: string,
+    rawSourceKind: string,
+): ProductKind | null {
+  const rawText = normalizeText(
+      [
+        rawSourceKind,
+        item.type,
+        item.kind,
+        item.itemType,
+        item.item_type,
+        item.sourceType,
+        item.source_type,
+        item.categoryType,
+        item.category_type,
+        item.objectType,
+        item.object_type,
+        item.__sandealEndpoint,
+        item.__sandealSourceKind,
+      ].join(' '),
+  );
+
+  if (rawText.includes('voucher') || rawText.includes('coupon')) {
+    return 'voucher';
+  }
+
+  if (rawText.includes('campaign')) {
+    return 'campaign';
+  }
+
+  if (
+      rawText.includes('store_offer') ||
+      rawText.includes('store offer') ||
+      rawText.includes('shop offer') ||
+      rawText.includes('offer_feed')
+  ) {
+    if (!hasProductSignalsWithoutNonProductCheck(item)) {
+      return isVoucherText(title, description, rawSourceKind) ? 'voucher' : 'store_offer';
+    }
+  }
+
+  if (item.coupon_code || item.voucher_code || item.voucherCode || item.couponCode) {
+    return 'voucher';
+  }
+
+  if (isStoreOfferText(title, description, rawSourceKind)) {
+    return 'store_offer';
+  }
+
+  if (isVoucherText(title, description, rawSourceKind)) {
+    return 'voucher';
+  }
+
+  if (isCampaignText(title, description, rawSourceKind)) {
+    return 'campaign';
+  }
+
+  return null;
+}
+
+function hasProductSignalsWithoutNonProductCheck(item: AccessTradeRawItem): boolean {
+  const title = getFirstText(item, ['productName', 'product_name', 'title', 'name']);
+
+  const hasPrice = Boolean(
+      parsePriceNumber(item.price) ||
+      parsePriceNumber(item.currentPrice) ||
+      parsePriceNumber(item.current_price) ||
+      parsePriceNumber(item.salePrice) ||
+      parsePriceNumber(item.sale_price) ||
+      parsePriceNumber(item.discountedPrice) ||
+      parsePriceNumber(item.discounted_price) ||
+      parsePriceNumber(item.discount_price) ||
+      parsePriceNumber(item.discountPrice),
+  );
+
+  const hasImage = Boolean(
+      getFirstText(item, [
+        'productImage',
+        'product_image',
+        'image',
+        'image_url',
+        'imageUrl',
+        'thumbnail',
+        'thumbnail_url',
+        'thumbnailUrl',
+      ]),
+  );
+
+  const hasUrl = Boolean(
+      getFirstText(item, [
+        'aff_link',
+        'affiliate_url',
+        'affiliateUrl',
+        'affiliate_link',
+        'affiliateLink',
+        'tracking_link',
+        'trackingLink',
+        'deep_link',
+        'deepLink',
+        'deeplink',
+        'productUrl',
+        'product_url',
+        'url',
+        'link',
+      ]),
+  );
+
+  const hasProductId = Boolean(
+      getFirstText(item, [
+        'productId',
+        'product_id',
+        'sku',
+        'skuId',
+        'sku_id',
+        'itemId',
+        'item_id',
+      ]),
+  );
+
+  return Boolean(title && hasUrl && hasImage && hasPrice && (hasProductId || hasSpecificProductTitle(title)));
+}
+
+function isStoreOfferText(title: string, description: string, rawSourceKind: string): boolean {
+  const text = normalizeText([title, description, rawSourceKind].join(' '));
+
+  if (!text) return false;
+
+  const hasMerchantPrefix = /^\s*\[[^\]]+\]\s*-\s*/.test(title);
+  const mentionsStore =
+      text.includes('official store') ||
+      text.includes('official shop') ||
+      text.includes('store') ||
+      text.includes('shop') ||
+      text.includes('cua hang') ||
+      text.includes('gian hang') ||
+      text.includes('thuong hieu');
+
+  const storeWideOffer =
+      text.includes('toan shop') ||
+      text.includes('toan san') ||
+      text.includes('tat ca san pham') ||
+      text.includes('don tu') ||
+      text.includes('nhap ma') ||
+      text.includes('giam toi da') ||
+      text.includes('uu dai shop') ||
+      text.includes('khuyen mai shop');
+
+  const genericDiscountTitle =
+      text.startsWith('giam ') ||
+      text.includes('- giam ') ||
+      text.includes(' giam ') ||
+      text.includes('uu dai ') ||
+      text.includes('khuyen mai ') ||
+      text.includes('sale ') ||
+      text.includes('flash sale');
+
+  return Boolean((hasMerchantPrefix && genericDiscountTitle) || (mentionsStore && storeWideOffer));
+}
+
+function isVoucherText(title: string, description: string, rawSourceKind: string): boolean {
+  const text = normalizeText([title, description, rawSourceKind].join(' '));
+
+  if (!text) return false;
+
+  return (
+      text.includes('voucher') ||
+      text.includes('coupon') ||
+      text.includes('ma giam') ||
+      text.includes('ma uu dai') ||
+      text.includes('ma khuyen mai') ||
+      text.includes('coupon code') ||
+      text.includes('voucher code') ||
+      text.includes('promo code') ||
+      text.includes('nhap ma') ||
+      text.includes('code giam')
+  );
+}
+
+function isCampaignText(title: string, description: string, rawSourceKind: string): boolean {
+  const text = normalizeText([title, description, rawSourceKind].join(' '));
+
+  if (!text) return false;
+
+  return (
+      text.includes('campaign') ||
+      text.includes('chien dich') ||
+      text.includes('chuong trinh') ||
+      text.includes('su kien') ||
+      text.includes('mega sale') ||
+      text.includes('brand day') ||
+      text.includes('double day') ||
+      text.includes('ngay hoi mua sam')
+  );
 }
 
 // ---- Raw extraction helpers ----
@@ -1079,6 +1550,8 @@ function getRawDedupeKey(item: AccessTradeRawItem): string {
         'sku',
         'skuId',
         'sku_id',
+        'itemId',
+        'item_id',
         'id',
         '_id',
         'sourceId',
@@ -1092,6 +1565,8 @@ function getRawDedupeKey(item: AccessTradeRawItem): string {
         'affiliateUrl',
         'url',
         'link',
+        'productUrl',
+        'product_url',
         'name',
         'title',
       ]) || JSON.stringify(item).slice(0, 160),
@@ -1166,6 +1641,8 @@ function getItemId(item: AccessTradeRawItem): string {
         'sku',
         'skuId',
         'sku_id',
+        'itemId',
+        'item_id',
         'id',
         '_id',
         'sourceId',
@@ -1207,6 +1684,8 @@ function normalizeText(value: unknown): string {
   return String(value)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/Đ/g, 'd')
       .toLowerCase()
       .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ')
@@ -1215,7 +1694,6 @@ function normalizeText(value: unknown): string {
 
 function toAsciiSlug(value: string): string {
   return normalizeText(value)
-      .replace(/đ/g, 'd')
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
 }
@@ -1253,6 +1731,60 @@ function parseNumber(value: unknown): number | undefined {
   const parsed = Number(normalized);
 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parsePriceNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 1000 ? value : undefined;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed) return undefined;
+
+  if (/%/.test(trimmed)) return undefined;
+
+  const normalizedText = normalizeText(trimmed);
+
+  if (
+      normalizedText.includes('mien phi') ||
+      normalizedText.includes('free') ||
+      normalizedText.includes('lien he') ||
+      normalizedText.includes('contact')
+  ) {
+    return undefined;
+  }
+
+  const kMatch = trimmed.match(/^(\d+(?:[.,]\d+)?)\s?k$/i);
+  if (kMatch) {
+    const parsedK = Number(kMatch[1].replace(',', '.')) * 1000;
+    return Number.isFinite(parsedK) && parsedK >= 1000 ? Math.round(parsedK) : undefined;
+  }
+
+  const digitsOnly = trimmed.replace(/[^\d]/g, '');
+
+  if (!digitsOnly) return undefined;
+
+  const looksLikeVnd =
+      /₫|đ|vnd/i.test(trimmed) ||
+      /\d+[.,]\d{3}/.test(trimmed) ||
+      digitsOnly.length >= 4;
+
+  if (looksLikeVnd) {
+    const parsedVnd = Number(digitsOnly);
+    return Number.isFinite(parsedVnd) && parsedVnd >= 1000 ? parsedVnd : undefined;
+  }
+
+  const normalized = trimmed.replace(',', '.').replace(/[^\d.]/g, '');
+  const parsed = Number(normalized);
+
+  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
 }
 
 function resolveAccessTradeDomain(platform?: string): string | null {

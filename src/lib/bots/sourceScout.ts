@@ -3,10 +3,16 @@
 // Finds candidate products from real sources
 // AutoPilot mode: safely auto-publishes verified real products only
 // ===========================================
+// Rules:
+// - Safe Mode ON by default.
+// - Free Only ON by policy. This bot does not call paid AI.
+// - Store offers / vouchers / campaigns are saved internally only.
+// - Real products are saved first, then link/image health is checked.
+// - Public publish happens only after strict checks pass.
 
 import type { Product, ProductKind } from '../types';
 import { BotContext } from './context';
-import { listProducts, createProduct, getAllProducts, updateProduct } from '../storage/products';
+import { listProducts, createProduct, getAllProducts } from '../storage/products';
 import { classifyProductKind, looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import {
   isAccessTradeConfigured,
@@ -25,6 +31,7 @@ type AccessTradeSearchResult = {
   campaigns?: AccessTradeRawItem[];
   storeOffers?: AccessTradeRawItem[];
   unknown?: AccessTradeRawItem[];
+  summary?: Record<string, unknown>;
   data?: {
     items?: AccessTradeRawItem[];
     products?: AccessTradeRawItem[];
@@ -32,6 +39,7 @@ type AccessTradeSearchResult = {
     campaigns?: AccessTradeRawItem[];
     storeOffers?: AccessTradeRawItem[];
     unknown?: AccessTradeRawItem[];
+    summary?: Record<string, unknown>;
   };
 };
 
@@ -50,9 +58,22 @@ type SafeAutoPublishDecision = {
   reason: string;
 };
 
+type HealthGuardDecision = {
+  allowed: boolean;
+  reason: string;
+  blockedBy?: 'link' | 'image' | 'health_error';
+  updates: MutableProductDraft;
+};
+
 const AUTO_SAFE_MODE = process.env.AI_AUTO_MODE !== 'false';
 const AUTO_APPROVE_SAFE_PRODUCTS = process.env.AUTO_APPROVE_SAFE_PRODUCTS !== 'false';
 const AUTO_PUBLISH_SAFE_PRODUCTS = process.env.AUTO_PUBLISH_SAFE_PRODUCTS !== 'false';
+
+// Hard policy for this bot.
+// Do not wire paid AI/API behavior here.
+const FREE_ONLY_ENFORCED = true;
+const ALLOW_PAID_AI = false;
+const COST_MODE = 'safe_free';
 
 const ACCESS_TRADE_KEYWORDS = [
   'iphone',
@@ -97,8 +118,8 @@ const ACCESS_TRADE_ID_KEYS = [
 ];
 
 const ACCESS_TRADE_TITLE_KEYS = [
-  'title',
   'name',
+  'title',
   'productName',
   'product_name',
   'voucherName',
@@ -135,9 +156,9 @@ const ACCESS_TRADE_IMAGE_KEYS = [
 ];
 
 const ACCESS_TRADE_AFFILIATE_URL_KEYS = [
-  'aff_link',
   'affiliateUrl',
   'affiliate_url',
+  'aff_link',
   'affiliateLink',
   'affiliate_link',
   'trackingLink',
@@ -161,18 +182,18 @@ const ACCESS_TRADE_ORIGINAL_URL_KEYS = [
 ];
 
 const ACCESS_TRADE_CURRENT_PRICE_KEYS = [
-  'currentPrice',
-  'current_price',
   'salePrice',
   'sale_price',
-  'discount',
-  'discountPrice',
-  'discount_price',
+  'currentPrice',
+  'current_price',
   'discountedPrice',
   'discounted_price',
-  'price',
+  'discountPrice',
+  'discount_price',
+  'discount',
   'priceValue',
   'price_value',
+  'price',
 ];
 
 const ACCESS_TRADE_ORIGINAL_PRICE_KEYS = [
@@ -186,6 +207,7 @@ const ACCESS_TRADE_ORIGINAL_PRICE_KEYS = [
   'market_price',
   'priceBeforeDiscount',
   'price_before_discount',
+  'price',
 ];
 
 const ACCESS_TRADE_PLATFORM_KEYS = [
@@ -260,6 +282,8 @@ function normalizeText(value: unknown): string {
   return stringifyValue(value)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/Đ/g, 'd')
       .toLowerCase()
       .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ')
@@ -290,9 +314,11 @@ function getRawText(item: AccessTradeRawItem, keys: string[]): string {
   return '';
 }
 
-function parsePositiveNumber(value: unknown): number | undefined {
+function parsePriceNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+
   if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : undefined;
+    return Number.isFinite(value) && value >= 1000 ? value : undefined;
   }
 
   if (typeof value !== 'string') {
@@ -301,6 +327,25 @@ function parsePositiveNumber(value: unknown): number | undefined {
 
   const trimmed = value.trim();
   if (!trimmed) return undefined;
+
+  if (/%/.test(trimmed)) return undefined;
+
+  const normalizedText = normalizeText(trimmed);
+
+  if (
+      normalizedText.includes('mien phi') ||
+      normalizedText.includes('free') ||
+      normalizedText.includes('lien he') ||
+      normalizedText.includes('contact')
+  ) {
+    return undefined;
+  }
+
+  const kMatch = trimmed.match(/^(\d+(?:[.,]\d+)?)\s?k$/i);
+  if (kMatch) {
+    const parsedK = Number(kMatch[1].replace(',', '.')) * 1000;
+    return Number.isFinite(parsedK) && parsedK >= 1000 ? Math.round(parsedK) : undefined;
+  }
 
   const digitsOnly = trimmed.replace(/[^\d]/g, '');
   if (!digitsOnly) return undefined;
@@ -312,18 +357,18 @@ function parsePositiveNumber(value: unknown): number | undefined {
 
   if (looksLikeVnd) {
     const parsedVnd = Number(digitsOnly);
-    return Number.isFinite(parsedVnd) && parsedVnd > 0 ? parsedVnd : undefined;
+    return Number.isFinite(parsedVnd) && parsedVnd >= 1000 ? parsedVnd : undefined;
   }
 
   const normalized = trimmed.replace(',', '.').replace(/[^\d.]/g, '');
   const parsed = Number(normalized);
 
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
 }
 
 function getRawNumber(item: AccessTradeRawItem, keys: string[]): number | undefined {
   for (const key of keys) {
-    const value = parsePositiveNumber(getPathValue(item, key));
+    const value = parsePriceNumber(getPathValue(item, key));
     if (value) return value;
   }
 
@@ -339,7 +384,7 @@ function normalizeUrl(value: unknown): string {
 }
 
 function hasRealPositivePrice(value: unknown): boolean {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1000;
 }
 
 function cloneRawItemWithCollection(
@@ -385,6 +430,22 @@ function extractAccessTradeItems(result: unknown): AccessTradeRawItem[] {
   });
 }
 
+function toKnownProductKind(value: unknown): ProductKind | null {
+  const normalized = normalizeText(value);
+
+  switch (normalized) {
+    case 'product':
+    case 'deal':
+    case 'voucher':
+    case 'campaign':
+    case 'store_offer':
+    case 'unknown':
+      return normalized as ProductKind;
+    default:
+      return null;
+  }
+}
+
 function getRawKind(item: AccessTradeRawItem): string {
   const collectionKind = normalizeText(item.__accessTradeCollection);
 
@@ -405,9 +466,13 @@ function getRawKind(item: AccessTradeRawItem): string {
         'type',
         'rawSourceKind',
         'categoryType',
+        'category_type',
         'sourceType',
+        'source_type',
         'itemType',
+        'item_type',
         'objectType',
+        'object_type',
         '__sandealSourceKind',
         '__sandealEndpoint',
       ]) || 'unknown'
@@ -422,6 +487,7 @@ function normalizePlatformText(value: string): string {
   if (lower.includes('tiktok')) return 'tiktok_shop';
   if (lower.includes('tiki')) return 'tiki';
   if (lower.includes('sendo')) return 'sendo';
+  if (lower.includes('fahasa')) return 'fahasa';
   if (lower.includes('access')) return 'accesstrade';
 
   return 'accesstrade';
@@ -442,19 +508,38 @@ function isProductLikeKind(kind: ProductKind | string | undefined): boolean {
   return kind === 'product' || kind === 'deal';
 }
 
+function isBlockedNonProductKind(kind: ProductKind | string | undefined): boolean {
+  return kind === 'voucher' || kind === 'campaign' || kind === 'store_offer' || kind === 'unknown';
+}
+
 function getKindCounterKey(kind: ProductKind | string | undefined): string {
   switch (kind) {
     case 'product':
     case 'deal':
-      return 'productsFound';
+      return 'realProducts';
     case 'voucher':
-      return 'vouchersFound';
+      return 'vouchers';
     case 'campaign':
-      return 'campaignsFound';
+      return 'campaigns';
     case 'store_offer':
-      return 'storeOffersFound';
+      return 'storeOffers';
     default:
-      return 'unknownFound';
+      return 'unknown';
+  }
+}
+
+function getNonProductReason(kind: ProductKind | string | undefined): string {
+  switch (kind) {
+    case 'store_offer':
+      return 'Chưa phải sản phẩm cụ thể.';
+    case 'voucher':
+      return 'Voucher/mã giảm giá không public như sản phẩm.';
+    case 'campaign':
+      return 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
+    case 'unknown':
+      return 'Chưa xác định được đây là sản phẩm thật.';
+    default:
+      return '';
   }
 }
 
@@ -474,18 +559,39 @@ function isUnsafeTitleForAutoPublish(title: string): boolean {
     'coupon',
     'ma giam gia',
     'ma uu dai',
+    'ma khuyen mai',
+    'code giam',
+    'nhap ma',
     'giam gia',
-    'giam ',
     'cho don',
     'don toi thieu',
     'official store',
     'official shop',
+    'uu dai shop',
+    'khuyen mai shop',
     'chien dich',
     'campaign',
     'cashback',
+    'hoan tien',
+    'toan shop',
+    'toan san',
+    'tat ca san pham',
   ];
 
   return blockedTerms.some((term) => normalized.includes(term));
+}
+
+function hasSpecificProductTitle(title: string): boolean {
+  const text = normalizeText(title);
+
+  if (!text) return false;
+
+  const hasModelOrVariant =
+      /\b[a-z0-9]{2,}[-_/]?[a-z0-9]{2,}\b/i.test(title) ||
+      /\d+\s?(ml|g|gram|kg|l|lit|cm|mm|inch|w|mah|gb|tb|pack|pcs|vien|chai|hop|tuyp|bo|cai)\b/i.test(text) ||
+      /\b(iphone|ipad|macbook|samsung|xiaomi|oppo|vivo|asus|acer|lenovo|dell|hp|sony|lg|dabo|serum|kem|sua tam|sua rua mat|tai nghe|laptop|dien thoai|may loc|noi chien|binh giu nhiet)\b/i.test(text);
+
+  return hasModelOrVariant && !isUnsafeTitleForAutoPublish(title);
 }
 
 function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPublishDecision {
@@ -493,6 +599,13 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     return {
       allowed: false,
       reason: 'auto_mode_disabled',
+    };
+  }
+
+  if (!FREE_ONLY_ENFORCED || ALLOW_PAID_AI) {
+    return {
+      allowed: false,
+      reason: 'free_only_guard_failed',
     };
   }
 
@@ -508,10 +621,13 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
   const platform = getText(productDraft.platform);
 
   const price =
-      parsePositiveNumber(productDraft.salePrice) ||
-      parsePositiveNumber(productDraft.price) ||
-      parsePositiveNumber(productDraft.currentPrice) ||
-      parsePositiveNumber(productDraft.originalPrice);
+      parsePriceNumber(productDraft.salePrice) ||
+      parsePriceNumber(productDraft.price) ||
+      parsePriceNumber(productDraft.currentPrice) ||
+      parsePriceNumber(productDraft.originalPrice);
+
+  const publicDecision = getText(productDraft.publicDecision);
+  const sourceQualityScore = Number(productDraft.sourceQualityScore || productDraft.qualityScore || 0);
 
   if (!isProductLikeKind(kind)) {
     return {
@@ -520,7 +636,7 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
-  if (kind === 'voucher' || kind === 'campaign' || kind === 'store_offer' || kind === 'unknown') {
+  if (isBlockedNonProductKind(kind)) {
     return {
       allowed: false,
       reason: `blocked_kind_${kind}`,
@@ -531,6 +647,13 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     return {
       allowed: false,
       reason: 'missing_or_too_short_title',
+    };
+  }
+
+  if (!hasSpecificProductTitle(title)) {
+    return {
+      allowed: false,
+      reason: 'title_not_specific_enough',
     };
   }
 
@@ -591,7 +714,7 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
-  if (!price || price <= 0) {
+  if (!price || price < 1000) {
     return {
       allowed: false,
       reason: 'missing_real_price',
@@ -612,15 +735,40 @@ function decideSafeAutoPublish(productDraft: MutableProductDraft): SafeAutoPubli
     };
   }
 
+  if (publicDecision && publicDecision !== 'public_candidate') {
+    return {
+      allowed: false,
+      reason: `public_decision_${publicDecision}`,
+    };
+  }
+
+  if (sourceQualityScore > 0 && sourceQualityScore < 70) {
+    return {
+      allowed: false,
+      reason: 'source_quality_score_too_low',
+    };
+  }
+
   return {
     allowed: true,
-    reason: 'auto_published_verified_real_product',
+    reason: 'safe_candidate_waiting_health_check',
   };
 }
 
 function getBlockedStatus(kind: ProductKind | string | undefined): string {
   if (isProductLikeKind(kind)) return 'needs_review';
   return 'archived';
+}
+
+function getPublicDecisionForDraft(
+    kind: ProductKind | string | undefined,
+    verifiedSource: boolean,
+    autoPublishEligible: boolean,
+): string {
+  if (kind === 'store_offer' || kind === 'voucher' || kind === 'campaign') return 'archived';
+  if (kind === 'unknown') return 'needs_review';
+  if (autoPublishEligible && verifiedSource) return 'public_candidate';
+  return 'needs_review';
 }
 
 function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProductDraft | null {
@@ -637,6 +785,7 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
   const imageUrl = getRawText(rawItem, ACCESS_TRADE_IMAGE_KEYS);
   const description = getRawText(rawItem, ACCESS_TRADE_DESCRIPTION_KEYS);
   const rawKind = getRawKind(rawItem);
+  const knownKind = toKnownProductKind(rawKind);
 
   const rawPlatform = getRawText(rawItem, ACCESS_TRADE_PLATFORM_KEYS);
   const platformText = normalizePlatformText(rawPlatform || 'AccessTrade');
@@ -645,47 +794,98 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
 
   const currentPrice = getRawNumber(rawItem, ACCESS_TRADE_CURRENT_PRICE_KEYS);
   const originalPriceRaw = getRawNumber(rawItem, ACCESS_TRADE_ORIGINAL_PRICE_KEYS);
+
   const originalPrice =
       originalPriceRaw && currentPrice && originalPriceRaw > currentPrice
           ? originalPriceRaw
           : undefined;
 
+  const displayPrice = originalPrice || originalPriceRaw || currentPrice;
   const discountPercent = calculateDiscountPercent(currentPrice, originalPrice);
 
   const hasPrice =
       hasRealPositivePrice(currentPrice) ||
-      hasRealPositivePrice(originalPrice);
+      hasRealPositivePrice(originalPriceRaw) ||
+      hasRealPositivePrice(displayPrice);
 
   const hasAffiliateUrl = Boolean(affiliateUrl);
   const hasImage = Boolean(imageUrl);
 
-  const classifiedKind = classifyProductKind({
+  const classifiedKind =
+      knownKind ||
+      classifyProductKind({
+        title,
+        name: title,
+        description,
+        source: 'accesstrade',
+        imageUrl,
+        affiliateUrl: affiliateUrl || undefined,
+        originalUrl: originalUrl || undefined,
+        url: finalUrl,
+        price: displayPrice,
+        salePrice: currentPrice,
+        originalPrice,
+        rawSourceKind: rawKind,
+        sourceType: 'affiliate',
+        raw: rawItem,
+      });
+
+  const isProductLike = isProductLikeKind(classifiedKind);
+  const nonProductReason = getNonProductReason(classifiedKind);
+
+  const normalizedVerifiedSource = Boolean(rawItem.verifiedSource || rawItem.sourceVerified);
+  const normalizedNeedsVerification =
+      typeof rawItem.needsVerification === 'boolean' ? Boolean(rawItem.needsVerification) : undefined;
+
+  const normalizedAutoPublishEligible = Boolean(rawItem.autoPublishEligible);
+  const normalizedPublicDecision = getText(rawItem.publicDecision);
+  const normalizedBlockReason = getText(rawItem.publicBlockReason);
+  const normalizedQualityScore = Number(rawItem.qualityScore || rawItem.sourceQualityScore || 0);
+
+  const titleUnsafe = isUnsafeTitleForAutoPublish(title);
+  const looksUnsafe = looksLikeVoucherOrCampaign({
     title,
-    name: title,
     description,
-    source: 'accesstrade',
-    imageUrl,
-    affiliateUrl: affiliateUrl || undefined,
-    originalUrl: originalUrl || undefined,
-    url: finalUrl,
-    price: originalPrice || currentPrice,
-    salePrice: currentPrice,
-    originalPrice,
     rawSourceKind: rawKind,
-    sourceType: 'affiliate',
+    source: 'accesstrade',
     raw: rawItem,
   });
 
-  const isProductLike = isProductLikeKind(classifiedKind);
-  const isNonProduct = !isProductLike;
+  const hasMinimumProductSignals =
+      isProductLike &&
+      hasAffiliateUrl &&
+      hasImage &&
+      hasPrice &&
+      hasSpecificProductTitle(title) &&
+      !titleUnsafe &&
+      !looksUnsafe;
+
+  const verifiedSource =
+      normalizedVerifiedSource ||
+      (hasMinimumProductSignals &&
+          normalizedPublicDecision !== 'archived' &&
+          !isBlockedNonProductKind(classifiedKind));
 
   const needsVerification =
-      isNonProduct ||
-      !hasAffiliateUrl ||
-      !hasImage ||
-      !hasPrice;
+      normalizedNeedsVerification ??
+      (!verifiedSource || !isProductLike || !hasAffiliateUrl || !hasImage || !hasPrice);
 
-  const verifiedSource = isProductLike && !needsVerification;
+  const publicDecision =
+      normalizedPublicDecision ||
+      getPublicDecisionForDraft(classifiedKind, verifiedSource, normalizedAutoPublishEligible);
+
+  const publicBlockReason =
+      normalizedBlockReason ||
+      nonProductReason ||
+      (!hasAffiliateUrl
+          ? 'Thiếu affiliate link.'
+          : !hasImage
+              ? 'Thiếu ảnh sản phẩm.'
+              : !hasPrice
+                  ? 'Thiếu giá sản phẩm.'
+                  : !verifiedSource
+                      ? 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.'
+                      : '');
 
   const baseDraft = {
     title,
@@ -707,6 +907,7 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
     publicHidden: true,
     needsVerification,
     aiApproved: false,
+    autoPublished: false,
     approvalMode: 'manual_or_auto_safe_required',
 
     status: getBlockedStatus(classifiedKind),
@@ -722,7 +923,7 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
 
     category: category || undefined,
 
-    price: originalPrice || currentPrice,
+    price: displayPrice,
     salePrice: currentPrice,
     currentPrice,
     originalPrice,
@@ -730,11 +931,13 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
 
     benefits: [],
     tags: [],
-    warnings: [],
+    warnings: [
+      nonProductReason || 'Không fake giá, ảnh, review, tồn kho hoặc trải nghiệm mua hàng.',
+    ].filter(Boolean),
     checkBeforeBuy: [
       'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
-      'Giá và ưu đãi có thể thay đổi theo thời điểm.',
-      'SanDeal có thể nhận hoa hồng affiliate nếu bạn mua qua liên kết.',
+      'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
+      'SanDeal có thể nhận hoa hồng affiliate nếu bạn mua qua liên kết, giá người mua không đổi.',
     ],
 
     riskLevel: needsVerification ? 'unknown' : 'low',
@@ -742,39 +945,171 @@ function buildAccessTradeProductDraft(rawItem: AccessTradeRawItem): MutableProdu
     contentPackageStatus: 'none',
 
     affiliateSource: 'accesstrade',
+
+    autoPublishEligible: normalizedAutoPublishEligible || publicDecision === 'public_candidate',
+    publicDecision,
+    publicBlockReason,
+    nonProductReason: nonProductReason || undefined,
+    qualityScore: normalizedQualityScore || undefined,
+    sourceQualityScore: normalizedQualityScore || undefined,
+
+    autoPublishBlockedReason: publicBlockReason || undefined,
+
     rawSourceType: 'accesstrade',
-    rawData: rawItem,
+    rawData: rawItem.rawData && typeof rawItem.rawData === 'object' ? rawItem.rawData : rawItem,
   } as MutableProductDraft;
 
-  const autoDecision = decideSafeAutoPublish(baseDraft);
-  const now = new Date().toISOString();
-
-  if (autoDecision.allowed) {
-    baseDraft.status = 'published';
-    baseDraft.publicHidden = false;
-    baseDraft.needsVerification = false;
-    baseDraft.verifiedSource = true;
-    baseDraft.sourceVerified = true;
-    baseDraft.aiApproved = true;
-    baseDraft.approvalMode = 'ai_auto_safe_publish';
-    baseDraft.approvedAt = now;
-    baseDraft.publishedAt = now;
-    baseDraft.autoPublished = true;
-    baseDraft.autoPublishReason = autoDecision.reason;
-
-    // Giữ giá trị hợp lệ theo type hiện tại của project.
-    // Không dùng "approved" vì ComplianceStatus hiện tại không nhận giá trị đó.
-    baseDraft.complianceStatus = 'needs_edit';
-
-    baseDraft.contentPackageStatus = 'generated';
-    baseDraft.riskLevel = 'low';
-  } else {
+  if (!isProductLike || isBlockedNonProductKind(classifiedKind)) {
+    baseDraft.status = 'archived';
     baseDraft.publicHidden = true;
+    baseDraft.aiApproved = false;
     baseDraft.autoPublished = false;
-    baseDraft.autoPublishBlockedReason = autoDecision.reason;
+    baseDraft.needsVerification = true;
+    baseDraft.verifiedSource = false;
+    baseDraft.sourceVerified = false;
+    baseDraft.publicDecision = classifiedKind === 'unknown' ? 'needs_review' : 'archived';
+    baseDraft.publicBlockReason = nonProductReason || 'Không phải sản phẩm cụ thể.';
+    baseDraft.autoPublishBlockedReason = baseDraft.publicBlockReason;
   }
 
   return baseDraft;
+}
+
+async function runHealthGuardBeforePublish(
+    productDraft: MutableProductDraft,
+): Promise<HealthGuardDecision> {
+  const checkUrl =
+      getText(productDraft.affiliateUrl) ||
+      getText(productDraft.originalUrl) ||
+      getText(productDraft.url);
+
+  if (!checkUrl) {
+    return {
+      allowed: false,
+      reason: 'missing_link_before_health_check',
+      blockedBy: 'link',
+      updates: {
+        linkHealthStatus: 'missing',
+        publicHidden: true,
+        unpublishedReason: 'Thiếu link sản phẩm hoặc affiliate link.',
+      },
+    };
+  }
+
+  try {
+    const linkResult = await checkLinkHealth(checkUrl);
+
+    if (!linkResult.ok) {
+      return {
+        allowed: false,
+        reason: `Link lỗi: ${linkResult.reason}`,
+        blockedBy: 'link',
+        updates: {
+          linkHealthStatus: linkResult.status as Product['linkHealthStatus'],
+          linkLastCheckedAt: new Date().toISOString(),
+          publicHidden: true,
+          unpublishedReason: `Link lỗi: ${linkResult.reason}`,
+        },
+      };
+    }
+
+    const imageUrl = getText(productDraft.imageUrl);
+
+    if (!imageUrl) {
+      return {
+        allowed: false,
+        reason: 'missing_image_before_health_check',
+        blockedBy: 'image',
+        updates: {
+          imageHealthStatus: 'missing',
+          publicHidden: true,
+          unpublishedReason: 'Thiếu ảnh sản phẩm.',
+        },
+      };
+    }
+
+    const imageResult = await checkImageHealth(imageUrl);
+
+    if (!imageResult.ok) {
+      return {
+        allowed: false,
+        reason: `Ảnh lỗi: ${imageResult.reason}`,
+        blockedBy: 'image',
+        updates: {
+          imageHealthStatus: imageResult.status as Product['imageHealthStatus'],
+          publicHidden: true,
+          unpublishedReason: `Ảnh lỗi: ${imageResult.reason}`,
+        },
+      };
+    }
+
+    return {
+      allowed: true,
+      reason: 'health_ok',
+      updates: {
+        linkHealthStatus: 'ok' as Product['linkHealthStatus'],
+        imageHealthStatus: 'ok' as Product['imageHealthStatus'],
+        linkLastCheckedAt: new Date().toISOString(),
+        imageLastCheckedAt: new Date().toISOString(),
+      },
+    };
+  } catch (error) {
+    return {
+      allowed: false,
+      reason: `health_check_error: ${error instanceof Error ? error.message : String(error)}`,
+      blockedBy: 'health_error',
+      updates: {
+        publicHidden: true,
+        unpublishedReason: 'Lỗi khi kiểm tra link/ảnh, cần xem xét thủ công.',
+      },
+    };
+  }
+}
+
+function markDraftAsAutoPublished(productDraft: MutableProductDraft, reason: string): MutableProductDraft {
+  const now = new Date().toISOString();
+
+  return {
+    ...productDraft,
+    status: 'published',
+    publicHidden: false,
+    needsVerification: false,
+    verifiedSource: true,
+    sourceVerified: true,
+    aiApproved: true,
+    approvalMode: 'ai_auto_safe_publish',
+    approvedAt: now,
+    publishedAt: now,
+    autoPublished: true,
+    autoPublishReason: reason,
+    autoPublishBlockedReason: undefined,
+    publicDecision: 'published',
+    publicBlockReason: undefined,
+    complianceStatus: 'needs_edit',
+    contentPackageStatus: 'generated',
+    riskLevel: 'low',
+  };
+}
+
+function markDraftAsBlocked(
+    productDraft: MutableProductDraft,
+    reason: string,
+    updates?: MutableProductDraft,
+): MutableProductDraft {
+  const kind = getText(productDraft.kind || productDraft.sourceItemKind);
+
+  return {
+    ...productDraft,
+    ...(updates || {}),
+    status: getBlockedStatus(kind),
+    publicHidden: true,
+    aiApproved: false,
+    autoPublished: false,
+    autoPublishBlockedReason: reason,
+    publicBlockReason: reason,
+    needsVerification: true,
+    approvalMode: 'manual_or_auto_safe_required',
+  };
 }
 
 export class SourceScoutBot {
@@ -807,11 +1142,14 @@ export class SourceScoutBot {
       source,
       requestedLimit: limit,
       candidatesFound: candidates.length,
-      autoMode: AUTO_SAFE_MODE,
+      safeMode: AUTO_SAFE_MODE,
+      freeOnly: FREE_ONLY_ENFORCED,
+      allowPaidAi: ALLOW_PAID_AI,
+      costMode: COST_MODE,
       autoApproveSafeProducts: AUTO_APPROVE_SAFE_PRODUCTS,
       autoPublishSafeProducts: AUTO_PUBLISH_SAFE_PRODUCTS,
       note:
-          'Verified real products can be auto-published. Voucher/campaign/store offers stay internal or archived.',
+          'Verified real products can be auto-published only after link/image health checks. Voucher/campaign/store offers stay internal or archived.',
     });
 
     return candidates;
@@ -842,7 +1180,12 @@ export class SourceScoutBot {
     if (limit <= 0) return [];
 
     try {
-      await this.ctx.info('Checking AccessTrade token status');
+      await this.ctx.info('Checking AccessTrade token status', {
+        safeMode: AUTO_SAFE_MODE,
+        freeOnly: FREE_ONLY_ENFORCED,
+        allowPaidAi: ALLOW_PAID_AI,
+        costMode: COST_MODE,
+      });
 
       const configured = await isAccessTradeConfigured();
       if (!configured) {
@@ -856,24 +1199,25 @@ export class SourceScoutBot {
 
       const pipelineCandidates: Product[] = [];
 
+      let foundCount = 0;
       let savedInternalCount = 0;
-      let returnedCount = 0;
       let duplicateCount = 0;
       let skippedCount = 0;
       let keywordsScanned = 0;
-      let skippedFromPublicCount = 0;
+
       let autoPublishedCount = 0;
-      let needsReviewProductCount = 0;
-      let archivedNonProductCount = 0;
+      let candidatesCount = 0;
+      let needsReviewCount = 0;
+      let archivedCount = 0;
       let blockedByLinkCount = 0;
       let blockedByImageCount = 0;
 
       const kindCounters: Record<string, number> = {
-        productsFound: 0,
-        vouchersFound: 0,
-        campaignsFound: 0,
-        storeOffersFound: 0,
-        unknownFound: 0,
+        realProducts: 0,
+        vouchers: 0,
+        campaigns: 0,
+        storeOffers: 0,
+        unknown: 0,
       };
 
       const existingProducts = await getAllProducts();
@@ -911,7 +1255,9 @@ export class SourceScoutBot {
           limit: perKeywordLimit,
           remainingPipelineSlots: Math.max(totalLimit - pipelineCandidates.length, 0),
           remainingInternalSlots: Math.max(internalSaveLimit - savedInternalCount, 0),
-          autoMode: AUTO_SAFE_MODE,
+          safeMode: AUTO_SAFE_MODE,
+          freeOnly: FREE_ONLY_ENFORCED,
+          costMode: COST_MODE,
         });
 
         let searchResult: unknown;
@@ -934,34 +1280,36 @@ export class SourceScoutBot {
         }
 
         const rawItems = extractAccessTradeItems(searchResult);
-        returnedCount += rawItems.length;
+        foundCount += rawItems.length;
 
         await this.ctx.info('AccessTrade keyword returned', {
           keyword,
           count: rawItems.length,
+          summary:
+              searchResult && typeof searchResult === 'object'
+                  ? (searchResult as AccessTradeSearchResult).summary || null
+                  : null,
         });
 
         for (const rawItem of rawItems) {
           if (savedInternalCount >= internalSaveLimit) break;
 
-          const productDraft = buildAccessTradeProductDraft(rawItem);
+          const productDraftInitial = buildAccessTradeProductDraft(rawItem);
 
-          if (!productDraft) {
+          if (!productDraftInitial) {
             skippedCount += 1;
             await this.ctx.warn('AccessTrade item skipped', {
               keyword,
-              reason: 'missing_required_real_fields',
+              reason: 'missing_title_or_link',
             });
             continue;
           }
 
+          let productDraft = productDraftInitial;
+
           const draftKind = getText(productDraft.sourceItemKind || productDraft.kind) as ProductKind;
           const kindCounterKey = getKindCounterKey(draftKind);
           kindCounters[kindCounterKey] = (kindCounters[kindCounterKey] || 0) + 1;
-
-          if (!isProductLikeKind(draftKind)) {
-            skippedFromPublicCount += 1;
-          }
 
           const rawSourceId = getText(productDraft.sourceId);
           const mappedTitle = getText(productDraft.title);
@@ -988,6 +1336,42 @@ export class SourceScoutBot {
             continue;
           }
 
+          const autoDecision = decideSafeAutoPublish(productDraft);
+
+          if (autoDecision.allowed) {
+            const healthDecision = await runHealthGuardBeforePublish(productDraft);
+
+            productDraft = {
+              ...productDraft,
+              ...healthDecision.updates,
+            };
+
+            if (healthDecision.allowed) {
+              productDraft = markDraftAsAutoPublished(
+                  productDraft,
+                  'auto_published_verified_real_product_link_image_ok',
+              );
+            } else {
+              productDraft = markDraftAsBlocked(productDraft, healthDecision.reason, healthDecision.updates);
+
+              if (healthDecision.blockedBy === 'link') {
+                blockedByLinkCount += 1;
+              } else if (healthDecision.blockedBy === 'image') {
+                blockedByImageCount += 1;
+              }
+
+              await this.ctx.warn('Auto-publish blocked by Product Health Guard', {
+                keyword,
+                title: mappedTitle,
+                kind: draftKind,
+                reason: healthDecision.reason,
+                blockedBy: healthDecision.blockedBy || null,
+              });
+            }
+          } else {
+            productDraft = markDraftAsBlocked(productDraft, autoDecision.reason);
+          }
+
           try {
             if (productDraft.price === 0) productDraft.price = undefined;
             if (productDraft.salePrice === 0) productDraft.salePrice = undefined;
@@ -1000,110 +1384,20 @@ export class SourceScoutBot {
 
             savedInternalCount += 1;
 
-            let savedRecord = saved as Product & Record<string, unknown>;
-            let autoPublished = Boolean(savedRecord.autoPublished);
-            let savedStatus = getText(savedRecord.status);
-
-            // === Product Health Guard ===
-            // Nếu sản phẩm được auto-publish, kiểm tra link + ảnh thật
-            // trước khi giữ trạng thái published.
-            if (autoPublished || savedStatus === 'published') {
-              let healthBlocked = false;
-
-              try {
-                const checkUrl =
-                  getText(productDraft.affiliateUrl) ||
-                  getText(productDraft.originalUrl) ||
-                  getText(productDraft.url);
-
-                if (checkUrl) {
-                  const linkResult = await checkLinkHealth(checkUrl);
-
-                  if (!linkResult.ok) {
-                    healthBlocked = true;
-                    blockedByLinkCount += 1;
-
-                    await updateProduct(saved.id, {
-                      status: 'needs_review',
-                      publicHidden: true,
-                      aiApproved: false,
-                      linkHealthStatus: linkResult.status as Product['linkHealthStatus'],
-                      unpublishedReason: `Link lỗi: ${linkResult.reason}`,
-                    } as Partial<Product>);
-
-                    savedRecord = { ...savedRecord, autoPublished: false, status: 'needs_review' };
-                    autoPublished = false;
-                    savedStatus = 'needs_review';
-
-                    await this.ctx.warn('Auto-publish blocked by link health', {
-                      productId: saved.id,
-                      linkStatus: linkResult.status,
-                      linkReason: linkResult.reason,
-                      url: checkUrl,
-                    });
-                  } else {
-                    // Link ok — ghi lại status
-                    await updateProduct(saved.id, {
-                      linkHealthStatus: 'ok' as Product['linkHealthStatus'],
-                      linkLastCheckedAt: new Date().toISOString(),
-                    } as Partial<Product>);
-                  }
-                }
-
-                // Check image (chỉ nếu link ok)
-                if (!healthBlocked) {
-                  const imgUrl = getText(productDraft.imageUrl);
-
-                  if (imgUrl) {
-                    const imageResult = await checkImageHealth(imgUrl);
-
-                    if (!imageResult.ok) {
-                      healthBlocked = true;
-                      blockedByImageCount += 1;
-
-                      await updateProduct(saved.id, {
-                        status: 'needs_review',
-                        publicHidden: true,
-                        aiApproved: false,
-                        imageHealthStatus: imageResult.status as Product['imageHealthStatus'],
-                        unpublishedReason: `Ảnh lỗi: ${imageResult.reason}`,
-                      } as Partial<Product>);
-
-                      savedRecord = { ...savedRecord, autoPublished: false, status: 'needs_review' };
-                      autoPublished = false;
-                      savedStatus = 'needs_review';
-
-                      await this.ctx.warn('Auto-publish blocked by image health', {
-                        productId: saved.id,
-                        imageStatus: imageResult.status,
-                        imageReason: imageResult.reason,
-                        imageUrl: imgUrl,
-                      });
-                    } else {
-                      await updateProduct(saved.id, {
-                        imageHealthStatus: 'ok' as Product['imageHealthStatus'],
-                      } as Partial<Product>);
-                    }
-                  }
-                }
-              } catch (healthError) {
-                // Health check lỗi — không crash bot, giữ sản phẩm nhưng đưa vào review
-                await this.ctx.warn('Health check error — product moved to review', {
-                  productId: saved.id,
-                  error: healthError instanceof Error ? healthError.message : String(healthError),
-                });
-              }
-            }
+            const savedRecord = saved as Product & Record<string, unknown>;
+            const autoPublished = Boolean(savedRecord.autoPublished || productDraft.autoPublished);
+            const savedStatus = getText(savedRecord.status || productDraft.status);
 
             if (autoPublished || savedStatus === 'published') {
               autoPublishedCount += 1;
             } else if (isProductLikeKind(draftKind)) {
-              needsReviewProductCount += 1;
+              needsReviewCount += 1;
             } else {
-              archivedNonProductCount += 1;
+              archivedCount += 1;
             }
 
             if (isProductLikeKind(draftKind)) {
+              candidatesCount += 1;
               pipelineCandidates.push(saved);
             }
 
@@ -1125,12 +1419,19 @@ export class SourceScoutBot {
                   rawSourceKind: productDraft.rawSourceKind,
                   publicHidden: Boolean(productDraft.publicHidden),
                   needsVerification: Boolean(productDraft.needsVerification),
+                  verifiedSource: Boolean(productDraft.verifiedSource || productDraft.sourceVerified),
                   aiApproved: Boolean(productDraft.aiApproved),
                   autoPublished,
                   autoPublishReason:
                       getText(productDraft.autoPublishReason) ||
                       getText(productDraft.autoPublishBlockedReason) ||
+                      getText(productDraft.publicBlockReason) ||
                       null,
+                  publicDecision: getText(productDraft.publicDecision) || null,
+                  publicBlockReason: getText(productDraft.publicBlockReason) || null,
+                  nonProductReason: getText(productDraft.nonProductReason) || null,
+                  linkHealthStatus: getText(productDraft.linkHealthStatus) || null,
+                  imageHealthStatus: getText(productDraft.imageHealthStatus) || null,
                   returnedToPipeline: isProductLikeKind(draftKind),
                 },
             );
@@ -1150,23 +1451,30 @@ export class SourceScoutBot {
       await this.ctx.info('AccessTrade keyword scan complete', {
         requestedLimit: limit,
         keywordsScanned,
-        returnedCount,
-        savedInternalCount,
-        pipelineCandidateCount: pipelineCandidates.length,
-        autoPublishedCount,
-        needsReviewProductCount,
-        archivedNonProductCount,
-        blockedByLinkCount,
-        blockedByImageCount,
-        duplicateCount,
-        skippedCount,
-        skippedFromPublicCount,
-        productsFound: kindCounters.productsFound,
-        vouchersFound: kindCounters.vouchersFound,
-        campaignsFound: kindCounters.campaignsFound,
-        storeOffersFound: kindCounters.storeOffersFound,
-        unknownFound: kindCounters.unknownFound,
-        autoMode: AUTO_SAFE_MODE,
+
+        found: foundCount,
+        saved: savedInternalCount,
+        candidates: candidatesCount,
+
+        realProducts: kindCounters.realProducts,
+        storeOffers: kindCounters.storeOffers,
+        vouchers: kindCounters.vouchers,
+        campaigns: kindCounters.campaigns,
+        unknown: kindCounters.unknown,
+
+        autoPublished: autoPublishedCount,
+        needsReview: needsReviewCount,
+        archived: archivedCount,
+
+        blockedByLink: blockedByLinkCount,
+        blockedByImage: blockedByImageCount,
+        duplicatesSkipped: duplicateCount,
+        skipped: skippedCount,
+
+        safeMode: AUTO_SAFE_MODE,
+        freeOnly: FREE_ONLY_ENFORCED,
+        allowPaidAi: ALLOW_PAID_AI,
+        costMode: COST_MODE,
         autoApproveSafeProducts: AUTO_APPROVE_SAFE_PRODUCTS,
         autoPublishSafeProducts: AUTO_PUBLISH_SAFE_PRODUCTS,
       });

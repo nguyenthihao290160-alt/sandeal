@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import type { Product, ProductKind } from '@/lib/types';
 import { classifyProductKind, looksLikeVoucherOrCampaign } from '@/lib/sourceItemClassifier';
+import {
+  getPublicProductBlockReason,
+  isPublicSafeProduct,
+} from '@/lib/publicProductFilter';
 
 type Toast = {
   type: 'success' | 'error' | 'info';
@@ -18,23 +22,62 @@ type ApiEnvelope<T> = {
   data?: T;
 };
 
-type ProductRecord = Product & {
+type ProductRecord = Product &
+    Record<string, unknown> & {
   source?: string;
   dataSource?: string;
+  importedFrom?: string;
   sourceItemKind?: ProductKind;
+  kind?: ProductKind;
+  rawSourceKind?: string;
+
   verifiedSource?: boolean;
   sourceVerified?: boolean;
+  needsVerification?: boolean;
+
   publicHidden?: boolean;
+  archived?: boolean;
+  hidden?: boolean;
+  deleted?: boolean;
+
   isDemo?: boolean;
   isSample?: boolean;
   isTest?: boolean;
+  isInternal?: boolean;
+
   originalUrl?: string;
   affiliateUrl?: string;
   url?: string;
   productUrl?: string;
   landingUrl?: string;
+  landingPage?: string;
+
   linkHealthStatus?: string;
+  linkHealth?: string;
   imageHealthStatus?: string;
+  imageHealth?: string;
+
+  currentPrice?: number | string;
+  originalPrice?: number | string;
+  priceValue?: number | string;
+
+  publicDecision?: string;
+  publicBlockReason?: string;
+  nonProductReason?: string;
+  autoPublishBlockedReason?: string;
+  unpublishedReason?: string;
+
+  autoPublished?: boolean;
+  aiApproved?: boolean;
+
+  qualityScore?: number | string;
+  sourceQualityScore?: number | string;
+};
+
+type PublicDecision = {
+  label: string;
+  badge: string;
+  reason: string;
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -43,6 +86,9 @@ const PLATFORM_LABELS: Record<string, string> = {
   lazada: 'Lazada',
   accesstrade: 'AccessTrade',
   website: 'Website',
+  tiki: 'Tiki',
+  sendo: 'Sendo',
+  fahasa: 'Fahasa',
   other: 'Khác',
 };
 
@@ -57,7 +103,7 @@ const STATUS_LABELS: Record<string, { label: string; badge: string }> = {
 const KIND_LABELS: Record<string, string> = {
   product: 'Sản phẩm',
   voucher: 'Voucher',
-  campaign: 'Chiến dịch',
+  campaign: 'Campaign',
   deal: 'Deal',
   store_offer: 'Ưu đãi shop',
   unknown: 'Chưa rõ',
@@ -83,6 +129,9 @@ const BROKEN_LINK_STATUSES = new Set([
   'broken',
   'broken_link',
   'not_found',
+  'not_allowed',
+  'forbidden',
+  'timeout',
   'affiliate_error',
   'image_broken',
   'product_unavailable',
@@ -93,6 +142,32 @@ const BROKEN_LINK_STATUSES = new Set([
   'redirect_error',
   'unavailable',
   'out_of_stock',
+  'missing',
+  'invalid',
+  'blocked',
+]);
+
+const BROKEN_IMAGE_STATUSES = new Set([
+  'image_broken',
+  'invalid_image',
+  'forbidden',
+  'timeout',
+  'error',
+  'failed',
+  'broken',
+  'not_found',
+  'missing',
+  'invalid',
+  'blocked',
+]);
+
+const SAFE_HEALTH_STATUSES = new Set([
+  'ok',
+  'healthy',
+  'valid',
+  'available',
+  'pass',
+  'passed',
 ]);
 
 function normalizeText(value?: unknown): string {
@@ -101,7 +176,10 @@ function normalizeText(value?: unknown): string {
   return String(value)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/Đ/g, 'd')
       .toLowerCase()
+      .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ')
       .trim();
 }
@@ -110,15 +188,40 @@ function getProductRecord(product: Product): ProductRecord {
   return product as ProductRecord;
 }
 
+function parsePriceNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 1000 ? value : undefined;
+  }
+
+  if (typeof value !== 'string') return undefined;
+
+  const trimmed = value.trim();
+  if (!trimmed || /%/.test(trimmed)) return undefined;
+
+  const digitsOnly = trimmed.replace(/[^\d]/g, '');
+  if (!digitsOnly) return undefined;
+
+  const parsed = Number(digitsOnly);
+  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : undefined;
+}
+
 function getEffectiveKind(product: Product): ProductKind {
   const p = getProductRecord(product);
   const explicitKind = p.sourceItemKind || p.kind;
 
   if (explicitKind && explicitKind !== 'unknown') {
-    if (
-        (explicitKind === 'product' || explicitKind === 'deal') &&
-        (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(product.title))
-    ) {
+    const looksUnsafe =
+        looksLikeVoucherOrCampaign({
+          title: product.title,
+          description: product.description,
+          rawSourceKind: p.rawSourceKind,
+          source: p.source,
+          raw: product,
+        }) || looksLikeVoucherOrCampaign(product.title);
+
+    if ((explicitKind === 'product' || explicitKind === 'deal') && looksUnsafe) {
       return classifyProductKind({
         ...product,
         kind: undefined,
@@ -144,25 +247,27 @@ function getKindBadge(kind: ProductKind): string {
   return KIND_BADGES[kind] || 'badge-neutral';
 }
 
-function isRealProductKind(kind: ProductKind): boolean {
+function isRealProductKind(kind: ProductKind | string | undefined): boolean {
   return kind === 'product' || kind === 'deal';
 }
 
-function isNonProductKind(kind: ProductKind): boolean {
+function isNonProductKind(kind: ProductKind | string | undefined): boolean {
   return kind === 'voucher' || kind === 'campaign' || kind === 'store_offer' || kind === 'unknown';
 }
 
 function getSourceLabel(product: Product): string {
   const p = getProductRecord(product);
+  return p.source || p.dataSource || p.importedFrom || 'unknown';
+}
 
-  return p.source || p.dataSource || 'unknown';
+function getPlatformLabel(product: Product): string {
+  const platform = String(product.platform || getProductRecord(product).platform || 'other');
+  return PLATFORM_LABELS[platform] || platform || 'Khác';
 }
 
 function isVerifiedSource(product: Product): boolean {
   const p = getProductRecord(product);
-  const source = normalizeText(getSourceLabel(product));
-
-  return Boolean(p.verifiedSource === true || p.sourceVerified === true || source === 'accesstrade');
+  return Boolean(p.verifiedSource === true || p.sourceVerified === true);
 }
 
 function isDemoOrTest(product: Product): boolean {
@@ -174,29 +279,190 @@ function isDemoOrTest(product: Product): boolean {
       p.isDemo === true ||
       p.isSample === true ||
       p.isTest === true ||
+      p.isInternal === true ||
       source === 'demo' ||
       source === 'sample' ||
       source === 'test' ||
+      source === 'internal' ||
       title.includes('demo') ||
       title.includes('sample') ||
       title.includes('test product') ||
-      title.includes('san pham test'),
+      title.includes('san pham test') ||
+      title.includes('placeholder') ||
+      title.includes('fake'),
   );
 }
 
 function hasExternalUrl(product: Product): boolean {
   const p = getProductRecord(product);
 
-  return [p.affiliateUrl, p.originalUrl, p.url, p.productUrl, p.landingUrl].some(
-      (url) => typeof url === 'string' && /^https?:\/\//i.test(url),
-  );
+  return [
+    p.affiliateUrl,
+    p.originalUrl,
+    p.url,
+    p.productUrl,
+    p.landingUrl,
+    p.landingPage,
+  ].some((url) => typeof url === 'string' && /^https?:\/\//i.test(url.trim()));
+}
+
+function hasRealImage(product: Product): boolean {
+  return Boolean(product.imageUrl && String(product.imageUrl).trim());
+}
+
+function hasRealPrice(product: Product): boolean {
+  const p = getProductRecord(product);
+
+  return [
+    product.salePrice,
+    product.price,
+    p.currentPrice,
+    p.originalPrice,
+    p.priceValue,
+  ].some((value) => Boolean(parsePriceNumber(value)));
+}
+
+function getLinkHealthStatus(product: Product): string {
+  const p = getProductRecord(product);
+  return normalizeText(p.linkHealthStatus || p.linkHealth);
+}
+
+function getImageHealthStatus(product: Product): string {
+  const p = getProductRecord(product);
+  return normalizeText(p.imageHealthStatus || p.imageHealth);
 }
 
 function hasBrokenLink(product: Product): boolean {
-  const p = getProductRecord(product);
-  const status = normalizeText(p.linkHealthStatus);
-
+  const status = getLinkHealthStatus(product);
   return Boolean(status && BROKEN_LINK_STATUSES.has(status));
+}
+
+function hasBrokenImage(product: Product): boolean {
+  const status = getImageHealthStatus(product);
+  return Boolean(status && BROKEN_IMAGE_STATUSES.has(status));
+}
+
+function hasOkLink(product: Product): boolean {
+  const status = getLinkHealthStatus(product);
+  return Boolean(status && SAFE_HEALTH_STATUSES.has(status));
+}
+
+function hasOkImage(product: Product): boolean {
+  const status = getImageHealthStatus(product);
+  return Boolean(status && SAFE_HEALTH_STATUSES.has(status));
+}
+
+function isImportedAffiliateProduct(product: Product): boolean {
+  const p = getProductRecord(product);
+  const haystack = normalizeText([p.source, p.dataSource, p.importedFrom, product.platform].join(' '));
+
+  return haystack.includes('accesstrade') || p.autoPublished === true;
+}
+
+function hasLowQualityScore(product: Product): boolean {
+  const p = getProductRecord(product);
+  const rawScore = p.sourceQualityScore ?? p.qualityScore;
+  const score =
+      typeof rawScore === 'number'
+          ? rawScore
+          : typeof rawScore === 'string'
+              ? Number(rawScore)
+              : undefined;
+
+  if (score === undefined || !Number.isFinite(score)) return false;
+
+  return score > 0 && score < 70;
+}
+
+function getQualityScore(product: Product): number | null {
+  const p = getProductRecord(product);
+  const rawScore = p.sourceQualityScore ?? p.qualityScore ?? product.score;
+  const score =
+      typeof rawScore === 'number'
+          ? rawScore
+          : typeof rawScore === 'string'
+              ? Number(rawScore)
+              : undefined;
+
+  if (score === undefined || !Number.isFinite(score)) return null;
+
+  return Math.round(score);
+}
+
+function getStoredBlockReason(product: Product): string {
+  const p = getProductRecord(product);
+
+  return (
+      p.publicBlockReason ||
+      p.nonProductReason ||
+      p.autoPublishBlockedReason ||
+      p.unpublishedReason ||
+      ''
+  );
+}
+
+function getMainBlockReason(product: Product): string {
+  const storedReason = getStoredBlockReason(product);
+  if (storedReason) return storedReason;
+
+  const publicFilterReason = getPublicProductBlockReason(product);
+  if (publicFilterReason) return publicFilterReason;
+
+  return getApproveBlockedReason(product);
+}
+
+function getPublicDecision(product: Product): PublicDecision {
+  const p = getProductRecord(product);
+  const status = normalizeText(product.status);
+  const publicDecision = normalizeText(p.publicDecision);
+  const kind = getEffectiveKind(product);
+  const reason = getMainBlockReason(product);
+
+  if (isPublicSafeProduct(product)) {
+    return {
+      label: 'Đã public',
+      badge: 'badge-success',
+      reason: 'Đủ chuẩn Safe Publish.',
+    };
+  }
+
+  if (status === 'archived' || publicDecision === 'archived') {
+    return {
+      label: 'Lưu trữ',
+      badge: 'badge-neutral',
+      reason: reason || 'Đang được lưu nội bộ, không hiển thị public.',
+    };
+  }
+
+  if (isNonProductKind(kind)) {
+    return {
+      label: 'Không public tự động',
+      badge: 'badge-warning',
+      reason:
+          reason ||
+          (kind === 'store_offer'
+              ? 'Chưa phải sản phẩm cụ thể.'
+              : kind === 'voucher'
+                  ? 'Voucher không public như sản phẩm.'
+                  : kind === 'campaign'
+                      ? 'Campaign không public như sản phẩm.'
+                      : 'Chưa xác định được là sản phẩm thật.'),
+    };
+  }
+
+  if (status === 'published' && reason) {
+    return {
+      label: 'Đã chặn public',
+      badge: 'badge-danger',
+      reason,
+    };
+  }
+
+  return {
+    label: 'Cần xem xét',
+    badge: 'badge-warning',
+    reason: reason || 'Cần kiểm tra thêm trước khi public.',
+  };
 }
 
 function canApproveProduct(product: Product): boolean {
@@ -211,8 +477,18 @@ function canApproveProduct(product: Product): boolean {
   if (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(product.title)) return false;
   if (isDemoOrTest(product)) return false;
   if (!hasExternalUrl(product)) return false;
+  if (!hasRealImage(product)) return false;
+  if (!hasRealPrice(product)) return false;
   if (source === 'manual' && p.verifiedSource !== true && p.sourceVerified !== true) return false;
-  if (hasBrokenLink(product)) return false;
+  if (p.needsVerification === true) return false;
+  if (p.verifiedSource === false || p.sourceVerified === false) return false;
+  if (hasBrokenLink(product) || hasBrokenImage(product)) return false;
+  if (hasLowQualityScore(product)) return false;
+
+  if (isImportedAffiliateProduct(product)) {
+    if (!hasOkLink(product)) return false;
+    if (!hasOkImage(product)) return false;
+  }
 
   return true;
 }
@@ -222,12 +498,15 @@ function getApproveBlockedReason(product: Product): string {
   const kind = getEffectiveKind(product);
   const source = normalizeText(getSourceLabel(product));
 
+  const storedReason = getStoredBlockReason(product);
+  if (storedReason) return storedReason;
+
   if (kind === 'voucher') {
-    return 'Mục này là voucher, chưa đủ dữ liệu sản phẩm để public.';
+    return 'Mục này là voucher, không thể duyệt public như sản phẩm.';
   }
 
   if (kind === 'campaign') {
-    return 'Mục này là chiến dịch, chưa đủ dữ liệu sản phẩm để public.';
+    return 'Mục này là campaign, không thể duyệt public như sản phẩm.';
   }
 
   if (kind === 'store_offer') {
@@ -239,19 +518,55 @@ function getApproveBlockedReason(product: Product): string {
   }
 
   if (looksLikeVoucherOrCampaign(product) || looksLikeVoucherOrCampaign(product.title)) {
-    return 'Tiêu đề giống voucher/chiến dịch, không thể duyệt public.';
+    return 'Tiêu đề giống voucher/campaign/store offer, không thể duyệt public.';
+  }
+
+  if (!product.title || !String(product.title).trim()) {
+    return 'Thiếu tên sản phẩm.';
   }
 
   if (!hasExternalUrl(product)) {
-    return 'Thiếu link sản phẩm hoặc link affiliate hợp lệ.';
+    return 'Thiếu link sản phẩm hoặc affiliate link hợp lệ.';
+  }
+
+  if (!hasRealImage(product)) {
+    return 'Thiếu ảnh sản phẩm.';
+  }
+
+  if (!hasRealPrice(product)) {
+    return 'Thiếu giá sản phẩm thật.';
   }
 
   if (source === 'manual' && p.verifiedSource !== true && p.sourceVerified !== true) {
     return 'Sản phẩm thủ công chưa được xác minh nguồn.';
   }
 
+  if (p.needsVerification === true) {
+    return 'Sản phẩm đang cần xác minh thêm.';
+  }
+
+  if (p.verifiedSource === false || p.sourceVerified === false) {
+    return 'Nguồn sản phẩm chưa được xác minh.';
+  }
+
   if (hasBrokenLink(product)) {
     return 'Link sản phẩm đang lỗi hoặc không khả dụng.';
+  }
+
+  if (hasBrokenImage(product)) {
+    return 'Ảnh sản phẩm đang lỗi hoặc không khả dụng.';
+  }
+
+  if (isImportedAffiliateProduct(product) && !hasOkLink(product)) {
+    return 'Link sản phẩm chưa được kiểm tra OK.';
+  }
+
+  if (isImportedAffiliateProduct(product) && !hasOkImage(product)) {
+    return 'Ảnh sản phẩm chưa được kiểm tra OK.';
+  }
+
+  if (hasLowQualityScore(product)) {
+    return 'Điểm chất lượng nguồn thấp.';
   }
 
   if (isDemoOrTest(product)) {
@@ -261,10 +576,11 @@ function getApproveBlockedReason(product: Product): string {
   return 'Mục này chưa đủ điều kiện duyệt.';
 }
 
-function formatPrice(price?: number) {
-  if (!price) return '—';
+function formatPrice(price?: number | string) {
+  const parsed = parsePriceNumber(price);
+  if (!parsed) return '—';
 
-  return `${price.toLocaleString('vi-VN')}₫`;
+  return `${parsed.toLocaleString('vi-VN')}₫`;
 }
 
 function getStatusLabel(status?: string) {
@@ -281,6 +597,22 @@ function getRiskLabel(riskLevel?: string) {
 
 function getRiskBadge(riskLevel?: string) {
   return RISK_LABELS[riskLevel || 'unknown']?.badge || 'badge-neutral';
+}
+
+function getHealthBadge(status: string, type: 'link' | 'image') {
+  if (!status) return { label: 'Chưa check', badge: 'badge-neutral' };
+
+  if (SAFE_HEALTH_STATUSES.has(status)) {
+    return { label: 'OK', badge: 'badge-success' };
+  }
+
+  const brokenSet = type === 'link' ? BROKEN_LINK_STATUSES : BROKEN_IMAGE_STATUSES;
+
+  if (brokenSet.has(status)) {
+    return { label: status, badge: 'badge-danger' };
+  }
+
+  return { label: status, badge: 'badge-warning' };
 }
 
 function SafeThumb({
@@ -387,7 +719,8 @@ export default function ProductsPage() {
       if (filterStatus) params.set('status', filterStatus);
       if (filterRisk) params.set('riskLevel', filterRisk);
 
-      const res = await fetch(`/api/products?${params.toString()}`, {
+      const query = params.toString();
+      const res = await fetch(`/api/products${query ? `?${query}` : ''}`, {
         cache: 'no-store',
       });
 
@@ -423,28 +756,46 @@ export default function ProductsPage() {
   }, [products, filterKind]);
 
   const stats = useMemo(() => {
-    const published = products.filter((product) => product.status === 'published').length;
-    const needsReview = products.filter((product) => product.status === 'needs_review').length;
-    const nonProducts = products.filter((product) => isNonProductKind(getEffectiveKind(product))).length;
+    const realProducts = products.filter((product) => isRealProductKind(getEffectiveKind(product))).length;
+    const storeOffers = products.filter((product) => getEffectiveKind(product) === 'store_offer').length;
+    const vouchers = products.filter((product) => getEffectiveKind(product) === 'voucher').length;
+    const campaigns = products.filter((product) => getEffectiveKind(product) === 'campaign').length;
+    const unknown = products.filter((product) => getEffectiveKind(product) === 'unknown').length;
+
+    const publicSafe = products.filter((product) => isPublicSafeProduct(product)).length;
+    const publishedStatus = products.filter((product) => normalizeText(product.status) === 'published').length;
+    const needsReview = products.filter((product) => normalizeText(product.status) === 'needs_review').length;
+    const archived = products.filter((product) => normalizeText(product.status) === 'archived').length;
+
     const brokenLinks = products.filter((product) => hasBrokenLink(product)).length;
-    const brokenImages = products.filter((product) => {
-      const p = getProductRecord(product);
-      const imgStatus = normalizeText(p.imageHealthStatus as unknown as string | undefined);
-      return imgStatus && BROKEN_LINK_STATUSES.has(imgStatus);
-    }).length;
+    const brokenImages = products.filter((product) => hasBrokenImage(product)).length;
+    const missingPrice = products.filter((product) => !hasRealPrice(product)).length;
+    const missingImage = products.filter((product) => !hasRealImage(product)).length;
+    const missingLink = products.filter((product) => !hasExternalUrl(product)).length;
+
     const hidden = products.filter((product) => {
       const p = getProductRecord(product);
-      return p.publicHidden === true;
+      return p.publicHidden === true || p.hidden === true || p.archived === true;
     }).length;
 
     return {
       total: products.length,
-      published,
+      realProducts,
+      storeOffers,
+      vouchers,
+      campaigns,
+      unknown,
+      publicSafe,
+      publishedStatus,
       needsReview,
-      nonProducts,
+      archived,
       brokenLinks,
       brokenImages,
+      missingPrice,
+      missingImage,
+      missingLink,
       hidden,
+      nonProducts: storeOffers + vouchers + campaigns + unknown,
     };
   }, [products]);
 
@@ -487,12 +838,12 @@ export default function ProductsPage() {
           'success',
           mode === 'full_safe_run'
               ? 'Đã chạy AutoPilot toàn bộ. Chỉ sản phẩm thật đạt chuẩn mới được public.'
-              : 'Đã chạy quét nguồn. Bot sẽ tự lọc và public an toàn nếu đủ chuẩn.',
+              : 'Đã chạy quét nguồn. Bot sẽ lưu nội bộ và chỉ public sản phẩm thật đạt chuẩn.',
       );
 
       await loadProducts();
     } catch (err) {
-      showToast(err instanceof Error ? 'error' : 'error', err instanceof Error ? err.message : 'Không chạy được bot.');
+      showToast('error', err instanceof Error ? err.message : 'Không chạy được bot.');
     } finally {
       setBotRunning(false);
     }
@@ -556,14 +907,52 @@ export default function ProductsPage() {
 
   const renderKindBadge = (product: Product) => {
     const kind = getEffectiveKind(product);
-    const warningText = isNonProductKind(kind) ? 'Chưa phải sản phẩm cụ thể' : null;
+    const warningText = isNonProductKind(kind) ? getApproveBlockedReason(product) : null;
 
     return (
         <div>
           <span className={`badge ${getKindBadge(kind)}`}>{getKindLabel(kind)}</span>
           {warningText && (
-              <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 4 }}>{warningText}</div>
+              <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 4, maxWidth: 220 }}>
+                {warningText}
+              </div>
           )}
+        </div>
+    );
+  };
+
+  const renderDecisionBadge = (product: Product) => {
+    const decision = getPublicDecision(product);
+
+    return (
+        <div style={{ maxWidth: 260 }}>
+          <span className={`badge ${decision.badge}`}>{decision.label}</span>
+          <div
+              style={{
+                fontSize: 11,
+                color: 'var(--text-tertiary)',
+                marginTop: 6,
+                lineHeight: 1.45,
+              }}
+          >
+            {decision.reason}
+          </div>
+        </div>
+    );
+  };
+
+  const renderHealthBadges = (product: Product) => {
+    const link = getHealthBadge(getLinkHealthStatus(product), 'link');
+    const image = getHealthBadge(getImageHealthStatus(product), 'image');
+
+    return (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <span className={`badge ${link.badge}`} style={{ fontSize: 10 }}>
+          Link: {link.label}
+        </span>
+          <span className={`badge ${image.badge}`} style={{ fontSize: 10 }}>
+          Ảnh: {image.label}
+        </span>
         </div>
     );
   };
@@ -583,7 +972,7 @@ export default function ProductsPage() {
               disabled
               title={getApproveBlockedReason(product)}
           >
-            OK
+            Duyệt
           </button>
       );
     }
@@ -595,7 +984,7 @@ export default function ProductsPage() {
             onClick={() => void handleApprove(product.id)}
             title="Duyệt sản phẩm"
         >
-          OK
+          Duyệt
         </button>
     );
   };
@@ -603,6 +992,7 @@ export default function ProductsPage() {
   const renderSourceBadges = (product: Product) => {
     const source = getSourceLabel(product);
     const kind = getEffectiveKind(product);
+    const p = getProductRecord(product);
 
     return (
         <div
@@ -641,7 +1031,21 @@ export default function ProductsPage() {
                     borderRadius: 6,
                   }}
               >
-            Nguồn thật
+            Nguồn xác minh
+          </span>
+          )}
+
+          {p.autoPublished === true && (
+              <span
+                  style={{
+                    fontSize: 10,
+                    background: 'rgba(34,197,94,0.1)',
+                    color: '#22c55e',
+                    padding: '2px 8px',
+                    borderRadius: 6,
+                  }}
+              >
+            Auto publish
           </span>
           )}
 
@@ -672,9 +1076,9 @@ export default function ProductsPage() {
 
             <h1 className="page-title">Kết quả bot & hàng chờ duyệt</h1>
 
-            <p className="page-subtitle" style={{ maxWidth: 720 }}>
-              Theo dõi sản phẩm do bot AI quét được. AutoPilot sẽ tự public sản phẩm thật đạt chuẩn;
-              voucher, campaign, ưu đãi shop, dữ liệu thiếu link hoặc rủi ro cao sẽ bị giữ nội bộ.
+            <p className="page-subtitle" style={{ maxWidth: 760 }}>
+              Theo dõi sản phẩm do bot AI quét được. AutoPilot chỉ public sản phẩm thật đạt chuẩn;
+              voucher, campaign, ưu đãi shop, dữ liệu thiếu link/ảnh/giá hoặc link lỗi sẽ bị giữ nội bộ.
             </p>
 
             <div className="flex gap-sm" style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
@@ -704,7 +1108,7 @@ export default function ProductsPage() {
               </button>
 
               <Link href="/dashboard/product-sources" className="secondary-button">
-                + Thêm sản phẩm
+                + Thêm nguồn sản phẩm
               </Link>
 
               <Link href="/deals" target="_blank" rel="noreferrer" className="secondary-button">
@@ -721,17 +1125,17 @@ export default function ProductsPage() {
               </div>
 
               <div className="metric-card">
-                <span className="badge badge-success">Đã public</span>
-                <div className="stat-card-value">{stats.published}</div>
+                <span className="badge badge-success">Đủ chuẩn public</span>
+                <div className="stat-card-value">{stats.publicSafe}</div>
               </div>
 
               <div className="metric-card">
-                <span className="badge badge-warning">Chờ xem xét</span>
+                <span className="badge badge-warning">Cần xem xét</span>
                 <div className="stat-card-value">{stats.needsReview}</div>
               </div>
 
               <div className="metric-card">
-                <span className="badge badge-neutral">Không public</span>
+                <span className="badge badge-neutral">Không phải SP</span>
                 <div className="stat-card-value">{stats.nonProducts}</div>
               </div>
             </div>
@@ -763,45 +1167,102 @@ export default function ProductsPage() {
             </div>
         )}
 
-        {/* Safe Publish Summary Card */}
         {!loading && stats.total > 0 && (
-          <div className="card" style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-lg)' }}>
-            <h3 style={{ fontWeight: 800, fontSize: 'var(--text-base)', marginBottom: 'var(--space-md)', color: 'var(--text-primary)' }}>
-              Safe Publish — Tổng hợp trạng thái
-            </h3>
-            <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 'var(--space-sm)', marginBottom: 'var(--space-md)' }}>
-              <div className="metric-card">
-                <span className="badge badge-success" style={{ alignSelf: 'flex-start' }}>Đã public</span>
-                <div className="stat-card-value">{stats.published}</div>
+            <div className="card" style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-lg)' }}>
+              <h3
+                  style={{
+                    fontWeight: 800,
+                    fontSize: 'var(--text-base)',
+                    marginBottom: 'var(--space-md)',
+                    color: 'var(--text-primary)',
+                  }}
+              >
+                Safe Publish — Tổng hợp trạng thái
+              </h3>
+
+              <div
+                  className="grid"
+                  style={{
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(138px, 1fr))',
+                    gap: 'var(--space-sm)',
+                    marginBottom: 'var(--space-md)',
+                  }}
+              >
+                <div className="metric-card">
+              <span className="badge badge-success" style={{ alignSelf: 'flex-start' }}>
+                Sản phẩm thật
+              </span>
+                  <div className="stat-card-value">{stats.realProducts}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-warning" style={{ alignSelf: 'flex-start' }}>
+                Ưu đãi shop
+              </span>
+                  <div className="stat-card-value">{stats.storeOffers}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-warning" style={{ alignSelf: 'flex-start' }}>
+                Voucher
+              </span>
+                  <div className="stat-card-value">{stats.vouchers}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-warning" style={{ alignSelf: 'flex-start' }}>
+                Campaign
+              </span>
+                  <div className="stat-card-value">{stats.campaigns}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-success" style={{ alignSelf: 'flex-start' }}>
+                Đang public
+              </span>
+                  <div className="stat-card-value">{stats.publicSafe}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-danger" style={{ alignSelf: 'flex-start' }}>
+                Link lỗi
+              </span>
+                  <div className="stat-card-value">{stats.brokenLinks}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-danger" style={{ alignSelf: 'flex-start' }}>
+                Ảnh lỗi
+              </span>
+                  <div className="stat-card-value">{stats.brokenImages}</div>
+                </div>
+
+                <div className="metric-card">
+              <span className="badge badge-neutral" style={{ alignSelf: 'flex-start' }}>
+                Đã ẩn/lưu
+              </span>
+                  <div className="stat-card-value">{stats.hidden}</div>
+                </div>
               </div>
-              <div className="metric-card">
-                <span className="badge badge-warning" style={{ alignSelf: 'flex-start' }}>Chờ duyệt</span>
-                <div className="stat-card-value">{stats.needsReview}</div>
-              </div>
-              <div className="metric-card">
-                <span className="badge badge-danger" style={{ alignSelf: 'flex-start' }}>Link lỗi</span>
-                <div className="stat-card-value">{stats.brokenLinks}</div>
-              </div>
-              <div className="metric-card">
-                <span className="badge badge-danger" style={{ alignSelf: 'flex-start' }}>Ảnh lỗi</span>
-                <div className="stat-card-value">{stats.brokenImages}</div>
-              </div>
-              <div className="metric-card">
-                <span className="badge badge-neutral" style={{ alignSelf: 'flex-start' }}>Không phải SP</span>
-                <div className="stat-card-value">{stats.nonProducts}</div>
-              </div>
-              <div className="metric-card">
-                <span className="badge badge-neutral" style={{ alignSelf: 'flex-start' }}>Đã ẩn</span>
-                <div className="stat-card-value">{stats.hidden}</div>
-              </div>
+
+              {(stats.missingLink > 0 || stats.missingImage > 0 || stats.missingPrice > 0 || stats.publicSafe === 0) && (
+                  <div
+                      style={{
+                        padding: '12px 16px',
+                        borderRadius: 'var(--radius-md)',
+                        background: 'rgba(251,191,36,0.08)',
+                        border: '1px solid rgba(251,191,36,0.2)',
+                        fontSize: 'var(--text-sm)',
+                        color: 'var(--text-secondary)',
+                        lineHeight: 1.6,
+                      }}
+                  >
+                    Public site có thể tạm không có deal nếu Safe Publish chặn hết. Lý do thường gặp:
+                    thiếu link ({stats.missingLink}), thiếu ảnh ({stats.missingImage}), thiếu giá ({stats.missingPrice}),
+                    link/ảnh lỗi, hoặc dữ liệu là voucher/campaign/ưu đãi shop.
+                  </div>
+              )}
             </div>
-            {stats.published === 0 && stats.total > 0 && (
-              <div style={{ padding: '12px 16px', borderRadius: 'var(--radius-md)', background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                Public site có thể tạm không có deal nếu toàn bộ sản phẩm hiện tại bị chặn bởi Safe Publish.
-                Nguyên nhân phổ biến: link lỗi, ảnh lỗi, loại không phải sản phẩm, hoặc chưa đạt chuẩn an toàn.
-              </div>
-            )}
-          </div>
         )}
 
         <div className="filter-bar">
@@ -825,6 +1286,8 @@ export default function ProductsPage() {
             <option value="lazada">Lazada</option>
             <option value="accesstrade">AccessTrade</option>
             <option value="website">Website</option>
+            <option value="tiki">Tiki</option>
+            <option value="sendo">Sendo</option>
           </select>
 
           <select
@@ -843,16 +1306,16 @@ export default function ProductsPage() {
 
           <select
               className="select"
-              style={{ maxWidth: '140px' }}
+              style={{ maxWidth: '150px' }}
               value={filterKind}
               onChange={(event) => setFilterKind(event.target.value)}
           >
-            <option value="">Loại</option>
+            <option value="">Loại dữ liệu</option>
             <option value="product">Sản phẩm</option>
-            <option value="voucher">Voucher</option>
-            <option value="campaign">Chiến dịch</option>
-            <option value="store_offer">Ưu đãi shop</option>
             <option value="deal">Deal</option>
+            <option value="store_offer">Ưu đãi shop</option>
+            <option value="voucher">Voucher</option>
+            <option value="campaign">Campaign</option>
             <option value="unknown">Chưa rõ</option>
           </select>
 
@@ -905,7 +1368,7 @@ export default function ProductsPage() {
               <div className="empty-state-desc">
                 {filterKind
                     ? 'Không có mục nào khớp với bộ lọc hiện tại.'
-                    : 'Hãy chạy AutoPilot hoặc thêm sản phẩm từ nguồn affiliate.'}
+                    : 'Hãy chạy AutoPilot hoặc thêm nguồn affiliate. Nếu public site đang 0 deal, có thể Safe Publish đang chặn các item chưa đạt chuẩn.'}
               </div>
               <div className="flex gap-sm" style={{ marginTop: 'var(--space-lg)', justifyContent: 'center' }}>
                 <button
@@ -917,7 +1380,7 @@ export default function ProductsPage() {
                   Quét nguồn
                 </button>
                 <Link href="/dashboard/product-sources" className="btn btn-secondary">
-                  + Thêm sản phẩm
+                  + Thêm nguồn
                 </Link>
               </div>
             </div>
@@ -930,11 +1393,10 @@ export default function ProductsPage() {
                 <tr>
                   <th>Sản phẩm</th>
                   <th>Loại</th>
+                  <th>Quyết định public</th>
                   <th>Nền tảng</th>
                   <th>Giá</th>
-                  <th>Trạng thái</th>
-                  <th>Link</th>
-                  <th>Ảnh</th>
+                  <th>Link / Ảnh</th>
                   <th>Điểm</th>
                   <th>Rủi ro</th>
                   <th>Hành động</th>
@@ -942,159 +1404,135 @@ export default function ProductsPage() {
                 </thead>
 
                 <tbody>
-                {visibleProducts.map((product) => (
-                    <tr key={product.id}>
-                      <td>
-                        <div className="flex items-center gap-sm">
-                          <SafeThumb src={product.imageUrl} label="SP" size={40} />
+                {visibleProducts.map((product) => {
+                  const qualityScore = getQualityScore(product);
 
+                  return (
+                      <tr key={product.id}>
+                        <td>
+                          <div className="flex items-center gap-sm">
+                            <SafeThumb src={product.imageUrl} label="SP" size={40} />
+
+                            <div>
+                              <Link
+                                  href={`/dashboard/products/${product.id}`}
+                                  style={{ fontWeight: 700, fontSize: 'var(--text-sm)' }}
+                              >
+                                {product.title}
+                              </Link>
+
+                              {renderSourceBadges(product)}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td>{renderKindBadge(product)}</td>
+
+                        <td>{renderDecisionBadge(product)}</td>
+
+                        <td>
+                      <span className="badge badge-neutral">
+                        {getPlatformLabel(product)}
+                      </span>
+                        </td>
+
+                        <td>
                           <div>
+                            {product.salePrice ? (
+                                <>
+                            <span style={{ fontWeight: 700, color: 'var(--color-accent-light)' }}>
+                              {formatPrice(product.salePrice)}
+                            </span>
+                                  {product.price && product.price !== product.salePrice && (
+                                      <span
+                                          style={{
+                                            fontSize: 'var(--text-xs)',
+                                            color: 'var(--text-tertiary)',
+                                            textDecoration: 'line-through',
+                                            marginLeft: '6px',
+                                          }}
+                                      >
+                                {formatPrice(product.price)}
+                              </span>
+                                  )}
+                                </>
+                            ) : (
+                                <span>{formatPrice(product.price)}</span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td>{renderHealthBadges(product)}</td>
+
+                        <td>
+                          {qualityScore != null ? (
+                              <span
+                                  className={`score-badge ${
+                                      qualityScore >= 75
+                                          ? 'score-badge-green'
+                                          : qualityScore >= 45
+                                              ? 'score-badge-yellow'
+                                              : 'score-badge-red'
+                                  }`}
+                                  style={{ fontSize: '12px', padding: '4px 10px' }}
+                              >
+                          {qualityScore}
+                        </span>
+                          ) : (
+                              '—'
+                          )}
+                        </td>
+
+                        <td>
+                      <span className={`badge ${getRiskBadge(product.riskLevel)}`}>
+                        {getRiskLabel(product.riskLevel)}
+                      </span>
+                        </td>
+
+                        <td>
+                          <div className="flex gap-xs" style={{ flexWrap: 'wrap' }}>
                             <Link
                                 href={`/dashboard/products/${product.id}`}
-                                style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}
+                                className="btn btn-ghost btn-sm"
+                                title="Xem"
                             >
-                              {product.title}
+                              View
                             </Link>
 
-                            {renderSourceBadges(product)}
-                          </div>
-                        </div>
-                      </td>
-
-                      <td>{renderKindBadge(product)}</td>
-
-                      <td>
-                    <span className="badge badge-neutral">
-                      {PLATFORM_LABELS[product.platform] || product.platform}
-                    </span>
-                      </td>
-
-                      <td>
-                        <div>
-                          {product.salePrice ? (
-                              <>
-                          <span style={{ fontWeight: 700, color: 'var(--color-accent-light)' }}>
-                            {formatPrice(product.salePrice)}
-                          </span>
-                                {product.price && product.price !== product.salePrice && (
-                                    <span
-                                        style={{
-                                          fontSize: 'var(--text-xs)',
-                                          color: 'var(--text-tertiary)',
-                                          textDecoration: 'line-through',
-                                          marginLeft: '6px',
-                                        }}
-                                    >
-                              {formatPrice(product.price)}
-                            </span>
-                                )}
-                              </>
-                          ) : (
-                              <span>{formatPrice(product.price)}</span>
-                          )}
-                        </div>
-                      </td>
-
-                      <td>
-                    <span className={`badge ${getStatusBadge(product.status)}`}>
-                      {getStatusLabel(product.status)}
-                    </span>
-                      </td>
-
-                      <td>
-                        {(() => {
-                          const p = getProductRecord(product);
-                          const ls = (p.linkHealthStatus || '') as string;
-                          const isBroken = ls && BROKEN_LINK_STATUSES.has(normalizeText(ls));
-                          return (
-                            <span className={`badge ${isBroken ? 'badge-danger' : ls ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
-                              {ls || '—'}
-                            </span>
-                          );
-                        })()}
-                      </td>
-
-                      <td>
-                        {(() => {
-                          const p = getProductRecord(product);
-                          const is = normalizeText(p.imageHealthStatus as unknown as string | undefined);
-                          const isBroken = is && BROKEN_LINK_STATUSES.has(is);
-                          return (
-                            <span className={`badge ${isBroken ? 'badge-danger' : is ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
-                              {(p.imageHealthStatus as unknown as string) || '—'}
-                            </span>
-                          );
-                        })()}
-                      </td>
-
-                      <td>
-                        {product.score != null ? (
-                            <span
-                                className={`score-badge ${
-                                    product.score >= 75
-                                        ? 'score-badge-green'
-                                        : product.score >= 45
-                                            ? 'score-badge-yellow'
-                                            : 'score-badge-red'
-                                }`}
-                                style={{ fontSize: '12px', padding: '4px 10px' }}
+                            <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => void handleScore(product.id)}
+                                title="Chấm điểm"
                             >
-                        {product.score}
-                      </span>
-                        ) : (
-                            '—'
-                        )}
-                      </td>
+                              Score
+                            </button>
 
-                      <td>
-                    <span className={`badge ${getRiskBadge(product.riskLevel)}`}>
-                      {getRiskLabel(product.riskLevel)}
-                    </span>
-                      </td>
+                            {renderApproveButton(product)}
 
-                      <td>
-                        <div className="flex gap-xs" style={{ flexWrap: 'wrap' }}>
-                          <Link
-                              href={`/dashboard/products/${product.id}`}
-                              className="btn btn-ghost btn-sm"
-                              title="Xem"
-                          >
-                            View
-                          </Link>
+                            <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => void handleArchive(product.id)}
+                                title="Lưu trữ"
+                            >
+                              Arch
+                            </button>
 
-                          <button
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => void handleScore(product.id)}
-                              title="Chấm điểm"
-                          >
-                            Score
-                          </button>
-
-                          {renderApproveButton(product)}
-
-                          <button
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => void handleArchive(product.id)}
-                              title="Lưu trữ"
-                          >
-                            Arch
-                          </button>
-
-                          <button
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => setDeleteConfirm(product.id)}
-                              title="Xoá"
-                              style={{ color: 'var(--color-danger)' }}
-                          >
-                            Del
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                ))}
+                            <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => setDeleteConfirm(product.id)}
+                                title="Xoá"
+                                style={{ color: 'var(--color-danger)' }}
+                            >
+                              Del
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                  );
+                })}
                 </tbody>
               </table>
             </div>
@@ -1104,6 +1542,8 @@ export default function ProductsPage() {
             <div className="grid grid-3">
               {visibleProducts.map((product) => {
                 const kind = getEffectiveKind(product);
+                const decision = getPublicDecision(product);
+                const qualityScore = getQualityScore(product);
 
                 return (
                     <div key={product.id} className="card product-card">
@@ -1117,7 +1557,7 @@ export default function ProductsPage() {
 
                         <div className="deal-card-platform">
                     <span className="badge badge-neutral">
-                      {PLATFORM_LABELS[product.platform] || product.platform}
+                      {getPlatformLabel(product)}
                     </span>
                         </div>
                       </div>
@@ -1142,6 +1582,10 @@ export default function ProductsPage() {
                       {getKindLabel(kind)}
                     </span>
 
+                          <span className={`badge ${decision.badge}`} style={{ fontSize: '10px' }}>
+                      {decision.label}
+                    </span>
+
                           <span
                               className={`badge ${getRiskBadge(product.riskLevel)}`}
                               style={{ fontSize: '10px' }}
@@ -1150,29 +1594,38 @@ export default function ProductsPage() {
                     </span>
                         </div>
 
-                        {isNonProductKind(kind) && (
-                            <div style={{ fontSize: 11, color: '#f59e0b', marginBottom: 'var(--space-xs)' }}>
-                              Chưa phải sản phẩm cụ thể — không public tự động
-                            </div>
-                        )}
+                        <div
+                            style={{
+                              fontSize: 12,
+                              color: isPublicSafeProduct(product) ? '#22c55e' : '#f59e0b',
+                              marginBottom: 'var(--space-xs)',
+                              lineHeight: 1.45,
+                            }}
+                        >
+                          {decision.reason}
+                        </div>
+
+                        <div style={{ marginBottom: 'var(--space-xs)' }}>
+                          {renderHealthBadges(product)}
+                        </div>
 
                         <div className="deal-card-price" style={{ fontSize: 'var(--text-lg)' }}>
                           {product.salePrice ? formatPrice(product.salePrice) : formatPrice(product.price)}
                         </div>
 
-                        {product.score != null && (
+                        {qualityScore != null && (
                             <div style={{ margin: 'var(--space-xs) 0' }}>
                       <span
                           className={`score-badge ${
-                              product.score >= 75
+                              qualityScore >= 75
                                   ? 'score-badge-green'
-                                  : product.score >= 45
+                                  : qualityScore >= 45
                                       ? 'score-badge-yellow'
                                       : 'score-badge-red'
                           }`}
                           style={{ fontSize: '11px' }}
                       >
-                        {product.scoreLabel || `${product.score} điểm`}
+                        {product.scoreLabel || `${qualityScore} điểm`}
                       </span>
                             </div>
                         )}
