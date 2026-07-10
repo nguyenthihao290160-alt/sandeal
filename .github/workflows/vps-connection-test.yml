@@ -2,6 +2,9 @@ name: VPS connection test
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/vps-connection-test
   pull_request:
     branches:
       - master
@@ -9,6 +12,7 @@ on:
       - opened
       - synchronize
       - reopened
+
 permissions:
   contents: read
 
@@ -52,12 +56,28 @@ jobs:
           fi
 
           install -d -m 700 "${HOME}/.ssh"
-          printf '%s\n' "${VPS_SSH_KEY}" | tr -d '\r' > "${HOME}/.ssh/id_ed25519"
+
+          printf '%s\n' "${VPS_SSH_KEY}" |
+            tr -d '\r' > "${HOME}/.ssh/id_ed25519"
+
           chmod 600 "${HOME}/.ssh/id_ed25519"
 
-          ssh-keyscan -T 10 -t ed25519 "${VPS_HOST}" 2>/dev/null > /tmp/sandeal-known-hosts
+          ssh-keyscan \
+            -T 10 \
+            -t ed25519 \
+            "${VPS_HOST}" \
+            2>/dev/null > /tmp/sandeal-known-hosts
 
-          actual_fingerprint="$(ssh-keygen -lf /tmp/sandeal-known-hosts | awk 'NR == 1 { print $2 }')"
+          if [[ ! -s /tmp/sandeal-known-hosts ]]; then
+            echo "::error::Unable to read the VPS ED25519 host key."
+            exit 1
+          fi
+
+          actual_fingerprint="$(
+            ssh-keygen -lf /tmp/sandeal-known-hosts |
+              awk 'NR == 1 { print $2 }'
+          )"
+
           expected_fingerprint="SHA256:8vKYsMQzLOiWgG9/aAOtG4hUpVkZk3f6st1/WN8E61g"
 
           if [[ "${actual_fingerprint}" != "${expected_fingerprint}" ]]; then
@@ -65,7 +85,10 @@ jobs:
             exit 1
           fi
 
-          install -m 600 /tmp/sandeal-known-hosts "${HOME}/.ssh/known_hosts"
+          install \
+            -m 600 \
+            /tmp/sandeal-known-hosts \
+            "${HOME}/.ssh/known_hosts"
 
       - name: Test read-only VPS access
         shell: bash
@@ -83,13 +106,16 @@ jobs:
           ssh \
             -i "${HOME}/.ssh/id_ed25519" \
             -o BatchMode=yes \
+            -o ConnectTimeout=15 \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
             "${VPS_USER}@${VPS_HOST}" \
             'set -eu
              echo "SSH connection: OK"
-             printf "Remote user: " && whoami
-             printf "Remote directory: " && pwd
+             printf "Remote user: "
+             whoami
+             printf "Remote directory: "
+             pwd
              test -d /var/www/sandeal
              test -r /var/www/sandeal/package.json
              echo "SanDeal directory: readable"
