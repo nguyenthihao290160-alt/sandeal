@@ -1,0 +1,91 @@
+name: VPS connection test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vps-connection-test
+  cancel-in-progress: false
+
+jobs:
+  build-and-test-ssh:
+    name: Build and test read-only SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the requested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build SanDeal
+        run: npm run build
+
+      - name: Configure SSH and verify VPS identity
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${VPS_HOST}" || -z "${VPS_SSH_KEY}" ]]; then
+            echo "::error::VPS_HOST or VPS_SSH_KEY is missing."
+            exit 1
+          fi
+
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${VPS_SSH_KEY}" | tr -d '\r' > "${HOME}/.ssh/id_ed25519"
+          chmod 600 "${HOME}/.ssh/id_ed25519"
+
+          ssh-keyscan -T 10 -t ed25519 "${VPS_HOST}" 2>/dev/null > /tmp/sandeal-known-hosts
+
+          actual_fingerprint="$(ssh-keygen -lf /tmp/sandeal-known-hosts | awk 'NR == 1 { print $2 }')"
+          expected_fingerprint="SHA256:8vKYsMQzLOiWgG9/aAOtG4hUpVkZk3f6st1/WN8E61g"
+
+          if [[ "${actual_fingerprint}" != "${expected_fingerprint}" ]]; then
+            echo "::error::VPS host fingerprint mismatch. Connection refused."
+            exit 1
+          fi
+
+          install -m 600 /tmp/sandeal-known-hosts "${HOME}/.ssh/known_hosts"
+
+      - name: Test read-only VPS access
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${VPS_HOST}" || -z "${VPS_USER}" ]]; then
+            echo "::error::VPS_HOST or VPS_USER is missing."
+            exit 1
+          fi
+
+          ssh \
+            -i "${HOME}/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${VPS_USER}@${VPS_HOST}" \
+            'set -eu
+             echo "SSH connection: OK"
+             printf "Remote user: " && whoami
+             printf "Remote directory: " && pwd
+             test -d /var/www/sandeal
+             test -r /var/www/sandeal/package.json
+             echo "SanDeal directory: readable"
+             node --version
+             npm --version'
