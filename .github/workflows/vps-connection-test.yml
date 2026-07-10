@@ -80,7 +80,7 @@ jobs:
 
                     echo "Observed VPS host fingerprint: ${actual_fingerprint}"
 
-          expected_fingerprint="SHA256:8vKYsMQzLOiWgG9/aAOtG4hUpVkZk3f6st1/WN8E61g"
+         expected_fingerprint="SHA256:8vKYsMQzLOiWgG9/aAOtG4hUpVkZk3f6stl/WN8E6lg"
 
           if [[ "${actual_fingerprint}" != "${expected_fingerprint}" ]]; then
             echo "::error::VPS host fingerprint mismatch. Connection refused."
