@@ -195,17 +195,21 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
           productsArchived: 0,
         };
 
+        let scoutSummary: any = null;
+
         if (mode === 'source_scan') {
           const scout = await createSourceScout(botRun.id);
-          const candidates = await scout.scanSource('all', clampedLimit);
-          stats.candidatesFound = candidates.length;
-          stats.productsSaved = candidates.length;
+          const result = await scout.scanSource('all', clampedLimit);
+          stats.candidatesFound = result.candidates.length;
+          stats.productsSaved = result.candidates.length;
+          scoutSummary = result.summary;
         } else {
           // full_safe_run
           const scout = await createSourceScout(botRun.id);
-          const candidates = await scout.scanSource('all', clampedLimit);
-          stats.candidatesFound = candidates.length;
-          stats.productsSaved = candidates.length;
+          const result = await scout.scanSource('all', clampedLimit);
+          stats.candidatesFound = result.candidates.length;
+          stats.productsSaved = result.candidates.length;
+          scoutSummary = result.summary;
 
           const allProducts = await listProducts();
           const runnableProducts = allProducts
@@ -282,12 +286,31 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
         await updateBotRun(botRun.id, { status: 'completed', ...stats });
 
         summary = {
-          found: stats.candidatesFound,
-          saved: stats.productsSaved,
+          found: scoutSummary?.found || stats.candidatesFound,
+          created: scoutSummary?.created || 0,
+          updated: scoutSummary?.updated || 0,
+          saved: scoutSummary?.saved || stats.productsSaved,
+          published: scoutSummary?.published || 0,
+          duplicate: scoutSummary?.duplicate || 0,
+          skipped: scoutSummary?.skipped || 0,
+          needsReview: scoutSummary?.needsReview || 0,
+          archived: scoutSummary?.archived || stats.productsArchived,
+          blocked: (scoutSummary?.blockedByLink || 0) + (scoutSummary?.blockedByImage || 0),
+          brokenLinks: scoutSummary?.blockedByLink || 0,
+          brokenImages: scoutSummary?.blockedByImage || 0,
+          healthErrors: scoutSummary?.healthErrors || 0,
           checked: stats.linksChecked,
           cleaned: stats.productsArchived,
         };
-        message = `${mode === 'source_scan' ? 'Quét nguồn' : 'AutoPilot full'} hoàn tất. Tìm ${stats.candidatesFound}, lưu ${stats.productsSaved}.`;
+
+        const totalFound = summary.found || 0;
+        const totalCreated = summary.created || 0;
+        const totalUpdated = summary.updated || 0;
+        const totalDuplicate = summary.duplicate || 0;
+        const totalPublished = summary.published || 0;
+        const totalNeedsReview = summary.needsReview || 0;
+
+        message = `${mode === 'source_scan' ? 'Quét nguồn' : 'AutoPilot full'} hoàn tất. Tìm ${totalFound}, tạo mới ${totalCreated}, cập nhật ${totalUpdated}, duplicate ${totalDuplicate}, public ${totalPublished}, needs review ${totalNeedsReview}.`;
 
         break;
       }
@@ -298,8 +321,8 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
         summary = {
           checked: healthResult.checked,
           hidden: healthResult.hidden,
-          blockedByLink: healthResult.linkBroken,
-          blockedByImage: healthResult.imageBroken,
+          brokenLinks: healthResult.linkBroken,
+          brokenImages: healthResult.imageBroken,
           errors: healthResult.errors,
         };
         message = `Health check hoàn tất. Kiểm tra ${healthResult.checked}, ẩn ${healthResult.hidden}.`;

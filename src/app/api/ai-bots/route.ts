@@ -664,16 +664,15 @@ async function executeWorkflow(
 
     switch (mode) {
       case 'source_scan': {
-        const beforeScanProducts = await listProducts();
         const scout = await createSourceScout(runId);
-        const candidates = await scout.scanSource(source, limit);
+        const { candidates, summary } = await scout.scanSource(source, limit);
         const afterScanProducts = await listProducts();
 
-        stats.candidatesFound = candidates.length;
-        stats.productsSaved = Math.max(afterScanProducts.length - beforeScanProducts.length, 0);
+        stats.candidatesFound = summary.found || candidates.length;
+        stats.productsSaved = summary.saved || 0;
 
         await addBotRunLog(runId, 'source_scout', 'info', 'Source scan finished', {
-          candidatesFound: candidates.length,
+          candidatesFound: stats.candidatesFound,
           newRecordsSaved: stats.productsSaved,
           publicSafety: summarizePublicSafety(afterScanProducts),
           note:
@@ -781,16 +780,15 @@ async function executeWorkflow(
       }
 
       case 'full_safe_run': {
-        const beforeScanProducts = await listProducts();
         const scout = await createSourceScout(runId);
 
         // Step 1: Scan sources.
         // SourceScout may safely auto-publish verified real products immediately.
-        const candidates = await scout.scanSource(source, limit);
+        const { candidates, summary } = await scout.scanSource(source, limit);
         const afterScanProducts = await listProducts();
 
-        stats.candidatesFound = candidates.length;
-        stats.productsSaved = Math.max(afterScanProducts.length - beforeScanProducts.length, 0);
+        stats.candidatesFound = summary.found || candidates.length;
+        stats.productsSaved = summary.saved || 0;
 
         // Step 2: Central filter decides which products are truly public-safe.
         const runnableProducts = getRunnableProducts(afterScanProducts, limit);

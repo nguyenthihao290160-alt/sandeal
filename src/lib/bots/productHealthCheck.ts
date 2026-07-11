@@ -74,6 +74,44 @@ const FORCE_GET_DOMAINS = [
 
 // ---- Helpers ----
 
+function isPrivateIp(hostname: string): boolean {
+  if (hostname === 'localhost') return true;
+  if (/^127\./.test(hostname)) return true;
+  if (/^10\./.test(hostname)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)) return true;
+  if (/^192\.168\./.test(hostname)) return true;
+  if (/^0\./.test(hostname)) return true;
+  if (hostname.endsWith('.local') || hostname.endsWith('.internal')) return true;
+  return false;
+}
+
+async function fetchSafeRedirects(url: string, method: string, timeoutMs: number): Promise<Response> {
+  let currentUrl = url;
+  let redirects = 0;
+  while (redirects < 5) {
+    const parsed = new URL(currentUrl);
+    if (isPrivateIp(parsed.hostname)) {
+      throw new Error(`SSRF blocked: ${parsed.hostname}`);
+    }
+    const res = await fetch(currentUrl, {
+      method,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.has('location')) {
+      const location = res.headers.get('location');
+      if (!location) return res;
+      currentUrl = new URL(location, currentUrl).toString();
+      redirects++;
+    } else {
+      // Attach finalUrl so caller knows where it ended up
+      Object.defineProperty(res, 'url', { value: currentUrl });
+      return res;
+    }
+  }
+  throw new Error('Too many redirects');
+}
+
 function isValidHttpUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -162,11 +200,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
     // Step 1: HEAD request (bỏ qua nếu domain cần GET)
     if (!forceGet) {
       try {
-        const headResponse = await fetch(url, {
-          method: 'HEAD',
-          redirect: 'follow',
-          signal: AbortSignal.timeout(LINK_CHECK_TIMEOUT_MS),
-        });
+        const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS);
 
         if (headResponse.ok) {
           // HEAD 200 — link có vẻ ok, nhưng không đọc được body
@@ -189,11 +223,8 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
           };
         }
 
-        if (headResponse.status === 403) {
-          // 403 từ HEAD có thể là server chặn HEAD, cần fallback GET
-          // Fall through to GET
-        } else if (headResponse.status === 405) {
-          // Method not allowed — server không hỗ trợ HEAD, fallback GET
+        if ([401, 403, 405, 429].includes(headResponse.status)) {
+          // 403, 405 từ HEAD có thể là server chặn HEAD, cần fallback GET
           // Fall through to GET
         } else if (headResponse.status >= 500) {
           return {
@@ -208,7 +239,10 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
         }
       } catch (headError) {
         // HEAD completely failed (network, timeout, etc.) — try GET
-        if (headError instanceof Error && headError.name === 'TimeoutError') {
+        if (headError instanceof Error && (headError.name === 'TimeoutError' || headError.message.includes('SSRF'))) {
+          if (headError.message.includes('SSRF')) {
+             return { status: 'forbidden', ok: false, reason: headError.message };
+          }
           return { status: 'timeout', ok: false, reason: 'HEAD request timeout' };
         }
         // Fall through to GET
@@ -216,11 +250,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
     }
 
     // Step 2: GET request (fallback hoặc forced)
-    const getResponse = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(LINK_CHECK_TIMEOUT_MS),
-    });
+    const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS);
 
     if (getResponse.status === 404 || getResponse.status === 410) {
       return {
@@ -231,12 +261,39 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
       };
     }
 
+    if (getResponse.status === 401) {
+      return {
+        status: 'forbidden',
+        ok: false,
+        reason: `HTTP 401 — Yêu cầu xác thực, không thể xác minh link`,
+        statusCode: getResponse.status,
+      };
+    }
+
     if (getResponse.status === 403) {
       return {
         status: 'forbidden',
         ok: false,
-        reason: `HTTP 403 Forbidden`,
-        statusCode: 403,
+        reason: `HTTP 403 — Link bị từ chối truy cập, có thể là anti-bot hoặc địa chỉ IP bị chặn`,
+        statusCode: getResponse.status,
+      };
+    }
+
+    if (getResponse.status === 405) {
+      return {
+        status: 'not_allowed',
+        ok: false,
+        reason: `HTTP 405 — Phương thức GET không được phép, không thể xác minh`,
+        statusCode: getResponse.status,
+      };
+    }
+
+    if (getResponse.status === 429) {
+      return {
+        status: 'broken',
+        ok: false,
+        reason: `HTTP 429 — Rate limit, link tạm thời không thể truy cập, cần thử lại sau`,
+        statusCode: getResponse.status,
       };
     }
 
@@ -284,6 +341,9 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
       if (error.name === 'TimeoutError' || error.name === 'AbortError') {
         return { status: 'timeout', ok: false, reason: 'Request timeout (10s)' };
       }
+      if (error.message.includes('SSRF')) {
+        return { status: 'forbidden', ok: false, reason: error.message };
+      }
 
       return {
         status: 'error',
@@ -323,32 +383,19 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
     let headContentType: string | null = null;
 
     try {
-      const headResponse = await fetch(imageUrl, {
-        method: 'HEAD',
-        redirect: 'follow',
-        signal: AbortSignal.timeout(IMAGE_CHECK_TIMEOUT_MS),
-      });
+      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS);
 
       if (headResponse.status >= 400) {
-        if (headResponse.status === 403) {
-          return {
-            status: 'forbidden',
-            ok: false,
-            reason: 'HTTP 403 — ảnh bị chặn truy cập',
-            statusCode: 403,
-          };
-        }
-
-        if (headResponse.status === 404 || headResponse.status === 410) {
+        if ([401, 403, 405, 429].includes(headResponse.status)) {
+          // Fall through to GET
+        } else if (headResponse.status === 404 || headResponse.status === 410) {
           return {
             status: 'image_broken',
             ok: false,
             reason: `HTTP ${headResponse.status} — ảnh không tồn tại`,
             statusCode: headResponse.status,
           };
-        }
-
-        if (headResponse.status >= 500) {
+        } else if (headResponse.status >= 500) {
           return {
             status: 'image_broken',
             ok: false,
@@ -356,8 +403,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
             statusCode: headResponse.status,
           };
         }
-
-        // Other 4xx — try GET fallback
+        // Other 4xx (not anti-bot) — try GET fallback
       } else {
         headOk = true;
         headContentType = headResponse.headers.get('content-type');
@@ -386,7 +432,10 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
         // HEAD 200 but no content-type — fallback to GET
       }
     } catch (headError) {
-      if (headError instanceof Error && headError.name === 'TimeoutError') {
+      if (headError instanceof Error && (headError.name === 'TimeoutError' || headError.message.includes('SSRF'))) {
+        if (headError.message.includes('SSRF')) {
+           return { status: 'forbidden', ok: false, reason: headError.message };
+        }
         return { status: 'timeout', ok: false, reason: 'HEAD request timeout (8s)' };
       }
       // Fall through to GET
@@ -394,21 +443,44 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
 
     // Step 2: GET fallback (nếu HEAD không có content-type hoặc fail)
     if (!headOk || !headContentType) {
-      const getResponse = await fetch(imageUrl, {
-        method: 'GET',
-        redirect: 'follow',
-        signal: AbortSignal.timeout(IMAGE_CHECK_TIMEOUT_MS),
-      });
+      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS);
 
       if (getResponse.status >= 400) {
-        if (getResponse.status === 403) {
-          return {
-            status: 'forbidden',
-            ok: false,
-            reason: 'HTTP 403 — ảnh bị chặn truy cập',
-            statusCode: 403,
-          };
-        }
+      if (getResponse.status === 401) {
+        return {
+          status: 'forbidden',
+          ok: false,
+          reason: `HTTP 401 — Ảnh yêu cầu xác thực, không thể xác minh`,
+          statusCode: getResponse.status,
+        };
+      }
+
+      if (getResponse.status === 403) {
+        return {
+          status: 'forbidden',
+          ok: false,
+          reason: `HTTP 403 — Ảnh bị từ chối truy cập, có thể là anti-bot hoặc địa chỉ IP bị chặn`,
+          statusCode: getResponse.status,
+        };
+      }
+
+      if (getResponse.status === 405) {
+        return {
+          status: 'invalid_image',
+          ok: false,
+          reason: `HTTP 405 — Phương thức GET không được phép, không thể xác minh ảnh`,
+          statusCode: getResponse.status,
+        };
+      }
+
+      if (getResponse.status === 429) {
+        return {
+          status: 'image_broken',
+          ok: false,
+          reason: `HTTP 429 — Rate limit, ảnh tạm thời không thể truy cập, cần thử lại sau`,
+          statusCode: getResponse.status,
+        };
+      }
 
         return {
           status: 'image_broken',

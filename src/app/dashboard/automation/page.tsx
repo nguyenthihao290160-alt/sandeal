@@ -306,8 +306,8 @@ export default function AutomationDashboard() {
                   <th style={{ padding: '12px 8px' }}>Thời gian</th>
                   <th style={{ padding: '12px 8px' }}>Trạng thái</th>
                   <th style={{ padding: '12px 8px' }}>Trigger</th>
-                  <th style={{ padding: '12px 8px' }}>Items (Lưu / Quét)</th>
-                  <th style={{ padding: '12px 8px' }}>Chi tiết</th>
+                  <th style={{ padding: '12px 8px' }}>Lưu / Duplicate / Lỗi</th>
+                  <th style={{ padding: '12px 8px' }}>Chi tiết (Tìm / Tạo / Sửa / Public)</th>
                 </tr>
               </thead>
               <tbody>
@@ -323,7 +323,7 @@ export default function AutomationDashboard() {
                     </td>
                     <td style={{ padding: '12px 8px' }}>{log.trigger}</td>
                     <td style={{ padding: '12px 8px' }}>
-                      {log.summary?.saved || 0} / {log.summary?.found || 0}
+                      <span className="text-success">{log.summary?.saved || 0}</span> / <span className="text-warning">{log.summary?.duplicate || 0}</span> / <span className="text-danger">{log.summary?.errors || log.summary?.skipped || 0}</span>
                     </td>
                     <td style={{ padding: '12px 8px', color: 'var(--text-secondary)' }}>
                       {log.message || log.error || '—'}

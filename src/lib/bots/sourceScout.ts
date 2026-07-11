@@ -13,7 +13,7 @@
 
 import type { Product, ProductKind } from '../types';
 import { BotContext } from './context';
-import { listProducts, createProduct, getAllProducts } from '../storage/products';
+import { listProducts, createProduct, updateProduct, getAllProducts } from '../storage/products';
 import { looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import {
   isAccessTradeConfigured,
@@ -41,6 +41,8 @@ type HealthGuardDecision = {
 
 type ScanCounters = {
   found: number;
+  created: number;
+  updated: number;
   saved: number;
   candidates: number;
   realProducts: number;
@@ -48,20 +50,20 @@ type ScanCounters = {
   vouchers: number;
   campaigns: number;
   unknown: number;
-  autoPublished: number;
+  published: number;
   needsReview: number;
   archived: number;
   blockedByLink: number;
   blockedByImage: number;
   healthErrors: number;
-  duplicatesSkipped: number;
+  duplicate: number;
   skipped: number;
 };
 
 type ExistingProductIndex = {
-  externalIds: Set<string>;
-  urls: Set<string>;
-  fallbackKeys: Set<string>;
+  externalIds: Map<string, Product>;
+  urls: Map<string, Product>;
+  fallbackKeys: Map<string, Product>;
 };
 
 const AUTO_SAFE_MODE = process.env.AI_AUTO_MODE !== 'false';
@@ -771,6 +773,7 @@ function markDraftAsBlocked(
     aiApproved: false,
     autoPublished: false,
 
+    autoPublishReason: null,
     autoPublishBlockedReason: reason,
     publicBlockReason: reason,
 
@@ -811,54 +814,59 @@ function getItemFallbackKey(item: NormalizedAccessTradeItem): string {
   );
 }
 
+function getProductFallbackKey(product: Product): string {
+  const price = product.salePrice || product.price || 0;
+
+  return normalizeText(
+      [
+        product.title,
+        product.platform,
+        price,
+      ].join('|'),
+  );
+}
+
 function buildExistingProductIndex(products: Product[]): ExistingProductIndex {
   const index: ExistingProductIndex = {
-    externalIds: new Set<string>(),
-    urls: new Set<string>(),
-    fallbackKeys: new Set<string>(),
+    externalIds: new Map(),
+    urls: new Map(),
+    fallbackKeys: new Map(),
   };
 
   for (const product of products) {
-    const record = product as Product & Record<string, unknown>;
+    const rec = product as Product & Record<string, unknown>;
 
-    for (const id of [
-      getText(record.sourceId),
-      getText(record.externalId),
-    ]) {
-      if (id) index.externalIds.add(id);
+    const externalId = getText(rec.sourceId || rec.externalId || rec.productId);
+    if (externalId) {
+      index.externalIds.set(externalId, product);
     }
 
     for (const rawUrl of [
-      record.affiliateUrl,
-      record.originalUrl,
-      record.url,
+      rec.affiliateUrl,
+      rec.originalUrl,
+      rec.url,
     ]) {
       const url = normalizeComparableUrl(rawUrl);
-      if (url) index.urls.add(url);
+      if (url) index.urls.set(url, product);
     }
 
-    const fallbackKey = normalizeText(
-        [
-          product.title,
-          product.platform,
-          product.salePrice || product.price || 0,
-        ].join('|'),
-    );
-
-    if (fallbackKey) index.fallbackKeys.add(fallbackKey);
+    const fallbackKey = getProductFallbackKey(product);
+    if (fallbackKey) {
+      index.fallbackKeys.set(fallbackKey, product);
+    }
   }
 
   return index;
 }
 
-function isDuplicateItem(
+function findDuplicateItem(
     item: NormalizedAccessTradeItem,
     index: ExistingProductIndex,
-): boolean {
+): Product | undefined {
   const externalId = getText(item.id);
 
   if (externalId && index.externalIds.has(externalId)) {
-    return true;
+    return index.externalIds.get(externalId);
   }
 
   const comparableUrls = [
@@ -866,27 +874,32 @@ function isDuplicateItem(
     normalizeComparableUrl(item.originalUrl),
   ].filter(Boolean);
 
-  if (comparableUrls.some((url) => index.urls.has(url))) {
-    return true;
+  for (const url of comparableUrls) {
+    if (index.urls.has(url)) {
+      return index.urls.get(url);
+    }
   }
 
   // Use title/platform/price only as a final fallback when no strong identifier exists.
   if (!externalId && comparableUrls.length === 0) {
     const fallbackKey = getItemFallbackKey(item);
-    return Boolean(fallbackKey && index.fallbackKeys.has(fallbackKey));
+    if (fallbackKey && index.fallbackKeys.has(fallbackKey)) {
+      return index.fallbackKeys.get(fallbackKey);
+    }
   }
 
-  return false;
+  return undefined;
 }
 
 function addItemToIndex(
     item: NormalizedAccessTradeItem,
+    savedProduct: Product,
     index: ExistingProductIndex,
 ): void {
   const externalId = getText(item.id);
 
   if (externalId) {
-    index.externalIds.add(externalId);
+    index.externalIds.set(externalId, savedProduct);
   }
 
   for (const rawUrl of [
@@ -894,19 +907,21 @@ function addItemToIndex(
     item.originalUrl,
   ]) {
     const url = normalizeComparableUrl(rawUrl);
-    if (url) index.urls.add(url);
+    if (url) index.urls.set(url, savedProduct);
   }
 
   const fallbackKey = getItemFallbackKey(item);
 
   if (fallbackKey) {
-    index.fallbackKeys.add(fallbackKey);
+    index.fallbackKeys.set(fallbackKey, savedProduct);
   }
 }
 
 function createEmptyScanCounters(): ScanCounters {
   return {
     found: 0,
+    created: 0,
+    updated: 0,
     saved: 0,
     candidates: 0,
 
@@ -916,7 +931,7 @@ function createEmptyScanCounters(): ScanCounters {
     campaigns: 0,
     unknown: 0,
 
-    autoPublished: 0,
+    published: 0,
     needsReview: 0,
     archived: 0,
 
@@ -924,7 +939,7 @@ function createEmptyScanCounters(): ScanCounters {
     blockedByImage: 0,
     healthErrors: 0,
 
-    duplicatesSkipped: 0,
+    duplicate: 0,
     skipped: 0,
   };
 }
@@ -936,9 +951,10 @@ export class SourceScoutBot {
     this.ctx = ctx;
   }
 
-  async scanSource(source: SourceName, limit: number): Promise<Product[]> {
+  async scanSource(source: SourceName, limit: number): Promise<{ candidates: Product[]; summary: ScanCounters }> {
     const totalLimit = Math.min(Math.max(limit || 10, 1), 30);
     const candidates: Product[] = [];
+    const summary = createEmptyScanCounters();
 
     if ((source === 'all' || source === 'local') && candidates.length < totalLimit) {
       const localProducts = await this.scanLocalSource(totalLimit - candidates.length);
@@ -946,11 +962,11 @@ export class SourceScoutBot {
     }
 
     if ((source === 'all' || source === 'accesstrade') && candidates.length < totalLimit) {
-      const atProducts = await this.scanAccessTradeSource(totalLimit - candidates.length);
+      const atProducts = await this.scanAccessTradeSource(totalLimit - candidates.length, summary);
       candidates.push(...atProducts);
     }
 
-    if ((source === 'all' || source === 'manual') && candidates.length < totalLimit) {
+    if (source === 'manual' && candidates.length < totalLimit) {
       const manualProducts = await this.scanManualSource(totalLimit - candidates.length);
       candidates.push(...manualProducts);
     }
@@ -972,7 +988,7 @@ export class SourceScoutBot {
           'Only verified real products can auto-publish after link/image health checks. Voucher/campaign/store offers remain internal or archived.',
     });
 
-    return candidates;
+    return { candidates, summary };
   }
 
   private async scanLocalSource(limit: number): Promise<Product[]> {
@@ -1000,10 +1016,10 @@ export class SourceScoutBot {
     }
   }
 
-  private async scanAccessTradeSource(limit: number): Promise<Product[]> {
+  private async scanAccessTradeSource(limit: number, summary: ScanCounters): Promise<Product[]> {
     if (limit <= 0) return [];
 
-    const counters = createEmptyScanCounters();
+    const counters = summary;
 
     try {
       await this.ctx.info('Checking AccessTrade token status', {
@@ -1094,24 +1110,10 @@ export class SourceScoutBot {
           const kindCounterKey = getKindCounterKey(kind);
           counters[kindCounterKey] += 1;
 
-          if (isDuplicateItem(item, existingIndex)) {
-            counters.duplicatesSkipped += 1;
-
-            await this.ctx.info('AccessTrade duplicate skipped', {
-              keyword,
-              sourceId: item.id || null,
-              title: item.name || null,
-              kind,
-            });
-
-            continue;
-          }
-
           let productDraft = buildAccessTradeProductDraft(item);
 
           if (!productDraft) {
             counters.skipped += 1;
-
             await this.ctx.warn('AccessTrade item skipped', {
               keyword,
               sourceId: item.id || null,
@@ -1119,8 +1121,25 @@ export class SourceScoutBot {
               kind,
               reason: 'missing_title',
             });
-
             continue;
+          }
+
+          const existingProduct = findDuplicateItem(item, existingIndex);
+          if (existingProduct) {
+            counters.duplicate += 1;
+            // Merge draft into existing product (keep new values over old values!)
+            productDraft = {
+              ...(existingProduct as MutableProductDraft),
+              ...productDraft, // Apply new mapped fields OVER existing!
+              id: existingProduct.id,
+              // Fallback to old values if new ones are invalid or missing
+              price: productDraft.price || existingProduct.price,
+              salePrice: productDraft.salePrice || existingProduct.salePrice,
+              imageUrl: isValidHttpUrl(productDraft.imageUrl) ? productDraft.imageUrl : existingProduct.imageUrl,
+              affiliateUrl: isValidHttpUrl(productDraft.affiliateUrl) ? productDraft.affiliateUrl : existingProduct.affiliateUrl,
+              originalUrl: isValidHttpUrl(productDraft.originalUrl) ? productDraft.originalUrl : existingProduct.originalUrl,
+              updatedAt: new Date().toISOString(),
+            };
           }
 
           const autoDecision = decideSafeAutoPublish(productDraft);
@@ -1141,47 +1160,37 @@ export class SourceScoutBot {
                   healthDecision.updates,
               );
 
-              if (healthDecision.blockedBy === 'link') {
-                counters.blockedByLink += 1;
-              } else if (healthDecision.blockedBy === 'image') {
-                counters.blockedByImage += 1;
-              } else if (healthDecision.blockedBy === 'health_error') {
-                counters.healthErrors += 1;
-              }
-
-              await this.ctx.warn('Auto-publish blocked by Product Health Guard', {
-                keyword,
-                sourceId: item.id || null,
-                title: item.name,
-                kind,
-                reason: healthDecision.reason,
-                blockedBy: healthDecision.blockedBy || null,
-              });
+              if (healthDecision.blockedBy === 'link') counters.blockedByLink += 1;
+              else if (healthDecision.blockedBy === 'image') counters.blockedByImage += 1;
+              else if (healthDecision.blockedBy === 'health_error') counters.healthErrors += 1;
             }
           } else {
-            productDraft = markDraftAsBlocked(
-                productDraft,
-                autoDecision.reason,
-            );
+            productDraft = markDraftAsBlocked(productDraft, autoDecision.reason);
           }
 
           try {
-            const saved = await createProduct(
-                productDraft as Parameters<typeof createProduct>[0],
-            );
+            let saved: Product;
+            if (existingProduct) {
+              saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
+              if (!saved) {
+                // If update failed/returned null, fallback to skipping
+                counters.skipped += 1;
+                continue;
+              }
+              counters.updated += 1;
+            } else {
+              saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
+              counters.created += 1;
+            }
 
             counters.saved += 1;
 
             const savedRecord = saved as Product & Record<string, unknown>;
-            const autoPublished = Boolean(
-                savedRecord.autoPublished || productDraft.autoPublished,
-            );
-            const savedStatus = getText(
-                savedRecord.status || productDraft.status,
-            );
+            const autoPublished = Boolean(savedRecord.autoPublished || productDraft.autoPublished);
+            const savedStatus = getText(savedRecord.status || productDraft.status);
 
             if (autoPublished || savedStatus === 'published') {
-              counters.autoPublished += 1;
+              counters.published += 1;
             } else if (isProductLikeKind(kind)) {
               counters.needsReview += 1;
             } else {
@@ -1193,63 +1202,40 @@ export class SourceScoutBot {
               pipelineCandidates.push(saved);
             }
 
-            addItemToIndex(item, existingIndex);
+            if (!existingProduct) {
+              addItemToIndex(item, saved, existingIndex);
+            }
 
             await this.ctx.info(
-                autoPublished
-                    ? 'AccessTrade auto-published safe product'
-                    : 'AccessTrade saved internal item',
+                existingProduct 
+                  ? 'AccessTrade updated existing item' 
+                  : (autoPublished ? 'AccessTrade auto-published safe product' : 'AccessTrade saved internal item'),
                 {
                   keyword,
-
                   productId: saved.id,
                   sourceId: item.id || null,
-
                   title: item.name,
                   kind,
                   status: savedStatus || productDraft.status,
                   rawSourceKind: item.rawSourceKind,
-
                   publicHidden: Boolean(productDraft.publicHidden),
                   needsVerification: Boolean(productDraft.needsVerification),
-                  verifiedSource: Boolean(
-                      productDraft.verifiedSource ||
-                      productDraft.sourceVerified,
-                  ),
-
+                  verifiedSource: Boolean(productDraft.verifiedSource || productDraft.sourceVerified),
                   aiApproved: Boolean(productDraft.aiApproved),
                   autoPublished,
-
-                  autoPublishReason:
-                      getText(productDraft.autoPublishReason) ||
-                      getText(productDraft.autoPublishBlockedReason) ||
-                      getText(productDraft.publicBlockReason) ||
-                      null,
-
-                  publicDecision:
-                      getText(productDraft.publicDecision) || null,
-
-                  publicBlockReason:
-                      getText(productDraft.publicBlockReason) || null,
-
-                  nonProductReason:
-                      getText(productDraft.nonProductReason) || null,
-
-                  linkHealthStatus:
-                      getText(productDraft.linkHealthStatus) || null,
-
-                  imageHealthStatus:
-                      getText(productDraft.imageHealthStatus) || null,
-
-                  qualityScore:
-                      getDraftQualityScore(productDraft) || null,
-
+                  autoPublishReason: getText(productDraft.autoPublishReason) || getText(productDraft.autoPublishBlockedReason) || getText(productDraft.publicBlockReason) || null,
+                  publicDecision: getText(productDraft.publicDecision) || null,
+                  publicBlockReason: getText(productDraft.publicBlockReason) || null,
+                  nonProductReason: getText(productDraft.nonProductReason) || null,
+                  linkHealthStatus: getText(productDraft.linkHealthStatus) || null,
+                  imageHealthStatus: getText(productDraft.imageHealthStatus) || null,
+                  qualityScore: getDraftQualityScore(productDraft) ?? null,
                   returnedToPipeline: isProductLikeKind(kind),
+                  isDuplicateRefresh: Boolean(existingProduct),
                 },
             );
           } catch (error) {
             counters.skipped += 1;
-
             await this.ctx.error('AccessTrade item save failed', {
               keyword,
               sourceId: item.id || null,
@@ -1276,7 +1262,7 @@ export class SourceScoutBot {
         campaigns: counters.campaigns,
         unknown: counters.unknown,
 
-        autoPublished: counters.autoPublished,
+        published: counters.published,
         needsReview: counters.needsReview,
         archived: counters.archived,
 
@@ -1284,7 +1270,7 @@ export class SourceScoutBot {
         blockedByImage: counters.blockedByImage,
         healthErrors: counters.healthErrors,
 
-        duplicatesSkipped: counters.duplicatesSkipped,
+        duplicate: counters.duplicate,
         skipped: counters.skipped,
 
         safeMode: AUTO_SAFE_MODE,

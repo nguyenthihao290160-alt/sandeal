@@ -24,14 +24,20 @@ export interface AutoPilotRunLog {
 
 export interface RunSummary {
   found?: number;
+  created?: number;
+  updated?: number;
   saved?: number;
-  autoPublished?: number;
+  published?: number;
   needsReview?: number;
-  blockedByKind?: number;
-  blockedByLink?: number;
-  blockedByImage?: number;
-  cleaned?: number;
+  archived?: number;
+  blocked?: number;
+  duplicate?: number;
+  skipped?: number;
+  brokenLinks?: number;
+  brokenImages?: number;
+  healthErrors?: number;
   checked?: number;
+  cleaned?: number;
   hidden?: number;
   errors?: number;
 }
