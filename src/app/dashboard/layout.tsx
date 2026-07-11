@@ -51,6 +51,7 @@ const NAV_GROUPS = [
   {
     label: 'TỰ ĐỘNG HÓA',
     items: [
+      { label: 'Automation', href: '/dashboard/automation', icon: 'schedule' },
       { label: 'Nguồn dữ liệu', href: '/dashboard/product-sources', icon: 'source' },
       { label: 'Kết quả bot', href: '/dashboard/products', icon: 'product' },
       { label: 'Bài review AI', href: '/dashboard/content', icon: 'content' },

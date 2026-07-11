@@ -1,7 +1,6 @@
 'use client';
 
 import {
-  type ChangeEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -104,34 +103,7 @@ type ApiEnvelope<T> = {
   data?: T;
 };
 
-// ---- Form Default ----
-const EMPTY_FORM = {
-  title: '',
-  description: '',
-  platform: 'shopee',
-  category: '',
-  tags: '',
-  originalUrl: '',
-  affiliateUrl: '',
-  imageUrl: '',
-  gallery: '',
-  price: '',
-  salePrice: '',
-  priceNote: 'Giá có thể thay đổi theo thời gian',
-  affiliateSource: '',
-  campaignName: '',
-  commissionNote: '',
-  affiliateDisclosure:
-      'Bài viết có thể chứa link affiliate. Giá của bạn không thay đổi.',
-  benefits: '',
-  painPoints: '',
-  targetAudience: '',
-  warnings: '',
-  contentAngles: '',
-  complianceNotes: '',
-  kind: 'product',
-  status: 'needs_review',
-};
+
 
 const KIND_LABELS: Record<string, string> = {
   product: 'Sản phẩm',
@@ -180,19 +152,7 @@ const ACCESS_TRADE_KEYWORD_SUGGESTIONS = [
   'nồi chiên không dầu',
 ];
 
-function splitLines(value: string): string[] {
-  return value
-      .split('\n')
-      .map((item) => item.trim())
-      .filter(Boolean);
-}
 
-function splitTags(value: string): string[] {
-  return value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-}
 
 function normalizeText(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -274,9 +234,7 @@ function parseMoneyNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-function parsePrice(value: string): number | undefined {
-  return parseMoneyNumber(value);
-}
+
 
 function getNumber(value: unknown): number | undefined {
   return parseMoneyNumber(value);
@@ -823,8 +781,6 @@ function SafeThumb({
 
 export default function ProductSourcesPage() {
   const [activeTab, setActiveTab] = useState<TabId>('accesstrade');
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const [recentProducts, setRecentProducts] = useState<Product[]>([]);
   const [runningBot, setRunningBot] = useState(false);
@@ -928,200 +884,7 @@ export default function ProductSourcesPage() {
     void loadRecent();
   }, [loadRecent]);
 
-  const handleChange = (
-      event: ChangeEvent<
-          HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-      >,
-  ) => {
-    setForm((prev) => ({ ...prev, [event.target.name]: event.target.value }));
-  };
 
-  const handleSave = async (status: string, runScore = false) => {
-    const title = form.title.trim();
-    const originalUrl = form.originalUrl.trim();
-    const affiliateUrl = form.affiliateUrl.trim();
-    const imageUrl = form.imageUrl.trim();
-    const gallery = splitLines(form.gallery);
-
-    if (!title) {
-      showToast('error', 'Tên sản phẩm là bắt buộc.');
-      return;
-    }
-
-    if (!form.platform) {
-      showToast('error', 'Nền tảng là bắt buộc.');
-      return;
-    }
-
-    if (!originalUrl && !affiliateUrl) {
-      showToast('error', 'Cần ít nhất link sản phẩm gốc hoặc link affiliate.');
-      return;
-    }
-
-    if (originalUrl && !isValidHttpUrl(originalUrl)) {
-      showToast('error', 'Link sản phẩm gốc chưa đúng định dạng http/https.');
-      return;
-    }
-
-    if (affiliateUrl && !isValidHttpUrl(affiliateUrl)) {
-      showToast('error', 'Link affiliate chưa đúng định dạng http/https.');
-      return;
-    }
-
-    if (imageUrl && !isValidImageUrl(imageUrl)) {
-      showToast(
-          'error',
-          'Link ảnh chưa hợp lệ hoặc đang là ảnh demo/placeholder.',
-      );
-      return;
-    }
-
-    const invalidGalleryUrl = gallery.find((url) => !isValidImageUrl(url));
-
-    if (invalidGalleryUrl) {
-      showToast('error', `Link ảnh phụ chưa hợp lệ: ${invalidGalleryUrl}`);
-      return;
-    }
-
-    const price = parsePrice(form.price);
-    const salePrice = parsePrice(form.salePrice);
-
-    if (form.price.trim() && !price) {
-      showToast(
-          'error',
-          'Giá gốc chưa hợp lệ. Hãy nhập số tiền VND từ 1.000đ.',
-      );
-      return;
-    }
-
-    if (form.salePrice.trim() && !salePrice) {
-      showToast(
-          'error',
-          'Giá khuyến mãi chưa hợp lệ. Hãy nhập số tiền VND từ 1.000đ.',
-      );
-      return;
-    }
-
-    if (price && salePrice && salePrice > price) {
-      showToast('error', 'Giá khuyến mãi không nên lớn hơn giá gốc.');
-      return;
-    }
-
-    const kind = getKind(form.kind);
-    const isNonProduct = isNonProductKind(kind);
-    const finalStatus =
-        status === 'draft' ? 'draft' : isNonProduct ? 'archived' : 'needs_review';
-
-    const manualIssues: string[] = [];
-
-    if (!affiliateUrl) manualIssues.push('Thiếu affiliate link.');
-    if (!imageUrl) manualIssues.push('Thiếu ảnh sản phẩm.');
-    if (!price && !salePrice) manualIssues.push('Thiếu giá sản phẩm.');
-
-    const blockReason = isNonProduct
-        ? getNonProductReason(kind)
-        : manualIssues.length > 0
-            ? `${manualIssues.join(' ')} Sản phẩm thủ công vẫn cần xác minh nguồn trước khi public.`
-            : 'Sản phẩm thủ công cần xác minh nguồn và chạy Health Guard trước khi public.';
-
-    setSaving(true);
-
-    try {
-      const res = await fetch('/api/products', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...form,
-          title,
-          originalUrl: originalUrl || undefined,
-          affiliateUrl: affiliateUrl || undefined,
-          url: affiliateUrl || originalUrl,
-          imageUrl: imageUrl || undefined,
-
-          source: 'manual',
-          dataSource: 'manual',
-          importedFrom: 'manual',
-          sourceType: 'manual',
-
-          kind,
-          sourceItemKind: kind,
-          status: finalStatus,
-
-          verifiedSource: false,
-          sourceVerified: false,
-          needsVerification: true,
-          publicHidden: true,
-
-          aiApproved: false,
-          autoPublished: false,
-          autoPublishEligible: false,
-          approvalMode: 'manual_review_required',
-
-          publicDecision: isNonProduct ? 'archived' : 'needs_review',
-          publicBlockReason: blockReason,
-          nonProductReason: isNonProduct ? blockReason : undefined,
-          autoPublishBlockedReason: blockReason,
-
-          price,
-          salePrice,
-          gallery,
-          tags: splitTags(form.tags),
-          benefits: splitLines(form.benefits),
-          warnings: [
-            ...splitLines(form.warnings),
-            'Không fake giá, ảnh, tồn kho, review hoặc trải nghiệm mua hàng.',
-          ],
-          painPoints: splitLines(form.painPoints),
-          targetAudience: splitLines(form.targetAudience),
-          contentAngles: splitLines(form.contentAngles),
-
-          checkBeforeBuy: [
-            'Kiểm tra giá, phí vận chuyển và điều kiện ưu đãi trước khi mua.',
-            'Giá, tồn kho và ưu đãi có thể thay đổi theo thời điểm.',
-            'SanDeal có thể nhận hoa hồng affiliate nếu bạn mua qua liên kết, giá người mua không đổi.',
-          ],
-
-          rawSourceType: 'manual',
-        }),
-      });
-
-      const data = (await res
-          .json()
-          .catch(() => null)) as ApiEnvelope<Product> | null;
-
-      if (res.ok && (data?.ok || data?.success)) {
-        showToast(
-            'success',
-            status === 'draft'
-                ? 'Đã lưu nháp sản phẩm.'
-                : isNonProduct
-                    ? 'Đã lưu nội bộ. Voucher/campaign/ưu đãi shop sẽ không public như sản phẩm.'
-                    : 'Đã thêm sản phẩm thủ công vào hàng chờ an toàn.',
-        );
-
-        setForm(EMPTY_FORM);
-
-        if (runScore && data.data?.id) {
-          await fetch(`/api/products/${data.data.id}/score`, {
-            method: 'POST',
-          });
-        }
-
-        await loadRecent();
-      } else {
-        showToast(
-            'error',
-            data?.message ||
-            data?.error ||
-            `Không thể thêm sản phẩm. HTTP ${res.status}`,
-        );
-      }
-    } catch {
-      showToast('error', 'Lỗi kết nối. Vui lòng thử lại.');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const handleRunAutoPilot = async (
       mode: 'source_scan' | 'full_safe_run' = 'source_scan',
@@ -2178,14 +1941,6 @@ export default function ProductSourcesPage() {
                                         : 'Lưu vào hàng chờ'}
                                   </button>
 
-                                  <button
-                                      type="button"
-                                      className="btn btn-sm btn-accent"
-                                      disabled={Boolean(atSaving)}
-                                      onClick={() => void handleAtSave(item, true)}
-                                  >
-                                    Lưu và chấm điểm
-                                  </button>
                                 </div>
                               </div>
                             </div>
