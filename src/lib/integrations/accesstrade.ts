@@ -1,4 +1,4 @@
-﻿// ===========================================
+// ===========================================
 // AccessTrade Integration — Server-side only
 // ===========================================
 // WARNING:
@@ -855,73 +855,93 @@ async function fetchAccessTradeEndpoint(
     endpoint: AccessTradeEndpointKind,
     sourceKind: string,
 ): Promise<AccessTradeFetchResult> {
-  let response: Response;
+  const MAX_RETRIES = 1;
+  const TIMEOUT_MS = 15_000;
+  
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let response: Response | undefined;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+    try {
+      response = await fetch(url.toString(), {
+        method: 'GET',
+        headers: {
+          Authorization: `Token ${apiKey}`,
+          Accept: 'application/json',
+        },
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const isTimeout = err instanceof Error && err.name === 'AbortError';
+      
+      if (attempt < MAX_RETRIES && isTimeout) {
+        // Backoff for 2 seconds
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      
+      const message = err instanceof Error ? err.message : 'Lỗi kết nối';
+      return {
+        endpoint,
+        ok: false,
+        items: [],
+        error: isTimeout ? `Request timeout after ${TIMEOUT_MS / 1000} seconds` : message,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
-  try {
-    response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        Authorization: `Token ${apiKey}`,
-        Accept: 'application/json',
-      },
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Lỗi kết nối';
+    if (!response.ok) {
+      if (attempt < MAX_RETRIES && response.status >= 500) {
+        // Backoff for 2 seconds
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      return {
+        endpoint,
+        ok: false,
+        items: [],
+        status: response.status,
+        error: `HTTP ${response.status}`,
+      };
+    }
+
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      return {
+        endpoint,
+        ok: false,
+        items: [],
+        status: response.status,
+        error: 'Dữ liệu trả về không phải JSON hợp lệ.',
+      };
+    }
+
+    const items = extractRawItems(data).map((rawItem) => ({
+      ...rawItem,
+      __sandealEndpoint: endpoint,
+      __sandealSourceKind: sourceKind,
+      __sandealEndpointUrl: sanitizeEndpointUrl(url),
+    }));
 
     return {
       endpoint,
-      ok: false,
-      items: [],
-      error:
-          err instanceof Error && err.name === 'AbortError'
-              ? 'Request timeout after 15 seconds'
-              : message,
-    };
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!response.ok) {
-    return {
-      endpoint,
-      ok: false,
-      items: [],
+      ok: true,
+      items,
       status: response.status,
-      error: `HTTP ${response.status}`,
     };
   }
-
-  let data: unknown;
-
-  try {
-    data = await response.json();
-  } catch {
-    return {
-      endpoint,
-      ok: false,
-      items: [],
-      status: response.status,
-      error: 'Dữ liệu trả về không phải JSON hợp lệ.',
-    };
-  }
-
-  const items = extractRawItems(data).map((rawItem) => ({
-    ...rawItem,
-    __sandealEndpoint: endpoint,
-    __sandealSourceKind: sourceKind,
-    __sandealEndpointUrl: sanitizeEndpointUrl(url),
-  }));
-
+  
   return {
     endpoint,
-    ok: true,
-    items,
-    status: response.status,
+    ok: false,
+    items: [],
+    error: 'Max retries exceeded',
   };
 }
 

@@ -98,6 +98,8 @@ export interface Product {
   linkHealthStatus?: LinkHealthStatus;
   linkLastCheckedAt?: string;
   linkFailureCount?: number;
+  affiliateHealthStatus?: LinkHealthStatus;
+  affiliateLinkErrors?: string;
   imageHealthStatus?: LinkHealthStatus;
   archivedReason?: string;
   unpublishedReason?: string;

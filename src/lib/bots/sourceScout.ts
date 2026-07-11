@@ -13,7 +13,7 @@
 
 import type { Product, ProductKind } from '../types';
 import { BotContext } from './context';
-import { listProducts, createProduct, updateProduct, getAllProducts } from '../storage/products';
+import { listProducts, createProduct, updateProduct, getAllProducts, getProductById } from '../storage/products';
 import { looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import {
   isAccessTradeConfigured,
@@ -1124,10 +1124,10 @@ export class SourceScoutBot {
             continue;
           }
 
+          // 1. Merge dữ liệu AccessTrade
           const existingProduct = findDuplicateItem(item, existingIndex);
           if (existingProduct) {
             counters.duplicate += 1;
-            // Merge draft into existing product (keep new values over old values!)
             productDraft = {
               ...(existingProduct as MutableProductDraft),
               ...productDraft, // Apply new mapped fields OVER existing!
@@ -1142,38 +1142,12 @@ export class SourceScoutBot {
             };
           }
 
-          const autoDecision = decideSafeAutoPublish(productDraft);
-
-          if (autoDecision.allowed) {
-            const healthDecision = await runHealthGuardBeforePublish(productDraft);
-
-            if (healthDecision.allowed) {
-              productDraft = markDraftAsAutoPublished(
-                  productDraft,
-                  'auto_published_verified_real_product_link_image_ok',
-                  healthDecision.updates,
-              );
-            } else {
-              productDraft = markDraftAsBlocked(
-                  productDraft,
-                  healthDecision.reason,
-                  healthDecision.updates,
-              );
-
-              if (healthDecision.blockedBy === 'link') counters.blockedByLink += 1;
-              else if (healthDecision.blockedBy === 'image') counters.blockedByImage += 1;
-              else if (healthDecision.blockedBy === 'health_error') counters.healthErrors += 1;
-            }
-          } else {
-            productDraft = markDraftAsBlocked(productDraft, autoDecision.reason);
-          }
-
           try {
+            // 2. Persist product draft
             let saved: Product;
             if (existingProduct) {
               saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
               if (!saved) {
-                // If update failed/returned null, fallback to skipping
                 counters.skipped += 1;
                 continue;
               }
@@ -1182,12 +1156,130 @@ export class SourceScoutBot {
               saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
               counters.created += 1;
             }
-
             counters.saved += 1;
 
-            const savedRecord = saved as Product & Record<string, unknown>;
-            const autoPublished = Boolean(savedRecord.autoPublished || productDraft.autoPublished);
-            const savedStatus = getText(savedRecord.status || productDraft.status);
+            // 3. Reload canonical product
+            let canonical = await getProductById(saved.id);
+            if (!canonical) continue;
+
+            const isRealProduct = isProductLikeKind(kind);
+            const originalUrl = isValidHttpUrl(canonical.originalUrl || '') ? canonical.originalUrl : undefined;
+            const affiliateUrl = isValidHttpUrl(canonical.affiliateUrl || '') ? canonical.affiliateUrl : undefined;
+            const imageUrl = isValidHttpUrl(canonical.imageUrl || '') ? canonical.imageUrl : undefined;
+
+            let healthUpdates: Partial<Product> = {
+              linkLastCheckedAt: new Date().toISOString(),
+            };
+            let isHealthOk = false;
+            let blockReason: string | undefined = undefined;
+            let blockedBy = '';
+
+            const autoDecision = decideSafeAutoPublish(canonical as unknown as MutableProductDraft);
+
+            if (autoDecision.allowed && isRealProduct) {
+              if (!originalUrl) {
+                blockReason = 'Thiếu Product URL (originalUrl)';
+                blockedBy = 'link';
+              } else if (!imageUrl) {
+                blockReason = 'Thiếu Ảnh (imageUrl)';
+                blockedBy = 'image';
+              } else {
+                // 4. Chạy product URL health
+                const linkResult = await checkLinkHealth(originalUrl);
+                healthUpdates.linkHealthStatus = linkResult.status as Product['linkHealthStatus'];
+
+                // 5. Chạy affiliate URL health
+                let affiliateOk = true;
+                if (affiliateUrl) {
+                  const affResult = await checkLinkHealth(affiliateUrl);
+                  healthUpdates.affiliateHealthStatus = affResult.status as Product['linkHealthStatus'];
+                  if (!affResult.ok) {
+                    affiliateOk = false;
+                    healthUpdates.affiliateLinkErrors = `Affiliate link lỗi: ${affResult.reason}`;
+                  } else {
+                    healthUpdates.affiliateLinkErrors = undefined;
+                  }
+                } else {
+                  affiliateOk = false;
+                  healthUpdates.affiliateLinkErrors = 'Thiếu Affiliate Link';
+                }
+
+                // 6. Chạy image health
+                const imageResult = await checkImageHealth(imageUrl);
+                healthUpdates.imageHealthStatus = imageResult.status as Product['imageHealthStatus'];
+
+                if (!linkResult.ok) {
+                  blockReason = `Product URL lỗi: ${linkResult.reason}`;
+                  blockedBy = 'link';
+                } else if (!affiliateOk) {
+                  blockReason = healthUpdates.affiliateLinkErrors;
+                  blockedBy = 'affiliate_link';
+                } else if (!imageResult.ok) {
+                  blockReason = `Ảnh lỗi: ${imageResult.reason}`;
+                  blockedBy = 'image';
+                } else {
+                  isHealthOk = true;
+                }
+              }
+            } else {
+              blockReason = autoDecision.reason || 'Không đủ điều kiện kiểm tra (thiếu URL/Ảnh)';
+              blockedBy = 'auto_decision';
+            }
+
+            // 7. Persist health result
+            await updateProduct(canonical.id, healthUpdates);
+
+            // 8. Reload canonical product
+            canonical = await getProductById(canonical.id);
+            if (!canonical) continue;
+
+            // 9 & 10. Tính quality / public block reason & Gọi isPublicSafeProduct()
+            // (Quality is already calculated during mapping, so we just use the check result to apply status)
+            let finalUpdates: MutableProductDraft = {};
+
+            if (isHealthOk) {
+               // Safe Publish
+               finalUpdates = {
+                 status: 'published',
+                 publicHidden: false,
+                 needsVerification: false,
+                 verifiedSource: true,
+                 aiApproved: true,
+                 autoPublished: true,
+                 autoPublishReason: 'auto_published_verified_real_product_link_image_ok',
+                 autoPublishBlockedReason: undefined,
+                 publicBlockReason: undefined,
+                 unpublishedReason: undefined,
+               };
+            } else {
+               // Blocked
+               finalUpdates = {
+                 status: getBlockedStatus(kind),
+                 publicHidden: true,
+                 needsVerification: true,
+                 aiApproved: false,
+                 autoPublished: false,
+                 autoPublishReason: undefined,
+                 autoPublishBlockedReason: blockReason,
+                 publicBlockReason: blockReason,
+                 unpublishedReason: blockReason,
+               };
+               
+               if (blockedBy === 'link') counters.blockedByLink += 1;
+               else if (blockedBy === 'image') counters.blockedByImage += 1;
+               else counters.healthErrors += 1;
+            }
+
+            // 11. Persist trạng thái cuối
+            await updateProduct(canonical.id, finalUpdates as Partial<Product>);
+
+            // 12. Reload lại record đã persist
+            const finalRecord = await getProductById(canonical.id) as Product & Record<string, unknown>;
+            if (!finalRecord) continue;
+
+            // 13. Update run log and summary
+            const autoPublished = Boolean(finalRecord.autoPublished);
+            const savedStatus = getText(finalRecord.status);
 
             if (autoPublished || savedStatus === 'published') {
               counters.published += 1;
@@ -1199,11 +1291,11 @@ export class SourceScoutBot {
 
             if (isProductLikeKind(kind)) {
               counters.candidates += 1;
-              pipelineCandidates.push(saved);
+              pipelineCandidates.push(finalRecord as Product);
             }
 
             if (!existingProduct) {
-              addItemToIndex(item, saved, existingIndex);
+              addItemToIndex(item, finalRecord as Product, existingIndex);
             }
 
             await this.ctx.info(
@@ -1212,24 +1304,21 @@ export class SourceScoutBot {
                   : (autoPublished ? 'AccessTrade auto-published safe product' : 'AccessTrade saved internal item'),
                 {
                   keyword,
-                  productId: saved.id,
+                  productId: finalRecord.id,
                   sourceId: item.id || null,
                   title: item.name,
                   kind,
-                  status: savedStatus || productDraft.status,
-                  rawSourceKind: item.rawSourceKind,
-                  publicHidden: Boolean(productDraft.publicHidden),
-                  needsVerification: Boolean(productDraft.needsVerification),
-                  verifiedSource: Boolean(productDraft.verifiedSource || productDraft.sourceVerified),
-                  aiApproved: Boolean(productDraft.aiApproved),
+                  status: savedStatus,
+                  publicHidden: Boolean(finalRecord.publicHidden),
+                  needsVerification: Boolean(finalRecord.needsVerification),
+                  verifiedSource: Boolean(finalRecord.verifiedSource),
+                  aiApproved: Boolean(finalRecord.aiApproved),
                   autoPublished,
-                  autoPublishReason: getText(productDraft.autoPublishReason) || getText(productDraft.autoPublishBlockedReason) || getText(productDraft.publicBlockReason) || null,
-                  publicDecision: getText(productDraft.publicDecision) || null,
-                  publicBlockReason: getText(productDraft.publicBlockReason) || null,
-                  nonProductReason: getText(productDraft.nonProductReason) || null,
-                  linkHealthStatus: getText(productDraft.linkHealthStatus) || null,
-                  imageHealthStatus: getText(productDraft.imageHealthStatus) || null,
-                  qualityScore: getDraftQualityScore(productDraft) ?? null,
+                  autoPublishReason: getText(finalRecord.autoPublishReason) || getText(finalRecord.autoPublishBlockedReason) || getText(finalRecord.publicBlockReason) || null,
+                  linkHealthStatus: getText(finalRecord.linkHealthStatus) || null,
+                  affiliateHealthStatus: getText(finalRecord.affiliateHealthStatus) || null,
+                  imageHealthStatus: getText(finalRecord.imageHealthStatus) || null,
+                  qualityScore: finalRecord.qualityScore ?? null,
                   returnedToPipeline: isProductLikeKind(kind),
                   isDuplicateRefresh: Boolean(existingProduct),
                 },
