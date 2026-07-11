@@ -1051,65 +1051,68 @@ export default function ProductsPage() {
   }, [products, filterKind, filterPublic]);
 
   const stats = useMemo(() => {
-    const realProducts = products.filter((product) =>
+    const list = visibleProducts;
+
+    const realProducts = list.filter((product) =>
         isRealProductKind(getEffectiveKind(product)),
     ).length;
-    const storeOffers = products.filter(
+    const storeOffers = list.filter(
         (product) => getEffectiveKind(product) === "store_offer",
     ).length;
-    const vouchers = products.filter(
+    const vouchers = list.filter(
         (product) => getEffectiveKind(product) === "voucher",
     ).length;
-    const campaigns = products.filter(
+    const campaigns = list.filter(
         (product) => getEffectiveKind(product) === "campaign",
     ).length;
-    const unknown = products.filter(
+    const unknown = list.filter(
         (product) => getEffectiveKind(product) === "unknown",
     ).length;
 
-    const publicSafe = products.filter((product) =>
+    const publicSafe = list.filter((product) =>
         isPublicSafeProduct(product),
     ).length;
-    const publishedStatus = products.filter(
+    const publishedStatus = list.filter(
         (product) => normalizeText(product.status) === "published",
     ).length;
-    const publishedButBlocked = products.filter(
+    const publishedButBlocked = list.filter(
         (product) =>
             normalizeText(product.status) === "published" &&
             !isPublicSafeProduct(product),
     ).length;
-    const publicCandidates = products.filter((product) => {
+    const publicCandidates = list.filter((product) => {
       const p = getProductRecord(product);
 
       return (
-          normalizeText(p.publicDecision) === "public_candidate" ||
-          p.autoPublishEligible === true
+          isRealProductKind(getEffectiveKind(product)) &&
+          (normalizeText(p.publicDecision) === "public_candidate" ||
+          p.autoPublishEligible === true)
       );
     }).length;
-    const needsReview = products.filter(
+    const needsReview = list.filter(
         (product) => normalizeText(product.status) === "needs_review",
     ).length;
-    const archived = products.filter(
+    const archived = list.filter(
         (product) => normalizeText(product.status) === "archived",
     ).length;
 
-    const brokenLinks = products.filter((product) =>
+    const brokenLinks = list.filter((product) =>
         hasBrokenLink(product),
     ).length;
-    const brokenImages = products.filter((product) =>
+    const brokenImages = list.filter((product) =>
         hasBrokenImage(product),
     ).length;
-    const missingPrice = products.filter(
+    const missingPrice = list.filter(
         (product) => !hasRealPrice(product),
     ).length;
-    const missingImage = products.filter(
+    const missingImage = list.filter(
         (product) => !hasRealImage(product),
     ).length;
-    const missingLink = products.filter(
+    const missingLink = list.filter(
         (product) => !hasExternalUrl(product),
     ).length;
 
-    const hidden = products.filter((product) => {
+    const hidden = list.filter((product) => {
       const p = getProductRecord(product);
       return (
           p.publicHidden === true || p.hidden === true || p.archived === true
@@ -1137,7 +1140,7 @@ export default function ProductsPage() {
       hidden,
       nonProducts: storeOffers + vouchers + campaigns + unknown,
     };
-  }, [products]);
+  }, [visibleProducts, products.length]);
 
   const clearFilters = () => {
     setSearch("");

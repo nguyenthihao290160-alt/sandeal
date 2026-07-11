@@ -990,12 +990,20 @@ function calculateCooldownDuration(reason: string | undefined): number {
     case 'stale_image':
     case 'stale_product_url':
     case 'stale_affiliate':
+    case 'broken':
+    case 'not_found':
+    case 'image_broken':
+    case 'invalid_image':
       return 24 * 60 * 60 * 1000; // 24 hours
     case 'timeout':
     case 'temporary_error':
+    case 'server_error':
+    case 'error':
       return 6 * 60 * 60 * 1000; // 6 hours
     case 'affiliate_unverified':
     case 'forbidden':
+    case 'not_allowed':
+    case 'affiliate_error':
       return 4 * 60 * 60 * 1000; // 4 hours
     case 'rate_limited':
       return 1 * 60 * 60 * 1000; // 1 hour
@@ -1226,16 +1234,22 @@ export class SourceScoutBot {
               continue;
             }
 
+            const newData: Partial<Product> = {};
+            if (productDraft.price && productDraft.price !== existingProduct.price) newData.price = productDraft.price;
+            if (productDraft.salePrice && productDraft.salePrice !== existingProduct.salePrice) newData.salePrice = productDraft.salePrice;
+            if (productDraft.imageUrl && isValidHttpUrl(productDraft.imageUrl) && productDraft.imageUrl !== existingProduct.imageUrl) newData.imageUrl = productDraft.imageUrl;
+            if (productDraft.affiliateUrl && isValidHttpUrl(productDraft.affiliateUrl) && productDraft.affiliateUrl !== existingProduct.affiliateUrl) newData.affiliateUrl = productDraft.affiliateUrl;
+            if (productDraft.originalUrl && isValidHttpUrl(productDraft.originalUrl) && productDraft.originalUrl !== existingProduct.originalUrl) newData.originalUrl = productDraft.originalUrl;
+            
+            // Mark a flag to track if we need to call updateProduct
+            (productDraft as any)._hasChanges = Object.keys(newData).length > 0;
+
+            // Preserve good existing data (like status, verified, approved)
             productDraft = {
               ...(existingProduct as MutableProductDraft),
-              ...productDraft,
-              id: existingProduct.id,
-              price: productDraft.price || existingProduct.price,
-              salePrice: productDraft.salePrice || existingProduct.salePrice,
-              imageUrl: isValidHttpUrl(productDraft.imageUrl) ? productDraft.imageUrl : existingProduct.imageUrl,
-              affiliateUrl: isValidHttpUrl(productDraft.affiliateUrl) ? productDraft.affiliateUrl : existingProduct.affiliateUrl,
-              originalUrl: isValidHttpUrl(productDraft.originalUrl) ? productDraft.originalUrl : existingProduct.originalUrl,
-              updatedAt: new Date().toISOString(),
+              ...newData,
+              // Update timestamps if there are changes
+              updatedAt: Object.keys(newData).length > 0 ? new Date().toISOString() : existingProduct.updatedAt,
             };
           }
 
@@ -1318,30 +1332,37 @@ export class SourceScoutBot {
             // 2. Persist product draft
             let saved: Product;
             if (existingProduct) {
-             saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
-             if (!saved) {
-               counters.skipped += 1;
-               continue;
+             const hasChanges = (productDraft as any)._hasChanges;
+             delete (productDraft as any)._hasChanges;
+             if (hasChanges) {
+               saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
+               if (!saved) {
+                 counters.skipped += 1;
+                 continue;
+               }
+               counters.updated += 1;
+             } else {
+               // No actual changes to persistent fields, skip db update
+               saved = existingProduct;
              }
-             counters.updated += 1;
             } else {
+             delete (productDraft as any)._hasChanges;
              saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
              counters.created += 1;
             }
             counters.saved += 1;
 
-            // 3. Reload canonical product
-            let canonical = await getProductById(saved.id);
-            if (!canonical) continue;
+            // 3. Reload canonical product (or use saved if no changes)
+            let canonical = saved;
 
             const isRealProduct = isProductLikeKind(kind);
             const originalUrl = isValidHttpUrl(canonical.originalUrl || '') ? canonical.originalUrl : undefined;
             const affiliateUrl = isValidHttpUrl(canonical.affiliateUrl || '') ? canonical.affiliateUrl : undefined;
             const imageUrl = isValidHttpUrl(canonical.imageUrl || '') ? canonical.imageUrl : undefined;
 
-            let healthUpdates: Partial<Product> = {
+            let healthUpdates: MutableProductDraft = {
               linkLastCheckedAt: new Date().toISOString(),
-            };
+            } as MutableProductDraft;
             let isHealthOk = false;
             let blockReason: string | undefined = undefined;
             let blockedBy = '';
@@ -1362,8 +1383,9 @@ export class SourceScoutBot {
 
                 // 5. Chạy affiliate URL health
                 let affiliateOk = true;
+                let affResult: any = null;
                 if (affiliateUrl) {
-                  const affResult = await checkLinkHealth(affiliateUrl);
+                  affResult = await checkLinkHealth(affiliateUrl);
                   healthUpdates.affiliateHealthStatus = affResult.status as Product['linkHealthStatus'];
                   if (!affResult.ok) {
                     affiliateOk = false;
@@ -1383,12 +1405,15 @@ export class SourceScoutBot {
                 if (!linkResult.ok) {
                   blockReason = `Product URL lỗi: ${linkResult.reason}`;
                   blockedBy = 'link';
+                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, linkResult.status));
                 } else if (!affiliateOk) {
                   blockReason = healthUpdates.affiliateLinkErrors;
                   blockedBy = 'affiliate_link';
+                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, affResult?.status || 'affiliate_error'));
                 } else if (!imageResult.ok) {
                   blockReason = `Ảnh lỗi: ${imageResult.reason}`;
                   blockedBy = 'image';
+                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, imageResult.status));
                 } else {
                   isHealthOk = true;
                 }
@@ -1398,20 +1423,13 @@ export class SourceScoutBot {
               blockedBy = 'auto_decision';
             }
 
-            // 7. Persist health result
-            await updateProduct(canonical.id, healthUpdates);
-
-            // 8. Reload canonical product
-            canonical = await getProductById(canonical.id);
-            if (!canonical) continue;
-
-            // 9 & 10. Tính quality / public block reason & Gọi isPublicSafeProduct()
-            // (Quality is already calculated during mapping, so we just use the check result to apply status)
-            let finalUpdates: MutableProductDraft = {};
+            // 7. Define finalUpdates (combining healthUpdates + status fields)
+            let finalUpdates: MutableProductDraft = { ...healthUpdates };
 
             if (isHealthOk) {
                // Safe Publish
                finalUpdates = {
+                 ...finalUpdates,
                  status: 'published',
                  publicHidden: false,
                  needsVerification: false,
@@ -1426,6 +1444,7 @@ export class SourceScoutBot {
             } else {
                // Blocked
                finalUpdates = {
+                 ...finalUpdates,
                  status: getBlockedStatus(kind),
                  publicHidden: true,
                  needsVerification: true,
@@ -1437,12 +1456,12 @@ export class SourceScoutBot {
                  unpublishedReason: blockReason,
                };
                
-               if (blockedBy === 'link') counters.blockedByLink += 1;
+               if (blockedBy === 'link' || blockedBy === 'affiliate_link') counters.blockedByLink += 1;
                else if (blockedBy === 'image') counters.blockedByImage += 1;
                else counters.healthErrors += 1;
             }
 
-            // 11. Persist trạng thái cuối
+            // 8. Persist trạng thái cuối cùng
             await updateProduct(canonical.id, finalUpdates as Partial<Product>);
 
             // 12. Reload lại record đã persist
