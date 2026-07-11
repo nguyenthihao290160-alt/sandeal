@@ -101,6 +101,7 @@ export interface Product {
   affiliateHealthStatus?: LinkHealthStatus;
   affiliateLinkErrors?: string;
   imageHealthStatus?: LinkHealthStatus;
+  imageLastCheckedAt?: string;
   archivedReason?: string;
   unpublishedReason?: string;
   contentPackageStatus?: 'none' | 'generated' | 'approved';
@@ -108,6 +109,11 @@ export interface Product {
   complianceIssues?: ComplianceIssue[];
   generatedContent?: ContentPackage;
   dataCompleteness?: number; // 0-100, calculated during normalization
+
+  // Source health resilience — cooldown for stale/dead items
+  sourceHealthCooldownUntil?: string; // ISO timestamp when item is safe to recheck
+  sourceHealthReason?: string; // reason for cooldown (e.g. "image_404_stale", "timeout", "affiliate_unverified")
+  sourceHealthSkipUntil?: string; // ISO timestamp to skip duplicate checks
 
   createdAt: string;
   updatedAt: string;

@@ -23,7 +23,10 @@ export interface AutoPilotRunLog {
 }
 
 export interface RunSummary {
+  // Core metrics
   found?: number;
+  rawFound?: number; // items returned by source API (before preflight)
+  validCandidates?: number; // items that passed preflight validation
   created?: number;
   updated?: number;
   saved?: number;
@@ -40,6 +43,17 @@ export interface RunSummary {
   cleaned?: number;
   hidden?: number;
   errors?: number;
+
+  // Source quality resilience
+  cooldownSkipped?: number; // items skipped due to active cooldown
+  staleImage?: number; // items with image 404/410
+  staleProductUrl?: number; // items with product URL 404/410
+  staleAffiliate?: number; // items with affiliate URL 404/410
+  affiliateUnverified?: number; // items with affiliate 200 but unverified destination
+  malformedSource?: number; // items with invalid URL format
+  invalidSource?: number; // items failing preflight validation
+  timeout?: number; // items with timeout during health check
+  needsImageFallback?: number; // items needing alternative image source
 }
 
 /**

@@ -21,7 +21,7 @@ import {
   searchAccessTrade,
   type NormalizedAccessTradeItem,
 } from '../integrations/accesstrade';
-import { checkLinkHealth, checkImageHealth } from './productHealthCheck';
+import { checkLinkHealth, checkImageHealth, checkSourcePreflight } from './productHealthCheck';
 
 type SourceName = 'local' | 'accesstrade' | 'manual' | 'all';
 
@@ -58,6 +58,17 @@ type ScanCounters = {
   healthErrors: number;
   duplicate: number;
   skipped: number;
+
+  // Source quality resilience
+  validCandidates: number;
+  cooldownSkipped: number;
+  staleImage: number;
+  staleProductUrl: number;
+  staleAffiliate: number;
+  affiliateUnverified: number;
+  malformedSource: number;
+  timeout: number;
+  needsImageFallback: number;
 };
 
 type ExistingProductIndex = {
@@ -941,6 +952,77 @@ function createEmptyScanCounters(): ScanCounters {
 
     duplicate: 0,
     skipped: 0,
+
+    validCandidates: 0,
+    cooldownSkipped: 0,
+    staleImage: 0,
+    staleProductUrl: 0,
+    staleAffiliate: 0,
+    affiliateUnverified: 0,
+    malformedSource: 0,
+    timeout: 0,
+    needsImageFallback: 0,
+  };
+}
+
+/**
+ * Check if a product is currently in cooldown (stale/dead source).
+ * Returns true if cooldown is active and should skip this item.
+ */
+function isInSourceCooldown(product: Product): boolean {
+  if (!product.sourceHealthCooldownUntil) return false;
+
+  const cooldownUntil = new Date(product.sourceHealthCooldownUntil).getTime();
+  const now = Date.now();
+
+  return cooldownUntil > now;
+}
+
+/**
+ * Calculate cooldown duration in milliseconds based on failure reason.
+ */
+function calculateCooldownDuration(reason: string | undefined): number {
+  if (!reason) return 0;
+
+  switch (reason) {
+    case 'image_404_stale':
+    case 'product_url_404_stale':
+    case 'stale_image':
+    case 'stale_product_url':
+    case 'stale_affiliate':
+      return 24 * 60 * 60 * 1000; // 24 hours
+    case 'timeout':
+    case 'temporary_error':
+      return 6 * 60 * 60 * 1000; // 6 hours
+    case 'affiliate_unverified':
+    case 'forbidden':
+      return 4 * 60 * 60 * 1000; // 4 hours
+    case 'rate_limited':
+      return 1 * 60 * 60 * 1000; // 1 hour
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Set cooldown on a product due to stale/dead source.
+ */
+function markSourceCooldown(
+  product: MutableProductDraft,
+  reason: string,
+  cooldownHours?: number,
+): MutableProductDraft {
+  const durationMs = cooldownHours
+    ? cooldownHours * 60 * 60 * 1000
+    : calculateCooldownDuration(reason);
+
+  const cooldownUntil = new Date(Date.now() + durationMs).toISOString();
+
+  return {
+    ...product,
+    sourceHealthCooldownUntil: cooldownUntil,
+    sourceHealthReason: reason,
+    sourceHealthSkipUntil: cooldownUntil,
   };
 }
 
@@ -1103,8 +1185,10 @@ export class SourceScoutBot {
         }
 
         for (const item of items) {
-          if (pipelineCandidates.length >= totalLimit) break;
-          if (counters.saved >= internalSaveLimit) break;
+          // Check internal save limit (we may continue processing even after this)
+          if (counters.saved >= internalSaveLimit && counters.validCandidates > 0) {
+            break;
+          }
 
           const kind = getNormalizedItemKind(item);
           const kindCounterKey = getKindCounterKey(kind);
@@ -1128,11 +1212,24 @@ export class SourceScoutBot {
           const existingProduct = findDuplicateItem(item, existingIndex);
           if (existingProduct) {
             counters.duplicate += 1;
+
+            // Check if existing item is in cooldown
+            if (isInSourceCooldown(existingProduct)) {
+              counters.cooldownSkipped += 1;
+              await this.ctx.info('AccessTrade duplicate in cooldown - skipping health checks', {
+                keyword,
+                sourceId: item.id || null,
+                title: item.name || null,
+                reason: existingProduct.sourceHealthReason,
+                cooldownUntil: existingProduct.sourceHealthCooldownUntil,
+              });
+              continue;
+            }
+
             productDraft = {
               ...(existingProduct as MutableProductDraft),
-              ...productDraft, // Apply new mapped fields OVER existing!
+              ...productDraft,
               id: existingProduct.id,
-              // Fallback to old values if new ones are invalid or missing
               price: productDraft.price || existingProduct.price,
               salePrice: productDraft.salePrice || existingProduct.salePrice,
               imageUrl: isValidHttpUrl(productDraft.imageUrl) ? productDraft.imageUrl : existingProduct.imageUrl,
@@ -1142,19 +1239,94 @@ export class SourceScoutBot {
             };
           }
 
+          // SOURCE PREFLIGHT: Quick validation before storage
+          const imageUrl = getText(productDraft.imageUrl);
+          const productUrl = getText(productDraft.originalUrl || productDraft.url);
+          const affiliateUrl = getText(productDraft.affiliateUrl);
+          const title = getText(productDraft.title);
+
+          const preflightResult = await checkSourcePreflight(title, imageUrl, productUrl, affiliateUrl);
+
+          if (!preflightResult.valid) {
+            // Mark as stale with cooldown instead of completely skipping
+            await this.ctx.warn('AccessTrade item failed preflight - marking cooldown', {
+              keyword,
+              sourceId: item.id || null,
+              title,
+              reason: preflightResult.status,
+              cooldownHours: preflightResult.cooldownDurationHours,
+            });
+
+            // Update counters based on preflight failure
+            switch (preflightResult.status) {
+              case 'stale_image':
+                counters.staleImage += 1;
+                break;
+              case 'stale_product_url':
+                counters.staleProductUrl += 1;
+                break;
+              case 'stale_affiliate':
+                counters.staleAffiliate += 1;
+                break;
+              case 'affiliate_unverified':
+                counters.affiliateUnverified += 1;
+                break;
+              case 'malformed_url':
+                counters.malformedSource += 1;
+                break;
+              case 'missing_field':
+                counters.malformedSource += 1;
+                break;
+              default:
+                counters.malformedSource += 1;
+            }
+
+            try {
+              // Persist cooldown marker instead of completely skipping
+              let saved: Product;
+              productDraft = markSourceCooldown(
+                productDraft,
+                preflightResult.status,
+                preflightResult.cooldownDurationHours,
+              );
+
+              if (existingProduct) {
+                saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
+                if (!saved) continue;
+                counters.updated += 1;
+              } else {
+                saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
+                counters.created += 1;
+              }
+              counters.saved += 1;
+            } catch (error) {
+              await this.ctx.error('Failed to mark source cooldown', {
+                sourceId: item.id || null,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+
+            // Continue to next item instead of stopping
+            continue;
+          }
+
+          // Preflight passed - this is a valid candidate
+          counters.validCandidates += 1;
+          if (pipelineCandidates.length >= totalLimit) break;
+
           try {
             // 2. Persist product draft
             let saved: Product;
             if (existingProduct) {
-              saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
-              if (!saved) {
-                counters.skipped += 1;
-                continue;
-              }
-              counters.updated += 1;
+             saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
+             if (!saved) {
+               counters.skipped += 1;
+               continue;
+             }
+             counters.updated += 1;
             } else {
-              saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
-              counters.created += 1;
+             saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
+             counters.created += 1;
             }
             counters.saved += 1;
 

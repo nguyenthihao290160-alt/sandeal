@@ -42,6 +42,26 @@ export interface ImageCheckResult {
   contentType?: string;
 }
 
+// ---- Source Preflight Check ----
+
+export type SourcePreflightStatus =
+  | 'ok'
+  | 'stale_image'
+  | 'stale_product_url'
+  | 'stale_affiliate'
+  | 'affiliate_unverified'
+  | 'malformed_url'
+  | 'missing_field'
+  | 'invalid_source';
+
+export interface SourcePreflightResult {
+  status: SourcePreflightStatus;
+  valid: boolean;
+  reason: string;
+  cooldownDurationHours?: number;
+  blockedBy?: 'image' | 'product_url' | 'affiliate' | 'validation';
+}
+
 // ---- Constants ----
 
 const LINK_CHECK_TIMEOUT_MS = 10_000;
@@ -532,5 +552,195 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
     }
 
     return { status: 'unknown', ok: false, reason: 'Lỗi không xác định' };
+  }
+}
+
+// ---- Source Preflight Check ----
+
+/**
+ * Quick preflight validation for AccessTrade items before merging into storage.
+ * Detects dead/stale items without full health checks.
+ *
+ * Check trong vòng:
+ * - Image 404/410 → stale_image
+ * - Product URL 404/410 → stale_product_url
+ * - Affiliate URL 404/410 → stale_affiliate
+ * - Affiliate 200 but no redirect → affiliate_unverified
+ * - Malformed URL → malformed_url
+ * - Missing required field → missing_field
+ *
+ * Nếu valid === false, sản phẩm nên được skip hoặc đánh dấu cooldown.
+ */
+export async function checkSourcePreflight(
+  productTitle: string | undefined,
+  imageUrl: string | undefined,
+  productUrl: string | undefined,
+  affiliateUrl: string | undefined,
+): Promise<SourcePreflightResult> {
+  // Validate required fields
+  if (!productTitle || !productTitle.trim()) {
+    return {
+      status: 'missing_field',
+      valid: false,
+      reason: 'Thiếu tiêu đề sản phẩm',
+      cooldownDurationHours: 0,
+      blockedBy: 'validation',
+    };
+  }
+
+  // Validate URL formats
+  if (productUrl && !isValidHttpUrl(productUrl)) {
+    return {
+      status: 'malformed_url',
+      valid: false,
+      reason: 'URL sản phẩm không hợp lệ hoặc không phải http/https',
+      cooldownDurationHours: 0,
+      blockedBy: 'product_url',
+    };
+  }
+
+  if (affiliateUrl && !isValidHttpUrl(affiliateUrl)) {
+    return {
+      status: 'malformed_url',
+      valid: false,
+      reason: 'Affiliate URL không hợp lệ hoặc không phải http/https',
+      cooldownDurationHours: 0,
+      blockedBy: 'affiliate',
+    };
+  }
+
+  if (imageUrl && !isValidHttpUrl(imageUrl)) {
+    return {
+      status: 'malformed_url',
+      valid: false,
+      reason: 'Image URL không hợp lệ hoặc không phải http/https',
+      cooldownDurationHours: 0,
+      blockedBy: 'image',
+    };
+  }
+
+  // Quick image check for 404/410
+  if (imageUrl) {
+    try {
+      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', 3000);
+      if (headResponse.status === 404 || headResponse.status === 410) {
+        return {
+          status: 'stale_image',
+          valid: false,
+          reason: `Ảnh không tồn tại (HTTP ${headResponse.status})`,
+          cooldownDurationHours: 24,
+          blockedBy: 'image',
+        };
+      }
+    } catch (error) {
+      // Timeout or network error on preflight — not immediately stale
+      // Will be checked again during full health check
+    }
+  }
+
+  // Quick product URL check for 404/410
+  if (productUrl) {
+    try {
+      const headResponse = await fetchSafeRedirects(productUrl, 'HEAD', 3000);
+      if (headResponse.status === 404 || headResponse.status === 410) {
+        return {
+          status: 'stale_product_url',
+          valid: false,
+          reason: `URL sản phẩm không tồn tại (HTTP ${headResponse.status})`,
+          cooldownDurationHours: 24,
+          blockedBy: 'product_url',
+        };
+      }
+    } catch (error) {
+      // Timeout or network error on preflight — not immediately stale
+    }
+  }
+
+  // Quick affiliate URL check
+  if (affiliateUrl) {
+    try {
+      const affiliateCheck = await checkAffiliateVerification(affiliateUrl);
+      if (affiliateCheck.status === 'unverified') {
+        return {
+          status: 'affiliate_unverified',
+          valid: false,
+          reason: affiliateCheck.reason,
+          cooldownDurationHours: 4,
+          blockedBy: 'affiliate',
+        };
+      }
+      if (affiliateCheck.status === 'stale') {
+        return {
+          status: 'stale_affiliate',
+          valid: false,
+          reason: affiliateCheck.reason,
+          cooldownDurationHours: 24,
+          blockedBy: 'affiliate',
+        };
+      }
+    } catch (error) {
+      // Network error on preflight — not immediately invalid
+    }
+  }
+
+  // Passed preflight
+  return {
+    status: 'ok',
+    valid: true,
+    reason: 'Kiểm tra sơ bộ thành công',
+  };
+}
+
+/**
+ * Check affiliate URL verification without full redirect following.
+ * Returns { status: 'ok' | 'unverified' | 'stale', reason: string }
+ */
+async function checkAffiliateVerification(
+  affiliateUrl: string,
+): Promise<{ status: 'ok' | 'unverified' | 'stale'; reason: string }> {
+  try {
+    const response = await fetchSafeRedirects(affiliateUrl, 'HEAD', 3000);
+
+    // 404/410 = stale
+    if (response.status === 404 || response.status === 410) {
+      return {
+        status: 'stale',
+        reason: `Affiliate URL không tồn tại (HTTP ${response.status})`,
+      };
+    }
+
+    // If not 200, we can't verify
+    if (!response.ok) {
+      return {
+        status: 'unverified',
+        reason: `Affiliate URL không thể xác minh (HTTP ${response.status})`,
+      };
+    }
+
+    // HTTP 200 — check if it's a deeplink that didn't redirect
+    const contentType = response.headers.get('content-type') || '';
+    const isBrowser = contentType.toLowerCase().includes('text/html');
+
+    if (isBrowser) {
+      // Affiliate link returned HTML but didn't redirect
+      // This is typical of deeplinks from AccessTrade
+      // We can't verify destination without JavaScript
+      return {
+        status: 'unverified',
+        reason: 'Affiliate link trả về HTML nhưng không redirect tự động - cần xác minh thủ công',
+      };
+    }
+
+    // Assume OK if not HTML
+    return {
+      status: 'ok',
+      reason: 'Affiliate URL đã xác minh',
+    };
+  } catch (error) {
+    // Network error
+    return {
+      status: 'unverified',
+      reason: 'Lỗi mạng khi kiểm tra affiliate URL',
+    };
   }
 }
