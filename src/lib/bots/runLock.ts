@@ -42,18 +42,6 @@ async function readLock(): Promise<RunLockData | null> {
   }
 }
 
-async function writeLock(data: RunLockData | null): Promise<void> {
-  await ensureDataDir();
-  if (!data) {
-    // Write an unlocked state
-    const content = JSON.stringify({ locked: false }, null, 2);
-    await fs.writeFile(LOCK_FILE, content, 'utf-8');
-  } else {
-    const content = JSON.stringify(data, null, 2);
-    await fs.writeFile(LOCK_FILE, content, 'utf-8');
-  }
-}
-
 function isLockExpired(lock: RunLockData): boolean {
   try {
     const expiresAt = new Date(lock.expiresAt).getTime();
@@ -63,18 +51,49 @@ function isLockExpired(lock: RunLockData): boolean {
   }
 }
 
+
 /**
- * Try to acquire the run lock.
- * If another run is active and not expired, returns acquired=false.
- * If lock is expired (stale), overwrites it.
+ * Try to acquire the run lock atomically.
+ * Uses fs.open with 'wx' flag to prevent race conditions.
  */
 export async function acquireRunLock(
   mode: string,
   trigger: string,
 ): Promise<AcquireLockResult> {
+  await ensureDataDir();
+
+  // Try to create the lock file atomically
+  const runId = generateId();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
+
+  const lockData: RunLockData = {
+    locked: true,
+    runId,
+    mode,
+    trigger,
+    startedAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+  };
+
+  const lockContent = JSON.stringify(lockData, null, 2);
+
+  try {
+    const fd = await fs.open(LOCK_FILE, 'wx');
+    await fd.writeFile(lockContent, 'utf-8');
+    await fd.close();
+    return { acquired: true, runId };
+  } catch (err: any) {
+    // EEXIST means the file is locked by someone else (or a stale lock)
+    if (err.code !== 'EEXIST') {
+      console.error('[RunLock] Unexpected error acquiring lock:', err);
+      return { acquired: false, runId: '', reason: 'Lỗi hệ thống khi tạo lock.' };
+    }
+  }
+
+  // Lock exists. We need to check if it's stale.
   const existing = await readLock();
 
-  // Check if there is an active, non-expired lock
   if (existing && existing.locked && !isLockExpired(existing)) {
     return {
       acquired: false,
@@ -84,23 +103,22 @@ export async function acquireRunLock(
     };
   }
 
-  // Stale lock or no lock — acquire
-  const runId = generateId();
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
+  // Lock is stale or corrupt. Force release it, then retry.
+  try {
+    await fs.unlink(LOCK_FILE);
+  } catch {
+    // Ignore errors during unlink, someone else might have deleted it
+  }
 
-  const lock: RunLockData = {
-    locked: true,
-    runId,
-    mode,
-    trigger,
-    startedAt: now.toISOString(),
-    expiresAt: expiresAt.toISOString(),
-  };
-
-  await writeLock(lock);
-
-  return { acquired: true, runId };
+  // Retry acquiring once after cleaning up stale lock
+  try {
+    const fd = await fs.open(LOCK_FILE, 'wx');
+    await fd.writeFile(lockContent, 'utf-8');
+    await fd.close();
+    return { acquired: true, runId, reason: 'Recovered from stale lock.' };
+  } catch {
+    return { acquired: false, runId: '', reason: 'AutoPilot đang chạy, vui lòng thử lại sau.' };
+  }
 }
 
 /**
@@ -112,12 +130,13 @@ export async function releaseRunLock(runId: string): Promise<void> {
   try {
     const existing = await readLock();
     if (existing && existing.runId === runId) {
-      await writeLock(null);
+      await fs.unlink(LOCK_FILE);
     }
-    // If lock belongs to another run, don't touch it
   } catch (err) {
-    console.error('[RunLock] Failed to release lock:', err instanceof Error ? err.message : String(err));
-    // Never crash — lock will expire by TTL
+    if ((err as any).code !== 'ENOENT') {
+      console.error('[RunLock] Failed to release lock:', err instanceof Error ? err.message : String(err));
+    }
+    // Never crash — lock will expire by TTL or is already deleted
   }
 }
 
@@ -137,4 +156,39 @@ export async function getRunLockStatus(): Promise<{
 
   const expired = isLockExpired(lock);
   return { isLocked: !expired, lock, isExpired: expired };
+}
+
+/**
+ * Force-release an expired/stale lock.
+ * Only releases if the lock is actually expired (past TTL).
+ * Dashboard admin utility — never releases an active lock.
+ * Returns true if a stale lock was released.
+ */
+export async function forceReleaseExpiredLock(): Promise<{
+  released: boolean;
+  reason: string;
+}> {
+  try {
+    const existing = await readLock();
+
+    if (!existing || !existing.locked) {
+      return { released: false, reason: 'Không có lock nào đang hoạt động.' };
+    }
+
+    if (!isLockExpired(existing)) {
+      return {
+        released: false,
+        reason: `Lock đang hoạt động (runId: ${existing.runId.slice(0, 8)}…). Không thể force-release lock chưa hết hạn.`,
+      };
+    }
+
+    await fs.unlink(LOCK_FILE);
+    return {
+      released: true,
+      reason: `Đã giải phóng lock kẹt (runId: ${existing.runId.slice(0, 8)}…, started: ${existing.startedAt}).`,
+    };
+  } catch (err) {
+    console.error('[RunLock] Force release failed:', err instanceof Error ? err.message : String(err));
+    return { released: false, reason: 'Lỗi khi giải phóng lock.' };
+  }
 }

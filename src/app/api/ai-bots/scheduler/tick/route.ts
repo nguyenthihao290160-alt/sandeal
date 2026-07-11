@@ -1,35 +1,23 @@
 // ===========================================
 // POST /api/ai-bots/scheduler/tick
-// Called by VPS cron every 30–60 minutes
-// Checks scheduler config and runs AutoPilot if due
-//
-// Security:
-//   - Protected by requireAuth (Basic Auth)
-//   - POST only — GET does not trigger
-//   - Scheduler must be enabled in dashboard
-//   - Run lock prevents concurrent runs
-//   - No secrets in response
+// Called by VPS cron every 10–30 minutes
 // ===========================================
 
 import { type NextRequest } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import {
-  getSchedulerConfig,
-  shouldRunNow,
-  markSchedulerRunCompleted,
-} from '@/lib/bots/schedulerConfig';
 import { runAutoPilot } from '@/lib/bots/autoPilotRunner';
 import { getRunLockStatus } from '@/lib/bots/runLock';
+import { getAutomationSettings } from '@/lib/storage/automationSettings';
+import { listRunLogs } from '@/lib/bots/runLogs';
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
-// Explicitly block GET — scheduler tick is POST only
+// Use a secret header to protect this internal route
+const EXPECTED_SECRET = process.env.SCHEDULER_SECRET || 'sandeal-vps-scheduler-secret-2024';
+
 export async function GET() {
   return Response.json(
-    {
-      ok: false,
-      message: 'Scheduler tick chỉ chấp nhận POST. GET không kích hoạt bot.',
-    },
+    { ok: false, message: 'Scheduler tick chỉ chấp nhận POST.' },
     { status: 405 },
   );
 }
@@ -38,15 +26,13 @@ export async function POST(request: NextRequest) {
   const tickStartMs = Date.now();
 
   try {
-    // Step 1: Auth guard
-    const authError = await requireAuth(request);
-    if (authError) return authError;
+    const authHeader = request.headers.get('x-sandeal-scheduler-secret');
+    if (authHeader !== EXPECTED_SECRET) {
+      return Response.json({ error: 'Unauthorized scheduler secret' }, { status: 401 });
+    }
 
-    // Step 2: Read scheduler config
-    const config = await getSchedulerConfig();
-
-    // Step 3: If scheduler disabled → skip
-    if (!config.enabled) {
+    const settings = await getAutomationSettings();
+    if (!settings.enabled) {
       return Response.json({
         ok: true,
         data: {
@@ -57,22 +43,26 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Step 4: Check if due
-    const check = shouldRunNow(config);
+    // Check if it's due
+    const recentLogs = await listRunLogs(10);
+    const lastRun = recentLogs.find((log: any) => log.status === 'completed' || log.status === 'failed');
 
-    if (!check.shouldRun) {
-      return Response.json({
-        ok: true,
-        data: {
-          status: 'skipped',
-          reason: 'not_due',
-          message: check.reason,
-          nextRunAt: config.nextRunAt,
-        },
-      });
+    if (lastRun && lastRun.finishedAt && settings.intervalHours) {
+      const lastFinishedMs = new Date(lastRun.finishedAt).getTime();
+      const nextRunMs = lastFinishedMs + settings.intervalHours * 60 * 60 * 1000;
+      
+      if (Date.now() < nextRunMs) {
+        return Response.json({
+          ok: true,
+          data: {
+            status: 'skipped',
+            reason: 'not_due',
+            message: `Chưa đến lịch. Lần tiếp theo: ${new Date(nextRunMs).toISOString()}`,
+          },
+        });
+      }
     }
 
-    // Step 5: Check run lock before attempting
     const lockStatus = await getRunLockStatus();
     if (lockStatus.isLocked) {
       return Response.json({
@@ -85,16 +75,10 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Step 6: Run AutoPilot
     const result = await runAutoPilot({
-      mode: config.mode,
+      mode: settings.mode as any || 'full_safe_run',
       trigger: 'scheduler',
     });
-
-    // Step 7: Update scheduler timestamps
-    if (result.status !== 'skipped') {
-      await markSchedulerRunCompleted();
-    }
 
     const tickDurationMs = Date.now() - tickStartMs;
 

@@ -4,8 +4,9 @@
 // ===========================================
 
 import { acquireRunLock, releaseRunLock } from './runLock';
-import { createRunLog, updateRunLog, type RunSummary } from './runLogs';
+import { createRunLog, updateRunLog, listRunLogs, type RunSummary } from './runLogs';
 import { runProductHealthCleanup } from './productHealth';
+import { getAutomationSettings } from '../storage/automationSettings';
 
 // Re-export for convenience
 export type { RunSummary } from './runLogs';
@@ -67,6 +68,47 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
 
+  // Step 0: Check Daily Quota and settings
+  const settings = await getAutomationSettings();
+  
+  // Calculate today's usage in Asia/Ho_Chi_Minh timezone
+  const tzOffset = 7 * 60 * 60 * 1000;
+  const nowMs = Date.now() + tzOffset;
+  const todayStr = new Date(nowMs).toISOString().split('T')[0];
+
+  const recentLogs = await listRunLogs(150);
+  let dailyUsage = 0;
+  for (const log of recentLogs) {
+    if (log.status !== 'completed' && log.status !== 'failed') continue;
+    if (!log.finishedAt) continue;
+    
+    const logMs = new Date(log.finishedAt).getTime() + tzOffset;
+    if (isNaN(logMs)) continue;
+    
+    const logDateStr = new Date(logMs).toISOString().split('T')[0];
+    // Use 'saved' (items stored) as the metric for daily usage
+    if (logDateStr === todayStr && log.summary?.saved) {
+      dailyUsage += log.summary.saved;
+    }
+  }
+
+  if (dailyUsage >= settings.maxItemsPerDay && mode !== 'cleanup_broken_products' && mode !== 'health_check') {
+    return {
+      runId: '',
+      mode,
+      trigger,
+      status: 'skipped',
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      durationMs: 0,
+      summary: {},
+      message: `Đã đạt giới hạn hàng ngày (${dailyUsage}/${settings.maxItemsPerDay}).`,
+    };
+  }
+
+  const limitRemaining = settings.maxItemsPerDay - dailyUsage;
+  const clampedLimit = Math.max(1, Math.min(50, settings.maxItemsPerRun, limitRemaining));
+
   // Step 1: Acquire lock
   const lockResult = await acquireRunLock(mode, trigger);
 
@@ -119,7 +161,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
         const { listProducts } = await import('../storage/products');
 
         const botMode = toBotRunMode(mode);
-        const botRun = await createBotRun(botMode as Parameters<typeof createBotRun>[0], 'all', 20);
+        const botRun = await createBotRun(botMode as Parameters<typeof createBotRun>[0], 'all', clampedLimit);
         await updateBotRun(botRun.id, { status: 'running' });
 
         const orchestrator = await createOrchestrator(botRun.id);
@@ -127,14 +169,14 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
           runId: botRun.id,
           mode: botMode,
           source: 'all',
-          limit: 20,
+          limit: clampedLimit,
           safeMode: true,
-          freeOnly: true,
+          freeOnly: settings.freeOnly,
           autoMode: true,
-          autoApprove: true,
-          allowPaidAi: false,
-          costMode: 'safe_free',
-          autoPublishEnabled: true,
+          autoApprove: settings.autoScore,
+          allowPaidAi: settings.allowPaidAi,
+          costMode: settings.costMode,
+          autoPublishEnabled: settings.safePublish,
         } as any);
 
         const preflight = await orchestrator.preflightCheck(state);
@@ -155,13 +197,13 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
 
         if (mode === 'source_scan') {
           const scout = await createSourceScout(botRun.id);
-          const candidates = await scout.scanSource('all', 20);
+          const candidates = await scout.scanSource('all', clampedLimit);
           stats.candidatesFound = candidates.length;
           stats.productsSaved = candidates.length;
         } else {
           // full_safe_run
           const scout = await createSourceScout(botRun.id);
-          const candidates = await scout.scanSource('all', 20);
+          const candidates = await scout.scanSource('all', clampedLimit);
           stats.candidatesFound = candidates.length;
           stats.productsSaved = candidates.length;
 
@@ -178,7 +220,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
               if (!hasUrl) return false;
               return Boolean(p.price || p.salePrice);
             })
-            .slice(0, 20);
+            .slice(0, clampedLimit);
 
           // Score
           const scorer = await createDealScorer(botRun.id);
@@ -231,7 +273,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
 
           // Cleanup
           const cleanup = await createProductCleanup(botRun.id);
-          const cleanupResult = await cleanup.cleanupBrokenProducts({ limit: 20, dryRun: false });
+          const cleanupResult = await cleanup.cleanupBrokenProducts({ limit: clampedLimit, dryRun: false });
           stats.productsArchived = cleanupResult.archived;
           stats.linksChecked += cleanupResult.checked;
         }
