@@ -7,7 +7,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "reprocess:v2:dry": "node scripts/reprocess-products-v2.cjs",
+    "reprocess:v2:apply": "node scripts/reprocess-products-v2.cjs --apply"
   },
   "dependencies": {
     "next": "16.2.10",

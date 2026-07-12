@@ -1,7 +1,14 @@
 // ===========================================
-// Product Health Check — Standalone Helpers
+// Product Health Check V2 — Standalone Helpers
 // Check link & image health before AutoPilot publish
 // Reusable across SourceScout, Approve Route, Cleanup
+//
+// V2 CHANGES:
+// - HEAD is probe only: failures fall through to GET
+// - Proper status classification: retryable vs broken
+// - Browser-like request headers (no fake auth/cookies)
+// - Expanded ImageCheckStatus with retryable states
+// - Affiliate deeplink domains handled correctly
 // ===========================================
 
 // ---- Link Health Check ----
@@ -24,17 +31,22 @@ export interface LinkCheckResult {
   reason: string;
   statusCode?: number;
   finalUrl?: string;
+  retryable?: boolean;
 }
 
 // ---- Image Health Check ----
 
 export type ImageCheckStatus =
   | 'ok'
-  | 'image_broken'
-  | 'invalid_image'
-  | 'forbidden'
-  | 'timeout'
-  | 'error'
+  | 'image_broken'    // 404/410 confirmed, or confirmed non-image data
+  | 'invalid_image'   // response ok but content is not image/*
+  | 'forbidden'       // 401/403 anti-bot
+  | 'not_allowed'     // same as forbidden, alias
+  | 'rate_limited'    // 429: temporary
+  | 'server_error'    // 5xx: temporary
+  | 'timeout'         // network timeout
+  | 'dns_error'       // DNS resolution failed
+  | 'error'           // other network error
   | 'unknown';
 
 export interface ImageCheckResult {
@@ -43,6 +55,7 @@ export interface ImageCheckResult {
   reason: string;
   statusCode?: number;
   contentType?: string;
+  retryable?: boolean;
 }
 
 // ---- Source Preflight Check ----
@@ -69,11 +82,11 @@ export interface SourcePreflightResult {
 
 const LINK_CHECK_TIMEOUT_MS = 10_000;
 const IMAGE_CHECK_TIMEOUT_MS = 8_000;
-const MAX_BODY_BYTES = 8_192; // 8KB — đủ để phát hiện lỗi text, không download lớn
+const MAX_BODY_BYTES = 8_192; // 8KB — enough to detect error text, not download large files
 
 /**
- * Các cụm lỗi phổ biến trên trang đích. Nếu body chứa một trong
- * những cụm này, link được coi là hỏng / bị chặn.
+ * Common error patterns in destination pages. If body contains one of
+ * these, the link is considered broken / blocked.
  */
 const BODY_ERROR_PATTERNS: Array<{ pattern: RegExp; status: LinkCheckStatus }> = [
   { pattern: /not\s+allowed!?/i, status: 'not_allowed' },
@@ -86,8 +99,8 @@ const BODY_ERROR_PATTERNS: Array<{ pattern: RegExp; status: LinkCheckStatus }> =
 ];
 
 /**
- * Domains mà HEAD thường không đủ tin cậy — cần GET để phát hiện lỗi
- * trong body (ví dụ AccessTrade trả 200 nhưng body chứa "Not Allowed!").
+ * Domains where HEAD is typically unreliable — need GET to detect errors
+ * in body (e.g. AccessTrade returns 200 but body contains "Not Allowed!").
  */
 const FORCE_GET_DOMAINS = [
   'go.isclix.com',
@@ -96,10 +109,10 @@ const FORCE_GET_DOMAINS = [
 ];
 
 /**
- * Affiliate deeplink domains: trả HTML 200 mà không redirect tức thời
- * là BÌNH THƯỜNG — deeplink cần JavaScript để redirect. Chỉ cần 2xx/3xx
- * không phải 404/410/5xx là affiliate link ok.
- * Không được coi HTML response từ các domain này là "unverified".
+ * Affiliate deeplink domains: returning HTML 200 without immediate redirect
+ * is NORMAL — deeplinks need JavaScript to redirect. Only need 2xx/3xx
+ * not 404/410/5xx for affiliate link to be ok.
+ * Do NOT consider HTML response from these domains as "unverified".
  */
 const AFFILIATE_DEEPLINK_DOMAINS = [
   'pub.accesstrade.vn',
@@ -108,7 +121,32 @@ const AFFILIATE_DEEPLINK_DOMAINS = [
   'click.accesstrade.vn',
 ];
 
+/** HTTP status codes that indicate the resource is definitively gone */
+const PERMANENTLY_DEAD_CODES = new Set([404, 410]);
+
+
+
+/** Retryable link statuses — should NOT trigger archival or permanent broken */
+const RETRYABLE_LINK_STATUSES = new Set<LinkCheckStatus>([
+  'not_allowed', 'rate_limited', 'server_error', 'timeout', 'dns_error', 'forbidden', 'error', 'unknown',
+]);
+
+/** Retryable image statuses — should NOT trigger image_broken */
+const RETRYABLE_IMAGE_STATUSES = new Set<ImageCheckStatus>([
+  'forbidden', 'not_allowed', 'rate_limited', 'server_error', 'timeout', 'dns_error', 'error', 'unknown',
+]);
+
 // ---- Helpers ----
+
+/** Check if status is retryable (not permanent failure) */
+export function isRetryableLinkStatus(status: LinkCheckStatus): boolean {
+  return RETRYABLE_LINK_STATUSES.has(status);
+}
+
+/** Check if image status is retryable (not permanent failure) */
+export function isRetryableImageStatus(status: ImageCheckStatus): boolean {
+  return RETRYABLE_IMAGE_STATUSES.has(status);
+}
 
 function isPrivateIp(hostname: string): boolean {
   if (hostname === 'localhost') return true;
@@ -121,7 +159,43 @@ function isPrivateIp(hostname: string): boolean {
   return false;
 }
 
-async function fetchSafeRedirects(url: string, method: string, timeoutMs: number): Promise<Response> {
+/**
+ * Standard browser-like headers for health check requests.
+ * Does NOT fake login, cookies, or bypass protection mechanisms.
+ */
+function buildRequestHeaders(method: 'HEAD' | 'GET'): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': method === 'GET'
+      ? 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      : '*/*',
+    'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+    'Cache-Control': 'no-cache',
+  };
+  if (method === 'GET') {
+    headers['Range'] = `bytes=0-${MAX_BODY_BYTES - 1}`;
+  }
+  return headers;
+}
+
+/**
+ * Standard browser-like headers for image health check requests.
+ */
+function buildImageRequestHeaders(method: 'HEAD' | 'GET'): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+    'Cache-Control': 'no-cache',
+  };
+  if (method === 'GET') {
+    // Limit download for GET probe
+    headers['Range'] = `bytes=0-${MAX_BODY_BYTES - 1}`;
+  }
+  return headers;
+}
+
+async function fetchSafeRedirects(url: string, method: string, timeoutMs: number, customHeaders?: Record<string, string>): Promise<Response> {
   let currentUrl = url;
   let redirects = 0;
   while (redirects < 5) {
@@ -129,9 +203,10 @@ async function fetchSafeRedirects(url: string, method: string, timeoutMs: number
     if (isPrivateIp(parsed.hostname)) {
       throw new Error(`SSRF blocked: ${parsed.hostname}`);
     }
+    const headers = customHeaders || (method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : undefined);
     const res = await fetch(currentUrl, {
       method,
-      headers: method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : undefined,
+      headers,
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs)
     });
@@ -170,8 +245,8 @@ function shouldForceGet(url: string): boolean {
 }
 
 /**
- * Đọc tối đa `maxBytes` từ response body dưới dạng text.
- * Tránh download toàn bộ body lớn.
+ * Read up to `maxBytes` from response body as text.
+ * Avoid downloading entire large body.
  */
 async function readLimitedBody(response: Response, maxBytes: number): Promise<string> {
   try {
@@ -210,27 +285,104 @@ function matchBodyError(body: string): { status: LinkCheckStatus; reason: string
   return null;
 }
 
+/**
+ * Classify an error into a LinkCheckStatus.
+ * Returns null if the error is NOT an SSRF block (should fall through to GET).
+ * Returns a result if the error is SSRF or similar hard block.
+ */
+function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: string; isSsrf: boolean } | null {
+  if (!(error instanceof Error)) return null;
+
+  if (error.message.includes('SSRF')) {
+    return { status: 'forbidden', reason: error.message, isSsrf: true };
+  }
+
+  if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+    return { status: 'timeout', reason: 'Request timeout', isSsrf: false };
+  }
+
+  const msg = error.message.toLowerCase();
+  if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
+    return { status: 'dns_error', reason: `DNS lỗi: ${error.message}`, isSsrf: false };
+  }
+
+  if (error.message.includes('Too many redirects')) {
+    return { status: 'error', reason: 'Quá nhiều redirect', isSsrf: false };
+  }
+
+  return { status: 'error', reason: `Network error: ${error.message}`, isSsrf: false };
+}
+
+/**
+ * Map HTTP status code to LinkCheckResult for GET responses.
+ */
+function classifyGetResponse(status: number): LinkCheckResult | null {
+  if (PERMANENTLY_DEAD_CODES.has(status)) {
+    return {
+      status: 'broken', ok: false, retryable: false,
+      reason: `HTTP ${status} — không tìm thấy trang`,
+      statusCode: status,
+    };
+  }
+  if (status === 401) {
+    return {
+      status: 'not_allowed', ok: false, retryable: true,
+      reason: 'HTTP 401 — Yêu cầu xác thực, không thể xác minh link (có thể do anti-bot)',
+      statusCode: status,
+    };
+  }
+  if (status === 403) {
+    return {
+      status: 'not_allowed', ok: false, retryable: true,
+      reason: 'HTTP 403 — Link bị từ chối truy cập (anti-bot hoặc IP bị chặn). KHÔNG phải link chết.',
+      statusCode: status,
+    };
+  }
+  if (status === 405) {
+    return {
+      status: 'not_allowed', ok: false, retryable: true,
+      reason: 'HTTP 405 — Phương thức không được phép, có thể do anti-bot',
+      statusCode: status,
+    };
+  }
+  if (status === 429) {
+    return {
+      status: 'rate_limited', ok: false, retryable: true,
+      reason: 'HTTP 429 — Rate limit, cần thử lại sau 1 giờ',
+      statusCode: status,
+    };
+  }
+  if (status >= 500) {
+    return {
+      status: 'server_error', ok: false, retryable: true,
+      reason: `Server error HTTP ${status} — tạm thời, có thể phục hồi`,
+      statusCode: status,
+    };
+  }
+  if (status >= 400) {
+    return {
+      status: 'error', ok: false, retryable: false,
+      reason: `HTTP ${status}`,
+      statusCode: status,
+    };
+  }
+  return null; // 2xx/3xx — needs body check
+}
+
 // ---- Link Health Check ----
 
 /**
- * Kiểm tra sức khỏe link sản phẩm / affiliate.
+ * Check link health for product / affiliate URLs.
  *
- * STATUS SEMANTICS:
- * - 'ok'          : Link trả 200/2xx, nội dung hợp lệ
- * - 'broken'      : 404/410 — Link chết vĩnh viễn, nên set cooldown 24h
- * - 'not_allowed' : 403/401/405 — Bị chặn bởi anti-bot hoặc firewall, KHÔNG phải chết
- * - 'rate_limited': 429 — Cần thử lại sau, tạm thời, cooldown 1h
- * - 'server_error': 5xx — Lỗi server, có thể phục hồi, cooldown 6h
- * - 'timeout'     : Request timeout, có thể phục hồi, cooldown 6h
- * - 'dns_error'   : DNS lỗi, có thể tạm thời, cooldown 6h
- * - 'error'       : Lỗi mạng khác
- * - 'unknown'     : Không xác định được
- *
- * HEAD trước, nếu fail / 405 / 403 → GET fallback.
- * Đọc body ngắn để phát hiện "Not Allowed!", "Forbidden", v.v.
- * Đặc biệt với go.isclix.com / AccessTrade: luôn GET.
- * Timeout 10 giây.
- * Không crash nếu lỗi network/DNS.
+ * V2 STRATEGY:
+ * 1. HEAD is a probe only — if HEAD succeeds with 200, link is ok.
+ * 2. If HEAD fails (timeout, error, 4xx, 5xx), ALWAYS fall through to GET
+ *    (except SSRF/invalid URL which are hard blocks).
+ * 3. GET is the authoritative check. Only GET 404/410 = broken.
+ * 4. 401/403/405 = not_allowed (retryable), NOT broken.
+ * 5. 429 = rate_limited (retryable).
+ * 6. 5xx = server_error (retryable).
+ * 7. timeout = timeout (retryable).
  */
 export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
   // Validate URL
@@ -242,133 +394,59 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
     return { status: 'error', ok: false, reason: 'URL không hợp lệ hoặc không phải http/https' };
   }
 
+  // SSRF check before any request
+  try {
+    const parsed = new URL(url);
+    if (isPrivateIp(parsed.hostname)) {
+      return { status: 'forbidden', ok: false, reason: `SSRF blocked: ${parsed.hostname}` };
+    }
+  } catch {
+    return { status: 'error', ok: false, reason: 'URL parse error' };
+  }
+
   const forceGet = shouldForceGet(url);
 
   try {
-    // Step 1: HEAD request (bỏ qua nếu domain cần GET)
+    // Step 1: HEAD request (probe only — skip if domain needs GET)
     if (!forceGet) {
       try {
-        const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS);
+        const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('HEAD'));
 
         if (headResponse.ok) {
-          // HEAD 200 — link có vẻ ok
+          // HEAD 200 — link is ok
           return {
-            status: 'ok',
-            ok: true,
+            status: 'ok', ok: true, retryable: false,
             reason: 'HEAD 200 OK',
             statusCode: headResponse.status,
             finalUrl: headResponse.url || url,
           };
         }
 
-        // HEAD rõ ràng lỗi vĩnh viễn
-        if (headResponse.status === 404 || headResponse.status === 410) {
-          return {
-            status: 'broken',
-            ok: false,
-            reason: `HTTP ${headResponse.status} — không tìm thấy trang`,
-            statusCode: headResponse.status,
-          };
+        // HEAD returned definitive 404/410 — still try GET to confirm
+        // (some servers return wrong status for HEAD)
+        if (PERMANENTLY_DEAD_CODES.has(headResponse.status)) {
+          // Fall through to GET for confirmation
         }
 
-        // 403/405/429/401 từ HEAD có thể là server chặn HEAD — fallback GET
-        if ([401, 403, 405, 429].includes(headResponse.status)) {
-          // Fall through to GET
-        } else if (headResponse.status >= 500) {
-          // 5xx từ HEAD — server-side error, có thể GET sẽ giống, nhưng thử GET nếu chưa forceGet
-          // Fall through to GET
-        } else if (headResponse.status >= 400) {
-          // Other 4xx — still try GET to confirm
-        }
+        // All other HEAD errors: fall through to GET
+        // 401/403/405/429/5xx from HEAD may just mean server blocks HEAD
       } catch (headError) {
-        if (headError instanceof Error) {
-          if (headError.message.includes('SSRF')) {
-            return { status: 'forbidden', ok: false, reason: headError.message };
-          }
-          if (headError.name === 'TimeoutError' || headError.name === 'AbortError') {
-            return { status: 'timeout', ok: false, reason: 'HEAD request timeout' };
-          }
-          // DNS / connection error — check message
-          const msg = headError.message.toLowerCase();
-          if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
-            return { status: 'dns_error', ok: false, reason: `DNS lỗi: ${headError.message}` };
-          }
+        const classified = classifyFetchError(headError);
+        if (classified?.isSsrf) {
+          return { status: 'forbidden', ok: false, reason: classified.reason };
         }
-        // Other HEAD error — fall through to GET
+        // All other HEAD errors (timeout, DNS, network): fall through to GET
       }
     }
 
-    // Step 2: GET request (fallback hoặc forced)
-    const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS);
+    // Step 2: GET request (authoritative check)
+    const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('GET'));
 
-    // Vĩnh viễn dead
-    if (getResponse.status === 404 || getResponse.status === 410) {
-      return {
-        status: 'broken',
-        ok: false,
-        reason: `HTTP ${getResponse.status} — không tìm thấy trang`,
-        statusCode: getResponse.status,
-      };
-    }
+    // Check HTTP status
+    const statusResult = classifyGetResponse(getResponse.status);
+    if (statusResult) return statusResult;
 
-    // Access restricted — có thể do anti-bot/firewall, KHÔNG phải chết vĩnh viễn
-    if (getResponse.status === 401) {
-      return {
-        status: 'not_allowed',
-        ok: false,
-        reason: `HTTP 401 — Yêu cầu xác thực, không thể xác minh link (có thể do anti-bot)`,
-        statusCode: getResponse.status,
-      };
-    }
-
-    if (getResponse.status === 403) {
-      return {
-        status: 'not_allowed',
-        ok: false,
-        reason: `HTTP 403 — Link bị từ chối truy cập (anti-bot hoặc IP bị chặn). KHÔNG phải link chết.`,
-        statusCode: getResponse.status,
-      };
-    }
-
-    if (getResponse.status === 405) {
-      return {
-        status: 'not_allowed',
-        ok: false,
-        reason: `HTTP 405 — Phương thức không được phép, có thể do anti-bot`,
-        statusCode: getResponse.status,
-      };
-    }
-
-    // Rate limited — tạm thời, cần cooldown ngắn
-    if (getResponse.status === 429) {
-      return {
-        status: 'rate_limited',
-        ok: false,
-        reason: `HTTP 429 — Rate limit, cần thử lại sau 1 giờ`,
-        statusCode: getResponse.status,
-      };
-    }
-
-    // Server error — có thể phục hồi
-    if (getResponse.status >= 500) {
-      return {
-        status: 'server_error',
-        ok: false,
-        reason: `Server error HTTP ${getResponse.status} — tạm thời, có thể phục hồi`,
-        statusCode: getResponse.status,
-      };
-    }
-
-    if (getResponse.status >= 400) {
-      return {
-        status: 'error',
-        ok: false,
-        reason: `HTTP ${getResponse.status}`,
-        statusCode: getResponse.status,
-      };
-    }
-
-    // Response là 2xx hoặc 3xx — đọc body ngắn kiểm tra nội dung lỗi
+    // Response is 2xx or 3xx — read limited body to check for error content
     const body = await readLimitedBody(getResponse, MAX_BODY_BYTES);
     const bodyMatch = matchBodyError(body);
 
@@ -376,6 +454,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
       return {
         status: bodyMatch.status,
         ok: false,
+        retryable: isRetryableLinkStatus(bodyMatch.status),
         reason: bodyMatch.reason,
         statusCode: getResponse.status,
         finalUrl: getResponse.url || url,
@@ -383,45 +462,36 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
     }
 
     return {
-      status: 'ok',
-      ok: true,
+      status: 'ok', ok: true, retryable: false,
       reason: `HTTP ${getResponse.status} OK`,
       statusCode: getResponse.status,
       finalUrl: getResponse.url || url,
     };
   } catch (error) {
-    if (error instanceof Error) {
-      if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-        return { status: 'timeout', ok: false, reason: 'Request timeout (10s)' };
-      }
-      if (error.message.includes('SSRF')) {
-        return { status: 'forbidden', ok: false, reason: error.message };
-      }
-      const msg = error.message.toLowerCase();
-      if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
-        return { status: 'dns_error', ok: false, reason: `DNS lỗi: ${error.message}` };
-      }
+    const classified = classifyFetchError(error);
+    if (classified) {
       return {
-        status: 'error',
+        status: classified.status,
         ok: false,
-        reason: `Network error: ${error.message}`,
+        retryable: !classified.isSsrf,
+        reason: classified.reason,
       };
     }
-
-    return { status: 'unknown', ok: false, reason: 'Lỗi không xác định' };
+    return { status: 'unknown', ok: false, retryable: true, reason: 'Lỗi không xác định' };
   }
 }
 
-// ---- Image Health Check ----
+// ---- Image Health Check V2 ----
 
 /**
- * Kiểm tra sức khỏe imageUrl.
+ * Check image URL health.
  *
- * - HEAD trước, nếu HEAD không đủ tin cậy → GET fallback.
- * - Check status 400–599 → fail.
- * - Check content-type phải image/* → fail nếu không.
- * - Timeout 8 giây.
- * - Không crash nếu lỗi network/DNS.
+ * V2 CHANGES:
+ * - 429/5xx/timeout/DNS = retryable status, NOT image_broken
+ * - Only 404/410 confirmed = image_broken
+ * - Only confirmed non-image content-type = invalid_image
+ * - HEAD failure always falls through to GET
+ * - Proper status types for all temporary failures
  */
 export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResult> {
   // Validate URL
@@ -433,33 +503,31 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
     return { status: 'error', ok: false, reason: 'Image URL không hợp lệ hoặc không phải http/https' };
   }
 
+  // SSRF check
   try {
-    // Step 1: HEAD request
+    const parsed = new URL(imageUrl);
+    if (isPrivateIp(parsed.hostname)) {
+      return { status: 'forbidden', ok: false, reason: `SSRF blocked: ${parsed.hostname}` };
+    }
+  } catch {
+    return { status: 'error', ok: false, reason: 'Image URL parse error' };
+  }
+
+  try {
+    // Step 1: HEAD request (probe)
     let headOk = false;
     let headContentType: string | null = null;
 
     try {
-      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS);
+      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('HEAD'));
 
       if (headResponse.status >= 400) {
-        if ([401, 403, 405, 429].includes(headResponse.status)) {
-          // Fall through to GET
-        } else if (headResponse.status === 404 || headResponse.status === 410) {
-          return {
-            status: 'image_broken',
-            ok: false,
-            reason: `HTTP ${headResponse.status} — ảnh không tồn tại`,
-            statusCode: headResponse.status,
-          };
-        } else if (headResponse.status >= 500) {
-          return {
-            status: 'image_broken',
-            ok: false,
-            reason: `Server error HTTP ${headResponse.status}`,
-            statusCode: headResponse.status,
-          };
+        // HEAD 404/410 — still try GET to confirm
+        if (PERMANENTLY_DEAD_CODES.has(headResponse.status)) {
+          // Fall through to GET for confirmation
         }
-        // Other 4xx (not anti-bot) — try GET fallback
+        // HEAD 401/403/405/429/5xx — fall through to GET
+        // These may just mean server blocks HEAD for images
       } else {
         headOk = true;
         headContentType = headResponse.headers.get('content-type');
@@ -467,8 +535,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
         // Check content-type from HEAD
         if (headContentType && !headContentType.toLowerCase().startsWith('image/')) {
           return {
-            status: 'invalid_image',
-            ok: false,
+            status: 'invalid_image', ok: false, retryable: false,
             reason: `Content-Type không phải ảnh: ${headContentType}`,
             contentType: headContentType,
             statusCode: headResponse.status,
@@ -477,8 +544,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
 
         if (headContentType && headContentType.toLowerCase().startsWith('image/')) {
           return {
-            status: 'ok',
-            ok: true,
+            status: 'ok', ok: true, retryable: false,
             reason: 'Image OK',
             contentType: headContentType,
             statusCode: headResponse.status,
@@ -488,59 +554,64 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
         // HEAD 200 but no content-type — fallback to GET
       }
     } catch (headError) {
-      if (headError instanceof Error && (headError.name === 'TimeoutError' || headError.message.includes('SSRF'))) {
-        if (headError.message.includes('SSRF')) {
-           return { status: 'forbidden', ok: false, reason: headError.message };
-        }
-        return { status: 'timeout', ok: false, reason: 'HEAD request timeout (8s)' };
+      if (headError instanceof Error && headError.message.includes('SSRF')) {
+        return { status: 'forbidden', ok: false, reason: headError.message };
       }
-      // Fall through to GET
+      // All other HEAD errors: fall through to GET
     }
 
-    // Step 2: GET fallback (nếu HEAD không có content-type hoặc fail)
+    // Step 2: GET fallback (if HEAD didn't resolve or had issues)
     if (!headOk || !headContentType) {
-      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS);
+      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('GET'));
 
       if (getResponse.status >= 400) {
-      if (getResponse.status === 401) {
-        return {
-          status: 'forbidden',
-          ok: false,
-          reason: `HTTP 401 — Ảnh yêu cầu xác thực, không thể xác minh`,
-          statusCode: getResponse.status,
-        };
-      }
+        // Definitively dead
+        if (PERMANENTLY_DEAD_CODES.has(getResponse.status)) {
+          return {
+            status: 'image_broken', ok: false, retryable: false,
+            reason: `HTTP ${getResponse.status} — ảnh không tồn tại`,
+            statusCode: getResponse.status,
+          };
+        }
 
-      if (getResponse.status === 403) {
-        return {
-          status: 'forbidden',
-          ok: false,
-          reason: `HTTP 403 — Ảnh bị từ chối truy cập, có thể là anti-bot hoặc địa chỉ IP bị chặn`,
-          statusCode: getResponse.status,
-        };
-      }
+        // Access restricted — retryable, NOT image_broken
+        if (getResponse.status === 401 || getResponse.status === 403) {
+          return {
+            status: 'forbidden', ok: false, retryable: true,
+            reason: `HTTP ${getResponse.status} — Ảnh bị từ chối truy cập, có thể là anti-bot`,
+            statusCode: getResponse.status,
+          };
+        }
 
-      if (getResponse.status === 405) {
-        return {
-          status: 'invalid_image',
-          ok: false,
-          reason: `HTTP 405 — Phương thức GET không được phép, không thể xác minh ảnh`,
-          statusCode: getResponse.status,
-        };
-      }
+        if (getResponse.status === 405) {
+          return {
+            status: 'not_allowed', ok: false, retryable: true,
+            reason: 'HTTP 405 — Phương thức không được phép, không thể xác minh ảnh',
+            statusCode: getResponse.status,
+          };
+        }
 
-      if (getResponse.status === 429) {
-        return {
-          status: 'image_broken',
-          ok: false,
-          reason: `HTTP 429 — Rate limit, ảnh tạm thời không thể truy cập, cần thử lại sau`,
-          statusCode: getResponse.status,
-        };
-      }
+        // Rate limited — retryable, NOT image_broken
+        if (getResponse.status === 429) {
+          return {
+            status: 'rate_limited', ok: false, retryable: true,
+            reason: 'HTTP 429 — Rate limit, ảnh tạm thời không thể truy cập',
+            statusCode: getResponse.status,
+          };
+        }
 
+        // Server error — retryable, NOT image_broken
+        if (getResponse.status >= 500) {
+          return {
+            status: 'server_error', ok: false, retryable: true,
+            reason: `Server error HTTP ${getResponse.status} — tạm thời`,
+            statusCode: getResponse.status,
+          };
+        }
+
+        // Other 4xx
         return {
-          status: 'image_broken',
-          ok: false,
+          status: 'error', ok: false, retryable: false,
           reason: `HTTP ${getResponse.status}`,
           statusCode: getResponse.status,
         };
@@ -553,8 +624,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
 
       if (!contentType.toLowerCase().startsWith('image/')) {
         return {
-          status: 'invalid_image',
-          ok: false,
+          status: 'invalid_image', ok: false, retryable: false,
           reason: contentType
             ? `Content-Type không phải ảnh: ${contentType}`
             : 'Không có Content-Type header',
@@ -564,8 +634,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
       }
 
       return {
-        status: 'ok',
-        ok: true,
+        status: 'ok', ok: true, retryable: false,
         reason: 'Image OK (GET)',
         contentType,
         statusCode: getResponse.status,
@@ -573,21 +642,26 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
     }
 
     // Should not reach here, but just in case
-    return { status: 'unknown', ok: false, reason: 'Không xác định được trạng thái ảnh' };
+    return { status: 'unknown', ok: false, retryable: true, reason: 'Không xác định được trạng thái ảnh' };
   } catch (error) {
     if (error instanceof Error) {
-      if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-        return { status: 'timeout', ok: false, reason: 'Request timeout (8s)' };
+      if (error.message.includes('SSRF')) {
+        return { status: 'forbidden', ok: false, retryable: false, reason: error.message };
       }
-
+      if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+        return { status: 'timeout', ok: false, retryable: true, reason: 'Request timeout (8s)' };
+      }
+      const msg = error.message.toLowerCase();
+      if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
+        return { status: 'dns_error', ok: false, retryable: true, reason: `DNS lỗi: ${error.message}` };
+      }
       return {
-        status: 'error',
-        ok: false,
+        status: 'error', ok: false, retryable: true,
         reason: `Network error: ${error.message}`,
       };
     }
 
-    return { status: 'unknown', ok: false, reason: 'Lỗi không xác định' };
+    return { status: 'unknown', ok: false, retryable: true, reason: 'Lỗi không xác định' };
   }
 }
 
@@ -668,7 +742,7 @@ export async function checkSourcePreflight(
           blockedBy: 'image',
         };
       }
-    } catch (error) {
+    } catch {
       // Timeout or network error on preflight — not immediately stale
       // Will be checked again during full health check
     }
@@ -687,7 +761,7 @@ export async function checkSourcePreflight(
           blockedBy: 'product_url',
         };
       }
-    } catch (error) {
+    } catch {
       // Timeout or network error on preflight — not immediately stale
     }
   }
@@ -714,7 +788,7 @@ export async function checkSourcePreflight(
           blockedBy: 'affiliate',
         };
       }
-    } catch (error) {
+    } catch {
       // Network error on preflight — not immediately invalid
     }
   }
@@ -746,10 +820,11 @@ function isAffiliateDeeplyinkDomain(url: string): boolean {
  * Check affiliate URL verification without full redirect following.
  * Returns { status: 'ok' | 'unverified' | 'stale', reason: string }
  *
- * Quan trọng: AccessTrade deeplinks (pub.accesstrade.vn, go.isclix.com)
- * trả HTML 200 mà không redirect ngay — đây là BÌNH THƯỜNG vì deeplink
- * cần JavaScript để redirect về merchant. Chỉ check HTTP status, không
- * đánh giá HTML response là "unverified" với các domain này.
+ * V2 CHANGES:
+ * - 401/403/405 from affiliate domains = unverified, NOT stale/broken
+ * - 429/5xx/timeout = unverified (retryable), NOT stale
+ * - Only confirmed 404/410 = stale
+ * - Affiliate deeplink domains: any 2xx/3xx = ok regardless of HTML content
  */
 async function checkAffiliateVerification(
   affiliateUrl: string,
@@ -757,7 +832,7 @@ async function checkAffiliateVerification(
   try {
     const isDeeplinkDomain = isAffiliateDeeplyinkDomain(affiliateUrl);
 
-    const response = await fetchSafeRedirects(affiliateUrl, 'HEAD', 3000);
+    const response = await fetchSafeRedirects(affiliateUrl, 'HEAD', 3000, buildRequestHeaders('HEAD'));
 
     // 404/410 = stale regardless of domain
     if (response.status === 404 || response.status === 410) {
@@ -767,11 +842,27 @@ async function checkAffiliateVerification(
       };
     }
 
+    // 429 = rate limited, treat as unverified (NOT stale)
+    if (response.status === 429) {
+      return {
+        status: 'unverified',
+        reason: `Affiliate URL rate limited (HTTP 429) — cần thử lại sau`,
+      };
+    }
+
     // 5xx = server error, treat as unverified (not stale)
     if (response.status >= 500) {
       return {
         status: 'unverified',
         reason: `Affiliate URL lỗi server (HTTP ${response.status})`,
+      };
+    }
+
+    // 401/403/405 = access restricted, unverified but NOT stale
+    if ([401, 403, 405].includes(response.status)) {
+      return {
+        status: 'unverified',
+        reason: `Affiliate URL bị hạn chế truy cập (HTTP ${response.status}) — có thể do anti-bot`,
       };
     }
 
@@ -815,7 +906,7 @@ async function checkAffiliateVerification(
       status: 'ok',
       reason: 'Affiliate URL đã xác minh',
     };
-  } catch (error) {
+  } catch {
     // Network error
     return {
       status: 'unverified',
