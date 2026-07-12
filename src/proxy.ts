@@ -13,6 +13,7 @@ export function proxy(request: NextRequest) {
     // Skip auth for public routes
     const isPublicRoute =
       pathname === '/api/app-health' ||
+      pathname === '/api/ai-bots/scheduler/tick' ||
       (pathname.startsWith('/api/products') && request.method === 'GET');
 
     if (isPublicRoute) {

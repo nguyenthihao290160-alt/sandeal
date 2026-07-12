@@ -461,6 +461,15 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     process.env.SANDEAL_DATA_DIR = previous; fs.rmSync(corruptDir, { recursive: true, force: true }); assert(threw, 'corrupt JSON must fail closed');
   });
 
+  await test('V4-17. scheduler tick uses an exact Basic Auth exemption and still checks its secret', () => {
+    const proxySource = fs.readFileSync(path.join(process.cwd(), 'src/proxy.ts'), 'utf8');
+    const tickSource = fs.readFileSync(path.join(process.cwd(), 'src/app/api/ai-bots/scheduler/tick/route.ts'), 'utf8');
+    assert(proxySource.includes("pathname === '/api/ai-bots/scheduler/tick'"));
+    assert(!proxySource.includes("pathname.startsWith('/api/ai-bots/scheduler')"));
+    assert(tickSource.includes('process.env.SCHEDULER_SECRET'));
+    assert(tickSource.includes("request.headers.get('x-sandeal-scheduler-secret')"));
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   fs.rmSync(tempDir, { recursive: true, force: true });
   process.exitCode = failed ? 1 : 0;
