@@ -30,11 +30,20 @@ const COLLECTION = 'token-vault';
 
 function initialMetadata(input: CreateCredentialInput): Record<string, unknown> | undefined {
   if (input.platform !== 'gemini') return input.metadata;
+  
+  const userMetadata = (input.metadata || {}) as Record<string, unknown>;
+  const {
+    billingMode, keyType, supportedModels, lightTestStatus,
+    generationStatus, failureStreak, requestsTodayEstimated,
+    inputTokensTodayEstimated, outputTokensTodayEstimated, healthScore,
+    ...safeMetadata
+  } = userMetadata;
+
   return {
+    ...safeMetadata,
     billingMode: 'unknown', keyType: 'unknown', supportedModels: [], lightTestStatus: 'unchecked',
     generationStatus: 'unchecked', failureStreak: 0, requestsTodayEstimated: 0,
     inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore: 50,
-    ...input.metadata,
   };
 }
 

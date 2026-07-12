@@ -269,13 +269,18 @@ export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.
   const batch = await claimCandidateBatch(Math.min(batchLimit, Math.floor(remainingNetworkChecks / 8)));
   const concurrency = Math.max(1, Math.min(3, settings.maxConcurrency, runtime.currentConcurrency || 3, batch.length || 1));
   let cursor = 0;
+  let budgetExhausted = false;
   await Promise.all(Array.from({ length: concurrency }, async () => {
     while (cursor < batch.length && Date.now() < deadlineMs) {
+      if (counters.networkChecks >= remainingNetworkChecks) {
+        budgetExhausted = true;
+        break;
+      }
       const item = batch[cursor++];
       await reviewOne(item, counters);
     }
   }));
-  for (; cursor < batch.length; cursor++) await finishCandidate(batch[cursor].id, { status: 'pending', delayReason: 'run_deadline_reached' });
+  for (; cursor < batch.length; cursor++) await finishCandidate(batch[cursor].id, { status: 'pending', delayReason: budgetExhausted ? 'network_budget_exhausted' : 'run_deadline_reached' });
   const processedIds = new Set(batch.map((item) => item.id));
   const recentReasons = (await listCandidateQueue()).filter((item) => processedIds.has(item.id)).map((item) => item.delayReason || '').join(',');
   const rateLimited = recentReasons.includes('rate_limited');
