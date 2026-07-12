@@ -41,7 +41,9 @@ export interface NormalizedAccessTradeItem {
   sourceItemKind: ProductKind;
   platform: ProductPlatform;
   imageUrl: string;
+  imageCandidates: string[];   // All image URLs from raw payload, ordered by priority
   originalUrl: string;
+  canonicalProductUrl?: string; // Decoded from affiliate deeplink if available
   affiliateUrl: string;
   price: number;
   salePrice: number;
@@ -398,6 +400,31 @@ export function normalizeAccessTradeItem(
     'banner',
   ]);
 
+  // Collect ALL image URL candidates from raw payload for fallback logic
+  const imageCandidates: string[] = [];
+  const imageFieldOrder = [
+    'productImage', 'product_image', 'image', 'image_url', 'imageUrl',
+    'thumbnail', 'thumbnail_url', 'thumbnailUrl', 'logo', 'banner',
+    'coverImage', 'cover_image', 'heroImage', 'hero_image',
+    'gallery', 'images', 'photos',
+  ];
+  for (const field of imageFieldOrder) {
+    const val = getFirstText(item, [field]);
+    if (val && isValidHttpUrl(val) && !imageCandidates.includes(val)) {
+      imageCandidates.push(val);
+    }
+  }
+  // Also extract from arrays like gallery/images if present
+  const galleryField = (item as Record<string, unknown>).gallery;
+  if (Array.isArray(galleryField)) {
+    for (const entry of galleryField) {
+      const entryUrl = typeof entry === 'string' ? entry.trim() : (typeof entry === 'object' && entry ? String((entry as Record<string, unknown>).url ?? '') : '');
+      if (entryUrl && isValidHttpUrl(entryUrl) && !imageCandidates.includes(entryUrl)) {
+        imageCandidates.push(entryUrl);
+      }
+    }
+  }
+
   const originalUrl = getFirstText(item, [
     'productUrl',
     'product_url',
@@ -555,6 +582,9 @@ export function normalizeAccessTradeItem(
   const autoPublishEligible = publicDecision === 'public_candidate';
   const needsVerification = !autoPublishEligible;
 
+  // Try to decode real product URL from affiliate deeplink query params
+  const canonicalProductUrl = decodeProductUrlFromAffiliateLink(affiliateUrl) || undefined;
+
   // Integration layer never exposes an item directly.
   // SourceScout must run link + image health checks before publicHidden can become false.
   const publicHidden = true;
@@ -567,7 +597,9 @@ export function normalizeAccessTradeItem(
     sourceItemKind: kind,
     platform: 'accesstrade',
     imageUrl,
+    imageCandidates,
     originalUrl,
+    canonicalProductUrl,
     affiliateUrl,
     price,
     salePrice,
@@ -585,6 +617,50 @@ export function normalizeAccessTradeItem(
     qualityScore,
     rawData: item,
   };
+}
+
+/**
+ * Try to extract the actual product URL from an affiliate deeplink.
+ * AccessTrade deeplinks often encode the target URL as a query parameter:
+ * https://pub.accesstrade.vn/deep_link/xxx?url=https%3A%2F%2Fshopee.vn%2F...
+ *
+ * Returns the decoded URL if valid, or null if not decodable.
+ */
+export function decodeProductUrlFromAffiliateLink(affiliateUrl: string): string | null {
+  if (!affiliateUrl || !isValidHttpUrl(affiliateUrl)) return null;
+
+  try {
+    const parsed = new URL(affiliateUrl);
+    // Common params that contain the real destination URL
+    const destParams = ['url', 'deeplink', 'target', 'destination', 'redirect', 'landing', 'to', 'href', 'link', 'u'];
+
+    for (const param of destParams) {
+      const value = parsed.searchParams.get(param);
+      if (value && isValidHttpUrl(value)) {
+        return value;
+      }
+      // Also try URL-decoded version
+      try {
+        const decoded = decodeURIComponent(value ?? '');
+        if (decoded && isValidHttpUrl(decoded)) {
+          return decoded;
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Some links encode destination in path: /deep_link/campaignId/productUrl
+    const pathParts = parsed.pathname.split('/').filter(Boolean);
+    for (const part of pathParts) {
+      try {
+        const decoded = decodeURIComponent(part);
+        if (isValidHttpUrl(decoded)) {
+          return decoded;
+        }
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+
+  return null;
 }
 
 export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind {

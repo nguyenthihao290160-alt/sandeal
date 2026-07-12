@@ -8,11 +8,14 @@
 
 export type LinkCheckStatus =
   | 'ok'
-  | 'broken'
-  | 'not_allowed'
-  | 'forbidden'
-  | 'timeout'
-  | 'error'
+  | 'broken'        // 404/410: definitively dead
+  | 'not_allowed'   // 403/401/405: access restricted, not necessarily dead
+  | 'rate_limited'  // 429: temporary, retry later
+  | 'server_error'  // 5xx: server-side issue, recoverable
+  | 'timeout'       // network timeout, recoverable
+  | 'dns_error'     // DNS resolution failed
+  | 'error'         // other network error
+  | 'forbidden'     // anti-bot block, same as not_allowed legacy alias
   | 'unknown';
 
 export interface LinkCheckResult {
@@ -90,6 +93,19 @@ const FORCE_GET_DOMAINS = [
   'go.isclix.com',
   'pub.accesstrade.vn',
   'accesstrade.vn',
+];
+
+/**
+ * Affiliate deeplink domains: trả HTML 200 mà không redirect tức thời
+ * là BÌNH THƯỜNG — deeplink cần JavaScript để redirect. Chỉ cần 2xx/3xx
+ * không phải 404/410/5xx là affiliate link ok.
+ * Không được coi HTML response từ các domain này là "unverified".
+ */
+const AFFILIATE_DEEPLINK_DOMAINS = [
+  'pub.accesstrade.vn',
+  'go.isclix.com',
+  'accesstrade.vn',
+  'click.accesstrade.vn',
 ];
 
 // ---- Helpers ----
@@ -198,11 +214,22 @@ function matchBodyError(body: string): { status: LinkCheckStatus; reason: string
 /**
  * Kiểm tra sức khỏe link sản phẩm / affiliate.
  *
- * - HEAD trước, nếu fail / 405 / 403 → GET fallback.
- * - Đọc body ngắn để phát hiện "Not Allowed!", "Forbidden", v.v.
- * - Đặc biệt với go.isclix.com / AccessTrade: luôn GET.
- * - Timeout 10 giây.
- * - Không crash nếu lỗi network/DNS.
+ * STATUS SEMANTICS:
+ * - 'ok'          : Link trả 200/2xx, nội dung hợp lệ
+ * - 'broken'      : 404/410 — Link chết vĩnh viễn, nên set cooldown 24h
+ * - 'not_allowed' : 403/401/405 — Bị chặn bởi anti-bot hoặc firewall, KHÔNG phải chết
+ * - 'rate_limited': 429 — Cần thử lại sau, tạm thời, cooldown 1h
+ * - 'server_error': 5xx — Lỗi server, có thể phục hồi, cooldown 6h
+ * - 'timeout'     : Request timeout, có thể phục hồi, cooldown 6h
+ * - 'dns_error'   : DNS lỗi, có thể tạm thời, cooldown 6h
+ * - 'error'       : Lỗi mạng khác
+ * - 'unknown'     : Không xác định được
+ *
+ * HEAD trước, nếu fail / 405 / 403 → GET fallback.
+ * Đọc body ngắn để phát hiện "Not Allowed!", "Forbidden", v.v.
+ * Đặc biệt với go.isclix.com / AccessTrade: luôn GET.
+ * Timeout 10 giây.
+ * Không crash nếu lỗi network/DNS.
  */
 export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
   // Validate URL
@@ -223,7 +250,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
         const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS);
 
         if (headResponse.ok) {
-          // HEAD 200 — link có vẻ ok, nhưng không đọc được body
+          // HEAD 200 — link có vẻ ok
           return {
             status: 'ok',
             ok: true,
@@ -233,7 +260,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
           };
         }
 
-        // HEAD fail rõ ràng
+        // HEAD rõ ràng lỗi vĩnh viễn
         if (headResponse.status === 404 || headResponse.status === 410) {
           return {
             status: 'broken',
@@ -243,35 +270,37 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
           };
         }
 
+        // 403/405/429/401 từ HEAD có thể là server chặn HEAD — fallback GET
         if ([401, 403, 405, 429].includes(headResponse.status)) {
-          // 403, 405 từ HEAD có thể là server chặn HEAD, cần fallback GET
           // Fall through to GET
         } else if (headResponse.status >= 500) {
-          return {
-            status: 'broken',
-            ok: false,
-            reason: `Server error HTTP ${headResponse.status}`,
-            statusCode: headResponse.status,
-          };
+          // 5xx từ HEAD — server-side error, có thể GET sẽ giống, nhưng thử GET nếu chưa forceGet
+          // Fall through to GET
         } else if (headResponse.status >= 400) {
           // Other 4xx — still try GET to confirm
-          // Fall through to GET
         }
       } catch (headError) {
-        // HEAD completely failed (network, timeout, etc.) — try GET
-        if (headError instanceof Error && (headError.name === 'TimeoutError' || headError.message.includes('SSRF'))) {
+        if (headError instanceof Error) {
           if (headError.message.includes('SSRF')) {
-             return { status: 'forbidden', ok: false, reason: headError.message };
+            return { status: 'forbidden', ok: false, reason: headError.message };
           }
-          return { status: 'timeout', ok: false, reason: 'HEAD request timeout' };
+          if (headError.name === 'TimeoutError' || headError.name === 'AbortError') {
+            return { status: 'timeout', ok: false, reason: 'HEAD request timeout' };
+          }
+          // DNS / connection error — check message
+          const msg = headError.message.toLowerCase();
+          if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
+            return { status: 'dns_error', ok: false, reason: `DNS lỗi: ${headError.message}` };
+          }
         }
-        // Fall through to GET
+        // Other HEAD error — fall through to GET
       }
     }
 
     // Step 2: GET request (fallback hoặc forced)
     const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS);
 
+    // Vĩnh viễn dead
     if (getResponse.status === 404 || getResponse.status === 410) {
       return {
         status: 'broken',
@@ -281,20 +310,21 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
       };
     }
 
+    // Access restricted — có thể do anti-bot/firewall, KHÔNG phải chết vĩnh viễn
     if (getResponse.status === 401) {
       return {
-        status: 'forbidden',
+        status: 'not_allowed',
         ok: false,
-        reason: `HTTP 401 — Yêu cầu xác thực, không thể xác minh link`,
+        reason: `HTTP 401 — Yêu cầu xác thực, không thể xác minh link (có thể do anti-bot)`,
         statusCode: getResponse.status,
       };
     }
 
     if (getResponse.status === 403) {
       return {
-        status: 'forbidden',
+        status: 'not_allowed',
         ok: false,
-        reason: `HTTP 403 — Link bị từ chối truy cập, có thể là anti-bot hoặc địa chỉ IP bị chặn`,
+        reason: `HTTP 403 — Link bị từ chối truy cập (anti-bot hoặc IP bị chặn). KHÔNG phải link chết.`,
         statusCode: getResponse.status,
       };
     }
@@ -303,39 +333,41 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
       return {
         status: 'not_allowed',
         ok: false,
-        reason: `HTTP 405 — Phương thức GET không được phép, không thể xác minh`,
+        reason: `HTTP 405 — Phương thức không được phép, có thể do anti-bot`,
         statusCode: getResponse.status,
       };
     }
 
+    // Rate limited — tạm thời, cần cooldown ngắn
     if (getResponse.status === 429) {
       return {
-        status: 'broken',
+        status: 'rate_limited',
         ok: false,
-        reason: `HTTP 429 — Rate limit, link tạm thời không thể truy cập, cần thử lại sau`,
+        reason: `HTTP 429 — Rate limit, cần thử lại sau 1 giờ`,
         statusCode: getResponse.status,
       };
     }
 
+    // Server error — có thể phục hồi
     if (getResponse.status >= 500) {
       return {
-        status: 'broken',
+        status: 'server_error',
         ok: false,
-        reason: `Server error HTTP ${getResponse.status}`,
+        reason: `Server error HTTP ${getResponse.status} — tạm thời, có thể phục hồi`,
         statusCode: getResponse.status,
       };
     }
 
     if (getResponse.status >= 400) {
       return {
-        status: 'broken',
+        status: 'error',
         ok: false,
         reason: `HTTP ${getResponse.status}`,
         statusCode: getResponse.status,
       };
     }
 
-    // Response is 2xx or 3xx — read limited body to check for error content
+    // Response là 2xx hoặc 3xx — đọc body ngắn kiểm tra nội dung lỗi
     const body = await readLimitedBody(getResponse, MAX_BODY_BYTES);
     const bodyMatch = matchBodyError(body);
 
@@ -364,7 +396,10 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
       if (error.message.includes('SSRF')) {
         return { status: 'forbidden', ok: false, reason: error.message };
       }
-
+      const msg = error.message.toLowerCase();
+      if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
+        return { status: 'dns_error', ok: false, reason: `DNS lỗi: ${error.message}` };
+      }
       return {
         status: 'error',
         ok: false,
@@ -692,16 +727,38 @@ export async function checkSourcePreflight(
 }
 
 /**
+ * Check if a URL is an affiliate deeplink domain where HTML 200 response
+ * without redirect is normal behavior (deeplink needs JS to redirect).
+ */
+function isAffiliateDeeplyinkDomain(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return AFFILIATE_DEEPLINK_DOMAINS.some(
+      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check affiliate URL verification without full redirect following.
  * Returns { status: 'ok' | 'unverified' | 'stale', reason: string }
+ *
+ * Quan trọng: AccessTrade deeplinks (pub.accesstrade.vn, go.isclix.com)
+ * trả HTML 200 mà không redirect ngay — đây là BÌNH THƯỜNG vì deeplink
+ * cần JavaScript để redirect về merchant. Chỉ check HTTP status, không
+ * đánh giá HTML response là "unverified" với các domain này.
  */
 async function checkAffiliateVerification(
   affiliateUrl: string,
 ): Promise<{ status: 'ok' | 'unverified' | 'stale'; reason: string }> {
   try {
+    const isDeeplinkDomain = isAffiliateDeeplyinkDomain(affiliateUrl);
+
     const response = await fetchSafeRedirects(affiliateUrl, 'HEAD', 3000);
 
-    // 404/410 = stale
+    // 404/410 = stale regardless of domain
     if (response.status === 404 || response.status === 410) {
       return {
         status: 'stale',
@@ -709,7 +766,30 @@ async function checkAffiliateVerification(
       };
     }
 
-    // If not 200, we can't verify
+    // 5xx = server error, treat as unverified (not stale)
+    if (response.status >= 500) {
+      return {
+        status: 'unverified',
+        reason: `Affiliate URL lỗi server (HTTP ${response.status})`,
+      };
+    }
+
+    // For affiliate deeplink domains: any 2xx/3xx is OK
+    // These domains redirect via JavaScript, not HTTP 30x
+    if (isDeeplinkDomain) {
+      if (response.ok || (response.status >= 200 && response.status < 400)) {
+        return {
+          status: 'ok',
+          reason: `Affiliate deeplink OK (HTTP ${response.status}) — redirect via JS`,
+        };
+      }
+      return {
+        status: 'unverified',
+        reason: `Affiliate deeplink không thể xác minh (HTTP ${response.status})`,
+      };
+    }
+
+    // If not 200, we can't verify for regular domains
     if (!response.ok) {
       return {
         status: 'unverified',
@@ -717,14 +797,12 @@ async function checkAffiliateVerification(
       };
     }
 
-    // HTTP 200 — check if it's a deeplink that didn't redirect
+    // HTTP 200 for regular domain — check if it's HTML without redirect
     const contentType = response.headers.get('content-type') || '';
     const isBrowser = contentType.toLowerCase().includes('text/html');
 
     if (isBrowser) {
-      // Affiliate link returned HTML but didn't redirect
-      // This is typical of deeplinks from AccessTrade
-      // We can't verify destination without JavaScript
+      // Regular domain returning HTML but didn't redirect — can't verify destination
       return {
         status: 'unverified',
         reason: 'Affiliate link trả về HTML nhưng không redirect tự động - cần xác minh thủ công',

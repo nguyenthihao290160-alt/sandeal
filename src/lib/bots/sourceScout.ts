@@ -985,28 +985,36 @@ function calculateCooldownDuration(reason: string | undefined): number {
   if (!reason) return 0;
 
   switch (reason) {
+    // Definitively dead — 24h cooldown
     case 'image_404_stale':
     case 'product_url_404_stale':
     case 'stale_image':
     case 'stale_product_url':
     case 'stale_affiliate':
     case 'broken':
-    case 'not_found':
     case 'image_broken':
     case 'invalid_image':
       return 24 * 60 * 60 * 1000; // 24 hours
+
+    // Recoverable errors — 6h cooldown
     case 'timeout':
     case 'temporary_error':
     case 'server_error':
+    case 'dns_error':
     case 'error':
       return 6 * 60 * 60 * 1000; // 6 hours
+
+    // Access restricted / anti-bot — 4h cooldown (NOT dead, can retry)
     case 'affiliate_unverified':
     case 'forbidden':
     case 'not_allowed':
     case 'affiliate_error':
       return 4 * 60 * 60 * 1000; // 4 hours
+
+    // Rate limited — 1h cooldown
     case 'rate_limited':
       return 1 * 60 * 60 * 1000; // 1 hour
+
     default:
       return 0;
   }
@@ -1359,6 +1367,15 @@ export class SourceScoutBot {
             const originalUrl = isValidHttpUrl(canonical.originalUrl || '') ? canonical.originalUrl : undefined;
             const affiliateUrl = isValidHttpUrl(canonical.affiliateUrl || '') ? canonical.affiliateUrl : undefined;
             const imageUrl = isValidHttpUrl(canonical.imageUrl || '') ? canonical.imageUrl : undefined;
+            // Image candidates from AT item for fallback
+            const imageCandidatesList: string[] = Array.isArray((item as any).imageCandidates)
+              ? (item as any).imageCandidates.filter((u: unknown) => typeof u === 'string' && isValidHttpUrl(u))
+              : [];
+            // Canonical product URL decoded from affiliate deeplink (if available)
+            const canonicalProductUrl: string | undefined =
+              (item as any).canonicalProductUrl && isValidHttpUrl((item as any).canonicalProductUrl)
+                ? (item as any).canonicalProductUrl
+                : undefined;
 
             let healthUpdates: MutableProductDraft = {
               linkLastCheckedAt: new Date().toISOString(),
@@ -1370,51 +1387,134 @@ export class SourceScoutBot {
             const autoDecision = decideSafeAutoPublish(canonical as unknown as MutableProductDraft);
 
             if (autoDecision.allowed && isRealProduct) {
-              if (!originalUrl) {
-                blockReason = 'Thiếu Product URL (originalUrl)';
+              if (!affiliateUrl && !originalUrl) {
+                blockReason = 'Thiếu cả Product URL và Affiliate URL';
                 blockedBy = 'link';
-              } else if (!imageUrl) {
+              } else if (!imageUrl && imageCandidatesList.length === 0) {
                 blockReason = 'Thiếu Ảnh (imageUrl)';
                 blockedBy = 'image';
               } else {
-                // 4. Chạy product URL health
-                const linkResult = await checkLinkHealth(originalUrl);
+                // 4. Check affiliate URL first (this is what users click — always prefer this)
+                // For AccessTrade deeplinks, affiliate URL returning HTML 200 is NORMAL
+                const primaryLinkUrl = affiliateUrl || originalUrl!;
+                const linkResult = await checkLinkHealth(primaryLinkUrl);
                 healthUpdates.linkHealthStatus = linkResult.status as Product['linkHealthStatus'];
+                healthUpdates.affiliateHealthStatus = linkResult.status as Product['linkHealthStatus'];
 
-                // 5. Chạy affiliate URL health
-                let affiliateOk = true;
-                let affResult: any = null;
-                if (affiliateUrl) {
-                  affResult = await checkLinkHealth(affiliateUrl);
-                  healthUpdates.affiliateHealthStatus = affResult.status as Product['linkHealthStatus'];
-                  if (!affResult.ok) {
-                    affiliateOk = false;
-                    healthUpdates.affiliateLinkErrors = `Affiliate link lỗi: ${affResult.reason}`;
-                  } else {
-                    healthUpdates.affiliateLinkErrors = undefined;
+                // 5. Also check product URL (originalUrl) for reference only — timeout here does NOT block
+                let productUrlOk = true;
+                if (originalUrl && originalUrl !== affiliateUrl) {
+                  const prodResult = await checkLinkHealth(originalUrl);
+                  // Only block on definitive errors (404 = 'broken', 403 = 'not_allowed') — timeout/error is recoverable
+                  if (prodResult.status === 'broken' || prodResult.status === 'not_allowed') {
+                    productUrlOk = false;
+                    healthUpdates.linkHealthStatus = prodResult.status as Product['linkHealthStatus'];
+                  } else if (prodResult.ok) {
+                    // If product URL is also ok, note it
+                    healthUpdates.linkHealthStatus = 'ok' as Product['linkHealthStatus'];
                   }
-                } else {
-                  affiliateOk = false;
-                  healthUpdates.affiliateLinkErrors = 'Thiếu Affiliate Link';
+                  // timeout, error, unknown => don't override affiliate's ok status
                 }
 
-                // 6. Chạy image health
-                const imageResult = await checkImageHealth(imageUrl);
-                healthUpdates.imageHealthStatus = imageResult.status as Product['imageHealthStatus'];
+                // 6. Image health with candidate fallback
+                let resolvedImageUrl = imageUrl;
+                let imageOk = false;
 
+                if (resolvedImageUrl) {
+                  const imageResult = await checkImageHealth(resolvedImageUrl);
+                  if (imageResult.ok) {
+                    imageOk = true;
+                    healthUpdates.imageHealthStatus = 'ok' as Product['imageHealthStatus'];
+                  } else {
+                    healthUpdates.imageHealthStatus = imageResult.status as Product['imageHealthStatus'];
+                    // Try fallback image candidates
+                    for (const candidateUrl of imageCandidatesList) {
+                      if (candidateUrl === resolvedImageUrl) continue; // already tried
+                      const candidateResult = await checkImageHealth(candidateUrl);
+                      if (candidateResult.ok) {
+                        imageOk = true;
+                        resolvedImageUrl = candidateUrl;
+                        healthUpdates.imageUrl = candidateUrl;
+                        healthUpdates.imageHealthStatus = 'ok' as Product['imageHealthStatus'];
+                        counters.needsImageFallback += 1;
+                        await this.ctx.info('Image fallback succeeded', {
+                          keyword,
+                          productId: canonical.id,
+                          primaryImageFailed: imageUrl,
+                          fallbackImage: candidateUrl,
+                        });
+                        break;
+                      }
+                    }
+                    if (!imageOk) {
+                      // All images failed — but if only timeout, don't mark as hard broken
+                      const isTimeoutOnly = (imageResult.status as string) === 'timeout';
+                      if (!isTimeoutOnly) {
+                        blockReason = `Ảnh lỗi: ${imageResult.reason} (đã thử ${imageCandidatesList.length + 1} ảnh)`;
+                        blockedBy = 'image';
+                        Object.assign(healthUpdates, markSourceCooldown(healthUpdates, imageResult.status));
+                      }
+                      // For timeout-only image failures: don't block, allow publish with warning
+                    }
+                  }
+                } else if (imageCandidatesList.length > 0) {
+                  // No primary image but have candidates — try them
+                  for (const candidateUrl of imageCandidatesList) {
+                    const candidateResult = await checkImageHealth(candidateUrl);
+                    if (candidateResult.ok) {
+                      imageOk = true;
+                      resolvedImageUrl = candidateUrl;
+                      healthUpdates.imageUrl = candidateUrl;
+                      healthUpdates.imageHealthStatus = 'ok' as Product['imageHealthStatus'];
+                      counters.needsImageFallback += 1;
+                      break;
+                    }
+                  }
+                  if (!imageOk) {
+                    blockReason = 'Không có ảnh hợp lệ (đã thử tất cả candidates)';
+                    blockedBy = 'image';
+                  }
+                }
+
+                // Evaluate overall health result
                 if (!linkResult.ok) {
-                  blockReason = `Product URL lỗi: ${linkResult.reason}`;
-                  blockedBy = 'link';
-                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, linkResult.status));
-                } else if (!affiliateOk) {
-                  blockReason = healthUpdates.affiliateLinkErrors;
-                  blockedBy = 'affiliate_link';
-                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, affResult?.status || 'affiliate_error'));
-                } else if (!imageResult.ok) {
-                  blockReason = `Ảnh lỗi: ${imageResult.reason}`;
-                  blockedBy = 'image';
-                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, imageResult.status));
+                  // Classify link failure by severity
+                  const linkStatus = linkResult.status as string;
+                  const isDefinitelyDead = linkStatus === 'broken'; // 404/410 only
+                  const isRecoverable =
+                    linkStatus === 'timeout' ||
+                    linkStatus === 'dns_error' ||
+                    linkStatus === 'server_error' ||
+                    linkStatus === 'rate_limited' ||
+                    linkStatus === 'not_allowed' ||  // 403 anti-bot — not necessarily dead
+                    linkStatus === 'forbidden' ||    // legacy alias
+                    linkStatus === 'error';
+
+                  if (isRecoverable && productUrlOk) {
+                    // Recoverable: affiliate had transient error but product URL is accessible
+                    // Allow publish — set cooldown to re-check later, but don't block now
+                    healthUpdates.affiliateLinkErrors = `Affiliate link tạm thời lỗi (${linkStatus}, recoverable): ${linkResult.reason}`;
+                    Object.assign(healthUpdates, markSourceCooldown({}, linkResult.status));
+                    // isHealthOk will be evaluated below based on blockReason
+                  } else if (isDefinitelyDead) {
+                    // 404/410: definitively dead — block and set long cooldown
+                    blockReason = `Affiliate/Link chết (404/410): ${linkResult.reason}`;
+                    blockedBy = 'link';
+                    Object.assign(healthUpdates, markSourceCooldown(healthUpdates, linkResult.status));
+                    healthUpdates.affiliateLinkErrors = `Affiliate link chết: ${linkResult.reason}`;
+                  } else {
+                    // Recoverable but no product URL fallback — block with short cooldown
+                    blockReason = `Affiliate/Link lỗi (${linkStatus}): ${linkResult.reason}`;
+                    blockedBy = 'link';
+                    Object.assign(healthUpdates, markSourceCooldown(healthUpdates, linkResult.status));
+                    healthUpdates.affiliateLinkErrors = `Affiliate link lỗi: ${linkResult.reason}`;
+                  }
                 } else {
+                  healthUpdates.affiliateLinkErrors = undefined;
+                }
+
+
+                if (!blockReason && (imageOk || (!imageUrl && imageCandidatesList.length === 0))) {
                   isHealthOk = true;
                 }
               }
@@ -1510,6 +1610,8 @@ export class SourceScoutBot {
                   affiliateHealthStatus: getText(finalRecord.affiliateHealthStatus) || null,
                   imageHealthStatus: getText(finalRecord.imageHealthStatus) || null,
                   qualityScore: finalRecord.qualityScore ?? null,
+                  imageCandidatesCount: imageCandidatesList.length,
+                  canonicalProductUrlDecoded: canonicalProductUrl || null,
                   returnedToPipeline: isProductLikeKind(kind),
                   isDuplicateRefresh: Boolean(existingProduct),
                 },
@@ -1549,8 +1651,10 @@ export class SourceScoutBot {
         blockedByLink: counters.blockedByLink,
         blockedByImage: counters.blockedByImage,
         healthErrors: counters.healthErrors,
+        needsImageFallback: counters.needsImageFallback,
 
         duplicate: counters.duplicate,
+        cooldownSkipped: counters.cooldownSkipped,
         skipped: counters.skipped,
 
         safeMode: AUTO_SAFE_MODE,
