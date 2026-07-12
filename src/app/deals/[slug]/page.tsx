@@ -2,8 +2,9 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
 import { getProductBySlug, getPublishedProducts } from '@/lib/storage/products';
-import { isPublicSafeProduct } from '@/lib/publicProductFilter';
 import type { Product } from '@/lib/types';
+import { buildBreadcrumbJsonLd, buildProductJsonLd, buildProductMetadata, getProductIndexingDecision, selectRelatedProducts } from '@/lib/seo/productSeo';
+import ProductImage from '../ProductImage';
 
 export const dynamic = 'force-dynamic';
 
@@ -107,19 +108,7 @@ function SafeProductImage({
     if (!cleanSrc) return fallback;
 
     return (
-        <object
-            data={cleanSrc}
-            aria-label={alt}
-            style={{
-                width: '100%',
-                height: '100%',
-                display: 'block',
-                objectFit: 'cover',
-                background: '#f8fafc',
-            }}
-        >
-            {fallback}
-        </object>
+        <ProductImage src={cleanSrc} alt={alt} compact={compact} />
     );
 }
 
@@ -191,6 +180,10 @@ export async function generateMetadata({
     const { slug } = await params;
     const product = await getProductBySlug(slug);
 
+    return buildProductMetadata(product);
+
+    /* Legacy metadata implementation retained only in git history.
+
     if (!product || !isPublicSafeProduct(product)) {
         return {
             title: 'Không tìm thấy — SanDeal',
@@ -203,6 +196,7 @@ export async function generateMetadata({
             product.description ||
             `Deal ${product.title} trên ${getPlatformLabel(String(product.platform || 'other'))}`,
     };
+    */
 }
 
 export default async function DealDetailPage({
@@ -211,16 +205,20 @@ export default async function DealDetailPage({
     params: Promise<{ slug: string }>;
 }) {
     const { slug } = await params;
-    const product = await getProductBySlug(slug);
+    const foundProduct = await getProductBySlug(slug);
 
-    if (!product || !isPublicSafeProduct(product)) {
-        notFound();
-    }
+    if (!foundProduct) return notFound();
+    if (foundProduct.kind !== 'product' && foundProduct.kind !== 'deal') return notFound();
+    const product: Product = foundProduct;
 
     const dealUrl = getDealUrl(product);
     const discount = getDiscountPercent(product);
     const platformLabel = getPlatformLabel(String(product.platform || 'other'));
     const currentPrice = product.salePrice || product.price;
+    const indexing = getProductIndexingDecision(product);
+    const review = product.reviewContent;
+    const productJsonLd = buildProductJsonLd(product);
+    const breadcrumbJsonLd = buildBreadcrumbJsonLd(product);
 
     let relatedDeals: Product[] = [];
 
@@ -228,10 +226,7 @@ export default async function DealDetailPage({
         const data = await getPublishedProducts();
 
         if (Array.isArray(data)) {
-            relatedDeals = data
-                .filter((item) => item.id !== product.id)
-                .filter((item) => isPublicSafeProduct(item))
-                .slice(0, 4);
+            relatedDeals = selectRelatedProducts(product, data, 4);
         }
     } catch {
         relatedDeals = [];
@@ -245,6 +240,8 @@ export default async function DealDetailPage({
                 minHeight: '100vh',
             }}
         >
+            <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd).replace(/</g, '\\u003c') }} />
+            {productJsonLd && <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd).replace(/</g, '\\u003c') }} />}
             <div
                 style={{
                     background: 'linear-gradient(90deg, #6d5dfc 0%, #06b6d4 100%)',
@@ -421,6 +418,13 @@ export default async function DealDetailPage({
                                 color: '#64748b',
                             }}
                         >
+                            <nav aria-label="Breadcrumb" style={{ marginBottom: 10 }}>
+                                <Link href="/" style={{ color: '#64748b', textDecoration: 'none' }}>Trang chủ</Link>
+                                {' / '}
+                                <Link href="/deals" style={{ color: '#64748b', textDecoration: 'none' }}>Sản phẩm</Link>
+                                {' / '}
+                                <span aria-current="page">{product.title}</span>
+                            </nav>
                             <Link
                                 href="/deals"
                                 style={{
@@ -433,6 +437,7 @@ export default async function DealDetailPage({
                         </div>
 
                         <div
+                            className="deal-detail-grid"
                             style={{
                                 display: 'grid',
                                 gridTemplateColumns: 'minmax(320px, 520px) 1fr',
@@ -679,7 +684,35 @@ export default async function DealDetailPage({
                                     </div>
                                 </div>
 
-                                {product.description && (
+                                <section aria-labelledby="editorial-review" style={{ display: 'grid', gap: 18 }}>
+                                    {!indexing.indexable && (
+                                        <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 18, padding: 16, color: '#9a3412' }}>
+                                            Trang thông tin ngắn này chưa đủ điều kiện lập chỉ mục. Lý do: {indexing.reasons.join(', ')}.
+                                        </div>
+                                    )}
+                                    {review ? <>
+                                        <div style={{ background: '#ffffff', border: '1px solid #e8edf5', borderRadius: 22, padding: 22 }}>
+                                            <h2 id="editorial-review" style={{ marginTop: 0 }}>Tóm tắt đánh giá</h2>
+                                            <p style={{ lineHeight: 1.8, color: '#334155' }}>{review.reviewSummary}</p>
+                                            <small>Kiểm tra: {review.reviewedAt ? new Date(review.reviewedAt).toLocaleDateString('vi-VN') : 'Chưa xác định'} · Cập nhật nội dung: {review.contentUpdatedAt ? new Date(review.contentUpdatedAt).toLocaleDateString('vi-VN') : 'Chưa xác định'}</small>
+                                        </div>
+                                        <div style={{ background: '#ffffff', border: '1px solid #e8edf5', borderRadius: 22, padding: 22 }}>
+                                            <h2 style={{ marginTop: 0 }}>Thông tin chính đã xác minh</h2>
+                                            <dl style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 0.7fr) 1.3fr', gap: 10 }}>
+                                                {review.keyFacts.filter((item) => !['product_url', 'affiliate_url', 'image'].includes(item.id)).slice(0, 14).map((item) => <div key={item.id} style={{ display: 'contents' }}><dt style={{ fontWeight: 800 }}>{item.label}</dt><dd style={{ margin: 0, overflowWrap: 'anywhere' }}>{typeof item.value === 'number' && item.id.includes('price') ? formatPrice(item.value) : `${item.value}${item.id === 'discount' ? '%' : ''}`}</dd></div>)}
+                                            </dl>
+                                        </div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 18 }}>
+                                            <div style={{ background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Ưu điểm có căn cứ</h2><ul>{review.strengths.map((item) => <li key={item.id}>{item.text}</li>)}</ul></div>
+                                            <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Hạn chế và điều cần cân nhắc</h2><ul>{review.limitations.map((item) => <li key={item.id}>{item.text}</li>)}</ul></div>
+                                        </div>
+                                        <div style={{ background: '#ffffff', border: '1px solid #e8edf5', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Phù hợp với ai?</h2><ul>{review.suitableFor.map((item) => <li key={item}>{item}</li>)}</ul><h2>Không phù hợp với ai?</h2><ul>{review.notSuitableFor.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                                        <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Kết luận biên tập</h2><p>{review.reviewVerdict}</p></div>
+                                        <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Minh bạch phương pháp</h2><p>{review.reviewDisclosure}</p><p>Người biên tập: Hệ thống biên tập tự động SanDeal · Phương pháp: phân tích dữ liệu nguồn · Nguồn: {review.evidenceSources.map((item) => item.name).join(', ') || product.source}.</p><p><Link href="/review-methodology">Xem SanDeal đánh giá sản phẩm như thế nào</Link></p></div>
+                                    </> : <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 22, padding: 22 }}><h2 id="editorial-review">Nội dung đang được xác minh</h2><p>SanDeal chưa có đủ dữ kiện để tạo bài đánh giá đầy đủ cho sản phẩm này.</p></div>}
+                                </section>
+
+                                {false && product.description && (
                                     <div
                                         style={{
                                             background: '#ffffff',
@@ -712,7 +745,7 @@ export default async function DealDetailPage({
                                     </div>
                                 )}
 
-                                {Array.isArray(product.benefits) && product.benefits.length > 0 && (
+                                {false && Array.isArray(product.benefits) && product.benefits.length > 0 && (
                                     <div
                                         style={{
                                             background: '#ffffff',
@@ -754,7 +787,7 @@ export default async function DealDetailPage({
                                     </div>
                                 )}
 
-                                {Array.isArray(product.warnings) && product.warnings.length > 0 && (
+                                {false && Array.isArray(product.warnings) && product.warnings.length > 0 && (
                                     <div
                                         style={{
                                             background: '#fffbeb',
@@ -797,11 +830,11 @@ export default async function DealDetailPage({
                                 )}
 
                                 <div style={{ marginTop: 24 }}>
-                                    {dealUrl ? (
+                                    {dealUrl && indexing.indexable ? (
                                         <a
                                             href={dealUrl}
                                             target="_blank"
-                                            rel="noopener noreferrer"
+                                            rel="sponsored noopener noreferrer"
                                             style={{
                                                 display: 'block',
                                                 width: '100%',

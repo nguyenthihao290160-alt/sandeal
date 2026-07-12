@@ -10,8 +10,6 @@ import type { Product } from './types';
 export function normalizeProductForPublic(p: Partial<Product>): Product {
   const price = typeof p.price === 'number' ? p.price : undefined;
   const salePrice = typeof p.salePrice === 'number' ? p.salePrice : undefined;
-  const discountPercent = (price && salePrice && price > salePrice) ? Math.round((1 - (salePrice / price)) * 100) : undefined;
-
   const imageUrl = p.imageUrl && typeof p.imageUrl === 'string' && p.imageUrl.length > 5 ? p.imageUrl : undefined;
 
   const normalized: Product = {
@@ -19,9 +17,9 @@ export function normalizeProductForPublic(p: Partial<Product>): Product {
     title: p.title || 'Sản phẩm chưa có tiêu đề',
     slug: p.slug || (p.title ? String(p.title).toLowerCase().replace(/[^a-z0-9]+/g, '-') : '') || '',
     description: p.description || undefined,
-    kind: (p.kind as any) || 'product',
-    platform: (p.platform as any) || 'website',
-    source: (p.source as any) || 'manual',
+    kind: p.kind || 'unknown',
+    platform: p.platform || 'website',
+    source: p.source || 'manual',
     originalUrl: p.originalUrl || undefined,
     affiliateUrl: p.affiliateUrl || undefined,
     imageUrl,
@@ -46,8 +44,8 @@ export function normalizeProductForPublic(p: Partial<Product>): Product {
     scoreLabel: p.scoreLabel,
     scoreReasons: Array.isArray(p.scoreReasons) ? p.scoreReasons : undefined,
     scoreWarnings: Array.isArray(p.scoreWarnings) ? p.scoreWarnings : undefined,
-    riskLevel: (p.riskLevel as any) || 'unknown',
-    status: (p.status as any) || 'draft',
+    riskLevel: p.riskLevel || 'unknown',
+    status: p.status || 'needs_review',
     externalId: p.externalId,
     rawSourceType: p.rawSourceType,
     linkHealthStatus: p.linkHealthStatus,
@@ -61,6 +59,33 @@ export function normalizeProductForPublic(p: Partial<Product>): Product {
     complianceIssues: Array.isArray(p.complianceIssues) ? p.complianceIssues : [],
     generatedContent: p.generatedContent,
     dataCompleteness: computeDataCompleteness(p),
+    affiliateHealthStatus: p.affiliateHealthStatus,
+    affiliateLastCheckedAt: p.affiliateLastCheckedAt,
+    imageLastCheckedAt: p.imageLastCheckedAt,
+    sourceHealthCooldownUntil: p.sourceHealthCooldownUntil,
+    sourceHealthReason: p.sourceHealthReason,
+    sourceHealthSkipUntil: p.sourceHealthSkipUntil,
+    sourceId: p.sourceId,
+    contentHash: p.contentHash,
+    sourceHash: p.sourceHash,
+    verifiedSource: p.verifiedSource,
+    sourceVerified: p.sourceVerified,
+    autoPublishEligible: p.autoPublishEligible,
+    publicDecision: p.publicDecision,
+    publicHidden: p.publicHidden,
+    publicBlockReason: p.publicBlockReason,
+    autoPublished: p.autoPublished,
+    needsVerification: p.needsVerification,
+    qualityScore: p.qualityScore,
+    publishedAt: p.publishedAt,
+    productHealthStatus: p.productHealthStatus,
+    imageContentType: p.imageContentType,
+    brand: p.brand,
+    sku: p.sku,
+    gtin: p.gtin,
+    mpn: p.mpn,
+    specifications: p.specifications,
+    reviewContent: p.reviewContent,
     createdAt: p.createdAt || new Date().toISOString(),
     updatedAt: p.updatedAt || new Date().toISOString(),
   };

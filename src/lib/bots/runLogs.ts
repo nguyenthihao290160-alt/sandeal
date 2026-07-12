@@ -23,6 +23,27 @@ export interface AutoPilotRunLog {
 }
 
 export interface RunSummary {
+  sourceRequests?: number;
+  candidatesQueued?: number;
+  networkChecks?: number;
+  productsReviewed?: number;
+  unchanged?: number;
+  skippedCooldown?: number;
+  failed?: number;
+  queueSize?: number;
+  reviewQueued?: number;
+  reviewGenerated?: number;
+  reviewApproved?: number;
+  reviewNeedsReview?: number;
+  reviewRejected?: number;
+  reviewStale?: number;
+  claimValidationFailed?: number;
+  duplicateContentSkipped?: number;
+  seoReady?: number;
+  seoBlocked?: number;
+  indexable?: number;
+  noindex?: number;
+  sitemapIncluded?: number;
   // Core metrics
   found?: number;
   rawFound?: number; // items returned by source API (before preflight)

@@ -3,15 +3,27 @@
 // ===========================================
 
 import type { Product, CreateProductInput, ProductFilters } from '../types';
-import { readCollection, writeCollection, findById, insertOne, updateOne, deleteOne, generateId } from './adapter';
+import { readCollection, writeCollection, deleteOne, generateId } from './adapter';
 import { normalizeProductForPublic } from '../productNormalizer';
 import { isPublicSafeProduct } from '../publicProductFilter';
+import { evaluateCanonicalProduct, normalizeCanonicalProduct, stableProductHash } from '../canonicalProduct';
 
 const COLLECTION = 'products';
+let productWriteChain: Promise<unknown> = Promise.resolve();
+
+function withProductWrite<T>(work: () => Promise<T>): Promise<T> {
+  const next = productWriteChain.then(work, work);
+  productWriteChain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+async function readCanonicalProducts(): Promise<Product[]> {
+  return (await readCollection<Partial<Product>>(COLLECTION)).map((item) => normalizeCanonicalProduct(item));
+}
 
 /** List products with optional filters */
 export async function listProducts(filters?: ProductFilters): Promise<Product[]> {
-  let products = await readCollection<Product>(COLLECTION);
+  let products = await readCanonicalProducts();
 
   if (!filters) return products;
 
@@ -46,28 +58,28 @@ export async function listProducts(filters?: ProductFilters): Promise<Product[]>
 }
 
 export async function getAllProducts(): Promise<Product[]> {
-  return readCollection<Product>(COLLECTION);
+  return readCanonicalProducts();
 }
 
 export async function getProductById(id: string): Promise<Product | null> {
-  return findById<Product>(COLLECTION, id);
+  return (await readCanonicalProducts()).find((item) => item.id === id) ?? null;
 }
 
 export async function getProductBySlug(slug: string): Promise<Product | null> {
-  const products = await readCollection<Product>(COLLECTION);
+  const products = await readCanonicalProducts();
   return products.find(p => p.slug === slug) ?? null;
 }
 
 
 export async function getPublishedProducts(): Promise<Product[]> {
-  const products = await readCollection<Product>(COLLECTION);
+  const products = await readCanonicalProducts();
   const filtered = products.filter(isPublicSafeProduct);
   // Normalize to ensure consistent public schema
   return filtered.map(p => normalizeProductForPublic(p));
 }
 
 export async function getPublicProducts(filters?: ProductFilters): Promise<Product[]> {
-  let products = await readCollection<Product>(COLLECTION);
+  let products = await readCanonicalProducts();
   if (filters) {
     // reuse existing listProducts filtering by delegating
     products = await listProducts(filters);
@@ -77,18 +89,86 @@ export async function getPublicProducts(filters?: ProductFilters): Promise<Produ
 }
 
 export async function createProduct(data: CreateProductInput): Promise<Product> {
-  const product: Product = {
+  const product = normalizeCanonicalProduct({
     ...data,
     id: generateId(),
     slug: generateSlug(data.title),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  };
-  return insertOne<Product>(COLLECTION, product);
+  });
+  return withProductWrite(async () => {
+    const products = await readCanonicalProducts();
+    products.push(product);
+    await writeCollection(COLLECTION, products);
+    return product;
+  });
 }
 
 export async function updateProduct(id: string, updates: Partial<Product>): Promise<Product | null> {
-  return updateOne<Product>(COLLECTION, id, updates);
+  const requestsPublicState = updates.status === 'published' || updates.publicHidden === false || updates.autoPublished === true;
+  return saveCanonicalProduct(id, updates, { evaluate: requestsPublicState });
+}
+
+export async function saveCanonicalProduct(
+  id: string,
+  updates: Partial<Product>,
+  options: { evaluate?: boolean } = {},
+): Promise<Product | null> {
+  return withProductWrite(async () => {
+    const products = await readCanonicalProducts();
+    const index = products.findIndex((item) => item.id === id);
+    if (index < 0) return null;
+    const now = new Date().toISOString();
+    const merged = { ...products[index], ...updates, id, updatedAt: now };
+    products[index] = options.evaluate
+      ? evaluateCanonicalProduct(merged, now)
+      : normalizeCanonicalProduct(merged, now);
+    await writeCollection(COLLECTION, products);
+    return products[index];
+  });
+}
+
+export async function upsertCanonicalProduct(
+  draft: Partial<Product>,
+  options: { evaluate?: boolean } = {},
+): Promise<{ product: Product; created: boolean; unchanged: boolean }> {
+  return withProductWrite(async () => {
+    const products = await readCanonicalProducts();
+    const sourceId = String(draft.sourceId || draft.externalId || '');
+    const hash = draft.sourceHash || draft.contentHash || stableProductHash(draft);
+    const index = products.findIndex((item) =>
+      (sourceId && item.source === draft.source && (item.sourceId === sourceId || item.externalId === sourceId)) ||
+      (draft.originalUrl && item.originalUrl === draft.originalUrl) ||
+      (draft.affiliateUrl && item.affiliateUrl === draft.affiliateUrl),
+    );
+    if (index >= 0 && products[index].sourceHash === hash) {
+      return { product: products[index], created: false, unchanged: true };
+    }
+    const now = new Date().toISOString();
+    if (index >= 0) {
+      const sourceChanged = products[index].sourceHash !== hash;
+      const staleReview = sourceChanged && products[index].reviewContent
+        ? { ...products[index].reviewContent, reviewStatus: 'stale' as const }
+        : products[index].reviewContent;
+      const merged = { ...products[index], ...draft, reviewContent: draft.reviewContent || staleReview, id: products[index].id, sourceHash: hash, contentHash: hash, updatedAt: now };
+      products[index] = options.evaluate ? evaluateCanonicalProduct(merged, now) : normalizeCanonicalProduct(merged, now);
+      await writeCollection(COLLECTION, products);
+      return { product: products[index], created: false, unchanged: false };
+    }
+    const base = {
+      ...draft,
+      id: String(draft.id || generateId()),
+      slug: draft.slug || generateSlug(String(draft.title || 'san-pham')),
+      sourceHash: hash,
+      contentHash: hash,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const product = options.evaluate ? evaluateCanonicalProduct(base, now) : normalizeCanonicalProduct(base, now);
+    products.push(product);
+    await writeCollection(COLLECTION, products);
+    return { product, created: true, unchanged: false };
+  });
 }
 
 export async function deleteProduct(id: string): Promise<boolean> {
@@ -96,11 +176,11 @@ export async function deleteProduct(id: string): Promise<boolean> {
 }
 
 export async function approveProduct(id: string): Promise<Product | null> {
-  return updateOne<Product>(COLLECTION, id, { status: 'approved' } as Partial<Product>);
+  return updateProduct(id, { status: 'approved' });
 }
 
 export async function archiveProduct(id: string): Promise<Product | null> {
-  return updateOne<Product>(COLLECTION, id, { status: 'archived' } as Partial<Product>);
+  return updateProduct(id, { status: 'archived' });
 }
 
 export async function getProductStats(): Promise<{
@@ -111,7 +191,7 @@ export async function getProductStats(): Promise<{
   published: number;
   archived: number;
 }> {
-  const products = await readCollection<Product>(COLLECTION);
+  const products = await readCanonicalProducts();
   return {
     total: products.length,
     draft: products.filter(p => p.status === 'draft').length,

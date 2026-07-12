@@ -1,67 +1,37 @@
-# Hướng dẫn thiết lập VPS Scheduler cho SanDeal AutoPilot
+# Scheduler SanDeal / ReviewPilot AI
 
-Tài liệu này hướng dẫn cách cấu hình `systemd` trên VPS để tự động gọi webhook (API Tick) của hệ thống AutoPilot định kỳ.
+Hệ thống chỉ dùng một endpoint server-side để điều phối cả chế độ tăng tốc và ổn định:
 
-Hệ thống sử dụng cơ chế bảo mật bằng Header `x-sandeal-scheduler-secret`. Cơ chế này độc lập với frontend, giúp tiến trình chạy ngầm cực kỳ ổn định, không lo timeout từ Cloudflare hoặc trình duyệt.
+`POST /api/ai-bots/scheduler/tick`
 
-## 1. Chuẩn bị
+Endpoint yêu cầu header `x-sandeal-scheduler-secret` khớp với biến môi trường `SCHEDULER_SECRET`. Code không có secret mặc định và không ghi secret vào log. Nếu biến môi trường chưa được cấu hình, endpoint luôn trả `401`.
 
-Xác định URL của hệ thống (ví dụ: `http://localhost:3000` hoặc domain của bạn). 
-Mặc định script dưới gọi vào: `http://localhost:3000/api/ai-bots/scheduler/tick`
+## Chu kỳ gọi
 
-Xác định Secret key (mặc định: `sandeal-vps-scheduler-secret-2024`).
+VPS cron nên gọi tick mỗi 5 phút. Tick chỉ lấy persistent lock, đọc trạng thái và chạy những job đã tới hạn. Không tạo cron riêng cho scan/review/recheck.
 
-## 2. Tạo Service file
+Ví dụ crontab (thay URL và lấy secret từ secret store của VPS, không ghi secret vào repository):
 
-Tạo file `/etc/systemd/system/sandeal-tick.service`:
-
-```ini
-[Unit]
-Description=SanDeal AutoPilot Tick Service
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/curl -s -X POST http://localhost:3000/api/ai-bots/scheduler/tick -H "x-sandeal-scheduler-secret: sandeal-vps-scheduler-secret-2024"
+```cron
+*/5 * * * * curl --fail --silent --show-error --max-time 290 -X POST -H "x-sandeal-scheduler-secret: $SCHEDULER_SECRET" https://your-domain.example/api/ai-bots/scheduler/tick
 ```
 
-## 3. Tạo Timer file
+## Lịch nội bộ
 
-Tạo file `/etc/systemd/system/sandeal-tick.timer` để gọi service mỗi 15 phút:
+- Dưới 100 sản phẩm công khai: scan 15 phút, review queue 5 phút, recheck 12 giờ.
+- Từ 100 sản phẩm công khai: scan 60 phút, review queue 15 phút, recheck 24 giờ.
+- Queue, lịch, keyword rotation, quota ngày và lock đều persistent trong `.data`.
+- Lock có TTL 25 phút; một tick mới không chạy chồng tick đang hoạt động.
+- Run dừng theo `maxRunDurationMs`; item chưa nhận hoặc chưa tới hạn vẫn nằm trong queue cho tick sau.
 
-```ini
-[Unit]
-Description=Run SanDeal AutoPilot Tick Every 15 Minutes
+## Kiểm tra local
 
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=15min
-Unit=sandeal-tick.service
-
-[Install]
-WantedBy=timers.target
-```
-
-## 4. Kích hoạt Timer
-
-Chạy các lệnh sau để nạp lại systemd và kích hoạt timer:
+Không cần gọi nguồn thật để kiểm tra logic:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable sandeal-tick.timer
-sudo systemctl start sandeal-tick.timer
+npm run test
+npm run lint
+npm run build
 ```
 
-## 5. Kiểm tra
-
-- Xem trạng thái Timer:
-  ```bash
-  sudo systemctl status sandeal-tick.timer
-  ```
-
-- Xem log chạy:
-  ```bash
-  sudo journalctl -u sandeal-tick.service -f
-  ```
-
-**Lưu ý**: Tick API sẽ tự động kiểm tra thời gian (chu kỳ 3h, 6h, 12h) và daily limit trước khi quyết định có chạy workflow thực sự hay không. Vì vậy, gọi Tick mỗi 15 phút là rất an toàn.
+Khi đã cấu hình key AccessTrade và muốn chạy đúng một lượt thủ công, dùng API `run-now` hiện có với mode `source_scan`, sau đó dùng `full_safe_run` để xử lý một batch. Không chạy vòng lặp thủ công và không đặt token trong command history.

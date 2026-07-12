@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import type { Product } from '@/lib/types';
+import ProductImage from './ProductImage';
 
 const PLATFORMS: Record<string, string> = {
     shopee: 'Shopee',
@@ -81,21 +82,6 @@ function getRecordUrl(product: Product) {
 
 function getBuyUrl(product: Product) {
     return product.affiliateUrl || product.originalUrl || getRecordUrl(product);
-}
-
-function isPublicProduct(product: Product) {
-    const record = product as ProductRecord;
-
-    if (!product) return false;
-    if (product.status !== 'approved' && product.status !== 'published') return false;
-    if (record.publicHidden === true) return false;
-    if (product.kind === 'voucher' || product.kind === 'campaign' || product.kind === 'store_offer') {
-        return false;
-    }
-    if (!product.title || !String(product.title).trim()) return false;
-    if (!getBuyUrl(product)) return false;
-
-    return true;
 }
 
 function applyQuickFilter(products: Product[], activeFilter: string) {
@@ -187,14 +173,8 @@ function SafeProductImage({
     src?: string | null;
     alt: string;
 }) {
-    const [failed, setFailed] = useState(false);
-
-    useEffect(() => {
-        setFailed(false);
-    }, [src]);
-
     const cleanSrc = typeof src === 'string' ? src.trim() : '';
-    const shouldShowImage = cleanSrc && !failed;
+    const shouldShowImage = Boolean(cleanSrc);
 
     if (!shouldShowImage) {
         return (
@@ -242,19 +222,7 @@ function SafeProductImage({
     }
 
     return (
-        <img
-            src={cleanSrc}
-            alt=""
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            onError={() => setFailed(true)}
-            style={{
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                display: 'block',
-            }}
-        />
+        <ProductImage src={cleanSrc} alt={alt} />
     );
 }
 
@@ -270,12 +238,11 @@ export default function DealsPage() {
     const [activeSort, setActiveSort] = useState('popular');
 
     useEffect(() => {
-        const params = new URLSearchParams(window.location.search);
-        const initialSearch = params.get('q');
-
-        if (initialSearch) {
-            setSearch(initialSearch);
-        }
+        const timer = window.setTimeout(() => {
+            const initialSearch = new URLSearchParams(window.location.search).get('q');
+            if (initialSearch) setSearch(initialSearch);
+        }, 0);
+        return () => window.clearTimeout(timer);
     }, []);
 
     const loadDeals = useCallback(async () => {
@@ -295,8 +262,7 @@ export default function DealsPage() {
             const data = await response.json();
 
             if (data?.ok && Array.isArray(data.data)) {
-                const safeProducts = data.data.filter((product: Product) => isPublicProduct(product));
-                setProducts(safeProducts);
+                setProducts(data.data);
             } else {
                 setProducts([]);
             }
@@ -308,7 +274,8 @@ export default function DealsPage() {
     }, [search, platform]);
 
     useEffect(() => {
-        loadDeals();
+        const timer = window.setTimeout(loadDeals, 0);
+        return () => window.clearTimeout(timer);
     }, [loadDeals]);
 
     const visibleProducts = useMemo(() => {
@@ -1071,7 +1038,7 @@ export default function DealsPage() {
                                                         <a
                                                             href={buyUrl}
                                                             target="_blank"
-                                                            rel="noreferrer"
+                                                            rel="sponsored noopener noreferrer"
                                                             style={{
                                                                 flex: 1,
                                                                 textAlign: 'center',

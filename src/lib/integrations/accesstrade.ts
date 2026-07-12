@@ -87,6 +87,28 @@ export interface AccessTradeSearchResult {
     archived: number;
     blockedFromPublic: number;
   };
+  requests: AccessTradeRequestLog[];
+}
+
+export type AccessTradeResultType =
+  | 'success_with_results' | 'success_empty' | 'timeout' | 'rate_limited'
+  | 'unauthorized' | 'forbidden' | 'upstream_error' | 'malformed_response' | 'network_error';
+
+export interface AccessTradeRequestLog {
+  endpoint: string;
+  durationMs: number;
+  statusCode?: number;
+  resultType: AccessTradeResultType;
+  itemCount: number;
+  retryAfter?: string;
+  attempts?: number;
+}
+
+export class AccessTradeRequestError extends Error {
+  constructor(public readonly resultType: AccessTradeResultType, public readonly requests: AccessTradeRequestLog[], message: string) {
+    super(message);
+    this.name = 'AccessTradeRequestError';
+  }
 }
 
 type AccessTradeEndpointKind = 'datafeed' | 'offers';
@@ -97,6 +119,20 @@ interface AccessTradeFetchResult {
   items: AccessTradeRawItem[];
   status?: number;
   error?: string;
+  request?: AccessTradeRequestLog;
+  attempts?: number;
+}
+
+function toRequestLog(result: AccessTradeFetchResult): AccessTradeRequestLog {
+  if (result.request) return result.request;
+  return {
+    endpoint: result.endpoint,
+    durationMs: 0,
+    statusCode: result.status,
+    resultType: result.ok ? (result.items.length ? 'success_with_results' : 'success_empty') : 'malformed_response',
+    itemCount: result.items.length,
+    attempts: result.attempts || 1,
+  };
 }
 
 // ---- Raw API response types ----
@@ -303,7 +339,11 @@ export async function searchAccessTrade(
         .map((result) => `${result.endpoint}: ${result.error || `HTTP ${result.status || 'unknown'}`}`)
         .join(' | ');
 
-    throw new Error(
+    const requests = fetchResults.map(toRequestLog);
+    const terminal = requests.find((item) => ['unauthorized', 'forbidden', 'rate_limited'].includes(item.resultType)) || requests[0];
+    throw new AccessTradeRequestError(
+        terminal?.resultType || 'network_error',
+        requests,
         `Không thể lấy dữ liệu từ AccessTrade. Vui lòng kiểm tra API key hoặc thử lại sau. ${errorMessage}`,
     );
   }
@@ -358,6 +398,7 @@ export async function searchAccessTrade(
       archived,
       blockedFromPublic: items.length - publicEligibleProducts,
     },
+    requests: fetchResults.map(toRequestLog),
   };
 }
 
@@ -901,6 +942,7 @@ async function fetchAccessTradeDatafeeds(
   if (params.category) {
     url.searchParams.set('cate', toAsciiSlug(params.category));
   }
+  if (params.keyword) url.searchParams.set('keyword', params.keyword);
 
   return fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed');
 }
@@ -935,6 +977,7 @@ async function fetchAccessTradeEndpoint(
   const TIMEOUT_MS = 15_000;
   
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const startedAt = Date.now();
     let response: Response | undefined;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -953,9 +996,8 @@ async function fetchAccessTradeEndpoint(
       clearTimeout(timeoutId);
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       
-      if (attempt < MAX_RETRIES && isTimeout) {
-        // Backoff for 2 seconds
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (attempt < MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 250 + Math.floor(Math.random() * 500)));
         continue;
       }
       
@@ -965,6 +1007,7 @@ async function fetchAccessTradeEndpoint(
         ok: false,
         items: [],
         error: isTimeout ? `Request timeout after ${TIMEOUT_MS / 1000} seconds` : message,
+        request: { endpoint, durationMs: Date.now() - startedAt, resultType: isTimeout ? 'timeout' : 'network_error', itemCount: 0, attempts: attempt + 1 },
       };
     } finally {
       clearTimeout(timeoutId);
@@ -972,16 +1015,24 @@ async function fetchAccessTradeEndpoint(
 
     if (!response.ok) {
       if (attempt < MAX_RETRIES && response.status >= 500) {
-        // Backoff for 2 seconds
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 250 + Math.floor(Math.random() * 500)));
         continue;
       }
+      const resultType: AccessTradeResultType = response.status === 401 ? 'unauthorized'
+        : response.status === 403 ? 'forbidden'
+        : response.status === 429 ? 'rate_limited'
+        : response.status >= 500 ? 'upstream_error' : 'network_error';
+      const retryAfterHeader = response.headers.get('retry-after') || undefined;
+      const retryAfterMs = retryAfterHeader
+        ? (/^\d+$/.test(retryAfterHeader) ? Date.now() + Number(retryAfterHeader) * 1000 : Date.parse(retryAfterHeader))
+        : NaN;
       return {
         endpoint,
         ok: false,
         items: [],
         status: response.status,
         error: `HTTP ${response.status}`,
+        request: { endpoint, durationMs: Date.now() - startedAt, statusCode: response.status, resultType, itemCount: 0, retryAfter: Number.isFinite(retryAfterMs) ? new Date(retryAfterMs).toISOString() : undefined, attempts: attempt + 1 },
       };
     }
 
@@ -1010,6 +1061,7 @@ async function fetchAccessTradeEndpoint(
       ok: true,
       items,
       status: response.status,
+      attempts: attempt + 1,
     };
   }
   

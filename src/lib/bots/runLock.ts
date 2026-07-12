@@ -5,10 +5,9 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import { ensureDataDir, generateId } from '../storage/adapter';
+import { ensureDataDir, generateId, getDataDir } from '../storage/adapter';
 
-const DATA_DIR = path.join(process.cwd(), '.data');
-const LOCK_FILE = path.join(DATA_DIR, 'autopilot-lock.json');
+function getLockFile() { return path.join(getDataDir(), 'autopilot-lock.json'); }
 
 /** Lock TTL: 25 minutes. If older, lock is considered stale. */
 const LOCK_TTL_MS = 25 * 60 * 1000;
@@ -31,7 +30,7 @@ export interface AcquireLockResult {
 
 async function readLock(): Promise<RunLockData | null> {
   try {
-    const raw = await fs.readFile(LOCK_FILE, 'utf-8');
+    const raw = await fs.readFile(getLockFile(), 'utf-8');
     const data = JSON.parse(raw);
     if (data && typeof data === 'object' && data.locked) {
       return data as RunLockData;
@@ -79,13 +78,13 @@ export async function acquireRunLock(
   const lockContent = JSON.stringify(lockData, null, 2);
 
   try {
-    const fd = await fs.open(LOCK_FILE, 'wx');
+    const fd = await fs.open(getLockFile(), 'wx');
     await fd.writeFile(lockContent, 'utf-8');
     await fd.close();
     return { acquired: true, runId };
-  } catch (err: any) {
+  } catch (err: unknown) {
     // EEXIST means the file is locked by someone else (or a stale lock)
-    if (err.code !== 'EEXIST') {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
       console.error('[RunLock] Unexpected error acquiring lock:', err);
       return { acquired: false, runId: '', reason: 'Lỗi hệ thống khi tạo lock.' };
     }
@@ -105,14 +104,14 @@ export async function acquireRunLock(
 
   // Lock is stale or corrupt. Force release it, then retry.
   try {
-    await fs.unlink(LOCK_FILE);
+    await fs.unlink(getLockFile());
   } catch {
     // Ignore errors during unlink, someone else might have deleted it
   }
 
   // Retry acquiring once after cleaning up stale lock
   try {
-    const fd = await fs.open(LOCK_FILE, 'wx');
+    const fd = await fs.open(getLockFile(), 'wx');
     await fd.writeFile(lockContent, 'utf-8');
     await fd.close();
     return { acquired: true, runId, reason: 'Recovered from stale lock.' };
@@ -130,10 +129,10 @@ export async function releaseRunLock(runId: string): Promise<void> {
   try {
     const existing = await readLock();
     if (existing && existing.runId === runId) {
-      await fs.unlink(LOCK_FILE);
+      await fs.unlink(getLockFile());
     }
   } catch (err) {
-    if ((err as any).code !== 'ENOENT') {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       console.error('[RunLock] Failed to release lock:', err instanceof Error ? err.message : String(err));
     }
     // Never crash — lock will expire by TTL or is already deleted
@@ -182,7 +181,7 @@ export async function forceReleaseExpiredLock(): Promise<{
       };
     }
 
-    await fs.unlink(LOCK_FILE);
+    await fs.unlink(getLockFile());
     return {
       released: true,
       reason: `Đã giải phóng lock kẹt (runId: ${existing.runId.slice(0, 8)}…, started: ${existing.startedAt}).`,

@@ -8,18 +8,20 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 
-const DATA_DIR = path.join(process.cwd(), '.data');
+export function getDataDir(): string {
+  return process.env.SANDEAL_DATA_DIR || path.join(process.cwd(), '.data');
+}
 
 export async function ensureDataDir(): Promise<void> {
   try {
-    await fs.access(DATA_DIR);
+    await fs.access(getDataDir());
   } catch {
-    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.mkdir(getDataDir(), { recursive: true });
   }
 }
 
 function getFilePath(collection: string): string {
-  return path.join(DATA_DIR, `${collection}.json`);
+  return path.join(getDataDir(), `${collection}.json`);
 }
 
 export async function readCollection<T>(collection: string): Promise<T[]> {

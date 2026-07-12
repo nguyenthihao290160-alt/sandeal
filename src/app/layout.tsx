@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { config } from '@/lib/config';
 
 const inter = Inter({
   variable: "--font-inter",
@@ -13,6 +14,7 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
+  metadataBase: new URL(config.siteUrl),
   title: "SanDeal — Săn deal thông minh bằng AI | Powered by ReviewPilot AI",
   description: "Hệ thống quản lý sản phẩm affiliate, tìm deal thông minh, chấm điểm cơ hội và tạo nội dung an toàn, minh bạch.",
   keywords: ["affiliate", "deal", "sản phẩm", "AI", "ReviewPilot", "SanDeal"],

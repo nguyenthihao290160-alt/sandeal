@@ -9,7 +9,7 @@ export const config = {
   siteUrl: process.env.NEXT_PUBLIC_SITE_URL || 'https://sandeal.tech',
 
   // Cost / Safety Mode
-  costMode: process.env.AI_COST_MODE || 'free_only',
+  costMode: process.env.AI_COST_MODE || 'safe_free',
   allowPaidAi: process.env.ALLOW_PAID_AI === 'true',
   allowVeoApi: process.env.ALLOW_VEO_API === 'true',
   allowImageGeneration: process.env.ALLOW_IMAGE_GENERATION === 'true',

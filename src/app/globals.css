@@ -2072,6 +2072,10 @@ tr:hover td {
 }
 
 @media (max-width: 768px) {
+  .deal-detail-grid {
+    grid-template-columns: 1fr !important;
+    gap: 24px !important;
+  }
   .sidebar {
     transform: translateX(-100%);
     transition: transform var(--transition-base);

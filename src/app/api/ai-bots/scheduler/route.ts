@@ -10,6 +10,7 @@ import {
   updateSchedulerConfig,
 } from '@/lib/bots/schedulerConfig';
 import { getRunLockStatus } from '@/lib/bots/runLock';
+import { getSchedulerState } from '@/lib/bots/automationScheduler';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,11 +21,13 @@ export async function GET(request: NextRequest) {
 
     const config = await getSchedulerConfig();
     const lockStatus = await getRunLockStatus();
+    const state = await getSchedulerState();
 
     return Response.json({
       ok: true,
       data: {
         scheduler: config,
+        state,
         lock: {
           isLocked: lockStatus.isLocked,
           isExpired: lockStatus.isExpired,

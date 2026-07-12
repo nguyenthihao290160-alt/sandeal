@@ -5,10 +5,9 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import { ensureDataDir } from '../storage/adapter';
+import { ensureDataDir, getDataDir } from '../storage/adapter';
 
-const DATA_DIR = path.join(process.cwd(), '.data');
-const CONFIG_FILE = path.join(DATA_DIR, 'scheduler-config.json');
+function getConfigFile() { return path.join(getDataDir(), 'scheduler-config.json'); }
 
 export type SchedulerMode =
   | 'full_safe_run'
@@ -47,7 +46,7 @@ function getDefaultConfig(): SchedulerConfig {
 export async function getSchedulerConfig(): Promise<SchedulerConfig> {
   await ensureDataDir();
   try {
-    const raw = await fs.readFile(CONFIG_FILE, 'utf-8');
+    const raw = await fs.readFile(getConfigFile(), 'utf-8');
     const data = JSON.parse(raw);
     if (data && typeof data === 'object') {
       return {
@@ -64,7 +63,7 @@ export async function getSchedulerConfig(): Promise<SchedulerConfig> {
 async function saveConfig(config: SchedulerConfig): Promise<void> {
   await ensureDataDir();
   const content = JSON.stringify(config, null, 2);
-  await fs.writeFile(CONFIG_FILE, content, 'utf-8');
+  await fs.writeFile(getConfigFile(), content, 'utf-8');
 }
 
 export function isValidInterval(value: unknown): value is SchedulerInterval {

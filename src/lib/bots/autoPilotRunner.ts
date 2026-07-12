@@ -86,9 +86,9 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
     if (isNaN(logMs)) continue;
     
     const logDateStr = new Date(logMs).toISOString().split('T')[0];
-    // Use 'saved' (items stored) as the metric for daily usage
-    if (logDateStr === todayStr && log.summary?.saved) {
-      dailyUsage += log.summary.saved;
+    // Product quota counts only candidates that actually reached deep review.
+    if (logDateStr === todayStr && log.summary?.productsReviewed) {
+      dailyUsage += log.summary.productsReviewed;
     }
   }
 
@@ -141,11 +141,59 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
   await createRunLog(runId, mode, trigger);
 
   try {
+    // Source discovery and deep review are intentionally separate persistent stages.
+    if (mode === 'source_scan' || mode === 'full_safe_run') {
+      const { getPublicProducts } = await import('../storage/products');
+      const { scanSourcesToQueue, processReviewQueue, selectOperationMode } = await import('./productPipeline');
+      const publicCount = (await getPublicProducts()).length;
+      const operationMode = selectOperationMode(publicCount);
+      const deadline = Date.now() + settings.maxRunDurationMs;
+      const scan = await scanSourcesToQueue(operationMode, deadline);
+      const review = mode === 'full_safe_run' && Date.now() < deadline
+        ? await processReviewQueue(operationMode, deadline)
+        : null;
+      const summary: RunSummary = {
+        sourceRequests: scan.sourceRequests,
+        found: scan.found,
+        candidatesQueued: scan.queued,
+        productsReviewed: review?.reviewed || 0,
+        networkChecks: review?.networkChecks || 0,
+        created: review?.created || 0,
+        updated: review?.updated || 0,
+        unchanged: scan.unchanged + (review?.unchanged || 0),
+        duplicate: scan.duplicate,
+        skippedCooldown: scan.skippedCooldown,
+        published: review?.published || 0,
+        needsReview: review?.needsReview || 0,
+        failed: scan.failed + (review?.failed || 0),
+        queueSize: review?.queueSize ?? scan.queueSize,
+        reviewQueued: scan.reviewQueued,
+        reviewGenerated: review?.reviewGenerated || 0,
+        reviewApproved: review?.reviewApproved || 0,
+        reviewNeedsReview: review?.reviewNeedsReview || 0,
+        reviewRejected: review?.reviewRejected || 0,
+        reviewStale: review?.reviewStale || 0,
+        claimValidationFailed: review?.claimValidationFailed || 0,
+        duplicateContentSkipped: review?.duplicateContentSkipped || 0,
+        seoReady: review?.seoReady || 0,
+        seoBlocked: review?.seoBlocked || 0,
+        indexable: review?.indexable || 0,
+        noindex: review?.noindex || 0,
+        sitemapIncluded: review?.sitemapIncluded || 0,
+      };
+      const finishedAt = new Date().toISOString();
+      const durationMs = Date.now() - startMs;
+      const message = `Pipeline ${operationMode} hoàn tất: tìm ${scan.found}, vào hàng đợi ${scan.queued}, review ${review?.reviewed || 0}, công khai ${review?.published || 0}.`;
+      await updateRunLog(runId, { status: 'completed', finishedAt, durationMs, summary, message });
+      return { runId, mode, trigger, status: 'completed', startedAt, finishedAt, durationMs, summary, message };
+    }
+
     // Step 3: Execute based on mode
     let summary: RunSummary = {};
     let message = '';
 
-    switch (mode) {
+    const legacyMode = mode as AutoPilotMode;
+    switch (legacyMode) {
       case 'full_safe_run':
       case 'source_scan': {
         // Delegate to existing POST /api/ai-bots workflow via direct import
@@ -197,7 +245,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
 
         let scoutSummary: any = null;
 
-        if (mode === 'source_scan') {
+        if (legacyMode === 'source_scan') {
           const scout = await createSourceScout(botRun.id);
           const result = await scout.scanSource('all', clampedLimit);
           stats.candidatesFound = result.candidates.length;
@@ -309,6 +357,8 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
         const totalDuplicate = summary.duplicate || 0;
         const totalPublished = summary.published || 0;
         const totalNeedsReview = summary.needsReview || 0;
+
+        // @ts-expect-error Legacy branch is unreachable after the persistent pipeline return above.
 
         message = `${mode === 'source_scan' ? 'Quét nguồn' : 'AutoPilot full'} hoàn tất. Tìm ${totalFound}, tạo mới ${totalCreated}, cập nhật ${totalUpdated}, duplicate ${totalDuplicate}, public ${totalPublished}, needs review ${totalNeedsReview}.`;
 

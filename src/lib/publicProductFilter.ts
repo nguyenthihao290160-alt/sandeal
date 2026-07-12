@@ -966,6 +966,17 @@ export function getPublicProductBlockReason(
     return 'Ảnh sản phẩm chưa được kiểm tra OK.';
   }
 
+  const review = (p.reviewContent && typeof p.reviewContent === 'object' ? p.reviewContent : {}) as Record<string, unknown>;
+  if (
+      review.reviewStatus !== 'approved' ||
+      Number(review.contentQualityScore || 0) < 75 ||
+      Number(review.originalityScore || 0) < 70 ||
+      Number(review.seoReadinessScore || 0) < 80 ||
+      (Array.isArray(review.reviewBlockReasons) && review.reviewBlockReasons.length > 0)
+  ) {
+    return 'Nội dung đánh giá chưa vượt cổng chất lượng và SEO.';
+  }
+
   return '';
 }
 

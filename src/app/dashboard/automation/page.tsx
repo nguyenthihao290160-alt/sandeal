@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import Link from 'next/link';
 
 type RunLog = {
   id: string;
@@ -14,7 +13,7 @@ type RunLog = {
   durationMs?: number;
   message?: string;
   error?: string;
-  summary?: any;
+  summary?: Record<string, number>;
 };
 
 type AutomationState = {
@@ -27,12 +26,20 @@ type AutomationState = {
     maxItemsPerDay: number;
   };
   currentStatus: string;
-  activeLock: any;
+  activeLock: unknown;
   nextRunAt: string | null;
   dailyUsage: number;
   dailyRemaining: number;
-  policy: any;
+  policy: Record<string, unknown>;
   recentRuns: RunLog[];
+  schedulerState?: {
+    currentMode: 'bootstrap' | 'steady'; publicProductCount: number; queueSize: number;
+    currentConcurrency: number; lastSourceScanAt?: string; lastReviewRunAt?: string;
+    nextSourceScanAt?: string; nextReviewRunAt?: string; sourceRateLimitUntil?: string;
+  };
+  queue?: { pending: number; processing: number; delayed: number; needs_review: number };
+  publicationBlocks?: Array<[string, number]>;
+  reviewStats?: Record<string, number>;
 };
 
 export default function AutomationDashboard() {
@@ -41,7 +48,6 @@ export default function AutomationDashboard() {
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error', message: string } | null>(null);
-  const [forceReleasing, setForceReleasing] = useState(false);
 
   const loadState = useCallback(async () => {
     try {
@@ -58,9 +64,9 @@ export default function AutomationDashboard() {
   }, []);
 
   useEffect(() => {
-    loadState();
+    const initial = window.setTimeout(loadState, 0);
     const interval = setInterval(loadState, 15000);
-    return () => clearInterval(interval);
+    return () => { window.clearTimeout(initial); clearInterval(interval); };
   }, [loadState]);
 
   const showToast = (type: 'success' | 'error', message: string) => {
@@ -211,6 +217,15 @@ export default function AutomationDashboard() {
                 <span>Next Run</span>
                 <span>{state?.currentStatus !== 'paused' ? formatTime(state?.nextRunAt || undefined) : '—'}</span>
               </div>
+              <div className="detail-meta-row"><span>Chế độ hiện tại</span><span>{state?.schedulerState?.currentMode === 'bootstrap' ? 'Tăng tốc khởi tạo' : 'Vận hành ổn định'}</span></div>
+              <div className="detail-meta-row"><span>Sản phẩm công khai</span><span>{state?.schedulerState?.publicProductCount || 0}</span></div>
+              <div className="detail-meta-row"><span>Ứng viên chờ / đang review</span><span>{state?.queue?.pending || 0} / {state?.queue?.processing || 0}</span></div>
+              <div className="detail-meta-row"><span>Đang trì hoãn</span><span>{state?.queue?.delayed || 0}</span></div>
+              <div className="detail-meta-row"><span>Song song hiện tại</span><span>{state?.schedulerState?.currentConcurrency || 1}</span></div>
+              <div className="detail-meta-row"><span>Review đã duyệt / cần xem lại</span><span>{state?.reviewStats?.approved || 0} / {state?.reviewStats?.needs_review || 0}</span></div>
+              <div className="detail-meta-row"><span>Đủ SEO / bị chặn SEO</span><span>{state?.reviewStats?.seoReady || 0} / {state?.reviewStats?.seoBlocked || 0}</span></div>
+              <div className="detail-meta-row"><span>Lần quét / review cuối</span><span>{formatTime(state?.schedulerState?.lastSourceScanAt)} / {formatTime(state?.schedulerState?.lastReviewRunAt)}</span></div>
+              {state?.schedulerState?.sourceRateLimitUntil && <div className="detail-meta-row"><span>Nguồn tạm giảm tốc đến</span><span>{formatTime(state.schedulerState.sourceRateLimitUntil)}</span></div>}
             </div>
           </div>
         </div>
@@ -291,6 +306,15 @@ export default function AutomationDashboard() {
               <span className="badge badge-info">safe_free</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 'var(--space-lg)' }}>
+        <h3 className="card-title">Lý do phổ biến khiến sản phẩm chưa công khai</h3>
+        <div className="detail-meta" style={{ marginTop: 12 }}>
+          {(state?.publicationBlocks || []).length > 0 ? state?.publicationBlocks?.map(([reason, count]) => (
+            <div className="detail-meta-row" key={reason}><span>{reason}</span><strong>{count}</strong></div>
+          )) : <span>Chưa có sản phẩm bị chặn.</span>}
         </div>
       </div>
 

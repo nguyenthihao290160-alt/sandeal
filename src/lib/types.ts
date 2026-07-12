@@ -42,6 +42,66 @@ export type ProductKind =
   | "store_offer"
   | "unknown";
 
+export type ReviewStatus = 'pending' | 'generated' | 'needs_review' | 'approved' | 'rejected' | 'stale';
+export type ReviewerType = 'automated_editorial' | 'human_editorial' | 'mixed';
+export type ReviewMethod = 'source_data_analysis' | 'technical_verification' | 'comparative_data_analysis' | 'hands_on_test';
+
+export interface VerifiedProductFact {
+  id: string;
+  label: string;
+  value: string | number;
+  sourceField: string;
+  sourceName: string;
+  verifiedAt?: string;
+}
+
+export interface EditorialClaim {
+  id: string;
+  text: string;
+  claimType: 'factual' | 'inferred' | 'unknown';
+  evidenceFactIds: string[];
+  confidence: 'high' | 'medium' | 'low' | 'unknown';
+}
+
+export interface ReviewEvidenceSource {
+  name: string;
+  fields: string[];
+  checkedAt?: string;
+}
+
+export interface ReviewContent {
+  reviewStatus: ReviewStatus;
+  reviewVersion: number;
+  reviewMethod: ReviewMethod;
+  reviewerType: ReviewerType;
+  reviewDisclosure: string;
+  reviewTitle: string;
+  reviewSummary: string;
+  reviewVerdict: string;
+  suitableFor: string[];
+  notSuitableFor: string[];
+  keyFacts: VerifiedProductFact[];
+  strengths: EditorialClaim[];
+  limitations: EditorialClaim[];
+  buyingConsiderations: string[];
+  factualClaims: EditorialClaim[];
+  inferredClaims: EditorialClaim[];
+  unknownClaims: EditorialClaim[];
+  evidenceSources: ReviewEvidenceSource[];
+  sourceConfidence: 'high' | 'medium' | 'low';
+  dataQualityScore: number;
+  productSafetyScore: number;
+  contentQualityScore: number;
+  originalityScore: number;
+  seoReadinessScore: number;
+  editorialConfidence: number;
+  reviewBlockReasons: string[];
+  reviewedAt: string;
+  contentUpdatedAt: string;
+  sourceHash: string;
+  reviewContentHash: string;
+}
+
 export type ProductScoreLabel =
   | "Bỏ qua"
   | "Cần xem xét"
@@ -114,6 +174,30 @@ export interface Product {
   sourceHealthCooldownUntil?: string; // ISO timestamp when item is safe to recheck
   sourceHealthReason?: string; // reason for cooldown (e.g. "image_404_stale", "timeout", "affiliate_unverified")
   sourceHealthSkipUntil?: string; // ISO timestamp to skip duplicate checks
+
+  // Canonical automation/publication fields. Legacy JSON is normalized safely.
+  sourceId?: string;
+  contentHash?: string;
+  sourceHash?: string;
+  verifiedSource?: boolean;
+  sourceVerified?: boolean;
+  autoPublishEligible?: boolean;
+  publicDecision?: string;
+  publicHidden?: boolean;
+  publicBlockReason?: string;
+  autoPublished?: boolean;
+  needsVerification?: boolean;
+  qualityScore?: number;
+  publishedAt?: string;
+  productHealthStatus?: string;
+  affiliateLastCheckedAt?: string;
+  imageContentType?: string;
+  brand?: string;
+  sku?: string;
+  gtin?: string;
+  mpn?: string;
+  specifications?: Record<string, string | number>;
+  reviewContent?: ReviewContent;
 
   createdAt: string;
   updatedAt: string;

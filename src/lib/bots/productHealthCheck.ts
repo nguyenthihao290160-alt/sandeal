@@ -131,6 +131,7 @@ async function fetchSafeRedirects(url: string, method: string, timeoutMs: number
     }
     const res = await fetch(currentUrl, {
       method,
+      headers: method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : undefined,
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs)
     });
