@@ -3,18 +3,20 @@ import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiRe
 import { createProduct } from '@/lib/storage/products';
 import { analyzeWithGemini } from '@/lib/ai/gemini';
 import { normalizePlatformFromUrl } from '@/lib/productScoring';
+import type { CreateProductInput, ProductSource } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
 const FETCH_TIMEOUT = 8000;
 const PLACEHOLDER_IMAGE = '/images/placeholder-product.png';
 
-function extractMeta(html: string) {
-  const meta: any = {
+interface ExtractedMeta { title?: string; description?: string; ogImage?: string; canonical?: string; jsonLd?: unknown; jsonLdImage?: string; price?: number; currency?: string; }
+function asRecord(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+
+function extractMeta(html: string): ExtractedMeta {
+  const meta: ExtractedMeta = {
     title: undefined,
     description: undefined,
-    ogTitle: undefined,
-    ogDescription: undefined,
     ogImage: undefined,
     canonical: undefined,
     jsonLd: undefined,
@@ -47,13 +49,15 @@ function extractMeta(html: string) {
   }
 
   if (meta.jsonLd) {
-    const pick = Array.isArray(meta.jsonLd) ? meta.jsonLd.find((p: any) => p['@type'] && String(p['@type']).toLowerCase().includes('product')) || meta.jsonLd[0] : meta.jsonLd;
+    const candidates = Array.isArray(meta.jsonLd) ? meta.jsonLd : [meta.jsonLd];
+    const pick = candidates.map(asRecord).find((item) => item?.['@type'] && String(item['@type']).toLowerCase().includes('product')) || asRecord(candidates[0]);
     if (pick) {
-      if (pick.image) meta.jsonLd.image = pick.image;
+      if (pick.image) meta.jsonLdImage = Array.isArray(pick.image) ? String(pick.image[0] || '') : String(pick.image);
       const offers = pick.offers || pick.Offers || pick.aggregateOffer;
-      if (offers) {
-        const price = offers.price || (Array.isArray(offers) ? offers[0]?.price : undefined);
-        const currency = offers.priceCurrency || offers.currency;
+      const offer = Array.isArray(offers) ? asRecord(offers[0]) : asRecord(offers);
+      if (offer) {
+        const price = offer.price;
+        const currency = offer.priceCurrency || offer.currency;
         if (price) meta.price = Number(price);
         if (currency) meta.currency = String(currency);
       }
@@ -77,10 +81,10 @@ async function fetchWithTimeout(url: string, timeout = FETCH_TIMEOUT) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const url = body?.url;
-    const source = body?.source || 'manual';
-    const notes = body?.notes || '';
+    const body = await request.json() as Record<string, unknown>;
+    const url = body.url;
+    const source: ProductSource = body.source === 'accesstrade' ? 'accesstrade' : 'manual';
+    const notes = typeof body.notes === 'string' ? body.notes : '';
 
     if (!url || typeof url !== 'string') return errorResponse('URL sản phẩm là bắt buộc.');
     try { new URL(url); } catch { return errorResponse('URL không hợp lệ.'); }
@@ -89,9 +93,9 @@ export async function POST(request: NextRequest) {
     const html = res?.text || '';
     const meta = extractMeta(html);
 
-    const image = (meta.jsonLd?.image && (Array.isArray(meta.jsonLd.image) ? meta.jsonLd.image[0] : meta.jsonLd.image)) || meta.ogImage || PLACEHOLDER_IMAGE;
+    const image = meta.jsonLdImage || meta.ogImage || PLACEHOLDER_IMAGE;
 
-    const platform = normalizePlatformFromUrl(url) || body.platform || 'website';
+    const platform = normalizePlatformFromUrl(url) || 'website';
 
     const sanitized = {
       title: meta.title || undefined,
@@ -107,23 +111,23 @@ export async function POST(request: NextRequest) {
     let aiResult = null;
     try {
       aiResult = await analyzeWithGemini(sanitized);
-    } catch (e) { /* ignore AI errors */ }
+    } catch { /* local fallback */ }
 
     const title = aiResult?.name || sanitized.title || 'Sản phẩm';
 
-    const productInput: any = {
+    const productInput: CreateProductInput = {
       title: String(title).slice(0, 240),
       description: sanitized.description || undefined,
       kind: 'product',
-      platform: platform as any,
-      source: source as any,
+      platform,
+      source,
       originalUrl: sanitized.canonical,
-      affiliateUrl: body.affiliateUrl || undefined,
+      affiliateUrl: typeof body.affiliateUrl === 'string' ? body.affiliateUrl : undefined,
       imageUrl: sanitized.image,
       gallery: [],
       price: aiResult?.price ?? sanitized.price ?? undefined,
       salePrice: undefined,
-      currency: sanitized.currency || 'VND',
+      currency: 'VND',
       priceNote: aiResult?.priceNote || (sanitized.price ? 'Giá có thể thay đổi' : undefined),
       category: aiResult?.category || undefined,
       tags: [],
@@ -139,8 +143,6 @@ export async function POST(request: NextRequest) {
       affiliateDisclosure: aiResult?.affiliateDisclosure || 'Bài viết có thể chứa link affiliate. Giá và ưu đãi có thể thay đổi.',
       riskLevel: 'unknown',
       status: 'needs_review',
-      aiGenerated: !!aiResult,
-      aiProvider: aiResult ? 'gemini' : undefined,
       rawSourceType: 'enriched',
     };
 

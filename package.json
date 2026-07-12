@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint",
     "reprocess:v2:dry": "node scripts/reprocess-products-v2.cjs",
-    "reprocess:v2:apply": "node scripts/reprocess-products-v2.cjs --apply"
+    "reprocess:v2:apply": "node scripts/reprocess-products-v2.cjs --apply",
+    "smoke:autonomous": "node scripts/autonomous-pipeline-smoke.cjs"
   },
   "dependencies": {
     "next": "16.2.10",

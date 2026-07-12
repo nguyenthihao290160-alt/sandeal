@@ -34,6 +34,13 @@ export type ProductRiskLevel =
   | "high"
   | "unknown";
 
+export type CandidateLane =
+  | 'FAST_LANE'
+  | 'NORMAL_LANE'
+  | 'RETRY_LANE'
+  | 'HUMAN_REVIEW_LANE'
+  | 'REJECTED_LANE';
+
 export type ProductKind =
   | "product"
   | "voucher"
@@ -185,6 +192,7 @@ export interface Product {
   publicDecision?: string;
   publicHidden?: boolean;
   publicBlockReason?: string;
+  publicBlockReasons?: string[];
   autoPublished?: boolean;
   needsVerification?: boolean;
   qualityScore?: number;
@@ -198,6 +206,7 @@ export interface Product {
   mpn?: string;
   specifications?: Record<string, string | number>;
   reviewContent?: ReviewContent;
+  reviewGeneration?: { provider: 'gemini' | 'local'; modelId?: string; promptVersion: string; generationFingerprint: string; responseHash?: string; generatedAt: string; validationResult: 'approved' | 'fallback_local' };
 
   createdAt: string;
   updatedAt: string;
@@ -378,7 +387,7 @@ export interface BotRun {
   logs: BotRunLog[];
 }
 
-export type LinkHealthStatus = 'ok' | 'redirect_ok' | 'timeout' | 'not_found' | 'server_error' | 'affiliate_error' | 'image_broken' | 'product_unavailable' | 'needs_manual_check';
+export type LinkHealthStatus = 'ok' | 'redirect_ok' | 'broken' | 'not_allowed' | 'unverified' | 'rate_limited' | 'server_error' | 'timeout' | 'dns_error' | 'error' | 'unknown' | 'not_found' | 'affiliate_error' | 'image_broken' | 'invalid_image' | 'forbidden' | 'product_unavailable' | 'needs_manual_check';
 
 export interface LinkHealthCheck {
   id: string;

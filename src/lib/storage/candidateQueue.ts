@@ -1,5 +1,6 @@
 import { generateId, readCollection, writeCollection } from './adapter';
-import type { Product } from '../types';
+import type { CandidateLane, Product } from '../types';
+import { LANE_PRIORITY } from '../bots/candidateReadiness';
 
 const COLLECTION = 'candidate-queue';
 const PROCESSING_TTL_MS = 15 * 60_000;
@@ -30,6 +31,8 @@ export interface CandidateQueueItem {
   sourceId: string;
   status: CandidateQueueStatus;
   priority: number;
+  readinessScore?: number;
+  lane?: CandidateLane;
   attempts: number;
   nextAttemptAt?: string;
   delayReason?: string;
@@ -98,7 +101,7 @@ export async function claimCandidateBatch(limit: number, now = Date.now()): Prom
     const items = await listCandidateQueue();
     const due = items
       .filter((item) => ['pending', 'delayed'].includes(item.status) && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now))
-      .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .sort((a, b) => (LANE_PRIORITY[b.lane || (b.status === 'delayed' ? 'RETRY_LANE' : 'NORMAL_LANE')] - LANE_PRIORITY[a.lane || (a.status === 'delayed' ? 'RETRY_LANE' : 'NORMAL_LANE')]) || b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
       .slice(0, Math.max(0, limit));
     const timestamp = new Date(now).toISOString();
     for (const item of due) {

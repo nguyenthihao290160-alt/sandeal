@@ -43,6 +43,35 @@ export type CredentialRole =
   | 'disabled'
   | 'testing';
 
+export type GeminiBillingMode = 'free_confirmed' | 'paid' | 'unknown';
+export type GeminiKeyType = 'auth' | 'restricted_standard' | 'standard' | 'unknown';
+export type GeminiGenerationStatus = 'unchecked' | 'available' | 'rate_limited' | 'quota_exhausted' | 'cooldown' | 'transient_error' | 'invalid' | 'missing_permission' | 'disabled';
+export type GeminiLightTestStatus = 'unchecked' | 'available' | 'invalid' | 'missing_permission' | 'transient_error';
+
+export interface GeminiCredentialMetadata {
+  projectAlias?: string;
+  quotaGroupId?: string;
+  billingMode: GeminiBillingMode;
+  keyType: GeminiKeyType;
+  supportedModels: string[];
+  preferredModel?: string;
+  lightTestStatus: GeminiLightTestStatus;
+  generationStatus: GeminiGenerationStatus;
+  lastLightTestAt?: string;
+  lastGenerationTestAt?: string;
+  lastSuccessfulRequestAt?: string;
+  lastFailureAt?: string;
+  lastErrorCode?: string;
+  failureStreak: number;
+  cooldownUntil?: string;
+  nextProbeAt?: string;
+  quotaExhaustedUntil?: string;
+  requestsTodayEstimated: number;
+  inputTokensTodayEstimated: number;
+  outputTokensTodayEstimated: number;
+  healthScore: number;
+}
+
 // ---- Stored Credential (server-side full object) ----
 
 export interface StoredCredential {

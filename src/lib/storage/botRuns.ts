@@ -2,8 +2,8 @@
 // Bot Run Storage
 // ===========================================
 
-import type { BotRun, BotRunMode } from '../types';
-import { readCollection, writeCollection, findById, insertOne, updateOne, generateId } from './adapter';
+import type { BotName, BotRun, BotRunMode, BotRunStatus } from '../types';
+import { readCollection, findById, insertOne, updateOne, generateId } from './adapter';
 
 const COLLECTION = 'bot-runs';
 
@@ -82,7 +82,7 @@ export async function addBotRunLog(
   run.logs.push({
     id: generateId(),
     runId,
-    botName: botName as any,
+    botName: (['orchestrator', 'source_scout', 'deal_hunter', 'product_normalizer', 'image_resolver', 'gemini_analyst', 'deal_scorer', 'content_review', 'compliance_guard', 'link_health', 'product_cleanup', 'content_package', 'app_health'].includes(botName) ? botName : 'orchestrator') as BotName,
     level,
     message,
     timestamp: new Date().toISOString(),
@@ -117,6 +117,6 @@ export async function getBotRunsStats(): Promise<{
     failedRuns: failed,
     pendingRuns: pending,
     lastRunAt: lastRun?.completedAt || lastRun?.startedAt,
-    lastRunStatus: lastRun?.status as any,
+    lastRunStatus: lastRun && ['completed', 'failed', 'cancelled'].includes(lastRun.status) ? lastRun.status as Extract<BotRunStatus, 'completed' | 'failed' | 'cancelled'> : undefined,
   };
 }

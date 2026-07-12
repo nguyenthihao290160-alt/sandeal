@@ -24,7 +24,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const Module = require('module');
 const ts = require('typescript');
 
@@ -49,36 +48,41 @@ const isApply = args.includes('--apply');
 const limitArg = args.find((_, i) => args[i - 1] === '--limit');
 const concurrencyArg = args.find((_, i) => args[i - 1] === '--concurrency');
 const dataDirArg = args.find((_, i) => args[i - 1] === '--data-dir');
+const laneArg = args.find((_, i) => args[i - 1] === '--lane');
 const limit = Math.max(1, Math.min(200, parseInt(limitArg || '20', 10) || 20));
 const concurrency = Math.max(1, Math.min(3, parseInt(concurrencyArg || '3', 10) || 3));
 
 // ---- Setup data dir ----
 if (dataDirArg) {
-  process.env.SANDEAL_DATA_DIR = dataDirArg;
+  process.env.SANDEAL_DATA_DIR = path.resolve(dataDirArg);
 } else if (!process.env.SANDEAL_DATA_DIR) {
   process.env.SANDEAL_DATA_DIR = path.join(process.cwd(), '.data');
 }
+assertSafeDataDir(process.env.SANDEAL_DATA_DIR, isApply);
 
 // ---- Main ----
 (async () => {
-  const { generateEditorialReview, shouldRegenerateReview, isReviewIndexable, REVIEW_THRESHOLDS } = require('../src/lib/editorialReview.ts');
-  const { evaluateSafePublish } = require('../src/lib/safePublish.ts');
+  const { generateEditorialReview, shouldRegenerateReview } = require('../src/lib/editorialReview.ts');
   const { getAllProducts, saveCanonicalProduct } = require('../src/lib/storage/products.ts');
+  const { scoreCandidateReadiness } = require('../src/lib/bots/candidateReadiness.ts');
+  const { getGeminiPoolState } = require('../src/lib/ai/geminiQuotaGroupManager.ts');
 
   console.log('=== Reprocess Products V2 ===');
   console.log(`Mode: ${isApply ? 'APPLY' : 'DRY-RUN'}`);
   console.log(`Limit: ${limit}`);
   console.log(`Concurrency: ${concurrency}`);
   console.log(`Data dir: ${process.env.SANDEAL_DATA_DIR}`);
+  console.log(`Lane: ${laneArg || 'all'}`);
   console.log('');
 
   // Load all products
   const allProducts = await getAllProducts();
 
   // Filter: only process valid products (not vouchers, campaigns, store_offers)
-  const validProducts = allProducts.filter((p) =>
+  let validProducts = allProducts.filter((p) =>
     p.kind === 'product' || p.kind === 'deal'
   );
+  if (laneArg) validProducts = validProducts.filter((product) => laneForProduct(product, scoreCandidateReadiness) === laneArg.toUpperCase());
 
   console.log(`Total products in storage: ${allProducts.length}`);
   console.log(`Valid products (product/deal): ${validProducts.length}`);
@@ -86,7 +90,8 @@ if (dataDirArg) {
   console.log('');
 
   // ---- Before stats ----
-  const beforeStats = computeStats(validProducts);
+  const pool = await getGeminiPoolState();
+  const beforeStats = computeStats(allProducts, validProducts, pool);
   console.log('--- BEFORE ---');
   printStats(beforeStats);
   console.log('');
@@ -103,6 +108,9 @@ if (dataDirArg) {
     if (fs.existsSync(productsFile)) {
       const backupFile = path.join(backupDir, `products-backup-${Date.now()}.json`);
       fs.copyFileSync(productsFile, backupFile);
+      const source = JSON.parse(fs.readFileSync(productsFile, 'utf8'));
+      const backup = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      if (!Array.isArray(source) || !Array.isArray(backup) || source.length !== backup.length) throw new Error('Backup validation failed.');
       console.log(`Backup created: ${backupFile}`);
     }
   }
@@ -148,7 +156,7 @@ if (dataDirArg) {
   if (isApply) {
     const updatedProducts = await getAllProducts();
     const updatedValid = updatedProducts.filter((p) => p.kind === 'product' || p.kind === 'deal');
-    const afterStats = computeStats(updatedValid);
+    const afterStats = computeStats(updatedProducts, updatedValid, await getGeminiPoolState());
     console.log('--- AFTER ---');
     printStats(afterStats);
     console.log('');
@@ -171,17 +179,17 @@ if (dataDirArg) {
   console.log('=== Done ===');
 })();
 
-function computeStats(products) {
+function computeStats(allProducts, products, pool) {
   const stats = {
-    total: products.length,
-    health_ok: 0,
-    health_retryable: 0,
-    health_broken: 0,
-    review_approved: 0,
-    review_needs_review: 0,
-    low_originality: 0,
-    low_seo_readiness: 0,
-    public_eligible: 0,
+    totalRecords: allProducts.length, realProducts: products.length,
+    invalidTypes: allProducts.length - products.length, duplicates: 0,
+    fastLane: 0, normalLane: 0, retryLane: 0, humanReviewLane: 0, rejectedLane: 0,
+    healthOk: 0, healthRetryable: 0, confirmedBroken: 0,
+    reviewV1: 0, reviewV2: 0, reviewApproved: 0, reviewNeedsReview: 0,
+    lowOriginality: 0, lowSeoReadiness: 0, claimBlocked: 0, safePublishEligible: 0,
+    estimatedWaves: 0, topBlockReasons: {}, GeminiPoolState: pool.state,
+    GeminiAvailableGroups: Object.values(pool.groups || {}).filter((group) => !group.cooldownUntil || Date.parse(group.cooldownUntil) <= Date.now()).length,
+    localFallbackCount: 0,
   };
 
   const retryableStatuses = new Set(['timeout', 'rate_limited', 'server_error', 'dns_error', 'not_allowed', 'forbidden', 'error', 'unknown']);
@@ -193,29 +201,53 @@ function computeStats(products) {
     const hasRetryable = statuses.some((s) => retryableStatuses.has(s));
     const allOk = statuses.every((s) => s === 'ok' || s === 'redirect_ok');
 
-    if (allOk || statuses.length === 0) stats.health_ok++;
-    else if (hasBroken) stats.health_broken++;
-    else if (hasRetryable) stats.health_retryable++;
+    if (allOk || statuses.length === 0) stats.healthOk++;
+    else if (hasBroken) stats.confirmedBroken++;
+    else if (hasRetryable) stats.healthRetryable++;
+
+    const lane = p.riskLevel === 'high' ? 'humanReviewLane' : hasBroken ? 'rejectedLane' : hasRetryable ? 'retryLane' : p.verifiedSource && p.autoPublishEligible ? 'fastLane' : 'normalLane';
+    stats[lane]++;
 
     const review = p.reviewContent;
     if (review) {
-      if (review.reviewStatus === 'approved') stats.review_approved++;
-      else stats.review_needs_review++;
-      if (review.originalityScore < 70) stats.low_originality++;
-      if (review.seoReadinessScore < 80) stats.low_seo_readiness++;
+      if (review.reviewVersion >= 2) stats.reviewV2++; else stats.reviewV1++;
+      if (review.reviewStatus === 'approved') stats.reviewApproved++;
+      else stats.reviewNeedsReview++;
+      if (review.originalityScore < 70) stats.lowOriginality++;
+      if (review.seoReadinessScore < 80) stats.lowSeoReadiness++;
+      if ((review.reviewBlockReasons || []).some((reason) => String(reason).includes('claim'))) stats.claimBlocked++;
+      if (!review.provider || review.provider === 'local') stats.localFallbackCount++;
     }
 
     try {
       const { evaluateSafePublish } = require('../src/lib/safePublish.ts');
-      if (evaluateSafePublish(p).eligible) stats.public_eligible++;
+      if (evaluateSafePublish(p).eligible) stats.safePublishEligible++;
     } catch { /* ignore */ }
   }
+
+  const seen = new Set(); for (const product of products) { const key = product.sourceId || product.externalId || product.originalUrl || product.affiliateUrl; if (key && seen.has(key)) stats.duplicates++; else if (key) seen.add(key); for (const reason of product.publicBlockReasons || String(product.publicBlockReason || '').split(',')) { const clean = String(reason).trim(); if (clean) stats.topBlockReasons[clean] = (stats.topBlockReasons[clean] || 0) + 1; } }
+  stats.estimatedWaves = Math.ceil(stats.safePublishEligible / 25);
+  stats.topBlockReasons = Object.fromEntries(Object.entries(stats.topBlockReasons).sort((a, b) => b[1] - a[1]).slice(0, 10));
 
   return stats;
 }
 
+function laneForProduct(product, scoreCandidateReadiness) {
+  const statuses = [product.linkHealthStatus, product.affiliateHealthStatus, product.imageHealthStatus];
+  if (product.riskLevel === 'high') return 'HUMAN_REVIEW_LANE';
+  if (statuses.some((status) => ['broken', 'image_broken', 'not_found'].includes(status))) return 'REJECTED_LANE';
+  if (statuses.some((status) => ['timeout', 'rate_limited', 'server_error', 'dns_error', 'not_allowed'].includes(status))) return 'RETRY_LANE';
+  return scoreCandidateReadiness({ title: product.title || '', description: product.description, kind: product.kind, platform: product.platform, originalUrl: product.originalUrl || '', affiliateUrl: product.affiliateUrl || '', imageUrl: product.imageUrl || '', price: product.price, salePrice: product.salePrice, currency: 'VND', category: product.category, verifiedSource: product.verifiedSource === true, autoPublishEligible: product.autoPublishEligible === true }).lane;
+}
+
+function assertSafeDataDir(value, apply) {
+  const resolved = path.resolve(value); const root = path.parse(resolved).root; const cwd = path.resolve(process.cwd());
+  if (resolved === root || resolved === cwd || resolved.includes(`${path.sep}.git${path.sep}`) || resolved.includes(`${path.sep}node_modules${path.sep}`) || ['src', 'scripts'].includes(path.basename(resolved).toLowerCase())) throw new Error(`Unsafe data directory: ${resolved}`);
+  if (apply && !fs.existsSync(path.join(resolved, 'products.json'))) throw new Error('Apply requires an existing products.json file.');
+}
+
 function printStats(stats) {
   for (const [key, value] of Object.entries(stats)) {
-    console.log(`  ${key}: ${value}`);
+    console.log(`  ${key}: ${value && typeof value === 'object' ? JSON.stringify(value) : value}`);
   }
 }

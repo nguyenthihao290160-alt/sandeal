@@ -7,6 +7,7 @@ import { readCollection, writeCollection, deleteOne, generateId } from './adapte
 import { normalizeProductForPublic } from '../productNormalizer';
 import { isPublicSafeProduct } from '../publicProductFilter';
 import { evaluateCanonicalProduct, normalizeCanonicalProduct, stableProductHash } from '../canonicalProduct';
+import { isReviewIndexable } from '../editorialReview';
 
 const COLLECTION = 'products';
 let productWriteChain: Promise<unknown> = Promise.resolve();
@@ -120,6 +121,9 @@ export async function saveCanonicalProduct(
     if (index < 0) return null;
     const now = new Date().toISOString();
     const merged = { ...products[index], ...updates, id, updatedAt: now };
+    const before = JSON.stringify({ ...products[index], updatedAt: undefined });
+    const after = JSON.stringify({ ...merged, updatedAt: undefined });
+    if (before === after) return products[index];
     products[index] = options.evaluate
       ? evaluateCanonicalProduct(merged, now)
       : normalizeCanonicalProduct(merged, now);
@@ -155,10 +159,12 @@ export async function upsertCanonicalProduct(
       await writeCollection(COLLECTION, products);
       return { product: products[index], created: false, unchanged: false };
     }
+    const requestedSlug = draft.slug || generateStableSlug(String(draft.title || 'san-pham'), hash);
+    const uniqueSlug = ensureUniqueSlug(requestedSlug, products, hash);
     const base = {
       ...draft,
       id: String(draft.id || generateId()),
-      slug: draft.slug || generateSlug(String(draft.title || 'san-pham')),
+      slug: uniqueSlug,
       sourceHash: hash,
       contentHash: hash,
       createdAt: now,
@@ -170,6 +176,46 @@ export async function upsertCanonicalProduct(
     return { product, created: true, unchanged: false };
   });
 }
+
+export async function publishCanonicalProductTransaction(id: string, updates: Partial<Product>, audit: { runId?: string; candidateId?: string } = {}): Promise<Product | null> {
+  return withProductWrite(async () => {
+    const products = await readCanonicalProducts(); const index = products.findIndex((item) => item.id === id); if (index < 0) return null;
+    const previous = products[index]; const now = new Date().toISOString();
+    const requestedSlug = updates.slug || previous.slug || generateStableSlug(previous.title, previous.sourceHash || previous.id);
+    const candidate = evaluateCanonicalProduct({ ...previous, ...updates, id, slug: ensureUniqueSlug(requestedSlug, products.filter((item) => item.id !== id), previous.sourceHash || previous.id), updatedAt: now }, now);
+    products[index] = candidate;
+    try {
+      await writeCollection(COLLECTION, products);
+      const confirmed = (await readCanonicalProducts()).find((item) => item.id === id);
+      if (!confirmed) throw new Error('canonical_readback_failed');
+      if (candidate.status === 'published' && (!isPublicSafeProduct(confirmed) || !isReviewIndexable(confirmed))) throw new Error('public_selector_inconsistent');
+      await appendPublicationAudit({ runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, timestamp: now });
+      return confirmed;
+    } catch (error) {
+      products[index] = previous; await writeCollection(COLLECTION, products);
+      await appendPublicationAudit({ runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [error instanceof Error ? error.message : 'publication_error'], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, timestamp: now });
+      return previous;
+    }
+  });
+}
+
+interface PublicationAudit { runId: string; candidateId?: string; productId: string; action: string; previousState: string; nextState: string; reasonCodes: string[]; sourceHash?: string; reviewVersion?: number; timestamp: string; }
+async function appendPublicationAudit(event: PublicationAudit): Promise<void> {
+  const existing = await readCollection<PublicationAudit>('publication-audit'); await writeCollection('publication-audit', [...existing.slice(-999), event]);
+}
+
+function generateStableSlug(title: string, seed: string): string {
+  const base = slugBase(title) || 'san-pham';
+  return `${base}-${String(seed).replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 10) || 'product'}`.slice(0, 96);
+}
+function ensureUniqueSlug(requested: string, products: Product[], seed: string): string {
+  const normalized = slugBase(requested) || generateStableSlug('san-pham', seed);
+  if (!products.some((item) => item.slug === normalized)) return normalized;
+  const suffix = String(seed).replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 12) || 'duplicate';
+  const candidate = `${normalized.slice(0, Math.max(1, 95 - suffix.length))}-${suffix}`;
+  return products.some((item) => item.slug === candidate) ? '' : candidate;
+}
+function slugBase(title: string): string { return title.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 80); }
 
 export async function deleteProduct(id: string): Promise<boolean> {
   return deleteOne<Product>(COLLECTION, id);

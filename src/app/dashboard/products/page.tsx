@@ -884,7 +884,8 @@ function SafeThumb({
   const cleanSrc = src?.trim() || "";
 
   useEffect(() => {
-    setFailed(false);
+    const timer = window.setTimeout(() => setFailed(false), 0);
+    return () => window.clearTimeout(timer);
   }, [cleanSrc]);
 
   if (!cleanSrc || failed) {
@@ -960,14 +961,13 @@ export default function ProductsPage() {
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-
-    setSearch(params.get("q") || "");
-    setFilterPlatform(params.get("platform") || "");
-    setFilterStatus(params.get("status") || "");
-    setFilterKind(params.get("kind") || "");
-    setFilterRisk(params.get("riskLevel") || "");
-    setFilterPublic(params.get("public") || "");
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      setSearch(params.get("q") || ""); setFilterPlatform(params.get("platform") || "");
+      setFilterStatus(params.get("status") || ""); setFilterKind(params.get("kind") || "");
+      setFilterRisk(params.get("riskLevel") || ""); setFilterPublic(params.get("public") || "");
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const loadProducts = useCallback(async () => {
@@ -1003,7 +1003,8 @@ export default function ProductsPage() {
   }, [search, filterPlatform, filterStatus, filterRisk]);
 
   useEffect(() => {
-    void loadProducts();
+    const timer = window.setTimeout(() => void loadProducts(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadProducts]);
 
   const visibleProducts = useMemo(() => {

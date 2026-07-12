@@ -610,7 +610,7 @@ async function executeWorkflow(
       allowPaidAi: policy.allowPaidAi,
       costMode: policy.costMode,
       autoPublishEnabled: policy.autoPublishEnabled,
-    } as any);
+    });
 
     const preflight = await orchestrator.preflightCheck(state);
 

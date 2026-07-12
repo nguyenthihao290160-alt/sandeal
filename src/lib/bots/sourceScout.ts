@@ -39,7 +39,7 @@ type HealthGuardDecision = {
   updates: MutableProductDraft;
 };
 
-type ScanCounters = {
+export type ScanCounters = {
   found: number;
   created: number;
   updated: number;
@@ -1250,7 +1250,7 @@ export class SourceScoutBot {
             if (productDraft.originalUrl && isValidHttpUrl(productDraft.originalUrl) && productDraft.originalUrl !== existingProduct.originalUrl) newData.originalUrl = productDraft.originalUrl;
             
             // Mark a flag to track if we need to call updateProduct
-            (productDraft as any)._hasChanges = Object.keys(newData).length > 0;
+            productDraft._hasChanges = Object.keys(newData).length > 0;
 
             // Preserve good existing data (like status, verified, approved)
             productDraft = {
@@ -1340,8 +1340,8 @@ export class SourceScoutBot {
             // 2. Persist product draft
             let saved: Product;
             if (existingProduct) {
-             const hasChanges = (productDraft as any)._hasChanges;
-             delete (productDraft as any)._hasChanges;
+             const hasChanges = productDraft._hasChanges === true;
+             delete productDraft._hasChanges;
              if (hasChanges) {
                saved = await updateProduct(existingProduct.id, productDraft as Partial<Product>) as Product;
                if (!saved) {
@@ -1354,30 +1354,30 @@ export class SourceScoutBot {
                saved = existingProduct;
              }
             } else {
-             delete (productDraft as any)._hasChanges;
+             delete productDraft._hasChanges;
              saved = await createProduct(productDraft as Parameters<typeof createProduct>[0]);
              counters.created += 1;
             }
             counters.saved += 1;
 
             // 3. Reload canonical product (or use saved if no changes)
-            let canonical = saved;
+            const canonical = saved;
 
             const isRealProduct = isProductLikeKind(kind);
             const originalUrl = isValidHttpUrl(canonical.originalUrl || '') ? canonical.originalUrl : undefined;
             const affiliateUrl = isValidHttpUrl(canonical.affiliateUrl || '') ? canonical.affiliateUrl : undefined;
             const imageUrl = isValidHttpUrl(canonical.imageUrl || '') ? canonical.imageUrl : undefined;
             // Image candidates from AT item for fallback
-            const imageCandidatesList: string[] = Array.isArray((item as any).imageCandidates)
-              ? (item as any).imageCandidates.filter((u: unknown) => typeof u === 'string' && isValidHttpUrl(u))
+            const imageCandidatesList: string[] = Array.isArray(item.imageCandidates)
+              ? item.imageCandidates.filter((u: string) => isValidHttpUrl(u))
               : [];
             // Canonical product URL decoded from affiliate deeplink (if available)
             const canonicalProductUrl: string | undefined =
-              (item as any).canonicalProductUrl && isValidHttpUrl((item as any).canonicalProductUrl)
-                ? (item as any).canonicalProductUrl
+              item.canonicalProductUrl && isValidHttpUrl(item.canonicalProductUrl)
+                ? item.canonicalProductUrl
                 : undefined;
 
-            let healthUpdates: MutableProductDraft = {
+            const healthUpdates: MutableProductDraft = {
               linkLastCheckedAt: new Date().toISOString(),
             } as MutableProductDraft;
             let isHealthOk = false;

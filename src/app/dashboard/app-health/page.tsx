@@ -60,7 +60,8 @@ export default function AppHealthPage() {
   }, []);
 
   useEffect(() => {
-    loadHealth();
+    const timer = window.setTimeout(() => void loadHealth(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadHealth]);
 
   return (

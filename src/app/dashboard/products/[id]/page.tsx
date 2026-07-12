@@ -130,7 +130,7 @@ export default function ProductDetailPage() {
                   <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
                     <span className="badge badge-neutral">{product.platform}</span>
                     {(() => {
-                      const inferred = product.kind || classifyProductKind(product as any);
+                      const inferred = product.kind || classifyProductKind(product);
                       return (
                         <>
                           <span className="badge badge-neutral">{inferred}</span>
@@ -283,7 +283,7 @@ export default function ProductDetailPage() {
               <h3 className="card-title">⚡ Hành động</h3>
               <div className="flex flex-col gap-sm">
                 {(() => {
-                  const inferred = product.kind || classifyProductKind(product as any);
+                  const inferred = product.kind || classifyProductKind(product);
                   if (inferred !== 'product') {
                     return (
                       <button className="btn btn-primary" style={{ width: '100%' }} disabled title="Mục này là voucher/chiến dịch/ưu đãi shop, không thể duyệt">✅ Duyệt sản phẩm</button>

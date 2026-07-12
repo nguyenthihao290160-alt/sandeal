@@ -110,11 +110,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pageTitle = useMemo(() => getPageTitle(pathname), [pathname]);
 
   useEffect(() => {
-    if (LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href))) {
-      setLegacyOpen(true);
-    }
-
-    setSidebarOpen(false);
+    const timer = window.setTimeout(() => {
+      if (LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href))) setLegacyOpen(true);
+      setSidebarOpen(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [pathname]);
 
   const closeSidebar = () => setSidebarOpen(false);

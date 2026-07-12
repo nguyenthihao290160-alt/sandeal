@@ -725,7 +725,8 @@ function SafeThumb({
   const cleanSrc = src?.trim() || '';
 
   useEffect(() => {
-    setFailed(false);
+    const timer = window.setTimeout(() => setFailed(false), 0);
+    return () => window.clearTimeout(timer);
   }, [cleanSrc]);
 
   if (!cleanSrc || failed) {
@@ -881,7 +882,8 @@ export default function ProductSourcesPage() {
   }, []);
 
   useEffect(() => {
-    void loadRecent();
+    const timer = window.setTimeout(() => void loadRecent(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadRecent]);
 
 

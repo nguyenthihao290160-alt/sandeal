@@ -11,6 +11,8 @@ export interface SafePublishResult {
 }
 
 const GOOD_HEALTH = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+const PROHIBITED_TERMS = /(?:thuoc\s+ke\s+don|nicotine|vu\s+khi|chat\s+cam|hang\s+gia|co\s+bac)/i;
+const HIGH_RISK_TERMS = /(?:thuoc\b|thiet\s+bi\s+y\s+te|giam\s+can|chua\s+benh|dieu\s+tri|an\s+toan\s+cho\s+tre)/i;
 
 function validHttpUrl(value?: string): boolean {
   try {
@@ -32,6 +34,7 @@ export function evaluateSafePublish(product: Partial<Product>): SafePublishResul
   if (product.kind !== 'product') reasons.push('not_product');
   if (product.verifiedSource !== true && product.sourceVerified !== true) reasons.push('source_unverified');
   if (title.length < 8) reasons.push('invalid_title');
+  if (!String(product.slug || '').trim()) reasons.push('invalid_slug');
   if (!Number.isFinite(price) || price <= 0) reasons.push('missing_price');
   if (product.currency !== 'VND') reasons.push('invalid_currency');
   if (!validHttpUrl(productUrl)) reasons.push('missing_product_url');
@@ -41,9 +44,14 @@ export function evaluateSafePublish(product: Partial<Product>): SafePublishResul
   if (!GOOD_HEALTH.has(String(product.affiliateHealthStatus || ''))) reasons.push('affiliate_url_unhealthy');
   if (!GOOD_HEALTH.has(String(product.imageHealthStatus || ''))) reasons.push('image_unhealthy');
   if (product.sourceHealthCooldownUntil && Date.parse(product.sourceHealthCooldownUntil) > Date.now()) reasons.push('cooldown');
-  if (String(product.publicBlockReason || '').trim()) reasons.push('public_blocked');
   if (product.autoPublishEligible !== true) reasons.push('auto_publish_ineligible');
   if (!isReviewIndexable(product)) reasons.push('review_not_indexable');
+
+  const policyText = `${title} ${product.category || ''} ${product.description || ''}`
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
+  if (PROHIBITED_TERMS.test(policyText)) reasons.push('prohibited_product');
+  if (product.riskLevel === 'high' || HIGH_RISK_TERMS.test(policyText)) reasons.push('human_review_required');
+  if (product.riskLevel === 'unknown') reasons.push('risk_unclassified');
 
   let qualityScore = 0;
   if (title.length >= 8) qualityScore += 12;
@@ -62,7 +70,7 @@ export function evaluateSafePublish(product: Partial<Product>): SafePublishResul
 
   const uniqueReasons = [...new Set(reasons)];
   const eligible = uniqueReasons.length === 0;
-  const riskLevel: ProductRiskLevel = eligible ? 'low' : (product.riskLevel || 'unknown');
+  const riskLevel: ProductRiskLevel = product.riskLevel || 'unknown';
   return {
     eligible,
     decision: eligible ? 'published' : 'needs_review',
@@ -82,6 +90,7 @@ export function applySafePublishDecision(product: Product, now = new Date().toIS
       publicDecision: 'published',
       publicHidden: false,
       publicBlockReason: undefined,
+      publicBlockReasons: [],
       needsVerification: false,
       autoPublished: true,
       qualityScore: evaluation.qualityScore,
@@ -95,6 +104,7 @@ export function applySafePublishDecision(product: Product, now = new Date().toIS
     publicDecision: 'needs_review',
     publicHidden: true,
     publicBlockReason: evaluation.reasons.join(', '),
+    publicBlockReasons: evaluation.reasons,
     needsVerification: true,
     autoPublished: false,
     qualityScore: evaluation.qualityScore,

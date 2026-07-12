@@ -40,6 +40,11 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
   const editorial = require('../src/lib/editorialReview.ts');
   const seo = require('../src/lib/seo/productSeo.ts');
   const sitemapModule = require('../src/app/sitemap.ts');
+  const readiness = require('../src/lib/bots/candidateReadiness.ts');
+  const geminiModels = require('../src/lib/ai/geminiModels.ts');
+  const geminiRouter = require('../src/lib/ai/geminiCredentialRouter.ts');
+  const geminiPool = require('../src/lib/ai/geminiQuotaGroupManager.ts');
+  const geminiProbe = require('../src/lib/ai/geminiCredentialProbe.ts');
 
   const payload = (o = {}) => ({ title: 'Sản phẩm chính hãng đầy đủ', kind: 'product', platform: 'accesstrade', originalUrl: 'https://shop.test/p/1', affiliateUrl: 'https://go.test/a/1', imageUrl: 'https://img.test/1.jpg', price: 100000, currency: 'VND', verifiedSource: true, autoPublishEligible: true, ...o });
   const enqueue = (id, o = {}) => queue.enqueueCandidate({ source: 'accesstrade', sourceId: id, priority: 100, contentHash: `h-${id}`, sourceHash: `h-${id}`, payload: payload(o) });
@@ -352,6 +357,108 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     assert(!health.isRetryableImageStatus('image_broken'), 'image_broken should NOT be retryable');
     assert(!health.isRetryableImageStatus('invalid_image'), 'invalid_image should NOT be retryable');
     assert(!health.isRetryableImageStatus('ok'), 'ok should NOT be retryable');
+  });
+
+  await test('V4-01. high-risk không auto-publish và giữ risk gốc', () => {
+    const result = safe.applySafePublishDecision(indexableProduct({ riskLevel: 'high', category: 'Thiết bị y tế' }));
+    equal(result.status, 'needs_review'); equal(result.riskLevel, 'high');
+    assert(result.publicBlockReasons.includes('human_review_required'));
+  });
+
+  await test('V4-02. publicBlockReasons tương thích publicBlockReason', () => {
+    const result = safe.applySafePublishDecision(baseProduct({ linkHealthStatus: 'timeout' }));
+    assert(Array.isArray(result.publicBlockReasons) && result.publicBlockReasons.length > 0);
+    assert(result.publicBlockReason.includes('product_url_unhealthy'));
+  });
+
+  await test('V4-03. readiness lane phân loại deterministic', () => {
+    equal(readiness.scoreCandidateReadiness(payload()).lane, 'FAST_LANE');
+    equal(readiness.scoreCandidateReadiness(payload({ kind: 'voucher' })).lane, 'REJECTED_LANE');
+    equal(readiness.scoreCandidateReadiness(payload({ title: 'Thiết bị y tế điều trị tại nhà' })).lane, 'HUMAN_REVIEW_LANE');
+  });
+
+  await test('V4-04. FAST_LANE được claim trước NORMAL_LANE', async () => {
+    await adapter.writeCollection('candidate-queue', []);
+    await queue.enqueueCandidate({ source: 'accesstrade', sourceId: 'normal', priority: 999, readinessScore: 70, lane: 'NORMAL_LANE', contentHash: 'normal', sourceHash: 'normal', payload: payload({ title: 'Sản phẩm normal đầy đủ' }) });
+    await queue.enqueueCandidate({ source: 'accesstrade', sourceId: 'fast', priority: 1, readinessScore: 100, lane: 'FAST_LANE', contentHash: 'fast', sourceHash: 'fast', payload: payload({ title: 'Sản phẩm fast đầy đủ' }) });
+    equal((await queue.claimCandidateBatch(1))[0].sourceId, 'fast');
+  });
+
+  await test('V4-05. model router chỉ chọn stable Free allowlist còn hạn', () => {
+    const profile = { taskType: 'metadata_repair', riskLevel: 'low', complexityScore: 10, factCount: 4, inputTokenEstimate: 100, candidateLane: 'FAST_LANE', priority: 100, previousFailures: 0, requiredQuality: 80 };
+    equal(geminiModels.routeModel(profile, ['models/gemini-3.1-flash-lite'], Date.parse('2026-07-12')).modelId, 'gemini-3.1-flash-lite');
+    equal(geminiModels.routeModel(profile, ['gemini-preview'], Date.parse('2026-07-12')), null);
+  });
+
+  const geminiCredential = (id, group, billingMode, healthScore, role = 'backup') => ({ id, platform: 'gemini', credentialType: 'api_key', role, label: id, encryptedValue: `b64:${Buffer.from(`secret-${id}`).toString('base64')}`, maskedValue: 'secr****test', status: 'valid', metadata: { billingMode, keyType: 'auth', quotaGroupId: group, supportedModels: ['gemini-3.1-flash-lite'], lightTestStatus: 'available', generationStatus: 'available', failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore }, createdAt: '2026-07-12T00:00:00.000Z', updatedAt: '2026-07-12T00:00:00.000Z' });
+
+  await test('V4-06. paid/unknown billing key không được chọn', async () => {
+    await adapter.writeCollection('token-vault', [geminiCredential('paid', 'paid-group', 'paid', 100), geminiCredential('unknown', 'unknown-group', 'unknown', 100)]);
+    await adapter.writeCollection('gemini-pool-state', []);
+    equal((await geminiRouter.selectGeminiCredentials('gemini-3.1-flash-lite', Date.parse('2026-07-12'))).length, 0);
+  });
+
+  await test('V4-07. 429 chuyển quotaGroup, không chuyển key cùng group', async () => {
+    await adapter.writeCollection('token-vault', [geminiCredential('g1a', 'group-1', 'free_confirmed', 100, 'primary'), geminiCredential('g1b', 'group-1', 'free_confirmed', 90), geminiCredential('g2', 'group-2', 'free_confirmed', 80)]);
+    await adapter.writeCollection('gemini-pool-state', []);
+    let calls = 0; const urls = []; const headers = [];
+    const mockFetch = async (url, init) => { calls++; urls.push(String(url)); headers.push(init.headers); return calls === 1 ? new Response('{}', { status: 429, headers: { 'retry-after': '60' } }) : response(200, { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }); };
+    const result = await geminiRouter.executeGeminiRequest({ modelId: 'gemini-3.1-flash-lite', taskType: 'metadata_repair', idempotencyKey: 'failover-groups', body: {}, timeoutMs: 1000 }, mockFetch);
+    equal(result.ok, true); equal(result.quotaGroupId, 'group-2'); equal(calls, 2);
+    assert(urls.every((url) => !url.includes('key='))); assert(headers.every((header) => Boolean(header['x-goog-api-key'])));
+  });
+
+  await test('V4-08. idempotency cache ngăn generation trùng', async () => {
+    let calls = 0; const mockFetch = async () => { calls++; return response(200, { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }); };
+    const request = { modelId: 'gemini-3.1-flash-lite', taskType: 'metadata_repair', idempotencyKey: 'cache-once', body: {}, timeoutMs: 1000 };
+    await geminiRouter.executeGeminiRequest(request, mockFetch); await geminiRouter.executeGeminiRequest(request, mockFetch); equal(calls, 1);
+  });
+
+  await test('V4-09. hết Free groups chuyển persistent LOCAL_ONLY', async () => {
+    await adapter.writeCollection('token-vault', [geminiCredential('paid-only', 'paid-only', 'paid', 100)]); await adapter.writeCollection('gemini-pool-state', []);
+    const result = await geminiRouter.executeGeminiRequest({ modelId: 'gemini-3.1-flash-lite', taskType: 'metadata_repair', idempotencyKey: 'local-only', body: {}, timeoutMs: 1000 }, async () => { throw new Error('must_not_call'); });
+    equal(result.errorCode, 'local_only'); equal((await geminiPool.getGeminiPoolState()).state, 'LOCAL_ONLY');
+  });
+
+  await test('V4-10. HEAD 429/500 đều fallback GET 200', async () => {
+    for (const status of [429, 500]) { let calls = 0; global.fetch = async () => ++calls === 1 ? new Response('', { status }) : new Response('', { status: 200, headers: { 'content-type': 'text/html' } }); const result = await health.checkLinkHealth(`https://fallback-${status}.test/p`); equal(result.ok, true); equal(calls, 2); }
+  });
+
+  await test('V4-11. redirect sang private IP bị SSRF chặn', async () => {
+    global.fetch = async () => new Response('', { status: 302, headers: { location: 'http://127.0.0.1/private' } });
+    const result = await health.checkLinkHealth('https://public.test/redirect'); equal(result.ok, false); assert(['not_allowed', 'forbidden'].includes(result.status));
+  });
+
+  await test('V4-12. generation probe strict JSON và 429 không invalid', async () => {
+    const credential = geminiCredential('probe', 'probe-group', 'free_confirmed', 100, 'primary'); await adapter.writeCollection('token-vault', [credential]); await adapter.writeCollection('gemini-pool-state', []);
+    let result = await geminiProbe.generationProbeCredential('probe', async () => response(200, { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] })); equal(result.generationStatus, 'available');
+    result = await geminiProbe.generationProbeCredential('probe', async () => new Response('{}', { status: 429 })); equal(result.generationStatus, 'quota_exhausted'); assert(result.status !== 'invalid');
+  });
+
+  await test('V4-13. invalid input không failover mọi key', async () => {
+    await adapter.writeCollection('token-vault', [geminiCredential('bad1', 'bad-group-1', 'free_confirmed', 100, 'primary'), geminiCredential('bad2', 'bad-group-2', 'free_confirmed', 90)]); await adapter.writeCollection('gemini-pool-state', []);
+    let calls = 0; const result = await geminiRouter.executeGeminiRequest({ modelId: 'gemini-3.1-flash-lite', taskType: 'metadata_repair', idempotencyKey: 'invalid-no-failover', body: {}, timeoutMs: 1000 }, async () => { calls++; return new Response('{}', { status: 400 }); });
+    equal(result.ok, false); equal(calls, 1);
+  });
+
+  await test('V4-14. Gemini concurrency không vượt 2', async () => {
+    await adapter.writeCollection('token-vault', [geminiCredential('concurrent', 'concurrent-group', 'free_confirmed', 100, 'primary')]); await adapter.writeCollection('gemini-pool-state', []);
+    let active = 0; let maximum = 0; const mockFetch = async () => { active++; maximum = Math.max(maximum, active); await new Promise((resolve) => setTimeout(resolve, 10)); active--; return response(200, { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }); };
+    await Promise.all([1, 2, 3].map((id) => geminiRouter.executeGeminiRequest({ modelId: 'gemini-3.1-flash-lite', taskType: 'metadata_repair', idempotencyKey: `concurrency-${id}`, body: {}, timeoutMs: 1000 }, mockFetch))); assert(maximum <= 2, `maximum=${maximum}`);
+  });
+
+  await test('V4-15. duplicate slug publication bị chặn và không làm mất canonical', async () => {
+    const first = indexableProduct({ id: 'slug-first', sourceId: 'slug-first', slug: 'same-slug', sourceHash: 'slug-first' });
+    const second = indexableProduct({ id: 'slug-second', sourceId: 'slug-second', slug: 'same-slug', sourceHash: 'slug-second' });
+    await adapter.writeCollection('products', [first, second]); const saved = await products.publishCanonicalProductTransaction('slug-second', { reviewContent: second.reviewContent });
+    assert(saved); assert(saved.slug !== 'same-slug' || saved.status !== 'published'); equal((await products.getAllProducts()).length, 2);
+  });
+
+  await test('V4-16. canonical JSON corrupt không bị coi là collection rỗng', async () => {
+    const corruptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-corrupt-')); const previous = process.env.SANDEAL_DATA_DIR; process.env.SANDEAL_DATA_DIR = corruptDir;
+    fs.writeFileSync(path.join(corruptDir, 'products.json'), '{broken', 'utf8'); let threw = false;
+    try { await adapter.readCollection('products'); } catch { threw = true; }
+    process.env.SANDEAL_DATA_DIR = previous; fs.rmSync(corruptDir, { recursive: true, force: true }); assert(threw, 'corrupt JSON must fail closed');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
