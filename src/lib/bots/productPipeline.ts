@@ -2,11 +2,15 @@ import { createHash } from 'crypto';
 import { AccessTradeRequestError, isAccessTradeConfigured, mapAccessTradeToProduct, searchAccessTrade, type AccessTradeResultType, type NormalizedAccessTradeItem } from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, enqueueCandidate, finishCandidate, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem } from '../storage/candidateQueue';
-import { getAllProducts, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
+import { getAllProducts, publishCanonicalProductTransaction, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
 import { readCollection, writeCollection } from '../storage/adapter';
 import { checkImageHealth, checkLinkHealth } from './productHealthCheck';
 import type { Product } from '../types';
-import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview } from '../editorialReview';
+import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
+import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
+import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
+import { scoreCandidateReadiness } from './candidateReadiness';
+import { isDomainCircuitOpen, recordDomainHealth } from './domainCircuitBreaker';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
@@ -141,7 +145,8 @@ export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.
         if (existing?.sourceHealthCooldownUntil && Date.parse(existing.sourceHealthCooldownUntil) > Date.now()) { counters.skippedCooldown++; continue; }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.affiliateUrl, payload.imageUrl].filter(Boolean).length;
         const priority = complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid);
-        const queued = await enqueueCandidate({ source: 'accesstrade', sourceId: item.id, priority, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
+        const readiness = scoreCandidateReadiness(payload);
+        const queued = await enqueueCandidate({ source: 'accesstrade', sourceId: item.id, priority, readinessScore: readiness.score, lane: readiness.lane, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
         if (queued.queued) { counters.queued++; counters.reviewQueued++; } else { counters.duplicate++; counters.unchanged++; }
       }
     } catch (error) {
@@ -160,9 +165,9 @@ export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.
   return { ...counters, resultTypes, retryAfter };
 }
 
-function cooldownFor(statuses: string[]): number {
+function cooldownFor(statuses: string[], attempts = 1): number {
   if (statuses.includes('rate_limited')) return 60 * 60_000;
-  if (statuses.some((status) => ['timeout', 'server_error', 'dns_error', 'error'].includes(status))) return 6 * 60 * 60_000;
+  if (statuses.some((status) => ['timeout', 'server_error', 'dns_error', 'error'].includes(status))) return Math.min(48 * 60 * 60_000, 60 * 60_000 * 2 ** Math.min(5, attempts));
   if (statuses.some((status) => ['broken', 'image_broken'].includes(status))) return 24 * 60 * 60_000;
   return 4 * 60 * 60_000;
 }
@@ -170,6 +175,9 @@ function cooldownFor(statuses: string[]): number {
 async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): Promise<void> {
   const { payload } = item;
   try {
+    if (await isDomainCircuitOpen(payload.originalUrl) || await isDomainCircuitOpen(payload.affiliateUrl) || await isDomainCircuitOpen(payload.imageUrl)) {
+      await finishCandidate(item.id, { status: 'delayed', delayReason: 'domain_circuit_open', nextAttemptAt: new Date(Date.now() + 30 * 60_000).toISOString() }); return;
+    }
     const productHealth = await checkLinkHealth(payload.originalUrl); counters.networkChecks++;
     const affiliateHealth = await checkLinkHealth(payload.affiliateUrl); counters.networkChecks++;
     let imageUrl = payload.imageUrl;
@@ -182,6 +190,7 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       }
     }
     const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+    await recordDomainHealth(payload.originalUrl, productHealth.status); await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status); await recordDomainHealth(imageUrl, imageHealth.status);
     const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
     const now = new Date().toISOString();
     const mapped = mapAccessTradeToProduct({
@@ -200,7 +209,7 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       imageHealthStatus: imageHealth.status === 'ok' ? 'ok' : imageHealth.status,
       linkLastCheckedAt: now, affiliateLastCheckedAt: now, imageLastCheckedAt: now,
       imageContentType: imageHealth.contentType,
-      sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses)).toISOString(),
+      sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses, item.attempts)).toISOString(),
       sourceHealthReason: healthy ? undefined : statuses.join(','),
       publicBlockReason: healthy ? '' : statuses.join(','),
     } as Partial<Product>;
@@ -208,13 +217,21 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
     if (canonical.product.reviewContent?.reviewStatus === 'stale') counters.reviewStale++;
     let finalProduct = canonical.product;
     if (shouldRegenerateReview(canonical.product)) {
-      const review = generateEditorialReview(canonical.product, (await getAllProducts()).filter((product) => product.id !== canonical.product.id));
+      const otherProducts = (await getAllProducts()).filter((product) => product.id !== canonical.product.id);
+      const localReview = generateEditorialReview(canonical.product, otherProducts);
+      const factCount = localReview.keyFacts.length;
+      const profile = { taskType: 'editorial_review' as const, riskLevel: canonical.product.riskLevel === 'high' ? 'high' as const : canonical.product.riskLevel === 'medium' ? 'medium' as const : 'low' as const, complexityScore: Math.max(31, Math.min(75, 30 + factCount * 5)), factCount, inputTokenEstimate: Math.ceil(JSON.stringify(canonical.product).length / 4), candidateLane: item.lane || 'NORMAL_LANE', priority: item.priority, previousFailures: Math.max(0, item.attempts - 1), requiredQuality: 80 };
+      const gemini = await generateGeminiEditorialReview(canonical.product, profile, await listAvailableGeminiModels(), () => localReview);
+      const generatedValidation = gemini ? validateReviewClaims(gemini.review, canonical.product) : null;
+      const duplicateGenerated = gemini ? otherProducts.some((other) => other.reviewContent && textSimilarity(`${gemini.review.reviewTitle} ${gemini.review.reviewSummary} ${gemini.review.reviewVerdict}`, `${other.reviewContent.reviewTitle} ${other.reviewContent.reviewSummary} ${other.reviewContent.reviewVerdict}`) >= 0.8) : false;
+      const useGemini = Boolean(gemini && generatedValidation?.valid && !duplicateGenerated);
+      const review = useGemini ? gemini!.review : localReview;
       counters.reviewGenerated++;
       if (review.reviewBlockReasons.includes('claim_validation_failed') || review.reviewBlockReasons.includes('unsafe_claim')) counters.claimValidationFailed++;
       if (review.reviewBlockReasons.includes('low_originality')) counters.duplicateContentSkipped++;
       if (review.reviewStatus === 'approved') counters.reviewApproved++; else if (review.reviewStatus === 'rejected') counters.reviewRejected++; else counters.reviewNeedsReview++;
       if (isReviewIndexable({ ...canonical.product, reviewContent: review })) counters.seoReady++; else counters.seoBlocked++;
-      finalProduct = (await saveCanonicalProduct(canonical.product.id, { reviewContent: review }, { evaluate: true })) || canonical.product;
+      finalProduct = (await publishCanonicalProductTransaction(canonical.product.id, { reviewContent: review, reviewGeneration: useGemini ? { provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion, generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash, generatedAt: gemini!.generatedAt, validationResult: 'approved' } : { provider: 'local', promptVersion: 'local-review-v2', generationFingerprint: canonical.product.sourceHash || canonical.product.id, generatedAt: new Date().toISOString(), validationResult: 'fallback_local' } }, { candidateId: item.id })) || canonical.product;
     } else {
       counters.unchanged++;
     }
@@ -228,7 +245,13 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       await writeCollection(KEYWORD_COLLECTION, keywordStats);
     } else {
       counters.needsReview++; counters.noindex++;
-      await finishCandidate(item.id, { status: healthy ? 'needs_review' : 'delayed', delayReason: finalProduct.publicBlockReason, nextAttemptAt: finalProduct.sourceHealthCooldownUntil });
+      const confirmedBroken = statuses.some((status) => ['broken', 'image_broken', 'invalid_image', 'not_found'].includes(status));
+      const retryExhausted = !healthy && item.attempts >= 6;
+      await finishCandidate(item.id, {
+        status: confirmedBroken ? 'discarded' : healthy || retryExhausted ? 'needs_review' : 'delayed',
+        delayReason: confirmedBroken ? 'confirmed_broken' : retryExhausted ? 'retry_budget_exhausted' : finalProduct.publicBlockReason,
+        nextAttemptAt: confirmedBroken || retryExhausted ? undefined : finalProduct.sourceHealthCooldownUntil,
+      });
     }
   } catch (error) {
     counters.failed++;
@@ -236,13 +259,13 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
   }
 }
 
-export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.now() + 240_000): Promise<PipelineCounters & { currentConcurrency: number }> {
+export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.now() + 240_000, batchOverride?: number): Promise<PipelineCounters & { currentConcurrency: number }> {
   const counters = emptyCounters();
   const settings = await getAutomationSettings();
   const usage = await getDailyPipelineUsage();
   const remainingNetworkChecks = Math.max(0, settings.networkCheckBudgetPerDay - usage.networkChecks);
   const runtime = (await readCollection<RuntimeState>(RUNTIME_COLLECTION))[0] || { id: 'runtime', currentConcurrency: 3, timeoutStreak: 0, updatedAt: new Date().toISOString() };
-  const batchLimit = mode === 'bootstrap' ? settings.bootstrapReviewBatch : settings.steadyReviewBatch;
+  const batchLimit = batchOverride || (mode === 'bootstrap' ? settings.bootstrapReviewBatch : settings.steadyReviewBatch);
   const batch = await claimCandidateBatch(Math.min(batchLimit, Math.floor(remainingNetworkChecks / 8)));
   const concurrency = Math.max(1, Math.min(3, settings.maxConcurrency, runtime.currentConcurrency || 3, batch.length || 1));
   let cursor = 0;
@@ -282,15 +305,20 @@ export async function recheckPublishedProducts(limit: number, deadlineMs: number
       const imageHealth = await checkImageHealth(product.imageUrl || ''); counters.networkChecks++;
       const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
       const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+      const confirmedBroken = ['broken', 'not_found'].includes(productHealth.status)
+        || ['broken', 'not_found'].includes(affiliateHealth.status)
+        || ['image_broken', 'invalid_image'].includes(imageHealth.status);
+      const preservePublishedHealth = !healthy && !confirmedBroken;
       const saved = await saveCanonicalProduct(product.id, {
-        linkHealthStatus: productHealth.status === 'ok' ? 'ok' : productHealth.status as Product['linkHealthStatus'],
-        affiliateHealthStatus: affiliateHealth.status === 'ok' ? 'ok' : affiliateHealth.status as Product['affiliateHealthStatus'],
-        imageHealthStatus: imageHealth.status === 'ok' ? 'ok' : imageHealth.status as Product['imageHealthStatus'],
+        linkHealthStatus: preservePublishedHealth ? product.linkHealthStatus : productHealth.status === 'ok' ? 'ok' : productHealth.status as Product['linkHealthStatus'],
+        affiliateHealthStatus: preservePublishedHealth ? product.affiliateHealthStatus : affiliateHealth.status === 'ok' ? 'ok' : affiliateHealth.status as Product['affiliateHealthStatus'],
+        imageHealthStatus: preservePublishedHealth ? product.imageHealthStatus : imageHealth.status === 'ok' ? 'ok' : imageHealth.status as Product['imageHealthStatus'],
         linkLastCheckedAt: new Date().toISOString(), affiliateLastCheckedAt: new Date().toISOString(), imageLastCheckedAt: new Date().toISOString(),
-        publicBlockReason: healthy ? '' : statuses.join(','),
+        publicBlockReason: healthy || preservePublishedHealth ? '' : statuses.join(','),
+        publicBlockReasons: healthy || preservePublishedHealth ? [] : statuses,
         sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses)).toISOString(),
         sourceHealthReason: healthy ? undefined : statuses.join(','),
-      }, { evaluate: true });
+      }, { evaluate: !preservePublishedHealth });
       counters.reviewed++;
       if (saved?.status === 'published') counters.published++; else counters.needsReview++;
     }

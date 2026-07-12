@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
 
     switch (cred.platform) {
       case 'gemini':
-        ({ status, lastError, metadata } = await testGeminiKey(rawValue));
+        ({ status, lastError, metadata } = await testGeminiKey(rawValue, cred.metadata));
         break;
 
       case 'accesstrade':
@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
 
 // ---- Gemini Test ----
 
-async function testGeminiKey(apiKey: string): Promise<{
+async function testGeminiKey(apiKey: string, previous?: Record<string, unknown>): Promise<{
   status: CredentialStatus;
   lastError?: string;
   metadata?: Record<string, unknown>;
@@ -125,8 +125,8 @@ async function testGeminiKey(apiKey: string): Promise<{
   // Light validation: call models.list endpoint (free, no generation cost)
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
-      { method: 'GET', signal: AbortSignal.timeout(10000) }
+      'https://generativelanguage.googleapis.com/v1beta/models',
+      { method: 'GET', headers: { 'x-goog-api-key': apiKey }, signal: AbortSignal.timeout(10000) }
     );
 
     if (res.ok) {
@@ -135,6 +135,10 @@ async function testGeminiKey(apiKey: string): Promise<{
       return {
         status: 'valid',
         metadata: {
+          ...previous,
+          lightTestStatus: 'available',
+          lastLightTestAt: new Date().toISOString(),
+          supportedModels: (data.models || []).map((item) => String(item.name || '').replace(/^models\//, '')).filter(Boolean),
           modelsAvailable: modelCount,
           note: 'Khóa hợp lệ. Đã xác nhận quyền truy cập Gemini API (chỉ kiểm tra danh sách model, không phát sinh chi phí).',
         },

@@ -425,15 +425,14 @@ export default function AIBotsPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
-    void loadScheduler();
+    const initial = window.setTimeout(() => { void loadData(); void loadScheduler(); }, 0);
 
     const interval = window.setInterval(() => {
       void loadData();
       void loadScheduler();
     }, 30000);
 
-    return () => window.clearInterval(interval);
+    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [loadData, loadScheduler]);
 
   const handleRunBot = async (mode: string) => {

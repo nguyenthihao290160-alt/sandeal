@@ -28,6 +28,16 @@ import { encryptSecret, decryptSecret, maskSecret, toSafeCredential, toSafeCrede
 
 const COLLECTION = 'token-vault';
 
+function initialMetadata(input: CreateCredentialInput): Record<string, unknown> | undefined {
+  if (input.platform !== 'gemini') return input.metadata;
+  return {
+    billingMode: 'unknown', keyType: 'unknown', supportedModels: [], lightTestStatus: 'unchecked',
+    generationStatus: 'unchecked', failureStreak: 0, requestsTodayEstimated: 0,
+    inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore: 50,
+    ...input.metadata,
+  };
+}
+
 // ---- List & Filter ----
 
 /**
@@ -139,7 +149,7 @@ export async function createCredential(input: CreateCredentialInput): Promise<Sa
     maskedValue: maskSecret(input.value),
     status: 'unchecked',
     permissions: undefined,
-    metadata: input.metadata,
+    metadata: initialMetadata(input),
     lastCheckedAt: undefined,
     lastError: undefined,
     createdAt: now,
@@ -174,12 +184,14 @@ export async function updateCredential(
  * Re-encrypts and re-masks.
  */
 export async function replaceCredentialValue(id: string, newValue: string): Promise<SafeCredential | null> {
+  const current = await getCredentialById(id);
   const updated = await updateOne<StoredCredential>(COLLECTION, id, {
     encryptedValue: encryptSecret(newValue),
     maskedValue: maskSecret(newValue),
     status: 'unchecked',
     lastCheckedAt: undefined,
     lastError: undefined,
+    metadata: current?.platform === 'gemini' ? { ...current.metadata, lightTestStatus: 'unchecked', generationStatus: 'unchecked', failureStreak: 0 } : current?.metadata,
   } as Partial<StoredCredential>);
   return updated ? toSafeCredential(updated) : null;
 }

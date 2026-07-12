@@ -6,7 +6,6 @@
 
 import type { BotRunMode } from '../types';
 import { BotContext } from './context';
-import { config } from '../config';
 import { getPrimaryCredential } from '../storage/tokenVault';
 import { getBotRunById, updateBotRun } from '../storage/botRuns';
 
@@ -18,6 +17,10 @@ export interface OrchestratorConfig {
   allowPaidAi?: boolean;
   costMode?: string;
   autoPublishEnabled?: boolean;
+  safeMode?: boolean;
+  freeOnly?: boolean;
+  autoMode?: boolean;
+  autoApprove?: boolean;
 }
 
 export interface OrchestratorState {
@@ -47,8 +50,8 @@ export class Orchestrator {
       mode: config.mode,
       source: config.source,
       limit: Math.min(config.limit, 50), // Max 50 items per run
-      safeMode: !(config.allowPaidAi ?? true),
-      freeOnly: config.costMode === 'free_only',
+      safeMode: config.safeMode ?? !(config.allowPaidAi ?? true),
+      freeOnly: config.freeOnly ?? config.costMode === 'safe_free',
       autoPublish: config.autoPublishEnabled ?? false,
       hasGeminiToken: false,
       hasAccessTradeToken: false,
@@ -161,7 +164,7 @@ export class Orchestrator {
 
     const status = error ? 'failed' : 'completed';
     await updateBotRun(state.runId, {
-      status: status as any,
+      status,
       completedAt: new Date().toISOString(),
     });
 

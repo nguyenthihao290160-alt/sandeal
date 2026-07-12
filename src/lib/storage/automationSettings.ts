@@ -31,6 +31,17 @@ export interface AutomationSettings {
   maxRunDurationMs: number;
   sourceRequestBudgetPerDay: number;
   networkCheckBudgetPerDay: number;
+  generationConcurrency: number;
+  bulkBudgetPercent: number;
+  editorialBudgetPercent: number;
+  adjudicationBudgetPercent: number;
+  launchEnabled: boolean;
+  publishWaveSize: number;
+  publishWaveDelayMinutes: number;
+  maximumLaunchPublishes: number;
+  minimumHealthPassRate: number;
+  maximumErrorRate: number;
+  maximumRollbackRate: number;
 
   // Immutables / System policies
   safePublish: boolean;
@@ -68,6 +79,17 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   maxRunDurationMs: 240_000,
   sourceRequestBudgetPerDay: 300,
   networkCheckBudgetPerDay: 900,
+  generationConcurrency: 1,
+  bulkBudgetPercent: 45,
+  editorialBudgetPercent: 45,
+  adjudicationBudgetPercent: 3,
+  launchEnabled: false,
+  publishWaveSize: 25,
+  publishWaveDelayMinutes: 30,
+  maximumLaunchPublishes: 150,
+  minimumHealthPassRate: 0.90,
+  maximumErrorRate: 0.05,
+  maximumRollbackRate: 0.02,
   
   // Immutables - Must NEVER be overridden by frontend
   safePublish: true,
@@ -106,6 +128,17 @@ function sanitizeSettings(settings: Record<string, unknown>): AutomationSettings
     maxRunDurationMs: Math.max(60_000, Math.min(Number(settings.maxRunDurationMs) || 240_000, 10 * 60_000)),
     sourceRequestBudgetPerDay: Math.max(10, Math.min(Number(settings.sourceRequestBudgetPerDay) || 300, 2_000)),
     networkCheckBudgetPerDay: Math.max(30, Math.min(Number(settings.networkCheckBudgetPerDay) || 900, 5_000)),
+    generationConcurrency: Math.max(1, Math.min(Number(settings.generationConcurrency) || 1, 2)),
+    bulkBudgetPercent: Math.max(0, Math.min(Number(settings.bulkBudgetPercent) || 45, 60)),
+    editorialBudgetPercent: Math.max(0, Math.min(Number(settings.editorialBudgetPercent) || 45, 60)),
+    adjudicationBudgetPercent: Math.max(0, Math.min(Number(settings.adjudicationBudgetPercent) || 3, 3)),
+    launchEnabled: settings.launchEnabled === true,
+    publishWaveSize: Math.max(1, Math.min(Number(settings.publishWaveSize) || 25, 50)),
+    publishWaveDelayMinutes: Math.max(5, Math.min(Number(settings.publishWaveDelayMinutes) || 30, 240)),
+    maximumLaunchPublishes: Math.max(1, Math.min(Number(settings.maximumLaunchPublishes) || 150, 500)),
+    minimumHealthPassRate: Math.max(0.5, Math.min(Number(settings.minimumHealthPassRate) || 0.90, 1)),
+    maximumErrorRate: Math.max(0, Math.min(Number(settings.maximumErrorRate) || 0.05, 0.25)),
+    maximumRollbackRate: Math.max(0, Math.min(Number(settings.maximumRollbackRate) || 0.02, 0.10)),
       
     // Enforce Immutables
     safePublish: true,

@@ -9,7 +9,8 @@
 // ===========================================
 
 import { getAllProducts, updateProduct } from '../storage/products';
-import { checkLinkHealth, checkImageHealth } from './productHealthCheck';
+import { checkLinkHealth, checkImageHealth, isRetryableLinkStatus, isRetryableImageStatus } from './productHealthCheck';
+import type { LinkCheckStatus, ImageCheckStatus } from './productHealthCheck';
 import type { Product } from '../types';
 
 type ProductRecord = Product & Record<string, unknown>;
@@ -20,6 +21,7 @@ export interface HealthCleanupSummary {
   hidden: number;
   linkBroken: number;
   imageBroken: number;
+  retryable: number;
   errors: number;
 }
 
@@ -30,16 +32,9 @@ function getText(value: unknown): string {
 }
 
 /**
- * Chạy health check cho tất cả sản phẩm đang published/approved.
- * Nếu phát hiện link hoặc ảnh lỗi:
- *  - publicHidden = true
- *  - status = "needs_review"
- *  - aiApproved = false
- *  - autoPublished = false
- *  - Ghi linkHealthStatus / imageHealthStatus
- *
- * Không xóa sản phẩm. Không mất dữ liệu gốc.
- * Mỗi item wrap try/catch — một lỗi không crash cả batch.
+ * V2: Only hide products for PERMANENT failures (broken/image_broken).
+ * Retryable failures (timeout, rate_limited, server_error, etc.)
+ * update the status field but do NOT hide or unpublish.
  */
 export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
   const summary: HealthCleanupSummary = {
@@ -48,6 +43,7 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
     hidden: 0,
     linkBroken: 0,
     imageBroken: 0,
+    retryable: 0,
     errors: 0,
   };
 
@@ -81,6 +77,7 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
       const imageUrl = getText(p.imageUrl);
 
       let isHealthy = true;
+      let hasRetryableIssue = false;
       const updates: Record<string, unknown> = {};
 
       // Check link health
@@ -91,17 +88,27 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
         updates.linkLastCheckedAt = new Date().toISOString();
 
         if (!linkResult.ok) {
-          isHealthy = false;
-          summary.linkBroken++;
-          updates.publicHidden = true;
-          updates.status = 'needs_review';
-          updates.aiApproved = false;
-          updates.autoPublished = false;
-          updates.unpublishedReason = `Link lỗi: ${linkResult.reason}`;
+          const linkRetryable = isRetryableLinkStatus(linkResult.status as LinkCheckStatus);
 
-          console.log(
-            `[ProductHealthGuard] Link broken: ${product.id} — ${linkResult.status}: ${linkResult.reason}`,
-          );
+          if (linkRetryable) {
+            // Retryable failure: record status but do NOT hide/unpublish
+            hasRetryableIssue = true;
+            console.log(
+              `[ProductHealthGuard] Link retryable: ${product.id} — ${linkResult.status}: ${linkResult.reason}`,
+            );
+          } else {
+            // Permanent failure: hide product
+            isHealthy = false;
+            summary.linkBroken++;
+            updates.publicHidden = true;
+            updates.status = 'needs_review';
+            updates.aiApproved = false;
+            updates.autoPublished = false;
+            updates.unpublishedReason = `Link lỗi: ${linkResult.reason}`;
+            console.log(
+              `[ProductHealthGuard] Link broken: ${product.id} — ${linkResult.status}: ${linkResult.reason}`,
+            );
+          }
         }
       } else {
         // Không có link mua → ẩn
@@ -115,29 +122,38 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
         updates.unpublishedReason = 'Không có link mua hàng';
       }
 
-      // Check image health (chỉ nếu link vẫn ok — tránh double-hide)
+      // Check image health
       if (imageUrl) {
         const imageResult = await checkImageHealth(imageUrl);
 
         updates.imageHealthStatus = imageResult.status;
 
         if (!imageResult.ok) {
-          if (isHealthy) {
-            // Chỉ count nếu link ok mà ảnh lỗi (tránh count trùng)
-            summary.imageBroken++;
-          }
-          isHealthy = false;
-          updates.publicHidden = true;
-          updates.status = 'needs_review';
-          updates.aiApproved = false;
-          updates.autoPublished = false;
-          updates.unpublishedReason = updates.unpublishedReason
-            ? `${updates.unpublishedReason}; Ảnh lỗi: ${imageResult.reason}`
-            : `Ảnh lỗi: ${imageResult.reason}`;
+          const imageRetryable = isRetryableImageStatus(imageResult.status as ImageCheckStatus);
 
-          console.log(
-            `[ProductHealthGuard] Image broken: ${product.id} — ${imageResult.status}: ${imageResult.reason}`,
-          );
+          if (imageRetryable) {
+            // Retryable failure: record but do NOT count as image_broken
+            hasRetryableIssue = true;
+            console.log(
+              `[ProductHealthGuard] Image retryable: ${product.id} — ${imageResult.status}: ${imageResult.reason}`,
+            );
+          } else {
+            // Permanent failure
+            if (isHealthy) {
+              summary.imageBroken++;
+            }
+            isHealthy = false;
+            updates.publicHidden = true;
+            updates.status = 'needs_review';
+            updates.aiApproved = false;
+            updates.autoPublished = false;
+            updates.unpublishedReason = updates.unpublishedReason
+              ? `${updates.unpublishedReason}; Ảnh lỗi: ${imageResult.reason}`
+              : `Ảnh lỗi: ${imageResult.reason}`;
+            console.log(
+              `[ProductHealthGuard] Image broken: ${product.id} — ${imageResult.status}: ${imageResult.reason}`,
+            );
+          }
         }
       } else {
         // Không có ảnh → ẩn
@@ -156,8 +172,12 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
       }
 
       if (isHealthy) {
-        summary.healthy++;
-        // Cập nhật health status mới nhất ngay cả khi healthy
+        if (hasRetryableIssue) {
+          summary.retryable++;
+        } else {
+          summary.healthy++;
+        }
+        // Update health status but keep product published
         updates.linkHealthStatus = updates.linkHealthStatus || 'ok';
         updates.imageHealthStatus = updates.imageHealthStatus || 'ok';
       } else {

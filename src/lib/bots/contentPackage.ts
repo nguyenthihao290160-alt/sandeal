@@ -5,6 +5,7 @@
 
 import { BotContext } from './context';
 import { getContentPackageByProductId } from '../storage/contentPackages';
+import type { ContentPackage } from '../types';
 
 export class ContentPackageBot {
   private ctx: BotContext;
@@ -13,7 +14,7 @@ export class ContentPackageBot {
     this.ctx = ctx;
   }
 
-  async getPackageStatus(productId: string): Promise<{ ready: boolean; package: any | null }> {
+  async getPackageStatus(productId: string): Promise<{ ready: boolean; package: ContentPackage | null }> {
     const pkg = await getContentPackageByProductId(productId);
 
     if (!pkg) {

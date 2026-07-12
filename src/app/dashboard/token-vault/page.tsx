@@ -63,6 +63,7 @@ export default function TokenVaultPage() {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [replaceId, setReplaceId] = useState<string | null>(null);
   const [replaceValue, setReplaceValue] = useState('');
+  const [testingAll, setTestingAll] = useState(false);
 
   const showToast = useCallback((type: string, message: string) => {
     setToast({ type, message });
@@ -84,7 +85,8 @@ export default function TokenVaultPage() {
   }, [showToast]);
 
   useEffect(() => {
-    loadCredentials();
+    const timer = window.setTimeout(() => void loadCredentials(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadCredentials]);
 
   // ---- Form handlers ----
@@ -186,6 +188,27 @@ export default function TokenVaultPage() {
     } catch {
       showToast('error', 'Lỗi kết nối.');
     }
+  };
+
+  const handleGenerationProbe = async (id: string) => {
+    setTestingId(id);
+    try {
+      const res = await fetch('/api/token-vault/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+      const data = await res.json();
+      showToast(data.ok && data.data?.generationStatus === 'available' ? 'success' : 'warning', data.message || 'Generation probe completed.');
+      await loadCredentials();
+    } catch { showToast('error', 'Generation probe failed.'); }
+    finally { setTestingId(null); }
+  };
+
+  const handleTestAll = async () => {
+    setTestingAll(true);
+    try {
+      const res = await fetch('/api/token-vault/test-all', { method: 'POST' });
+      const data = await res.json(); showToast(data.ok ? 'success' : 'warning', data.message || 'Gemini key tests completed.');
+      await loadCredentials();
+    } catch { showToast('error', 'Gemini key tests failed.'); }
+    finally { setTestingAll(false); }
   };
 
   const handleDisable = async (id: string) => {
@@ -306,6 +329,9 @@ export default function TokenVaultPage() {
         </div>
 
         {/* Stats */}
+        <div style={{ marginBottom: 'var(--space-md)', textAlign: 'right' }}>
+          <button className="btn btn-secondary" disabled={testingAll} onClick={handleTestAll}>{testingAll ? 'Testing Gemini keys...' : 'Test All Gemini Keys'}</button>
+        </div>
         <div className="grid grid-4" style={{ marginBottom: 'var(--space-xl)' }}>
           <div className="stat-card">
             <div className="stat-card-icon" style={{ background: 'rgba(124,58,237,0.12)', color: '#8b5cf6' }}>V</div>
@@ -446,6 +472,7 @@ export default function TokenVaultPage() {
                   replaceId={replaceId}
                   replaceValue={replaceValue}
                   onTest={handleTest}
+                  onProbe={handleGenerationProbe}
                   onSetPrimary={handleSetPrimary}
                   onDisable={handleDisable}
                   onDelete={setDeleteConfirm}
@@ -494,6 +521,7 @@ interface PlatformCardProps {
   replaceId: string | null;
   replaceValue: string;
   onTest: (id: string) => void;
+  onProbe: (id: string) => void;
   onSetPrimary: (id: string) => void;
   onDisable: (id: string) => void;
   onDelete: (id: string) => void;
@@ -509,6 +537,7 @@ function PlatformCard({
   replaceId,
   replaceValue,
   onTest,
+  onProbe,
   onSetPrimary,
   onDisable,
   onDelete,
@@ -574,6 +603,7 @@ function PlatformCard({
           replaceId={replaceId}
           replaceValue={replaceValue}
           onTest={onTest}
+          onProbe={onProbe}
           onSetPrimary={onSetPrimary}
           onDisable={onDisable}
           onDelete={onDelete}
@@ -595,6 +625,7 @@ interface CredentialRowProps {
   replaceId: string | null;
   replaceValue: string;
   onTest: (id: string) => void;
+  onProbe: (id: string) => void;
   onSetPrimary: (id: string) => void;
   onDisable: (id: string) => void;
   onDelete: (id: string) => void;
@@ -610,6 +641,7 @@ function CredentialRow({
   replaceId,
   replaceValue,
   onTest,
+  onProbe,
   onSetPrimary,
   onDisable,
   onDelete,
@@ -658,11 +690,19 @@ function CredentialRow({
               Quyền: {cred.permissions.join(', ')}
             </div>
           )}
+          {cred.platform === 'gemini' && (
+            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+              Project: {String(cred.metadata?.projectAlias || 'unset')} · Group: {String(cred.metadata?.quotaGroupId || 'unset')} · Billing: {String(cred.metadata?.billingMode || 'unknown')}<br />
+              Key type: {String(cred.metadata?.keyType || 'unknown')} · Generation: {String(cred.metadata?.generationStatus || 'unchecked')} · Model: {String(cred.metadata?.preferredModel || 'unset')}<br />
+              Cooldown: {cred.metadata?.cooldownUntil ? new Date(String(cred.metadata.cooldownUntil)).toLocaleString('vi-VN') : 'none'} · Requests: {String(cred.metadata?.requestsTodayEstimated || 0)}
+            </div>
+          )}
         </div>
         <div className="flex gap-xs" style={{ flexShrink: 0, flexWrap: 'wrap' }}>
           <button className="btn btn-ghost btn-sm" onClick={() => onTest(cred.id)} disabled={isTesting} title="Kiểm tra">
             {isTesting ? '...' : 'Test'}
           </button>
+          {cred.platform === 'gemini' && <button className="btn btn-ghost btn-sm" onClick={() => onProbe(cred.id)} disabled={isTesting}>Generation Probe</button>}
           {cred.role !== 'primary' && cred.role !== 'disabled' && (
             <button className="btn btn-ghost btn-sm" onClick={() => onSetPrimary(cred.id)} title="Đặt làm chính">
               Set Primary

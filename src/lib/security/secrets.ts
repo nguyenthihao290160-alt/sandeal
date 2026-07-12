@@ -3,14 +3,13 @@
 // ===========================================
 // Server-side only. Never import from client components.
 // Uses Node.js crypto with AES-256-GCM.
-// Falls back to base64 if TOKEN_VAULT_SECRET_KEY is not set.
+// New values fail closed when TOKEN_VAULT_SECRET_KEY is unavailable.
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
 import type { StoredCredential, SafeCredential } from '../types/tokenVault';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
-const TAG_LENGTH = 16;
 const SALT = 'sandeal-token-vault-salt-v1';
 
 // ---- Secret Key Management ----
@@ -24,31 +23,17 @@ function getEncryptionKey(): Buffer | null {
   return scryptSync(envKey, SALT, 32);
 }
 
-let hasWarnedNoKey = false;
-
-function warnNoKey(): void {
-  if (!hasWarnedNoKey) {
-    console.warn(
-      '[Token Vault] TOKEN_VAULT_SECRET_KEY chưa được cấu hình hoặc quá ngắn. ' +
-      'Dùng base64 encoding thay vì mã hoá thật. Hãy đặt TOKEN_VAULT_SECRET_KEY trong .env.'
-    );
-    hasWarnedNoKey = true;
-  }
-}
-
 // ---- Encryption ----
 
 /**
  * Encrypt a secret value.
  * Uses AES-256-GCM if TOKEN_VAULT_SECRET_KEY is set.
- * Falls back to base64 encoding with a marker prefix.
+ * Refuses to persist when the encryption key is unavailable.
  */
 export function encryptSecret(value: string): string {
   const key = getEncryptionKey();
   if (!key) {
-    warnNoKey();
-    // Fallback: base64 with prefix marker
-    return `b64:${Buffer.from(value, 'utf-8').toString('base64')}`;
+    throw new Error('Token Vault encryption is unavailable. Configure TOKEN_VAULT_SECRET_KEY before storing credentials.');
   }
 
   const iv = randomBytes(IV_LENGTH);

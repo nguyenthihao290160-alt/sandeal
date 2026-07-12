@@ -7,6 +7,8 @@ import { acquireRunLock, releaseRunLock } from './runLock';
 import { createRunLog, updateRunLog, listRunLogs, type RunSummary } from './runLogs';
 import { runProductHealthCleanup } from './productHealth';
 import { getAutomationSettings } from '../storage/automationSettings';
+import type { BotRunMode, Product } from '../types';
+import type { ScanCounters } from './sourceScout';
 
 // Re-export for convenience
 export type { RunSummary } from './runLogs';
@@ -38,7 +40,7 @@ export interface AutoPilotResult {
 }
 
 // Map our modes to BotRunMode values used by existing POST /api/ai-bots
-function toBotRunMode(mode: AutoPilotMode): string {
+function toBotRunMode(mode: AutoPilotMode): BotRunMode {
   switch (mode) {
     case 'full_safe_run': return 'full_safe_run';
     case 'source_scan': return 'source_scan';
@@ -198,7 +200,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
       case 'source_scan': {
         // Delegate to existing POST /api/ai-bots workflow via direct import
         // This avoids HTTP self-call and reuses the exact same executeWorkflow logic.
-        const { createBotRun, updateBotRun, addBotRunLog } = await import('../storage/botRuns');
+        const { createBotRun, updateBotRun } = await import('../storage/botRuns');
         const { createOrchestrator } = await import('./orchestrator');
         const { createSourceScout } = await import('./sourceScout');
         const { createDealScorer } = await import('./dealScorer');
@@ -209,7 +211,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
         const { listProducts } = await import('../storage/products');
 
         const botMode = toBotRunMode(mode);
-        const botRun = await createBotRun(botMode as Parameters<typeof createBotRun>[0], 'all', clampedLimit);
+        const botRun = await createBotRun(botMode, 'all', clampedLimit);
         await updateBotRun(botRun.id, { status: 'running' });
 
         const orchestrator = await createOrchestrator(botRun.id);
@@ -225,7 +227,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
           allowPaidAi: settings.allowPaidAi,
           costMode: settings.costMode,
           autoPublishEnabled: settings.safePublish,
-        } as any);
+        });
 
         const preflight = await orchestrator.preflightCheck(state);
         if (!preflight) {
@@ -243,7 +245,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
           productsArchived: 0,
         };
 
-        let scoutSummary: any = null;
+        let scoutSummary: ScanCounters | null = null;
 
         if (legacyMode === 'source_scan') {
           const scout = await createSourceScout(botRun.id);
@@ -262,7 +264,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
           const allProducts = await listProducts();
           const runnableProducts = allProducts
             .filter((p) => {
-              const rec = p as any;
+              const rec = p as Product & { sourceItemKind?: string; url?: string };
               const kind = rec.sourceItemKind || rec.kind || '';
               if (kind !== 'product' && kind !== 'deal') return false;
               if (p.status !== 'published' && p.status !== 'approved') return false;
@@ -276,7 +278,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
 
           // Score
           const scorer = await createDealScorer(botRun.id);
-          const scored: any[] = [];
+          const scored: Product[] = [];
           for (const p of runnableProducts) {
             try {
               const result = await scorer.scoreProduct(p);
@@ -288,7 +290,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
           const checker = await createLinkHealthChecker(botRun.id);
           for (const p of scored) {
             try {
-              const rec = p as any;
+              const rec = p as Product & { url?: string };
               const url = p.originalUrl || p.affiliateUrl || (typeof rec.url === 'string' ? rec.url : '');
               if (url) {
                 await checker.checkProductLink(p.id, url, p.affiliateUrl, p.imageUrl);

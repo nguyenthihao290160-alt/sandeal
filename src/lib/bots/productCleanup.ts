@@ -3,7 +3,7 @@
 // Safely archives broken products
 // ===========================================
 
-import type { LinkHealthStatus, Product } from '../types';
+import type { LinkHealthStatus } from '../types';
 import { BotContext } from './context';
 import {
   getLinkHealthByProductId,
@@ -162,11 +162,11 @@ export class ProductCleanupBot {
   }
 
   private isBrokenBeyondRecovery(status: LinkHealthStatus): boolean {
+    // V2: Only truly permanent failures should trigger archival
+    // server_error and affiliate_error are retryable, NOT permanent
     const brokenStatuses: LinkHealthStatus[] = [
       'not_found',
-      'server_error',
       'product_unavailable',
-      'affiliate_error',
     ];
     return brokenStatuses.includes(status);
   }

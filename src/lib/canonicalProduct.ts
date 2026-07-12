@@ -40,6 +40,9 @@ export function normalizeCanonicalProduct(input: Partial<Product>, now = new Dat
     status: safelyPublished ? 'published' : (status === 'published' ? 'needs_review' : status),
     publicHidden: safelyPublished ? false : input.publicHidden !== false,
     publicDecision: safelyPublished ? 'published' : (input.publicDecision || 'needs_review'),
+    publicBlockReasons: Array.isArray(input.publicBlockReasons)
+      ? [...new Set(input.publicBlockReasons.map(String).filter(Boolean))]
+      : String(input.publicBlockReason || '').split(',').map((reason) => reason.trim()).filter(Boolean),
     needsVerification: safelyPublished ? false : input.needsVerification !== false,
     autoPublished: safelyPublished ? input.autoPublished === true : false,
     contentHash: input.contentHash || stableProductHash(input),

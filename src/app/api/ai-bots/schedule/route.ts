@@ -22,10 +22,11 @@ const REVIEW_BLOCK_LABELS: Record<string, string> = {
 };
 
 function getVietnameseBlockReasons(product: Awaited<ReturnType<typeof getAllProducts>>[number]): string[] {
-  const reasons = product.reviewContent?.reviewBlockReasons?.length
-    ? product.reviewContent.reviewBlockReasons
-    : String(product.publicBlockReason || 'review_not_indexable').split(',').map((item) => item.trim()).filter(Boolean);
-  return reasons.map((reason) => REVIEW_BLOCK_LABELS[reason] || reason);
+  const reasons = [
+    ...(product.publicBlockReasons || String(product.publicBlockReason || '').split(',')),
+    ...(product.reviewContent?.reviewBlockReasons || []),
+  ].map((item) => item.trim()).filter(Boolean);
+  return [...new Set(reasons.length ? reasons : ['review_not_indexable'])].map((reason) => REVIEW_BLOCK_LABELS[reason] || reason);
 }
 
 export async function GET(request: NextRequest) {

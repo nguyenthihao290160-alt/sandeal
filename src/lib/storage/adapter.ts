@@ -30,10 +30,11 @@ export async function readCollection<T>(collection: string): Promise<T[]> {
   try {
     const raw = await fs.readFile(filePath, 'utf-8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    // File doesn't exist yet or is corrupt — return empty array
-    return [];
+    if (!Array.isArray(parsed)) throw new Error('collection_root_must_be_array');
+    return parsed as T[];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new Error(`Cannot read collection ${collection}: ${error instanceof Error ? error.message : 'invalid_json'}`);
   }
 }
 
@@ -42,12 +43,20 @@ export async function readCollection<T>(collection: string): Promise<T[]> {
  * Prevents corruption if process crashes during write.
  */
 export async function writeCollection<T>(collection: string, data: T[]): Promise<void> {
+  if (!Array.isArray(data)) throw new Error(`Invalid collection payload: ${collection}`);
   await ensureDataDir();
   const filePath = getFilePath(collection);
   const tmpPath = filePath + '.tmp.' + randomBytes(4).toString('hex');
   const content = JSON.stringify(data, null, 2);
   await fs.writeFile(tmpPath, content, 'utf-8');
-  await fs.rename(tmpPath, filePath);
+  try {
+    const verified = JSON.parse(await fs.readFile(tmpPath, 'utf-8'));
+    if (!Array.isArray(verified) || verified.length !== data.length) throw new Error('atomic_write_validation_failed');
+    await fs.rename(tmpPath, filePath);
+  } catch (error) {
+    await fs.unlink(tmpPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function findById<T extends { id: string }>(collection: string, id: string): Promise<T | null> {

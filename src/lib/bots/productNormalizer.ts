@@ -3,7 +3,7 @@
 // Normalizes raw product data to standard schema
 // ===========================================
 
-import type { Product, CreateProductInput } from '../types';
+import type { CreateProductInput, ProductSource } from '../types';
 import { BotContext } from './context';
 
 export class ProductNormalizerBot {
@@ -19,7 +19,7 @@ export class ProductNormalizerBot {
       description: String(rawData.description || rawData.summary || ''),
       kind: 'product',
       platform: this.detectPlatform(rawData),
-      source: source as any,
+      source: normalizeSource(source),
       originalUrl: String(rawData.url || rawData.originalUrl || rawData.productUrl || ''),
       affiliateUrl: String(rawData.affiliateUrl || rawData.affiliate_url || rawData.commissionSharingUrl || ''),
       imageUrl: String(rawData.image || rawData.imageUrl || rawData.image_url || ''),
@@ -116,6 +116,10 @@ export class ProductNormalizerBot {
     if (typeof value === 'string') return value.split(',').map(t => t.trim());
     return [];
   }
+}
+
+function normalizeSource(source: string): ProductSource {
+  return ['manual', 'accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other'].includes(source) ? source as ProductSource : 'other';
 }
 
 export async function createProductNormalizer(runId: string): Promise<ProductNormalizerBot> {

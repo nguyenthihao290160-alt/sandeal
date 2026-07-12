@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 
 export default function GlobalError({
   reset,
@@ -81,7 +82,7 @@ export default function GlobalError({
                 Tải lại trang
               </button>
 
-              <a
+              <Link
                 href="/"
                 style={{
                   padding: '12px 24px',
@@ -94,7 +95,7 @@ export default function GlobalError({
                 }}
               >
                 Về trang chủ
-              </a>
+              </Link>
             </div>
           </div>
         </div>

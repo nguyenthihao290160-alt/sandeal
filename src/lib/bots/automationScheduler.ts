@@ -4,6 +4,8 @@ import { getPublicProducts } from '../storage/products';
 import { cleanupCandidateQueue, getQueueStats } from '../storage/candidateQueue';
 import { readCollection, writeCollection } from '../storage/adapter';
 import { processReviewQueue, recheckPublishedProducts, scanSourcesToQueue, selectOperationMode, type OperationMode, type PipelineCounters } from './productPipeline';
+import { recoverDueGeminiCredentials } from '../ai/geminiCredentialProbe';
+import { canRunLaunchWave, recordLaunchWave } from './launchAccelerator';
 
 const COLLECTION = 'scheduler-state';
 
@@ -65,6 +67,8 @@ export async function runSchedulerTick(now = Date.now()): Promise<{ status: 'com
     const deadlineMs = now + settings.maxRunDurationMs;
     let summary = addCounters({}, {});
     const ran: string[] = [];
+    const recovered = await recoverDueGeminiCredentials(now, 1);
+    if (recovered.length) ran.push(`gemini_recovery:${recovered[0].generationStatus}`);
     if (settings.sourceScanEnabled && isJobDue(state.nextSourceScanAt, now) && (!state.sourceRateLimitUntil || Date.parse(state.sourceRateLimitUntil) <= now)) {
       const scan = await scanSourcesToQueue(mode, deadlineMs);
       summary = addCounters(summary, scan);
@@ -75,12 +79,17 @@ export async function runSchedulerTick(now = Date.now()): Promise<{ status: 'com
       ran.push('source_scan');
     }
     if (isJobDue(state.nextReviewRunAt, now) && Date.now() < deadlineMs) {
-      const review = await processReviewQueue(mode, deadlineMs);
+      const launchWave = await canRunLaunchWave(settings, now);
+      const review = await processReviewQueue(mode, deadlineMs, launchWave ? settings.publishWaveSize : undefined);
       summary = addCounters(summary, review);
       state.currentConcurrency = review.currentConcurrency;
       state.lastReviewRunAt = new Date(now).toISOString();
       state.nextReviewRunAt = new Date(now + intervals.reviewMs).toISOString();
       ran.push('review_queue');
+      if (launchWave && review.reviewed > 0) {
+        const launchState = await recordLaunchWave(settings, { processed: review.reviewed, published: review.published, failed: review.failed }, now);
+        ran.push(`launch_wave:${launchState.waves}:${launchState.phase}`);
+      }
     }
     if (isJobDue(state.nextRecheckAt, now) && Date.now() < deadlineMs) {
       const recheck = await recheckPublishedProducts(mode === 'bootstrap' ? 10 : 20, deadlineMs);

@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     if (sp.get('public') === 'true') {
       // lazy import to avoid cycles
       const { getPublicProducts } = await import('@/lib/storage/products');
-      const products = await getPublicProducts(filters as any);
+      const products = await getPublicProducts(filters);
       return successResponse('Đã tải danh sách sản phẩm (public).', products);
     }
 
