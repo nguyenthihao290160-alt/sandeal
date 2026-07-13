@@ -3,6 +3,7 @@
 // ===========================================
 
 import { NextResponse } from 'next/server';
+import { sanitizeErrorMessage } from './safety/operationGuard';
 
 export interface ApiResponse<T = unknown> {
   ok: boolean;
@@ -20,11 +21,10 @@ export function errorResponse(message: string, error?: string, status = 400): Ne
 }
 
 export function serverErrorResponse(message: string, err?: unknown): NextResponse<ApiResponse> {
-  const errorMessage = err instanceof Error ? err.message : 'Lỗi không xác định';
-  // Never log full tokens/secrets — only log safe error messages
+  const errorMessage = sanitizeErrorMessage(err instanceof Error ? err.message : 'Unknown error');
   console.error(`[API Error] ${message}:`, errorMessage);
   return NextResponse.json(
-    { ok: false, message, error: errorMessage },
+    { ok: false, message, error: 'INTERNAL_ERROR' },
     { status: 500 }
   );
 }

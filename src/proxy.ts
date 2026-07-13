@@ -4,6 +4,7 @@
 
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { validateBasicAuthHeader } from '@/lib/basicAuth';
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -14,7 +15,7 @@ export function proxy(request: NextRequest) {
     const isPublicRoute =
       pathname === '/api/app-health' ||
       pathname === '/api/ai-bots/scheduler/tick' ||
-      (pathname.startsWith('/api/products') && request.method === 'GET');
+      (pathname === '/api/products' && request.method === 'GET' && request.nextUrl.searchParams.get('public') === 'true');
 
     if (isPublicRoute) {
       return NextResponse.next();
@@ -23,42 +24,15 @@ export function proxy(request: NextRequest) {
     const basicAuthEnabled = process.env.BASIC_AUTH_ENABLED === 'true';
     if (!basicAuthEnabled) return NextResponse.next();
 
-    const authHeader = request.headers.get('authorization');
-    if (!authHeader) {
-      return new NextResponse('Authentication required', {
+    const validUser = process.env.BASIC_AUTH_USER || process.env.BASIC_AUTH_USERNAME || '';
+    const validPass = process.env.BASIC_AUTH_PASSWORD || '';
+    if (!validateBasicAuthHeader(request.headers.get('authorization'), validUser, validPass)) {
+      return new NextResponse('Invalid credentials', {
         status: 401,
         headers: {
           'WWW-Authenticate': 'Basic realm="ReviewPilot AI Dashboard", charset="UTF-8"',
         },
       });
-    }
-
-    const [scheme, encoded] = authHeader.split(' ');
-    if (scheme !== 'Basic' || !encoded) {
-      return new NextResponse('Invalid authentication', {
-        status: 401,
-        headers: {
-          'WWW-Authenticate': 'Basic realm="ReviewPilot AI Dashboard", charset="UTF-8"',
-        },
-      });
-    }
-
-    try {
-      const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
-      const [username, password] = decoded.split(':');
-      const validUser = process.env.BASIC_AUTH_USER || process.env.BASIC_AUTH_USERNAME || '';
-      const validPass = process.env.BASIC_AUTH_PASSWORD || '';
-
-      if (username !== validUser || password !== validPass) {
-        return new NextResponse('Invalid credentials', {
-          status: 401,
-          headers: {
-            'WWW-Authenticate': 'Basic realm="ReviewPilot AI Dashboard", charset="UTF-8"',
-          },
-        });
-      }
-    } catch {
-      return new NextResponse('Invalid authentication', { status: 401 });
     }
   }
 

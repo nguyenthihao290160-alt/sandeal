@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { createCredential, replaceCredentialValue } from '@/lib/storage/tokenVault';
 import type { CredentialPlatform, CredentialType, CredentialRole } from '@/lib/types/tokenVault';
+import { requireAuth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +23,8 @@ const VALID_TYPES: CredentialType[] = [
 const VALID_ROLES: CredentialRole[] = ['primary', 'backup', 'disabled', 'testing'];
 
 export async function POST(request: NextRequest) {
+  const authError = await requireAuth(request);
+  if (authError) return authError;
   try {
     const body = await request.json();
     const { platform, credentialType, label, value, role, metadata, replaceId } = body as {

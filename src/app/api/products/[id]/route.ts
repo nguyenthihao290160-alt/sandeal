@@ -5,14 +5,17 @@
 import { type NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { getProductById, updateProduct, deleteProduct } from '@/lib/storage/products';
+import { requireAuth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authError = await requireAuth(request);
+    if (authError) return authError;
     const { id } = await params;
     const product = await getProductById(id);
     if (!product) {
@@ -29,13 +32,30 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authError = await requireAuth(request);
+    if (authError) return authError;
     const { id } = await params;
-    const body = await request.json();
+    let body: Record<string, unknown>;
+    try {
+      body = await request.json() as Record<string, unknown>;
+    } catch {
+      return errorResponse('Dữ liệu JSON không hợp lệ.');
+    }
 
     // Don't allow updating id, createdAt
     const { id: _id, createdAt: _ca, ...updates } = body;
     void _id;
     void _ca;
+
+    const requestsPublicState = updates.status === 'published'
+      || updates.publicHidden === false
+      || updates.autoPublished === true
+      || updates.publicDecision === 'published'
+      || updates.indexable === true
+      || Object.prototype.hasOwnProperty.call(updates, 'publishedAt');
+    if (requestsPublicState) {
+      return errorResponse('Trạng thái public chỉ được thay đổi qua Safe Publish.', 'SAFE_PUBLISH_REQUIRED', 409);
+    }
 
     // Parse tags if string
     if (typeof updates.tags === 'string') {
@@ -53,10 +73,12 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authError = await requireAuth(request);
+    if (authError) return authError;
     const { id } = await params;
     const deleted = await deleteProduct(id);
     if (!deleted) {

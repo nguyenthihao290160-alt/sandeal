@@ -3,11 +3,13 @@
 // ===========================================
 
 import type { Product, CreateProductInput, ProductFilters } from '../types';
-import { readCollection, writeCollection, deleteOne, generateId } from './adapter';
+import { createHash } from 'crypto';
+import { readCollection, writeCollection, deleteOne, generateId, runTransaction } from './adapter';
 import { normalizeProductForPublic } from '../productNormalizer';
 import { isPublicSafeProduct } from '../publicProductFilter';
 import { evaluateCanonicalProduct, normalizeCanonicalProduct, stableProductHash } from '../canonicalProduct';
 import { isReviewIndexable } from '../editorialReview';
+import { getOperationEnvironment, runGuardedOperation, sanitizeErrorMessage, type OperationEnvironment } from '../safety/operationGuard';
 
 const COLLECTION = 'products';
 let productWriteChain: Promise<unknown> = Promise.resolve();
@@ -20,6 +22,14 @@ function withProductWrite<T>(work: () => Promise<T>): Promise<T> {
 
 async function readCanonicalProducts(): Promise<Product[]> {
   return (await readCollection<Partial<Product>>(COLLECTION)).map((item) => normalizeCanonicalProduct(item));
+}
+
+export class DuplicateProductError extends Error {
+  readonly code = 'DUPLICATE_PRODUCT';
+  constructor() {
+    super('duplicate_product');
+    this.name = 'DuplicateProductError';
+  }
 }
 
 /** List products with optional filters */
@@ -90,15 +100,22 @@ export async function getPublicProducts(filters?: ProductFilters): Promise<Produ
 }
 
 export async function createProduct(data: CreateProductInput): Promise<Product> {
-  const product = normalizeCanonicalProduct({
-    ...data,
-    id: generateId(),
-    slug: generateSlug(data.title),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
   return withProductWrite(async () => {
     const products = await readCanonicalProducts();
+    if (products.some((item) =>
+      (data.originalUrl && item.originalUrl === data.originalUrl)
+      || (data.affiliateUrl && item.affiliateUrl === data.affiliateUrl))) {
+      throw new DuplicateProductError();
+    }
+    const id = generateId();
+    const now = new Date().toISOString();
+    const product = normalizeCanonicalProduct({
+      ...data,
+      id,
+      slug: ensureUniqueSlug(generateSlug(data.title), products, id),
+      createdAt: now,
+      updatedAt: now,
+    });
     products.push(product);
     await writeCollection(COLLECTION, products);
     return product;
@@ -177,31 +194,71 @@ export async function upsertCanonicalProduct(
   });
 }
 
-export async function publishCanonicalProductTransaction(id: string, updates: Partial<Product>, audit: { runId?: string; candidateId?: string } = {}): Promise<Product | null> {
+export interface PublicationOperationContext {
+  runId?: string;
+  candidateId?: string;
+  actor?: string;
+  environment?: OperationEnvironment;
+  approval?: boolean;
+  dryRun?: boolean;
+  idempotencyKey?: string;
+}
+
+export function publicationIdempotencyKey(product: Product): string {
+  const gateState = JSON.stringify({
+    id: product.id,
+    sourceHash: product.sourceHash || product.contentHash || '',
+    reviewHash: product.reviewContent?.reviewContentHash || '',
+    reviewStatus: product.reviewContent?.reviewStatus || '',
+    linkHealthStatus: product.linkHealthStatus || '',
+    affiliateHealthStatus: product.affiliateHealthStatus || '',
+    imageHealthStatus: product.imageHealthStatus || '',
+    riskLevel: product.riskLevel,
+    verifiedSource: product.verifiedSource === true,
+    autoPublishEligible: product.autoPublishEligible === true,
+    publicBlockReasons: product.publicBlockReasons || [],
+    status: product.status,
+  });
+  return createHash('sha256').update(gateState).digest('hex');
+}
+
+export async function publishCanonicalProductTransaction(id: string, updates: Partial<Product>, audit: PublicationOperationContext = {}): Promise<Product | null> {
   return withProductWrite(async () => {
     const products = await readCanonicalProducts(); const index = products.findIndex((item) => item.id === id); if (index < 0) return null;
     const previous = products[index]; const now = new Date().toISOString();
     const requestedSlug = updates.slug || previous.slug || generateStableSlug(previous.title, previous.sourceHash || previous.id);
     const candidate = evaluateCanonicalProduct({ ...previous, ...updates, id, slug: ensureUniqueSlug(requestedSlug, products.filter((item) => item.id !== id), previous.sourceHash || previous.id), updatedAt: now }, now);
-    products[index] = candidate;
-    try {
-      await writeCollection(COLLECTION, products);
-      const confirmed = (await readCanonicalProducts()).find((item) => item.id === id);
-      if (!confirmed) throw new Error('canonical_readback_failed');
-      if (candidate.status === 'published' && (!isPublicSafeProduct(confirmed) || !isReviewIndexable(confirmed))) throw new Error('public_selector_inconsistent');
-      await appendPublicationAudit({ runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, timestamp: now });
-      return confirmed;
-    } catch (error) {
-      products[index] = previous; await writeCollection(COLLECTION, products);
-      await appendPublicationAudit({ runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [error instanceof Error ? error.message : 'publication_error'], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, timestamp: now });
-      return previous;
-    }
+    const guarded = await runGuardedOperation({
+      operationType: 'safe_publish',
+      actor: audit.actor || 'scheduler',
+      environment: audit.environment || getOperationEnvironment(),
+      target: id,
+      approval: audit.approval,
+      riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM',
+      dryRun: audit.dryRun,
+      idempotencyKey: audit.idempotencyKey || publicationIdempotencyKey(candidate),
+    }, async () => {
+      products[index] = candidate;
+      try {
+        await writeCollection(COLLECTION, products);
+        const confirmed = (await readCanonicalProducts()).find((item) => item.id === id);
+        if (!confirmed) throw new Error('canonical_readback_failed');
+        if (candidate.status === 'published' && (!isPublicSafeProduct(confirmed) || !isReviewIndexable(confirmed))) throw new Error('public_selector_inconsistent');
+        await appendPublicationAudit({ operationId: audit.idempotencyKey, runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM', dryRun: false, timestamp: now });
+        return confirmed;
+      } catch (error) {
+        products[index] = previous; await writeCollection(COLLECTION, products);
+        await appendPublicationAudit({ operationId: audit.idempotencyKey, runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [sanitizeErrorMessage(error instanceof Error ? error.message : 'publication_error')], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, riskLevel: 'HIGH', dryRun: false, timestamp: now });
+        throw error;
+      }
+    });
+    return guarded.status === 'COMPLETED' ? guarded.value : previous;
   });
 }
 
-interface PublicationAudit { runId: string; candidateId?: string; productId: string; action: string; previousState: string; nextState: string; reasonCodes: string[]; sourceHash?: string; reviewVersion?: number; timestamp: string; }
+interface PublicationAudit { operationId?: string; runId: string; candidateId?: string; productId: string; action: string; previousState: string; nextState: string; reasonCodes: string[]; sourceHash?: string; reviewVersion?: number; riskLevel: 'MEDIUM' | 'HIGH'; dryRun: boolean; timestamp: string; }
 async function appendPublicationAudit(event: PublicationAudit): Promise<void> {
-  const existing = await readCollection<PublicationAudit>('publication-audit'); await writeCollection('publication-audit', [...existing.slice(-999), event]);
+  await runTransaction<PublicationAudit>('publication-audit', (existing) => [...existing.slice(-999), event]);
 }
 
 function generateStableSlug(title: string, seed: string): string {

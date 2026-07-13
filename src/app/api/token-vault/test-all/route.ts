@@ -2,9 +2,13 @@ import { errorResponse, serverErrorResponse, successResponse } from '@/lib/apiRe
 import { acquireRunLock, releaseRunLock } from '@/lib/bots/runLock';
 import { listCredentials } from '@/lib/storage/tokenVault';
 import { generationProbeCredential, lightTestCredential } from '@/lib/ai/geminiCredentialProbe';
+import { type NextRequest } from 'next/server';
+import { requireAuth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const authError = await requireAuth(request);
+  if (authError) return authError;
   const lock = await acquireRunLock('gemini_test_all', 'token_vault');
   if (!lock.acquired) return errorResponse('Test All Gemini Keys đang chạy.', undefined, 409);
   try {

@@ -231,7 +231,12 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       if (review.reviewBlockReasons.includes('low_originality')) counters.duplicateContentSkipped++;
       if (review.reviewStatus === 'approved') counters.reviewApproved++; else if (review.reviewStatus === 'rejected') counters.reviewRejected++; else counters.reviewNeedsReview++;
       if (isReviewIndexable({ ...canonical.product, reviewContent: review })) counters.seoReady++; else counters.seoBlocked++;
-      finalProduct = (await publishCanonicalProductTransaction(canonical.product.id, { reviewContent: review, reviewGeneration: useGemini ? { provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion, generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash, generatedAt: gemini!.generatedAt, validationResult: 'approved' } : { provider: 'local', promptVersion: 'local-review-v2', generationFingerprint: canonical.product.sourceHash || canonical.product.id, generatedAt: new Date().toISOString(), validationResult: 'fallback_local' } }, { candidateId: item.id })) || canonical.product;
+      const publishSettings = await getAutomationSettings();
+      finalProduct = (await publishCanonicalProductTransaction(canonical.product.id, { reviewContent: review, reviewGeneration: useGemini ? { provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion, generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash, generatedAt: gemini!.generatedAt, validationResult: 'approved' } : { provider: 'local', promptVersion: 'local-review-v2', generationFingerprint: canonical.product.sourceHash || canonical.product.id, generatedAt: new Date().toISOString(), validationResult: 'fallback_local' } }, {
+        candidateId: item.id,
+        actor: 'scheduler',
+        approval: publishSettings.safePublish,
+      })) || canonical.product;
     } else {
       counters.unchanged++;
     }

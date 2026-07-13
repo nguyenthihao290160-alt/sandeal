@@ -450,7 +450,7 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
   await test('V4-15. duplicate slug publication bị chặn và không làm mất canonical', async () => {
     const first = indexableProduct({ id: 'slug-first', sourceId: 'slug-first', slug: 'same-slug', sourceHash: 'slug-first' });
     const second = indexableProduct({ id: 'slug-second', sourceId: 'slug-second', slug: 'same-slug', sourceHash: 'slug-second' });
-    await adapter.writeCollection('products', [first, second]); const saved = await products.publishCanonicalProductTransaction('slug-second', { reviewContent: second.reviewContent });
+    await adapter.writeCollection('products', [first, second]); const saved = await products.publishCanonicalProductTransaction('slug-second', { reviewContent: second.reviewContent }, { approval: true, environment: 'test', idempotencyKey: 'duplicate-slug-test' });
     assert(saved); assert(saved.slug !== 'same-slug' || saved.status !== 'published'); equal((await products.getAllProducts()).length, 2);
   });
 

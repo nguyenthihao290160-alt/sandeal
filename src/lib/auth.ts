@@ -4,6 +4,7 @@
 
 import { config } from './config';
 import { NextRequest, NextResponse } from 'next/server';
+import { validateBasicAuthHeader } from './basicAuth';
 
 /**
  * Validate Basic Auth credentials from Authorization header.
@@ -11,18 +12,7 @@ import { NextRequest, NextResponse } from 'next/server';
  */
 export function validateBasicAuth(authHeader: string | null): boolean {
   if (!config.basicAuthEnabled) return true;
-  if (!authHeader) return false;
-
-  const [scheme, encoded] = authHeader.split(' ');
-  if (scheme !== 'Basic' || !encoded) return false;
-
-  try {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
-    const [username, password] = decoded.split(':');
-    return username === config.basicAuthUsername && password === config.basicAuthPassword;
-  } catch {
-    return false;
-  }
+  return validateBasicAuthHeader(authHeader, config.basicAuthUsername, config.basicAuthPassword);
 }
 
 /**

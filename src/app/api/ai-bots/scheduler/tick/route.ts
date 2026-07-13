@@ -1,5 +1,6 @@
 import { type NextRequest } from 'next/server';
 import { runSchedulerTick } from '@/lib/bots/automationScheduler';
+import { getOperationEnvironment, runGuardedOperation, sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -12,7 +13,25 @@ export async function POST(request: NextRequest) {
     return Response.json({ ok: false, error: 'Unauthorized scheduler secret' }, { status: 401 });
   }
   try {
-    const result = await runSchedulerTick();
+    const dryRun = request.nextUrl.searchParams.get('dryRun') === 'true';
+    const minuteBucket = new Date().toISOString().slice(0, 16);
+    const guarded = await runGuardedOperation({
+      operationType: 'scheduler_tick',
+      actor: 'scheduler',
+      environment: getOperationEnvironment(),
+      target: 'automation_scheduler',
+      approval: true,
+      riskLevel: 'HIGH',
+      dryRun,
+      idempotencyKey: request.headers.get('x-idempotency-key') || `natural-tick:${minuteBucket}`,
+    }, runSchedulerTick);
+    if (guarded.status !== 'COMPLETED') {
+      return Response.json({
+        ok: guarded.status === 'DRY_RUN' || guarded.status === 'ALREADY_PROCESSED',
+        data: { status: guarded.status, tickDurationMs: Date.now() - tickStartMs },
+      }, { status: guarded.status === 'IN_PROGRESS' ? 409 : guarded.status === 'APPROVAL_REQUIRED' || guarded.status === 'BLOCKED' ? 403 : 200 });
+    }
+    const result = guarded.value;
     return Response.json({
       ok: result.status !== 'failed',
       data: {
@@ -29,8 +48,8 @@ export async function POST(request: NextRequest) {
       },
     }, { status: result.status === 'failed' ? 500 : 200 });
   } catch (error) {
-    const safeError = error instanceof Error ? error.message : 'Lỗi không xác định';
+    const safeError = sanitizeErrorMessage(error instanceof Error ? error.message : 'Unknown error');
     console.error('[scheduler/tick]', safeError);
-    return Response.json({ ok: false, data: { status: 'failed', error: safeError, tickDurationMs: Date.now() - tickStartMs } }, { status: 500 });
+    return Response.json({ ok: false, data: { status: 'failed', error: 'INTERNAL_ERROR', tickDurationMs: Date.now() - tickStartMs } }, { status: 500 });
   }
 }

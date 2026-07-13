@@ -9,10 +9,13 @@ import { NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { getCredentialById, getRawCredentialValue, updateCredential } from '@/lib/storage/tokenVault';
 import type { CredentialStatus } from '@/lib/types/tokenVault';
+import { requireAuth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
+  const authError = await requireAuth(request);
+  if (authError) return authError;
   try {
     const body = await request.json();
     const { id } = body as { id?: string };

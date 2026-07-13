@@ -4,14 +4,35 @@
 
 import { type NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
-import { listProducts, createProduct } from '@/lib/storage/products';
+import { listProducts, createProduct, DuplicateProductError } from '@/lib/storage/products';
+import { requireAuth } from '@/lib/auth';
 import type { ProductPlatform, ProductSource, ProductStatus, ProductKind, ProductRiskLevel } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
+const PRODUCT_PLATFORMS = new Set<ProductPlatform>(['shopee', 'tiktok_shop', 'lazada', 'accesstrade', 'website', 'other']);
+const PRODUCT_KINDS = new Set<ProductKind>(['product', 'voucher', 'campaign', 'deal', 'store_offer', 'unknown']);
+const PRODUCT_SOURCES = new Set<ProductSource>(['manual', 'accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other']);
+const RISK_LEVELS = new Set<ProductRiskLevel>(['low', 'medium', 'high', 'unknown']);
+
+function validHttpUrl(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
 export async function GET(request: NextRequest) {
   try {
     const sp = request.nextUrl.searchParams;
+
+    const isPublicRequest = sp.get('public') === 'true';
+    if (!isPublicRequest) {
+      const authError = await requireAuth(request);
+      if (authError) return authError;
+    }
 
     const filters = {
       q: sp.get('q') || undefined,
@@ -24,7 +45,7 @@ export async function GET(request: NextRequest) {
     };
 
     // If client requests public=true, return public-safe normalized products
-    if (sp.get('public') === 'true') {
+    if (isPublicRequest) {
       // lazy import to avoid cycles
       const { getPublicProducts } = await import('@/lib/storage/products');
       const products = await getPublicProducts(filters);
@@ -39,18 +60,36 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const authError = await requireAuth(request);
+  if (authError) return authError;
+
   try {
-    const body = await request.json();
+    let body: Record<string, unknown>;
+    try {
+      body = await request.json() as Record<string, unknown>;
+    } catch {
+      return errorResponse('Dữ liệu JSON không hợp lệ.');
+    }
 
     // Validate required fields
     if (!body.title || typeof body.title !== 'string' || body.title.trim().length === 0) {
       return errorResponse('Tên sản phẩm là bắt buộc.');
     }
-    if (!body.platform) {
+    if (!PRODUCT_PLATFORMS.has(body.platform as ProductPlatform)) {
       return errorResponse('Nền tảng là bắt buộc.');
     }
+    if (body.kind && !PRODUCT_KINDS.has(body.kind as ProductKind)) return errorResponse('Loại sản phẩm không hợp lệ.');
+    if (body.source && !PRODUCT_SOURCES.has(body.source as ProductSource)) return errorResponse('Nguồn sản phẩm không hợp lệ.');
+    if (body.riskLevel && !RISK_LEVELS.has(body.riskLevel as ProductRiskLevel)) return errorResponse('Mức rủi ro không hợp lệ.');
     if (!body.originalUrl && !body.affiliateUrl) {
       return errorResponse('Cần ít nhất link sản phẩm gốc hoặc link affiliate.');
+    }
+    if (body.originalUrl && !validHttpUrl(body.originalUrl)) return errorResponse('Link sản phẩm gốc không hợp lệ.');
+    if (body.affiliateUrl && !validHttpUrl(body.affiliateUrl)) return errorResponse('Link affiliate không hợp lệ.');
+    for (const field of ['price', 'salePrice'] as const) {
+      if (body[field] !== undefined && body[field] !== '' && (!Number.isFinite(Number(body[field])) || Number(body[field]) < 0)) {
+        return errorResponse('Giá sản phẩm không hợp lệ.');
+      }
     }
 
     // Parse tags from comma-separated string if needed
@@ -58,12 +97,12 @@ export async function POST(request: NextRequest) {
     if (typeof body.tags === 'string') {
       tags = body.tags.split(',').map((t: string) => t.trim()).filter(Boolean);
     } else if (Array.isArray(body.tags)) {
-      tags = body.tags;
+      tags = body.tags.filter((tag): tag is string => typeof tag === 'string').map(tag => tag.trim()).filter(Boolean);
     }
 
     // Parse multiline fields into arrays
     const parseMultiline = (val: unknown): string[] => {
-      if (Array.isArray(val)) return val;
+      if (Array.isArray(val)) return val.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean);
       if (typeof val === 'string') {
         return val.split('\n').map(l => l.trim()).filter(Boolean);
       }
@@ -71,20 +110,20 @@ export async function POST(request: NextRequest) {
     };
 
     const product = await createProduct({
-      title: body.title.trim(),
-      description: body.description || undefined,
-      kind: body.kind || 'product',
-      platform: body.platform,
-      source: body.source || 'manual',
-      originalUrl: body.originalUrl || undefined,
-      affiliateUrl: body.affiliateUrl || undefined,
-      imageUrl: body.imageUrl || undefined,
+      title: (body.title as string).trim(),
+      description: typeof body.description === 'string' ? body.description : undefined,
+      kind: (body.kind as ProductKind) || 'product',
+      platform: body.platform as ProductPlatform,
+      source: (body.source as ProductSource) || 'manual',
+      originalUrl: typeof body.originalUrl === 'string' ? body.originalUrl : undefined,
+      affiliateUrl: typeof body.affiliateUrl === 'string' ? body.affiliateUrl : undefined,
+      imageUrl: typeof body.imageUrl === 'string' ? body.imageUrl : undefined,
       gallery: parseMultiline(body.gallery),
-      price: body.price ? Number(body.price) : undefined,
-      salePrice: body.salePrice ? Number(body.salePrice) : undefined,
+      price: body.price !== undefined && body.price !== '' ? Number(body.price) : undefined,
+      salePrice: body.salePrice !== undefined && body.salePrice !== '' ? Number(body.salePrice) : undefined,
       currency: 'VND',
-      priceNote: body.priceNote || undefined,
-      category: body.category || undefined,
+      priceNote: typeof body.priceNote === 'string' ? body.priceNote : undefined,
+      category: typeof body.category === 'string' ? body.category : undefined,
       tags,
       benefits: parseMultiline(body.benefits),
       painPoints: parseMultiline(body.painPoints),
@@ -92,16 +131,24 @@ export async function POST(request: NextRequest) {
       warnings: parseMultiline(body.warnings),
       contentAngles: parseMultiline(body.contentAngles),
       complianceNotes: parseMultiline(body.complianceNotes),
-      affiliateSource: body.affiliateSource || undefined,
-      campaignName: body.campaignName || undefined,
-      commissionNote: body.commissionNote || undefined,
-      affiliateDisclosure: body.affiliateDisclosure || undefined,
-      riskLevel: body.riskLevel || 'unknown',
-      status: body.status || 'needs_review',
+      affiliateSource: typeof body.affiliateSource === 'string' ? body.affiliateSource : undefined,
+      campaignName: typeof body.campaignName === 'string' ? body.campaignName : undefined,
+      commissionNote: typeof body.commissionNote === 'string' ? body.commissionNote : undefined,
+      affiliateDisclosure: typeof body.affiliateDisclosure === 'string' ? body.affiliateDisclosure : undefined,
+      riskLevel: (body.riskLevel as ProductRiskLevel) || 'unknown',
+      // Manual creation can never bypass the review/publication transaction.
+      status: 'needs_review',
+      publicHidden: true,
+      autoPublished: false,
+      needsVerification: true,
+      verifiedSource: false,
     });
 
     return successResponse('Đã thêm sản phẩm thành công.', product, 201);
   } catch (err) {
+    if (err instanceof DuplicateProductError) {
+      return errorResponse('Sản phẩm đã tồn tại.', err.code, 409);
+    }
     return serverErrorResponse('Không thể thêm sản phẩm.', err);
   }
 }

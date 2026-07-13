@@ -22,7 +22,7 @@ export const config = {
 
   // Auth
   basicAuthEnabled: process.env.BASIC_AUTH_ENABLED === 'true',
-  basicAuthUsername: process.env.BASIC_AUTH_USERNAME || '',
+  basicAuthUsername: process.env.BASIC_AUTH_USER || process.env.BASIC_AUTH_USERNAME || '',
   basicAuthPassword: process.env.BASIC_AUTH_PASSWORD || '',
 } as const;
 
