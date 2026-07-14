@@ -1,0 +1,21 @@
+.root { border: 1px solid #bfdbfe; border-left: 4px solid var(--ds-info, #2563eb); border-radius: var(--ds-radius-md, 7px); background: var(--ds-surface-blue, #eef4ff); padding: 16px; color: #172554; }
+.header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.title { display: flex; align-items: center; gap: 10px; }
+.title > span:last-child { display: grid; gap: 2px; }
+.statusIcon { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; color: currentColor; background: rgba(255, 255, 255, .72); border-radius: var(--ds-radius-md, 7px); }
+.eyebrow { color: var(--ds-text-soft, #475569); font-size: 12px; font-weight: 650; }
+.job { color: var(--ds-text-soft, #475569); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.root p { margin: 8px 0 0; color: inherit !important; font-size: 14px; }
+.progress { height: 6px; margin-top: 12px; overflow: hidden; border-radius: 3px; background: #dbeafe; }
+.progress span { display: block; height: 100%; background: var(--ds-info, #2563eb); transition: width var(--ds-duration, 180ms) ease; }
+.approval { margin-top: 10px; font-weight: 650; }
+.root details { margin-top: 12px; font-size: 12px; }
+.root summary { cursor: pointer; color: var(--ds-text-soft, #475569); font-weight: 650; }
+.root dl { display: grid; gap: 5px; margin-top: 8px; }
+.root dl div { display: grid; grid-template-columns: 110px 1fr; gap: 8px; }
+.root dd { overflow-wrap: anywhere; }
+.success { border-color: #a7f3d0; border-left-color: var(--ds-success, #15803d); background: var(--ds-surface-green, #ecfdf5); color: #064e3b; }
+.danger { border-color: #fecaca; border-left-color: var(--ds-danger, #dc2626); background: var(--ds-surface-red, #fef2f2); color: #7f1d1d; }
+.neutral { border-color: var(--ds-border-strong, #cbd5e1); border-left-color: var(--ds-text-muted, #64748b); background: var(--ds-surface-muted, #f1f5f9); color: #334155; }
+@media (max-width: 600px) { .header { flex-direction: column; gap: 6px; } }
+@media (prefers-reduced-motion: reduce) { .progress span { transition: none; } }

@@ -24,6 +24,40 @@ function getFilePath(collection: string): string {
   return path.join(getDataDir(), `${collection}.json`);
 }
 
+const FILE_LOCK_STALE_MS = 2 * 60_000;
+const FILE_LOCK_WAIT_MS = 10_000;
+
+async function acquireCollectionFileLock(collection: string): Promise<() => Promise<void>> {
+  await ensureDataDir();
+  const lockPath = `${getFilePath(collection)}.lock`;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < FILE_LOCK_WAIT_MS) {
+    try {
+      const handle = await fs.open(lockPath, 'wx');
+      await handle.writeFile(JSON.stringify({ createdAt: new Date().toISOString() }), 'utf-8');
+      return async () => {
+        await handle.close().catch(() => undefined);
+        await fs.unlink(lockPath).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        const stat = await fs.stat(lockPath);
+        if (Date.now() - stat.mtimeMs > FILE_LOCK_STALE_MS) {
+          await fs.unlink(lockPath).catch(() => undefined);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      await new Promise(resolve => setTimeout(resolve, 25 + Math.floor(Math.random() * 25)));
+    }
+  }
+
+  throw new Error(`Storage lock timeout: ${collection}`);
+}
+
 export async function readCollection<T>(collection: string): Promise<T[]> {
   await ensureDataDir();
   const filePath = getFilePath(collection);
@@ -34,6 +68,12 @@ export async function readCollection<T>(collection: string): Promise<T[]> {
     return parsed as T[];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    try {
+      const backup = JSON.parse(await fs.readFile(`${filePath}.bak`, 'utf-8'));
+      if (Array.isArray(backup)) return backup as T[];
+    } catch {
+      // Surface the original corruption error when no usable backup exists.
+    }
     throw new Error(`Cannot read collection ${collection}: ${error instanceof Error ? error.message : 'invalid_json'}`);
   }
 }
@@ -52,6 +92,9 @@ export async function writeCollection<T>(collection: string, data: T[]): Promise
   try {
     const verified = JSON.parse(await fs.readFile(tmpPath, 'utf-8'));
     if (!Array.isArray(verified) || verified.length !== data.length) throw new Error('atomic_write_validation_failed');
+    await fs.copyFile(filePath, `${filePath}.bak`).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    });
     await fs.rename(tmpPath, filePath);
   } catch (error) {
     await fs.unlink(tmpPath).catch(() => undefined);
@@ -69,14 +112,17 @@ export async function runTransaction<T>(
   let release!: () => void;
   const current = new Promise<void>(resolve => { release = resolve; });
   collectionLocks.set(collection, previous.then(() => current));
+  let releaseFileLock: (() => Promise<void>) | undefined;
   try {
     await previous;
+    releaseFileLock = await acquireCollectionFileLock(collection);
     const items = await readCollection<T>(collection);
     const updated = await fn(items);
     if (updated !== undefined) {
       await writeCollection(collection, updated);
     }
   } finally {
+    if (releaseFileLock) await releaseFileLock();
     release();
   }
 }

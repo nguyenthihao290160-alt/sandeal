@@ -1,0 +1,25 @@
+export const dashboardStrings = {
+  navigation: {
+    commandCenter: 'Bảng điều khiển',
+    bots: 'Tác vụ và tiến độ',
+    automation: 'Tự động hóa',
+    sources: 'Nguồn sản phẩm',
+    results: 'Kết quả bot',
+    reviews: 'Sản phẩm và bài đánh giá',
+    vault: 'Kết nối bảo mật',
+    health: 'Sức khỏe hệ thống',
+    safety: 'Cài đặt an toàn',
+    legacy: 'Công cụ cũ',
+  },
+  status: {
+    pending: 'Chờ xử lý',
+    waiting_approval: 'Chờ phê duyệt',
+    running: 'Đang xử lý',
+    waiting_retry: 'Đang chờ thử lại',
+    completed: 'Hoàn thành',
+    failed: 'Thất bại',
+    cancelled: 'Đã hủy',
+    blocked: 'Bị chặn',
+    unavailable: 'Tạm thời chưa khả dụng',
+  },
+} as const;

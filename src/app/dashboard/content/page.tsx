@@ -1,51 +1,14 @@
 import Link from 'next/link';
+import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
+import styles from '../operations.module.css';
 
 export default function ContentPage() {
-  return (
-    <>
-      <div className="topbar">
-        <div className="topbar-title">AI Content Studio</div>
-        <div className="safe-mode-badges">
-          <span className="safe-badge safe-badge-on">🔒 Safe Mode</span>
-          <span className="safe-badge safe-badge-on">💰 Free Only</span>
-          <span className="safe-badge safe-badge-on">🚀 Safe Publish ON</span>
-        </div>
-      </div>
-      <div className="module-placeholder">
-        <div className="module-hero">
-          <span className="module-hero-icon">🤖</span>
-          <h1 className="module-hero-title">AI Content Studio</h1>
-          <p className="module-hero-desc">
-            Tạo bài viết review, caption social, hook và script video bằng Gemini AI. Mỗi nội dung phải qua kiểm duyệt trước khi xuất bản.
-          </p>
-          <div className="module-hero-badges">
-            <span className="safe-badge safe-badge-on">🤖 Gemini AI</span>
-            <span className="badge badge-info">Cần Gemini API Key</span>
-            <span className="safe-badge safe-badge-on">💰 Free Only: ON</span>
-          </div>
-          <div className="module-hero-actions">
-            <Link href="/dashboard/token-vault" className="btn btn-primary">🔐 Cấu hình Gemini Key</Link>
-            <Link href="/dashboard/products" className="btn btn-secondary">📦 Chọn sản phẩm</Link>
-          </div>
-        </div>
-        <div className="module-features">
-          <div className="module-feature">
-            <div className="module-feature-icon">📝</div>
-            <div className="module-feature-title">Tạo bài viết review</div>
-            <div className="module-feature-desc">Viết bài review chi tiết dựa trên dữ liệu sản phẩm, điểm số và góc nội dung.</div>
-          </div>
-          <div className="module-feature">
-            <div className="module-feature-icon">💬</div>
-            <div className="module-feature-title">Caption & Hook</div>
-            <div className="module-feature-desc">Tạo caption Facebook/Instagram, hook video TikTok, và CTA chuyển đổi cao.</div>
-          </div>
-          <div className="module-feature">
-            <div className="module-feature-icon">📋</div>
-            <div className="module-feature-title">Script video</div>
-            <div className="module-feature-desc">Script video từng scene, kèm prompt hình ảnh/video cho từng phân đoạn.</div>
-          </div>
-        </div>
-      </div>
-    </>
-  );
+  return <main className={styles.page}>
+    <header className={styles.header}><div><h1>Sản phẩm và bài đánh giá</h1><p>Route được giữ để không làm hỏng liên kết cũ; phần tạo bài đánh giá chưa có backend hoàn chỉnh nên được hạ mức ưu tiên.</p></div><span className={`${styles.badge} ${styles.warning}`}>Đang hoàn thiện</span></header>
+    <section className={`${styles.panel} ${styles.warningPanel}`}><div className={styles.panelHeader}><h2><DashboardIcon name="content" size={19} />Phạm vi hiện tại</h2></div><div className={styles.notice}><strong>Chưa khả dụng:</strong> tạo, kiểm duyệt và xuất bản bài đánh giá. Hệ thống chưa thực hiện thao tác và dữ liệu hiện tại không bị thay đổi.</div></section>
+    <div className={styles.grid}>
+      <section className={`${styles.panel} ${styles.successPanel}`}><div className={styles.panelHeader}><h2><DashboardIcon name="product" size={19} />Chức năng đã dùng được</h2></div><div className={styles.healthList}><div className={styles.healthRow}><span>Danh sách sản phẩm</span><strong>Dữ liệu backend thật</strong></div><div className={styles.healthRow}><span>Tìm kiếm và bộ lọc</span><strong>Đã hoạt động</strong></div><div className={styles.healthRow}><span>Kiểm tra đăng an toàn</span><strong>Đã kết nối</strong></div></div><div className={styles.emptyActions} style={{ padding: 16, justifyContent: 'flex-start' }}><Link href="/dashboard/products" className={styles.primary}>Mở Kết quả bot</Link></div></section>
+      <section className={`${styles.panel} ${styles.infoPanel}`}><div className={styles.panelHeader}><h2><DashboardIcon name="source" size={19} />Bước chuẩn bị</h2></div><div className={styles.healthList}><div className={styles.healthRow}><span>Thêm nguồn sản phẩm</span><strong>Có thể thực hiện</strong></div><div className={styles.healthRow}><span>Kết nối Gemini</span><strong>Chỉ cần khi backend bài đánh giá hoàn tất</strong></div><div className={styles.healthRow}><span>Gọi dịch vụ tính phí</span><strong>Đang bị chặn</strong></div></div><div className={styles.emptyActions} style={{ padding: 16, justifyContent: 'flex-start' }}><Link href="/dashboard/product-sources" className={styles.button}>Quản lý nguồn sản phẩm</Link></div></section>
+    </div>
+  </main>;
 }

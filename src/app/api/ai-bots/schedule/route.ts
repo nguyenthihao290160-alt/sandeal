@@ -7,6 +7,8 @@ import { getSchedulerState } from '@/lib/bots/automationScheduler';
 import { getDailyPipelineUsage } from '@/lib/bots/productPipeline';
 import { getQueueStats } from '@/lib/storage/candidateQueue';
 import { getAllProducts } from '@/lib/storage/products';
+import { generateId } from '@/lib/storage/adapter';
+import { appendAutomationAudit } from '@/lib/automation/store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -86,7 +88,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch {
-    return NextResponse.json({ error: 'Failed to fetch schedule data' }, { status: 500 });
+    return NextResponse.json({ error: 'Không thể tải dữ liệu lịch tự động.' }, { status: 500 });
   }
 }
 
@@ -97,10 +99,14 @@ export async function PATCH(request: NextRequest) {
   try {
     const contentType = request.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
-      return NextResponse.json({ error: 'Content-Type must be application/json' }, { status: 400 });
+      return NextResponse.json({ error: 'Yêu cầu phải dùng định dạng JSON.' }, { status: 400 });
     }
 
     const body = await request.json() as Record<string, unknown>;
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (body.confirmed !== true || reason.length < 8) {
+      return NextResponse.json({ error: 'Vui lòng xác nhận và nhập lý do ít nhất 8 ký tự.' }, { status: 400 });
+    }
     
     // Check for policy violations directly in the payload
     if (
@@ -111,11 +117,12 @@ export async function PATCH(request: NextRequest) {
       body.safeMode === false
     ) {
       return NextResponse.json({ 
-        error: 'Policy violation: Cannot override safety immutables.' 
+        error: 'Không thể thay đổi các chính sách an toàn bắt buộc.'
       }, { status: 403 });
     }
 
     // Pick only allowed fields
+    const currentSettings = await getAutomationSettings();
     const updates: Record<string, unknown> = {};
     const allowedFields = [
       'enabled', 'sourceScanEnabled', 'intervalHours', 'mode', 'source',
@@ -129,11 +136,36 @@ export async function PATCH(request: NextRequest) {
 
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
+        const currentValue = currentSettings[field as keyof typeof currentSettings];
+        const nextValue = body[field];
+        const sameShape = Array.isArray(currentValue)
+          ? Array.isArray(nextValue)
+          : typeof nextValue === typeof currentValue;
+        if (!sameShape || (typeof nextValue === 'number' && !Number.isFinite(nextValue))) {
+          return NextResponse.json({ error: `Giá trị ${field} không hợp lệ.` }, { status: 400 });
+        }
         updates[field] = body[field];
       }
     }
 
+    if (Object.keys(updates).length === 0) {
+      return NextResponse.json({ error: 'Không có cài đặt hợp lệ để cập nhật.' }, { status: 400 });
+    }
+
     const updatedSettings = await updateAutomationSettings(updates);
+    await appendAutomationAudit({
+      correlationId: generateId(),
+      operationId: generateId(),
+      operationType: 'SCHEDULER_SETTINGS_CHANGED',
+      actor: 'administrator',
+      target: 'automation-settings',
+      previousState: JSON.stringify(Object.fromEntries(Object.keys(updates).map(key => [key, currentSettings[key as keyof typeof currentSettings]]))),
+      nextState: JSON.stringify(Object.fromEntries(Object.keys(updates).map(key => [key, updatedSettings[key as keyof typeof updatedSettings]]))),
+      risk: updates.enabled === true ? 'HIGH' : 'MEDIUM',
+      reasons: [reason],
+      dryRun: false,
+      attempts: 1,
+    });
 
     return NextResponse.json({
       success: true,
@@ -141,10 +173,10 @@ export async function PATCH(request: NextRequest) {
     });
   } catch (err: unknown) {
     if (err instanceof SyntaxError) {
-      return NextResponse.json({ error: 'Invalid JSON payload' }, { status: 400 });
+      return NextResponse.json({ error: 'Dữ liệu JSON không hợp lệ.' }, { status: 400 });
     }
     return NextResponse.json({ 
-      error: err instanceof Error ? err.message : 'Failed to update schedule settings'
+      error: err instanceof Error ? err.message : 'Không thể cập nhật cài đặt lịch tự động.'
     }, { status: 500 });
   }
 }
