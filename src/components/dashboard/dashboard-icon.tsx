@@ -4,7 +4,9 @@ export type DashboardIconName =
   | 'dashboard' | 'product' | 'task' | 'queue' | 'approval' | 'ai' | 'worker'
   | 'scheduler' | 'security' | 'health' | 'settings' | 'emergency' | 'refresh'
   | 'check' | 'warning' | 'source' | 'filter' | 'grid' | 'list' | 'lock'
-  | 'menu' | 'close' | 'chevronDown' | 'chevronRight' | 'external' | 'tools' | 'content';
+  | 'menu' | 'close' | 'chevronDown' | 'chevronRight' | 'external' | 'tools' | 'content'
+  | 'import' | 'duplicate' | 'price' | 'analytics' | 'alert' | 'today' | 'calendar'
+  | 'compare' | 'search';
 
 const paths: Record<DashboardIconName, string[]> = {
   dashboard: ['M4 4h6v6H4z', 'M14 4h6v10h-6z', 'M4 14h6v6H4z', 'M14 18h6v2h-6z'],
@@ -34,6 +36,15 @@ const paths: Record<DashboardIconName, string[]> = {
   external: ['M14 4h6v6M20 4l-9 9', 'M18 13v6H5V6h6'],
   tools: ['M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.7-3.7a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9l-3.8 3.8Z'],
   content: ['M6 3h9l4 4v14H6z', 'M15 3v5h5M9 12h7M9 16h7'],
+  import: ['M12 3v12', 'M7 10l5 5 5-5', 'M5 21h14'],
+  duplicate: ['M8 8h11v11H8z', 'M5 16H3V3h13v2'],
+  price: ['M4 5h16v14H4z', 'M8 9h8M8 13h5M8 17h8'],
+  analytics: ['M4 19V9M10 19V5M16 19v-7M22 19H2'],
+  alert: ['M12 3a6 6 0 0 0-6 6v4l-2 3h16l-2-3V9a6 6 0 0 0-6-6Z', 'M10 20h4'],
+  today: ['M5 4h14v16H5z', 'M8 2v4M16 2v4M5 9h14', 'M9 14l2 2 4-4'],
+  calendar: ['M5 4h14v16H5z', 'M8 2v4M16 2v4M5 9h14'],
+  compare: ['M8 4 4 8l4 4M4 8h9', 'M16 12l4 4-4 4M20 16h-9'],
+  search: ['M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Z', 'M16 16l5 5'],
 };
 
 export function DashboardIcon({ name, size = 18, ...props }: { name: DashboardIconName; size?: number } & Omit<SVGProps<SVGSVGElement>, 'name'>) {

@@ -1,1094 +1,227 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import type { Metadata } from 'next';
-import { getProductBySlug, getPublishedProducts } from '@/lib/storage/products';
-import type { Product } from '@/lib/types';
-import { buildBreadcrumbJsonLd, buildProductJsonLd, buildProductMetadata, getProductIndexingDecision, selectRelatedProducts } from '@/lib/seo/productSeo';
+import { cache } from 'react';
+
+import {
+  AffiliateDisclosure,
+  DealScoreBadge,
+  PriceDisplay,
+  PriceHistory,
+  ProductEvidence,
+  PublicFooter,
+  PublicHeader,
+  PublicIcon,
+  PublicViewTracker,
+  RelatedDeals,
+  SourceSummary,
+  VerifiedSourceBadge,
+} from '@/components/public';
+import styles from '@/components/public/public.module.css';
+import { getPublicProductBySlugSafe } from '@/lib/product-intelligence/publicProducts';
+import {
+  buildBreadcrumbJsonLd,
+  buildProductJsonLd,
+  buildProductMetadata,
+  getProductIndexingDecision,
+} from '@/lib/seo/productSeo';
+
 import ProductImage from '../ProductImage';
 
 export const dynamic = 'force-dynamic';
 
-const PLATFORMS: Record<string, string> = {
-    shopee: 'Shopee',
-    tiktok_shop: 'TikTok Shop',
-    lazada: 'Lazada',
-    accesstrade: 'AccessTrade',
-    website: 'Website',
-    other: 'Khác',
-};
+const getSafeDetail = cache((slug: string) => getPublicProductBySlugSafe(slug));
 
-function getText(value: unknown): string {
-    return typeof value === 'string' ? value.trim() : '';
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const result = await getSafeDetail(slug);
+  return buildProductMetadata(result?.product || null);
 }
 
-function formatPrice(price?: number) {
-    if (!price) return 'Đang cập nhật';
-    return `${price.toLocaleString('vi-VN')}₫`;
+function claimTexts(items?: Array<{ text: string }>) {
+  return (items || []).map((item) => item.text).filter(Boolean);
 }
 
-function getDiscountPercent(product: Product) {
-    if (!product.price || !product.salePrice || product.price <= product.salePrice) {
-        return 0;
-    }
+export default async function DealDetailPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const result = await getSafeDetail(slug);
+  if (!result) notFound();
 
-    return Math.round((1 - product.salePrice / product.price) * 100);
-}
+  const { product, detail } = result;
+  const indexing = getProductIndexingDecision(product);
+  const productJsonLd = buildProductJsonLd(product);
+  const breadcrumbJsonLd = buildBreadcrumbJsonLd(product);
+  const review = detail.reviewContent;
+  const strengths = claimTexts(review?.strengths);
+  const limitations = claimTexts(review?.limitations);
+  const facts = [
+    ...(review?.keyFacts || [])
+      .filter((fact) => !['product_url', 'affiliate_url', 'image'].includes(fact.id))
+      .map((fact) => ({ id: fact.id, label: fact.label, value: fact.value })),
+    ...Object.entries(detail.specifications || {}).map(([key, value]) => ({ id: `spec-${key}`, label: key, value })),
+  ];
+  const evidence = {
+    facts,
+    sources: (review?.evidenceSources || []).map((source) => ({
+      name: source.name,
+      fields: source.fields,
+      checkedAt: source.checkedAt,
+    })),
+    warnings: detail.dataIssues,
+  };
+  const contentPageId = `deal:${detail.slug}`;
+  const outboundHref = `${detail.outboundHref}?content=${encodeURIComponent(contentPageId)}`;
 
-function getDealUrl(product: Product) {
-    const record = product as Product & Record<string, unknown>;
+  return (
+    <div className={styles.shell}>
+      <PublicViewTracker productId={detail.id} contentPageId={contentPageId} />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd).replace(/</g, '\\u003c') }}
+      />
+      {productJsonLd ? (
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd).replace(/</g, '\\u003c') }}
+        />
+      ) : null}
 
-    return product.affiliateUrl || product.originalUrl || getText(record.url) || '';
-}
+      <PublicHeader />
+      <main>
+        <section className={styles.section}>
+          <div className={styles.container}>
+            <nav className={styles.breadcrumb} aria-label="Breadcrumb">
+              <Link href="/">Trang chủ</Link><span aria-hidden="true">/</span>
+              <Link href="/deals">Deal</Link><span aria-hidden="true">/</span>
+              <span aria-current="page">{detail.title}</span>
+            </nav>
 
-function getPlatformLabel(platform?: string) {
-    const key = String(platform || 'other');
-    return PLATFORMS[key] || key || 'Khác';
-}
+            {!indexing.indexable ? (
+              <div className={styles.warningBox} role="note">
+                Trang này chưa đủ điều kiện lập chỉ mục: {indexing.reasons.join(', ')}.
+              </div>
+            ) : null}
 
-function SafeProductImage({
-                              src,
-                              alt,
-                              compact = false,
-                          }: {
-    src?: string | null;
-    alt: string;
-    compact?: boolean;
-}) {
-    const cleanSrc = typeof src === 'string' ? src.trim() : '';
+            <div className={styles.detailGrid}>
+              <div className={styles.galleryMain}>
+                <div className={styles.imageFrame}>
+                  <ProductImage
+                    src={detail.imageUrl}
+                    alt={detail.title}
+                    eager
+                    sizes="(max-width: 800px) calc(100vw - 28px), 520px"
+                  />
+                </div>
+              </div>
 
-    const fallback = (
-        <div
-            aria-label={alt}
-            style={{
-                width: '100%',
-                height: '100%',
-                minHeight: compact ? 68 : 260,
-                display: 'grid',
-                placeItems: 'center',
-                padding: compact ? 8 : 22,
-                background:
-                    'radial-gradient(circle at 50% 20%, rgba(14,165,233,0.14), transparent 34%), linear-gradient(135deg, #f8fafc 0%, #eef6ff 100%)',
-                color: '#64748b',
-                textAlign: 'center',
-            }}
-        >
-            <div>
-                <div
-                    style={{
-                        width: compact ? 34 : 68,
-                        height: compact ? 34 : 68,
-                        margin: compact ? '0 auto' : '0 auto 12px',
-                        borderRadius: compact ? 12 : 20,
-                        display: 'grid',
-                        placeItems: 'center',
-                        background: 'linear-gradient(135deg, #4f46e5, #06b6d4)',
-                        color: '#ffffff',
-                        fontWeight: 950,
-                        fontSize: compact ? 15 : 28,
-                        boxShadow: '0 18px 38px rgba(37,99,235,0.18)',
-                    }}
-                >
-                    S
+              <div>
+                <SourceSummary source={detail.sourceLabel} checkedAt={detail.priceUpdatedAt || detail.updatedAt} />
+                <h1 className={styles.detailTitle}>{detail.title}</h1>
+                {detail.description ? <p className={styles.detailSummary}>{detail.description}</p> : null}
+                <PriceDisplay
+                  currentPrice={detail.currentPrice}
+                  originalPrice={detail.originalPrice}
+                  currency={detail.currency}
+                  large
+                />
+                <div className={styles.badgeRow}>
+                  <DealScoreBadge score={detail.dealScore} band={detail.dealBand} />
+                  {typeof detail.qualityScore === 'number' ? (
+                    <span className={styles.qualityBadge}>Quality Score {Math.round(detail.qualityScore)}</span>
+                  ) : null}
+                  <VerifiedSourceBadge verified={detail.verifiedSource} />
                 </div>
 
-                {!compact && (
-                    <>
-                        <div style={{ fontSize: 14, fontWeight: 950, color: '#0f172a' }}>
-                            Ảnh đang cập nhật
-                        </div>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: '#94a3b8', marginTop: 5 }}>
-                            Ảnh gốc có thể không còn khả dụng từ nguồn bán hàng
-                        </div>
-                    </>
-                )}
-            </div>
-        </div>
-    );
+                {detail.dealReasons.length > 0 ? (
+                  <article className={styles.contentCard}>
+                    <h2>Lý do chấm Deal Score</h2>
+                    <ul className={styles.evidenceList}>{detail.dealReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                  </article>
+                ) : null}
 
-    if (!cleanSrc) return fallback;
-
-    return (
-        <ProductImage src={cleanSrc} alt={alt} compact={compact} />
-    );
-}
-
-function ProductCardImage({
-                              product,
-                              platformLabel,
-                              discount,
-                          }: {
-    product: Product;
-    platformLabel: string;
-    discount: number;
-}) {
-    return (
-        <div
-            style={{
-                position: 'relative',
-                aspectRatio: '1 / 1',
-                background: '#f8fafc',
-                display: 'grid',
-                placeItems: 'center',
-                overflow: 'hidden',
-            }}
-        >
-            <SafeProductImage src={product.imageUrl} alt={product.title} compact />
-
-            <div
-                style={{
-                    position: 'absolute',
-                    top: 12,
-                    left: 12,
-                    borderRadius: 999,
-                    background: '#ffffff',
-                    color: '#0f172a',
-                    padding: '6px 10px',
-                    fontSize: 11,
-                    fontWeight: 950,
-                    boxShadow: '0 8px 20px rgba(15,23,42,0.1)',
-                }}
-            >
-                {platformLabel}
-            </div>
-
-            {discount > 0 && (
-                <div
-                    style={{
-                        position: 'absolute',
-                        top: 12,
-                        right: 12,
-                        borderRadius: 999,
-                        background: '#ef4444',
-                        color: '#ffffff',
-                        padding: '6px 10px',
-                        fontSize: 11,
-                        fontWeight: 950,
-                    }}
-                >
-                    -{discount}%
+                <div className={styles.detailCta}>
+                  {indexing.indexable ? (
+                    <a
+                      className={styles.primaryButton}
+                      href={outboundHref}
+                      target="_blank"
+                      rel="sponsored noopener noreferrer"
+                    >
+                      Xem tại nhà bán <PublicIcon name="external" size={16} />
+                    </a>
+                  ) : <span className={styles.warningBox}>Liên kết mua đang chờ xác minh lại.</span>}
+                  <small>SanDeal có thể nhận hoa hồng. Giá và điều kiện cuối cùng được xác nhận tại nhà bán.</small>
                 </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className={`${styles.section} ${styles.sectionSoft}`} aria-labelledby="editorial-review-title">
+          <div className={styles.container}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <h2 id="editorial-review-title">Đánh giá dựa trên bằng chứng</h2>
+                <p>Nội dung phản ánh dữ liệu nguồn hiện có, không phải trải nghiệm sử dụng trực tiếp nếu không được ghi rõ.</p>
+              </div>
+            </div>
+
+            {review ? (
+              <div className={styles.contentGrid}>
+                {review.reviewSummary ? (
+                  <article className={styles.contentCard}>
+                    <h3>{review.reviewTitle || 'Tóm tắt đánh giá'}</h3>
+                    <p>{review.reviewSummary}</p>
+                  </article>
+                ) : null}
+                {review.reviewVerdict ? (
+                  <article className={styles.contentCard}>
+                    <h3>Kết luận biên tập</h3>
+                    <p>{review.reviewVerdict}</p>
+                  </article>
+                ) : null}
+                {strengths.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Điểm mạnh có bằng chứng</h3><ul className={styles.evidenceList}>{strengths.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {limitations.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Hạn chế cần cân nhắc</h3><ul className={styles.evidenceList}>{limitations.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {review.suitableFor.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Phù hợp với ai</h3><ul className={styles.evidenceList}>{review.suitableFor.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {review.notSuitableFor.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Chưa phù hợp với ai</h3><ul className={styles.evidenceList}>{review.notSuitableFor.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {review.buyingConsiderations.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Lưu ý mua hàng</h3><ul className={styles.evidenceList}>{review.buyingConsiderations.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {review.reviewDisclosure ? (
+                  <article className={styles.contentCard}><h3>Minh bạch phương pháp</h3><p>{review.reviewDisclosure}</p></article>
+                ) : null}
+              </div>
+            ) : (
+              <div className={styles.emptyState}>
+                <span className={styles.emptyIcon}><PublicIcon name="warning" size={24} /></span>
+                <h2>Nội dung đang được xác minh</h2>
+                <p>SanDeal chưa có đủ dữ kiện để hiển thị bài đánh giá đầy đủ.</p>
+              </div>
             )}
-        </div>
-    );
-}
+          </div>
+        </section>
 
-export async function generateMetadata({
-                                           params,
-                                       }: {
-    params: Promise<{ slug: string }>;
-}): Promise<Metadata> {
-    const { slug } = await params;
-    const product = await getProductBySlug(slug);
+        <ProductEvidence evidence={evidence} />
 
-    return buildProductMetadata(product);
+        <section className={`${styles.section} ${styles.sectionSoft}`}>
+          <div className={styles.container}><PriceHistory points={detail.priceHistory} /></div>
+        </section>
 
-    /* Legacy metadata implementation retained only in git history.
+        <RelatedDeals products={detail.related} />
 
-    if (!product || !isPublicSafeProduct(product)) {
-        return {
-            title: 'Không tìm thấy — SanDeal',
-        };
-    }
-
-    return {
-        title: `${product.title} — SanDeal`,
-        description:
-            product.description ||
-            `Deal ${product.title} trên ${getPlatformLabel(String(product.platform || 'other'))}`,
-    };
-    */
-}
-
-export default async function DealDetailPage({
-                                                 params,
-                                             }: {
-    params: Promise<{ slug: string }>;
-}) {
-    const { slug } = await params;
-    const foundProduct = await getProductBySlug(slug);
-
-    if (!foundProduct) return notFound();
-    if (foundProduct.kind !== 'product' && foundProduct.kind !== 'deal') return notFound();
-    const product: Product = foundProduct;
-
-    const dealUrl = getDealUrl(product);
-    const discount = getDiscountPercent(product);
-    const platformLabel = getPlatformLabel(String(product.platform || 'other'));
-    const currentPrice = product.salePrice || product.price;
-    const indexing = getProductIndexingDecision(product);
-    const review = product.reviewContent;
-    const productJsonLd = buildProductJsonLd(product);
-    const breadcrumbJsonLd = buildBreadcrumbJsonLd(product);
-
-    let relatedDeals: Product[] = [];
-
-    try {
-        const data = await getPublishedProducts();
-
-        if (Array.isArray(data)) {
-            relatedDeals = selectRelatedProducts(product, data, 4);
-        }
-    } catch {
-        relatedDeals = [];
-    }
-
-    return (
-        <div
-            className="market-shell"
-            style={{
-                background: 'linear-gradient(180deg, #f8fbff 0%, #ffffff 38%, #f5f8fc 100%)',
-                minHeight: '100vh',
-            }}
-        >
-            <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd).replace(/</g, '\\u003c') }} />
-            {productJsonLd && <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd).replace(/</g, '\\u003c') }} />}
-            <div
-                style={{
-                    background: 'linear-gradient(90deg, #6d5dfc 0%, #06b6d4 100%)',
-                    color: '#ffffff',
-                    fontSize: 13,
-                    fontWeight: 800,
-                    padding: '10px 0',
-                }}
-            >
-                <div
-                    className="market-container"
-                    style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 16,
-                        alignItems: 'center',
-                    }}
-                >
-                    <span>Deal mới mỗi ngày — So sánh nhanh — Link minh bạch</span>
-                    <span style={{ opacity: 0.95 }}>Giá và ưu đãi có thể thay đổi</span>
-                </div>
-            </div>
-
-            <header
-                className="market-header"
-                style={{
-                    position: 'sticky',
-                    top: 0,
-                    zIndex: 20,
-                    background: 'rgba(255,255,255,0.92)',
-                    backdropFilter: 'blur(14px)',
-                    borderBottom: '1px solid #e8edf5',
-                }}
-            >
-                <div
-                    className="market-container"
-                    style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'auto minmax(260px, 1fr) auto auto',
-                        alignItems: 'center',
-                        gap: 20,
-                        minHeight: 72,
-                    }}
-                >
-                    <Link
-                        href="/"
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            textDecoration: 'none',
-                            fontWeight: 950,
-                            color: '#0f172a',
-                            letterSpacing: '-0.03em',
-                        }}
-                    >
-            <span
-                style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: 14,
-                    display: 'grid',
-                    placeItems: 'center',
-                    background: 'linear-gradient(135deg, #4f46e5, #06b6d4)',
-                    color: '#ffffff',
-                    fontWeight: 950,
-                }}
-            >
-              S
-            </span>
-                        <span style={{ fontSize: 22 }}>SanDeal</span>
-                    </Link>
-
-                    <form
-                        action="/deals"
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            background: '#f8fafc',
-                            border: '1px solid #e2e8f0',
-                            borderRadius: 999,
-                            padding: '0 16px',
-                            height: 46,
-                            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.04)',
-                        }}
-                    >
-                        <span style={{ color: '#94a3b8' }}>⌕</span>
-                        <input
-                            name="q"
-                            placeholder="Tìm kiếm Deal ngon..."
-                            style={{
-                                width: '100%',
-                                border: 0,
-                                outline: 0,
-                                background: 'transparent',
-                                fontSize: 14,
-                                color: '#0f172a',
-                            }}
-                        />
-                    </form>
-
-                    <nav
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 22,
-                            fontSize: 14,
-                            fontWeight: 800,
-                            whiteSpace: 'nowrap',
-                        }}
-                    >
-                        <Link href="/" style={{ color: '#475569', textDecoration: 'none' }}>
-                            Trang chủ
-                        </Link>
-                        <Link href="/deals" style={{ color: '#0ea5e9', textDecoration: 'none' }}>
-                            Deal hot
-                        </Link>
-                        <Link href="/deals" style={{ color: '#475569', textDecoration: 'none' }}>
-                            Danh mục
-                        </Link>
-                        <Link href="/#how-it-works" style={{ color: '#475569', textDecoration: 'none' }}>
-                            Cách hoạt động
-                        </Link>
-                        <Link href="/#disclosure" style={{ color: '#475569', textDecoration: 'none' }}>
-                            Minh bạch affiliate
-                        </Link>
-                    </nav>
-
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span
-                style={{
-                    border: '1px solid #dbeafe',
-                    background: '#eff6ff',
-                    borderRadius: 999,
-                    padding: '8px 10px',
-                    fontSize: 12,
-                    fontWeight: 900,
-                    color: '#2563eb',
-                }}
-            >
-              VN
-            </span>
-                        <span
-                            style={{
-                                border: '1px solid #e2e8f0',
-                                background: '#ffffff',
-                                borderRadius: 999,
-                                padding: '8px 10px',
-                                fontSize: 12,
-                                fontWeight: 900,
-                                color: '#64748b',
-                            }}
-                        >
-              EN
-            </span>
-                    </div>
-                </div>
-            </header>
-
-            <main>
-                <section
-                    style={{
-                        padding: '32px 0 68px',
-                        background: 'radial-gradient(circle at 50% 0%, rgba(59,130,246,0.11), transparent 44%)',
-                    }}
-                >
-                    <div className="market-container">
-                        <div
-                            style={{
-                                marginBottom: 24,
-                                fontSize: 14,
-                                fontWeight: 800,
-                                color: '#64748b',
-                            }}
-                        >
-                            <nav aria-label="Breadcrumb" style={{ marginBottom: 10 }}>
-                                <Link href="/" style={{ color: '#64748b', textDecoration: 'none' }}>Trang chủ</Link>
-                                {' / '}
-                                <Link href="/deals" style={{ color: '#64748b', textDecoration: 'none' }}>Sản phẩm</Link>
-                                {' / '}
-                                <span aria-current="page">{product.title}</span>
-                            </nav>
-                            <Link
-                                href="/deals"
-                                style={{
-                                    color: '#64748b',
-                                    textDecoration: 'none',
-                                }}
-                            >
-                                ← Quay lại Deal hot
-                            </Link>
-                        </div>
-
-                        <div
-                            className="deal-detail-grid"
-                            style={{
-                                display: 'grid',
-                                gridTemplateColumns: 'minmax(320px, 520px) 1fr',
-                                gap: 42,
-                                alignItems: 'start',
-                            }}
-                        >
-                            <div
-                                style={{
-                                    background: '#ffffff',
-                                    border: '1px solid #e8edf5',
-                                    borderRadius: 28,
-                                    overflow: 'hidden',
-                                    boxShadow: '0 24px 60px rgba(15,23,42,0.08)',
-                                }}
-                            >
-                                <div
-                                    style={{
-                                        position: 'relative',
-                                        aspectRatio: '1 / 1',
-                                        background: '#f8fafc',
-                                        display: 'grid',
-                                        placeItems: 'center',
-                                        overflow: 'hidden',
-                                    }}
-                                >
-                                    <SafeProductImage src={product.imageUrl} alt={product.title} />
-
-                                    <div
-                                        style={{
-                                            position: 'absolute',
-                                            top: 16,
-                                            left: 16,
-                                            borderRadius: 999,
-                                            background: '#ffffff',
-                                            color: '#0f172a',
-                                            padding: '8px 12px',
-                                            fontSize: 12,
-                                            fontWeight: 950,
-                                            boxShadow: '0 8px 20px rgba(15,23,42,0.12)',
-                                        }}
-                                    >
-                                        {platformLabel}
-                                    </div>
-
-                                    {discount > 0 && (
-                                        <div
-                                            style={{
-                                                position: 'absolute',
-                                                top: 16,
-                                                right: 16,
-                                                borderRadius: 999,
-                                                background: '#ef4444',
-                                                color: '#ffffff',
-                                                padding: '8px 12px',
-                                                fontSize: 12,
-                                                fontWeight: 950,
-                                            }}
-                                        >
-                                            -{discount}%
-                                        </div>
-                                    )}
-                                </div>
-
-                                {Array.isArray(product.gallery) && product.gallery.length > 0 && (
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            gap: 10,
-                                            padding: 16,
-                                            overflowX: 'auto',
-                                            borderTop: '1px solid #edf2f7',
-                                        }}
-                                    >
-                                        {product.gallery.slice(0, 6).map((url, index) => (
-                                            <div
-                                                key={`${url}-${index}`}
-                                                style={{
-                                                    width: 68,
-                                                    height: 68,
-                                                    borderRadius: 16,
-                                                    border: '1px solid #e8edf5',
-                                                    overflow: 'hidden',
-                                                    flexShrink: 0,
-                                                    background: '#f8fafc',
-                                                }}
-                                            >
-                                                <SafeProductImage src={url} alt={`${product.title} ${index + 1}`} compact />
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-
-                            <div>
-                                <div
-                                    style={{
-                                        display: 'flex',
-                                        gap: 10,
-                                        flexWrap: 'wrap',
-                                        marginBottom: 16,
-                                    }}
-                                >
-                  <span
-                      style={{
-                          borderRadius: 999,
-                          background: '#eff6ff',
-                          border: '1px solid #dbeafe',
-                          color: '#2563eb',
-                          padding: '8px 12px',
-                          fontSize: 12,
-                          fontWeight: 950,
-                      }}
-                  >
-                    {platformLabel}
-                  </span>
-
-                                    <span
-                                        style={{
-                                            borderRadius: 999,
-                                            background: '#ecfdf5',
-                                            border: '1px solid #bbf7d0',
-                                            color: '#059669',
-                                            padding: '8px 12px',
-                                            fontSize: 12,
-                                            fontWeight: 950,
-                                        }}
-                                    >
-                    Đã lọc an toàn
-                  </span>
-
-                                    {discount > 0 && (
-                                        <span
-                                            style={{
-                                                borderRadius: 999,
-                                                background: '#fef2f2',
-                                                border: '1px solid #fecaca',
-                                                color: '#dc2626',
-                                                padding: '8px 12px',
-                                                fontSize: 12,
-                                                fontWeight: 950,
-                                            }}
-                                        >
-                      Giảm {discount}%
-                    </span>
-                                    )}
-                                </div>
-
-                                <h1
-                                    style={{
-                                        fontSize: 'clamp(34px, 4.5vw, 54px)',
-                                        lineHeight: 1.04,
-                                        letterSpacing: '-0.06em',
-                                        fontWeight: 950,
-                                        color: '#0f172a',
-                                        margin: '0 0 22px',
-                                    }}
-                                >
-                                    {product.title}
-                                </h1>
-
-                                <div
-                                    style={{
-                                        background: '#ffffff',
-                                        border: '1px solid #e8edf5',
-                                        borderRadius: 24,
-                                        padding: 24,
-                                        boxShadow: '0 18px 40px rgba(15,23,42,0.05)',
-                                        marginBottom: 22,
-                                    }}
-                                >
-                                    <div style={{ color: '#64748b', fontWeight: 800, marginBottom: 8 }}>
-                                        Giá tham khảo
-                                    </div>
-
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'baseline',
-                                            gap: 12,
-                                            flexWrap: 'wrap',
-                                            marginBottom: 12,
-                                        }}
-                                    >
-                                        <strong
-                                            style={{
-                                                color: '#06b6d4',
-                                                fontSize: 38,
-                                                fontWeight: 950,
-                                                letterSpacing: '-0.04em',
-                                            }}
-                                        >
-                                            {formatPrice(currentPrice)}
-                                        </strong>
-
-                                        {product.salePrice && product.price && product.salePrice !== product.price && (
-                                            <span
-                                                style={{
-                                                    color: '#94a3b8',
-                                                    textDecoration: 'line-through',
-                                                    fontSize: 18,
-                                                    fontWeight: 800,
-                                                }}
-                                            >
-                        {formatPrice(product.price)}
-                      </span>
-                                        )}
-                                    </div>
-
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            gap: 8,
-                                            flexWrap: 'wrap',
-                                        }}
-                                    >
-                    <span
-                        style={{
-                            color: '#f59e0b',
-                            background: 'rgba(245,158,11,0.08)',
-                            border: '1px solid rgba(245,158,11,0.16)',
-                            borderRadius: 999,
-                            padding: '6px 10px',
-                            fontSize: 12,
-                            fontWeight: 900,
-                        }}
-                    >
-                      Giá có thể thay đổi
-                    </span>
-
-                                        <span
-                                            style={{
-                                                color: '#2563eb',
-                                                background: '#eff6ff',
-                                                border: '1px solid #dbeafe',
-                                                borderRadius: 999,
-                                                padding: '6px 10px',
-                                                fontSize: 12,
-                                                fontWeight: 900,
-                                            }}
-                                        >
-                      Link affiliate minh bạch
-                    </span>
-                                    </div>
-                                </div>
-
-                                <section aria-labelledby="editorial-review" style={{ display: 'grid', gap: 18 }}>
-                                    {!indexing.indexable && (
-                                        <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 18, padding: 16, color: '#9a3412' }}>
-                                            Trang thông tin ngắn này chưa đủ điều kiện lập chỉ mục. Lý do: {indexing.reasons.join(', ')}.
-                                        </div>
-                                    )}
-                                    {review ? <>
-                                        <div style={{ background: '#ffffff', border: '1px solid #e8edf5', borderRadius: 22, padding: 22 }}>
-                                            <h2 id="editorial-review" style={{ marginTop: 0 }}>Tóm tắt đánh giá</h2>
-                                            <p style={{ lineHeight: 1.8, color: '#334155' }}>{review.reviewSummary}</p>
-                                            <small>Kiểm tra: {review.reviewedAt ? new Date(review.reviewedAt).toLocaleDateString('vi-VN') : 'Chưa xác định'} · Cập nhật nội dung: {review.contentUpdatedAt ? new Date(review.contentUpdatedAt).toLocaleDateString('vi-VN') : 'Chưa xác định'}</small>
-                                        </div>
-                                        <div style={{ background: '#ffffff', border: '1px solid #e8edf5', borderRadius: 22, padding: 22 }}>
-                                            <h2 style={{ marginTop: 0 }}>Thông tin chính đã xác minh</h2>
-                                            <dl style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 0.7fr) 1.3fr', gap: 10 }}>
-                                                {review.keyFacts.filter((item) => !['product_url', 'affiliate_url', 'image'].includes(item.id)).slice(0, 14).map((item) => <div key={item.id} style={{ display: 'contents' }}><dt style={{ fontWeight: 800 }}>{item.label}</dt><dd style={{ margin: 0, overflowWrap: 'anywhere' }}>{typeof item.value === 'number' && item.id.includes('price') ? formatPrice(item.value) : `${item.value}${item.id === 'discount' ? '%' : ''}`}</dd></div>)}
-                                            </dl>
-                                        </div>
-                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 18 }}>
-                                            <div style={{ background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Ưu điểm có căn cứ</h2><ul>{review.strengths.map((item) => <li key={item.id}>{item.text}</li>)}</ul></div>
-                                            <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Hạn chế và điều cần cân nhắc</h2><ul>{review.limitations.map((item) => <li key={item.id}>{item.text}</li>)}</ul></div>
-                                        </div>
-                                        <div style={{ background: '#ffffff', border: '1px solid #e8edf5', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Phù hợp với ai?</h2><ul>{review.suitableFor.map((item) => <li key={item}>{item}</li>)}</ul><h2>Không phù hợp với ai?</h2><ul>{review.notSuitableFor.map((item) => <li key={item}>{item}</li>)}</ul></div>
-                                        <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Kết luận biên tập</h2><p>{review.reviewVerdict}</p></div>
-                                        <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 22, padding: 22 }}><h2 style={{ marginTop: 0 }}>Minh bạch phương pháp</h2><p>{review.reviewDisclosure}</p><p>Người biên tập: Hệ thống biên tập tự động SanDeal · Phương pháp: phân tích dữ liệu nguồn · Nguồn: {review.evidenceSources.map((item) => item.name).join(', ') || product.source}.</p><p><Link href="/review-methodology">Xem SanDeal đánh giá sản phẩm như thế nào</Link></p></div>
-                                    </> : <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 22, padding: 22 }}><h2 id="editorial-review">Nội dung đang được xác minh</h2><p>SanDeal chưa có đủ dữ kiện để tạo bài đánh giá đầy đủ cho sản phẩm này.</p></div>}
-                                </section>
-
-                                {false && product.description && (
-                                    <div
-                                        style={{
-                                            background: '#ffffff',
-                                            border: '1px solid #e8edf5',
-                                            borderRadius: 22,
-                                            padding: 22,
-                                            marginBottom: 18,
-                                        }}
-                                    >
-                                        <h2
-                                            style={{
-                                                margin: '0 0 10px',
-                                                color: '#0f172a',
-                                                fontSize: 18,
-                                                fontWeight: 950,
-                                            }}
-                                        >
-                                            Thông tin sản phẩm
-                                        </h2>
-                                        <p
-                                            style={{
-                                                margin: 0,
-                                                color: '#64748b',
-                                                lineHeight: 1.75,
-                                                fontSize: 15,
-                                            }}
-                                        >
-                                            {product.description}
-                                        </p>
-                                    </div>
-                                )}
-
-                                {false && Array.isArray(product.benefits) && product.benefits.length > 0 && (
-                                    <div
-                                        style={{
-                                            background: '#ffffff',
-                                            border: '1px solid #e8edf5',
-                                            borderRadius: 22,
-                                            padding: 22,
-                                            marginBottom: 18,
-                                        }}
-                                    >
-                                        <h2
-                                            style={{
-                                                margin: '0 0 12px',
-                                                color: '#0f172a',
-                                                fontSize: 18,
-                                                fontWeight: 950,
-                                            }}
-                                        >
-                                            Điểm nổi bật
-                                        </h2>
-
-                                        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                                            {product.benefits.slice(0, 6).map((benefit, index) => (
-                                                <li
-                                                    key={`${benefit}-${index}`}
-                                                    style={{
-                                                        display: 'flex',
-                                                        gap: 10,
-                                                        alignItems: 'flex-start',
-                                                        color: '#334155',
-                                                        marginBottom: 9,
-                                                        lineHeight: 1.6,
-                                                    }}
-                                                >
-                                                    <span style={{ color: '#10b981', fontWeight: 950 }}>✓</span>
-                                                    <span>{benefit}</span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
-
-                                {false && Array.isArray(product.warnings) && product.warnings.length > 0 && (
-                                    <div
-                                        style={{
-                                            background: '#fffbeb',
-                                            border: '1px solid #fde68a',
-                                            borderRadius: 22,
-                                            padding: 22,
-                                            marginBottom: 18,
-                                        }}
-                                    >
-                                        <h2
-                                            style={{
-                                                margin: '0 0 12px',
-                                                color: '#92400e',
-                                                fontSize: 18,
-                                                fontWeight: 950,
-                                            }}
-                                        >
-                                            Cần kiểm tra trước khi mua
-                                        </h2>
-
-                                        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                                            {product.warnings.slice(0, 6).map((warning, index) => (
-                                                <li
-                                                    key={`${warning}-${index}`}
-                                                    style={{
-                                                        display: 'flex',
-                                                        gap: 10,
-                                                        alignItems: 'flex-start',
-                                                        color: '#92400e',
-                                                        marginBottom: 8,
-                                                        lineHeight: 1.6,
-                                                    }}
-                                                >
-                                                    <span>!</span>
-                                                    <span>{warning}</span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
-
-                                <div style={{ marginTop: 24 }}>
-                                    {dealUrl && indexing.indexable ? (
-                                        <a
-                                            href={dealUrl}
-                                            target="_blank"
-                                            rel="sponsored noopener noreferrer"
-                                            style={{
-                                                display: 'block',
-                                                width: '100%',
-                                                textAlign: 'center',
-                                                background: 'linear-gradient(135deg, #06b6d4, #2563eb)',
-                                                color: '#ffffff',
-                                                borderRadius: 18,
-                                                padding: '18px 22px',
-                                                textDecoration: 'none',
-                                                fontWeight: 950,
-                                                fontSize: 18,
-                                                boxShadow: '0 18px 34px rgba(37,99,235,0.22)',
-                                            }}
-                                        >
-                                            Đến trang mua hàng
-                                        </a>
-                                    ) : (
-                                        <div
-                                            style={{
-                                                width: '100%',
-                                                textAlign: 'center',
-                                                background: '#cbd5e1',
-                                                color: '#ffffff',
-                                                borderRadius: 18,
-                                                padding: '18px 22px',
-                                                fontWeight: 950,
-                                                fontSize: 18,
-                                            }}
-                                        >
-                                            Sản phẩm chưa sẵn sàng
-                                        </div>
-                                    )}
-
-                                    <p
-                                        style={{
-                                            textAlign: 'center',
-                                            margin: '12px 0 0',
-                                            color: '#64748b',
-                                            fontSize: 13,
-                                            lineHeight: 1.6,
-                                        }}
-                                    >
-                                        SanDeal có thể nhận hoa hồng nếu bạn mua qua liên kết này,
-                                        nhưng giá của bạn không thay đổi.
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                {relatedDeals.length > 0 && (
-                    <section style={{ padding: '0 0 68px' }}>
-                        <div className="market-container">
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'flex-end',
-                                    marginBottom: 22,
-                                }}
-                            >
-                                <div>
-                                    <h2
-                                        style={{
-                                            color: '#0f172a',
-                                            fontSize: 28,
-                                            fontWeight: 950,
-                                            margin: 0,
-                                            letterSpacing: '-0.04em',
-                                        }}
-                                    >
-                                        Deal khác có thể bạn thích
-                                    </h2>
-                                    <p style={{ color: '#64748b', margin: '8px 0 0' }}>
-                                        Sản phẩm đã được duyệt qua hệ thống
-                                    </p>
-                                </div>
-
-                                <Link
-                                    href="/deals"
-                                    style={{
-                                        color: '#06b6d4',
-                                        textDecoration: 'none',
-                                        fontWeight: 950,
-                                    }}
-                                >
-                                    Xem tất cả →
-                                </Link>
-                            </div>
-
-                            <div
-                                style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: 'repeat(auto-fill, minmax(238px, 1fr))',
-                                    gap: 22,
-                                }}
-                            >
-                                {relatedDeals.map((item) => {
-                                    const relatedDiscount = getDiscountPercent(item);
-                                    const relatedPlatform = getPlatformLabel(String(item.platform || 'other'));
-
-                                    return (
-                                        <article
-                                            key={item.id}
-                                            style={{
-                                                background: '#ffffff',
-                                                border: '1px solid #e8edf5',
-                                                borderRadius: 22,
-                                                overflow: 'hidden',
-                                                boxShadow: '0 18px 40px rgba(15,23,42,0.05)',
-                                            }}
-                                        >
-                                            <Link
-                                                href={`/deals/${item.slug}`}
-                                                style={{ display: 'block', textDecoration: 'none' }}
-                                            >
-                                                <ProductCardImage
-                                                    product={item}
-                                                    platformLabel={relatedPlatform}
-                                                    discount={relatedDiscount}
-                                                />
-                                            </Link>
-
-                                            <div style={{ padding: 16 }}>
-                                                <Link
-                                                    href={`/deals/${item.slug}`}
-                                                    style={{ textDecoration: 'none', color: '#0f172a' }}
-                                                >
-                                                    <h3
-                                                        style={{
-                                                            fontSize: 15,
-                                                            lineHeight: 1.45,
-                                                            minHeight: 44,
-                                                            margin: '0 0 12px',
-                                                            fontWeight: 950,
-                                                        }}
-                                                    >
-                                                        {item.title}
-                                                    </h3>
-                                                </Link>
-
-                                                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                                                    <strong style={{ color: '#06b6d4', fontSize: 18 }}>
-                                                        {formatPrice(item.salePrice || item.price)}
-                                                    </strong>
-
-                                                    {item.salePrice && item.price && item.salePrice !== item.price && (
-                                                        <span
-                                                            style={{
-                                                                color: '#94a3b8',
-                                                                textDecoration: 'line-through',
-                                                                fontSize: 13,
-                                                            }}
-                                                        >
-                              {formatPrice(item.price)}
-                            </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </article>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    </section>
-                )}
-
-                <section id="disclosure" style={{ padding: '0 0 54px' }}>
-                    <div className="market-container" style={{ maxWidth: 880 }}>
-                        <div
-                            style={{
-                                background: '#ffffff',
-                                border: '1px solid #e8edf5',
-                                borderRadius: 20,
-                                padding: 26,
-                                textAlign: 'center',
-                                color: '#64748b',
-                                lineHeight: 1.75,
-                            }}
-                        >
-                            <h3 style={{ margin: '0 0 8px', color: '#0f172a', fontWeight: 950 }}>
-                                Minh bạch Affiliate
-                            </h3>
-                            SanDeal có thể nhận hoa hồng nếu bạn mua qua liên kết này, nhưng{' '}
-                            <strong>giá của bạn không thay đổi</strong>. Giá, tồn kho và ưu đãi
-                            có thể thay đổi theo thời điểm. Bạn nên kiểm tra lại thông tin trên
-                            trang bán hàng trước khi mua.
-                        </div>
-                    </div>
-                </section>
-            </main>
-
-            <footer
-                style={{
-                    background: '#0f172a',
-                    color: '#cbd5e1',
-                    padding: '48px 0 30px',
-                }}
-            >
-                <div
-                    className="market-container"
-                    style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1.2fr 1fr 1fr 1fr',
-                        gap: 40,
-                    }}
-                >
-                    <div>
-                        <div style={{ fontSize: 22, fontWeight: 950, color: '#ffffff', marginBottom: 12 }}>
-                            SanDeal
-                        </div>
-                        <p style={{ margin: 0, color: '#94a3b8', lineHeight: 1.7 }}>
-                            Tổng hợp ưu đãi công nghệ, sản phẩm đáng mua và link affiliate minh bạch.
-                        </p>
-                    </div>
-
-                    <div>
-                        <h4 style={{ color: '#ffffff', marginTop: 0 }}>Danh mục</h4>
-                        <p>Trang chủ</p>
-                        <p>Deal hot</p>
-                        <p>Tìm kiếm</p>
-                    </div>
-
-                    <div>
-                        <h4 style={{ color: '#ffffff', marginTop: 0 }}>Chính sách</h4>
-                        <p>Công bố Affiliate</p>
-                        <p>Lưu ý về giá</p>
-                        <p>Bảo mật</p>
-                    </div>
-
-                    <div>
-                        <h4 style={{ color: '#ffffff', marginTop: 0 }}>Liên hệ</h4>
-                        <p>Hỗ trợ: support@sandeal.tech</p>
-                    </div>
-                </div>
-
-                <div
-                    className="market-container"
-                    style={{
-                        borderTop: '1px solid rgba(148,163,184,0.2)',
-                        marginTop: 34,
-                        paddingTop: 22,
-                        textAlign: 'center',
-                        color: '#64748b',
-                        fontSize: 13,
-                        lineHeight: 1.7,
-                    }}
-                >
-                    © 2026 SanDeal. SanDeal là nền tảng so sánh giá độc lập và có thể nhận
-                    hoa hồng Affiliate từ các liên kết. Chúng tôi không trực tiếp bán hàng;
-                    mọi giao dịch, giá cả do nhà bán trên sàn TMĐT chịu trách nhiệm.
-                </div>
-            </footer>
-        </div>
-    );
+        <section className={styles.section}>
+          <div className={styles.container}><AffiliateDisclosure /></div>
+        </section>
+      </main>
+      <PublicFooter />
+    </div>
+  );
 }

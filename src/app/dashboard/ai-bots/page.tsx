@@ -7,7 +7,23 @@ import styles from '../operations.module.css';
 type SafeJob = Omit<AutomationJob, 'payload'>;
 type JobsResponse = { ok: boolean; message: string; data?: { items: SafeJob[]; pagination: { page: number; totalItems: number; totalPages: number } } };
 const STATUS_LABELS: Record<AutomationJobStatus, string> = { PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ chạy lại', SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng' };
-const TYPE_LABELS: Record<AutomationJobType, string> = { PRODUCT_SCAN: 'Quét sản phẩm', AUTO_PILOT: 'Chế độ tự động', SAFE_PUBLISH: 'Đăng an toàn', AI_ANALYSIS: 'Phân tích AI', HEALTH_CHECK: 'Kiểm tra hệ thống' };
+const TYPE_LABELS: Record<AutomationJobType, string> = {
+  PRODUCT_SCAN: 'Quét sản phẩm',
+  AUTO_PILOT: 'Chế độ tự động',
+  SAFE_PUBLISH: 'Đăng an toàn',
+  AI_ANALYSIS: 'Phân tích AI',
+  HEALTH_CHECK: 'Kiểm tra hệ thống',
+  IMPORT_PRODUCTS: 'Nhập sản phẩm',
+  RECHECK_PRODUCT_HEALTH: 'Kiểm tra lại link và ảnh',
+  DETECT_DUPLICATES: 'Phát hiện trùng lặp',
+  SCORE_PRODUCTS: 'Chấm điểm sản phẩm',
+  CAPTURE_PRICE_HISTORY: 'Ghi nhận lịch sử giá',
+  PREPARE_CONTENT_DRAFT: 'Chuẩn bị khung nội dung',
+  EDITORIAL_CHECK: 'Kiểm tra biên tập',
+  EVALUATE_ALERTS: 'Đánh giá cảnh báo',
+  AGGREGATE_GROWTH_METRICS: 'Tổng hợp tăng trưởng',
+  BULK_PRODUCT_OPERATION: 'Thao tác hàng loạt',
+};
 
 function badge(status: AutomationJobStatus) {
   if (status === 'SUCCEEDED') return `${styles.badge} ${styles.success}`;

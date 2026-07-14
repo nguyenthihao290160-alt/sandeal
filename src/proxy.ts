@@ -15,6 +15,7 @@ export function proxy(request: NextRequest) {
     const isPublicRoute =
       pathname === '/api/app-health' ||
       pathname === '/api/ai-bots/scheduler/tick' ||
+      pathname.startsWith('/api/public/') ||
       (pathname === '/api/products' && request.method === 'GET' && request.nextUrl.searchParams.get('public') === 'true');
 
     if (isPublicRoute) {

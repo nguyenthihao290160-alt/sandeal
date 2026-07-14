@@ -5,8 +5,10 @@
 import { type NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { listProducts, createProduct, DuplicateProductError } from '@/lib/storage/products';
-import { requireAuth } from '@/lib/auth';
+import { requirePermission } from '@/lib/auth';
 import type { ProductPlatform, ProductSource, ProductStatus, ProductKind, ProductRiskLevel } from '@/lib/types';
+import { PublicProductQueryError, queryPublicProducts } from '@/lib/product-intelligence/publicProducts';
+import { validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,12 +18,7 @@ const PRODUCT_SOURCES = new Set<ProductSource>(['manual', 'accesstrade', 'shopee
 const RISK_LEVELS = new Set<ProductRiskLevel>(['low', 'medium', 'high', 'unknown']);
 
 function validHttpUrl(value: unknown): boolean {
-  if (typeof value !== 'string' || !value.trim()) return false;
-  try {
-    return ['http:', 'https:'].includes(new URL(value).protocol);
-  } catch {
-    return false;
-  }
+  return validateExternalUrl(value).safe;
 }
 
 export async function GET(request: NextRequest) {
@@ -30,7 +27,7 @@ export async function GET(request: NextRequest) {
 
     const isPublicRequest = sp.get('public') === 'true';
     if (!isPublicRequest) {
-      const authError = await requireAuth(request);
+      const authError = await requirePermission(request, 'VIEW_PRODUCTS');
       if (authError) return authError;
     }
 
@@ -46,9 +43,15 @@ export async function GET(request: NextRequest) {
 
     // If client requests public=true, return public-safe normalized products
     if (isPublicRequest) {
-      // lazy import to avoid cycles
-      const { getPublicProducts } = await import('@/lib/storage/products');
-      const products = await getPublicProducts(filters);
+      const publicParams = new URLSearchParams(sp);
+      publicParams.delete('public');
+      let products;
+      try {
+        products = (await queryPublicProducts(publicParams)).items;
+      } catch (error) {
+        if (error instanceof PublicProductQueryError) return errorResponse('Bộ lọc public không hợp lệ.', 'VALIDATION_ERROR', 400);
+        throw error;
+      }
       return successResponse('Đã tải danh sách sản phẩm (public).', products);
     }
 
@@ -60,7 +63,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const authError = await requireAuth(request);
+  const authError = await requirePermission(request, 'EDIT_PRODUCTS');
   if (authError) return authError;
 
   try {

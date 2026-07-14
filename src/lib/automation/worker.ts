@@ -1,5 +1,6 @@
 import { runAutoPilot } from '@/lib/bots/autoPilotRunner';
 import { buildDashboardProducts } from '@/lib/dashboard/products';
+import { executeProductIntelligenceJob } from '@/lib/product-intelligence/jobs';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { getProductById, getAllProducts, publishCanonicalProductTransaction } from '@/lib/storage/products';
 import { getPrimaryCredential } from '@/lib/storage/tokenVault';
@@ -15,6 +16,10 @@ import {
   updateAutomationControl,
 } from './store';
 import type { AutomationJob } from './types';
+
+function assertUnhandledJobType(type: never): never {
+  throw new Error(`UNSUPPORTED_JOB_TYPE:${String(type)}`);
+}
 
 export interface WorkerRunResult {
   workerId: string;
@@ -54,50 +59,22 @@ async function dryRunPreview(job: AutomationJob): Promise<Record<string, unknown
   };
 }
 
-async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> {
-  if (job.dryRun) return dryRunPreview(job);
+async function assertKillSwitchInactive(): Promise<void> {
   const control = await getAutomationControl();
   if (control.killSwitch) throw new Error('KILL_SWITCH_ACTIVE');
+}
 
-  if (job.type === 'HEALTH_CHECK') {
-    const products = await getAllProducts();
-    return { checkedAt: new Date().toISOString(), productCount: products.length, businessDataChanged: false };
-  }
-
-  if (job.type === 'SAFE_PUBLISH') {
-    if (job.approvalStatus !== 'APPROVED') throw new Error('APPROVAL_REQUIRED');
-    const productId = typeof job.payload.productId === 'string' ? job.payload.productId : '';
-    const product = await getProductById(productId);
-    if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
-    const published = await publishCanonicalProductTransaction(productId, { status: 'published' }, {
-      actor: job.approvedBy || job.requestedBy,
-      approval: true,
-      dryRun: false,
-      idempotencyKey: job.idempotencyKey,
-      runId: job.operationId,
-    });
-    if (!published || published.status !== 'published') throw new Error('SAFE_PUBLISH_BLOCKED');
-    return { productId, status: published.status, publishedAt: published.publishedAt || null };
-  }
-
-  if (job.type === 'AI_ANALYSIS') {
-    const settings = await getAutomationSettings();
-    if (!settings.freeOnly || settings.allowPaidAi) throw new Error('PAID_PROVIDER_BLOCKED');
-    const credential = await getPrimaryCredential('gemini');
-    if (!credential || credential.status !== 'valid') throw new Error('CONFIGURATION_REQUIRED');
-    const estimate = Math.max(1, Math.min(10, Number(job.payload.limit) || 1));
-    const circuit = await canUseCircuit('gemini');
-    if (!circuit.allowed) throw new Error('CIRCUIT_OPEN');
-    // Reserve usage only at the future provider call boundary; no provider is called here.
-    void estimate;
-    throw new Error('AI_HANDLER_UNAVAILABLE');
-  }
-
+async function executeAutoPilotJob(
+  job: AutomationJob,
+  mode: 'source_scan' | 'full_safe_run',
+): Promise<Record<string, unknown>> {
+  if (job.dryRun) return dryRunPreview(job);
+  await assertKillSwitchInactive();
   const circuit = await canUseCircuit('autopilot');
   if (!circuit.allowed) throw new Error('CIRCUIT_OPEN');
   try {
     const result = await runAutoPilot({
-      mode: job.type === 'PRODUCT_SCAN' ? 'source_scan' : 'full_safe_run',
+      mode,
       trigger: job.requestedBy === 'scheduler' ? 'scheduler' : 'dashboard',
     });
     if (result.status !== 'completed') throw new Error(result.error || result.message || 'AUTOPILOT_NOT_COMPLETED');
@@ -108,6 +85,67 @@ async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> 
       await recordCircuitResult('autopilot', false);
     }
     throw error;
+  }
+}
+
+async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> {
+  switch (job.type) {
+    case 'IMPORT_PRODUCTS':
+    case 'RECHECK_PRODUCT_HEALTH':
+    case 'DETECT_DUPLICATES':
+    case 'SCORE_PRODUCTS':
+    case 'CAPTURE_PRICE_HISTORY':
+    case 'PREPARE_CONTENT_DRAFT':
+    case 'EDITORIAL_CHECK':
+    case 'EVALUATE_ALERTS':
+    case 'AGGREGATE_GROWTH_METRICS':
+    case 'BULK_PRODUCT_OPERATION': {
+      if (!job.dryRun) await assertKillSwitchInactive();
+      return executeProductIntelligenceJob(job);
+    }
+    case 'PRODUCT_SCAN':
+      return executeAutoPilotJob(job, 'source_scan');
+    case 'AUTO_PILOT':
+      return executeAutoPilotJob(job, 'full_safe_run');
+    case 'HEALTH_CHECK': {
+      if (job.dryRun) return dryRunPreview(job);
+      await assertKillSwitchInactive();
+      const products = await getAllProducts();
+      return { checkedAt: new Date().toISOString(), productCount: products.length, businessDataChanged: false };
+    }
+    case 'SAFE_PUBLISH': {
+      if (job.dryRun) return dryRunPreview(job);
+      await assertKillSwitchInactive();
+      if (job.approvalStatus !== 'APPROVED') throw new Error('APPROVAL_REQUIRED');
+      const productId = typeof job.payload.productId === 'string' ? job.payload.productId : '';
+      const product = await getProductById(productId);
+      if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
+      const published = await publishCanonicalProductTransaction(productId, { status: 'published' }, {
+        actor: job.approvedBy || job.requestedBy,
+        approval: true,
+        dryRun: false,
+        idempotencyKey: job.idempotencyKey,
+        runId: job.operationId,
+      });
+      if (!published || published.status !== 'published') throw new Error('SAFE_PUBLISH_BLOCKED');
+      return { productId, status: published.status, publishedAt: published.publishedAt || null };
+    }
+    case 'AI_ANALYSIS': {
+      if (job.dryRun) return dryRunPreview(job);
+      await assertKillSwitchInactive();
+      const settings = await getAutomationSettings();
+      if (!settings.freeOnly || settings.allowPaidAi) throw new Error('PAID_PROVIDER_BLOCKED');
+      const credential = await getPrimaryCredential('gemini');
+      if (!credential || credential.status !== 'valid') throw new Error('CONFIGURATION_REQUIRED');
+      const estimate = Math.max(1, Math.min(10, Number(job.payload.limit) || 1));
+      const circuit = await canUseCircuit('gemini');
+      if (!circuit.allowed) throw new Error('CIRCUIT_OPEN');
+      // Reserve usage only at the future provider call boundary; no provider is called here.
+      void estimate;
+      throw new Error('AI_HANDLER_UNAVAILABLE');
+    }
+    default:
+      return assertUnhandledJobType(job.type);
   }
 }
 
@@ -133,6 +171,11 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       const completed = await completeAutomationJob(job.id, workerId, output);
       if (completed) result.succeeded += 1; else result.skipped += 1;
     } catch (error) {
+      const latest = await getAutomationJob(job.id);
+      if (latest?.status === 'CANCELLED') {
+        result.skipped += 1;
+        continue;
+      }
       await failAutomationJob(job.id, workerId, errorCode(error), error);
       result.failed += 1;
     } finally {

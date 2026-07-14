@@ -20,6 +20,19 @@ const CIRCUITS = 'automation-circuits';
 const MAX_PAYLOAD_BYTES = 16 * 1024;
 const SECRET_KEY = /token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key|credential/i;
 const TERMINAL = new Set<AutomationJobStatus>(['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED']);
+const COOPERATIVELY_CANCELLABLE = new Set<AutomationJobType>([
+  'RECHECK_PRODUCT_HEALTH',
+  'SCORE_PRODUCTS',
+  'CAPTURE_PRICE_HISTORY',
+  'PREPARE_CONTENT_DRAFT',
+  'EDITORIAL_CHECK',
+  'BULK_PRODUCT_OPERATION',
+]);
+
+function canCancelWhileRunning(job: AutomationJob): boolean {
+  if (!COOPERATIVELY_CANCELLABLE.has(job.type)) return false;
+  return job.type !== 'BULK_PRODUCT_OPERATION' || job.payload.action !== 'merge_duplicates';
+}
 
 export const DEFAULT_CONTROL: AutomationControlState = {
   id: 'automation-control',
@@ -244,7 +257,7 @@ export async function cancelAutomationJob(id: string, actor: string, reason: str
   let cancelled: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
-    if (!job || TERMINAL.has(job.status) || (job.status === 'RUNNING' && !job.dryRun)) return undefined;
+    if (!job || TERMINAL.has(job.status) || (job.status === 'RUNNING' && !job.dryRun && !canCancelWhileRunning(job))) return undefined;
     const previous = job.status; job.status = 'CANCELLED'; job.cancelledAt = now; job.completedAt = now; job.updatedAt = now;
     job.lastErrorCode = 'CANCELLED'; job.lastErrorMessage = sanitizeErrorMessage(reason); cancelled = { ...job, result: { previousState: previous } }; return items;
   });

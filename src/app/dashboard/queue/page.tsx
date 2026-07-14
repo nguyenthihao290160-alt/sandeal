@@ -7,7 +7,23 @@ import type { AutomationJob, AutomationJobType } from '@/lib/automation/types';
 import styles from '../operations.module.css';
 
 type SafeJob = Omit<AutomationJob, 'payload'>;
-const TYPES: Record<AutomationJobType, string> = { PRODUCT_SCAN: 'Quét sản phẩm', AUTO_PILOT: 'Chế độ tự động', SAFE_PUBLISH: 'Đăng an toàn', AI_ANALYSIS: 'Phân tích AI', HEALTH_CHECK: 'Kiểm tra hệ thống' };
+const TYPES: Record<AutomationJobType, string> = {
+  PRODUCT_SCAN: 'Quét sản phẩm',
+  AUTO_PILOT: 'Chế độ tự động',
+  SAFE_PUBLISH: 'Đăng an toàn',
+  AI_ANALYSIS: 'Phân tích AI',
+  HEALTH_CHECK: 'Kiểm tra hệ thống',
+  IMPORT_PRODUCTS: 'Nhập sản phẩm',
+  RECHECK_PRODUCT_HEALTH: 'Kiểm tra lại link và ảnh',
+  DETECT_DUPLICATES: 'Phát hiện trùng lặp',
+  SCORE_PRODUCTS: 'Chấm điểm sản phẩm',
+  CAPTURE_PRICE_HISTORY: 'Ghi nhận lịch sử giá',
+  PREPARE_CONTENT_DRAFT: 'Chuẩn bị khung nội dung',
+  EDITORIAL_CHECK: 'Kiểm tra biên tập',
+  EVALUATE_ALERTS: 'Đánh giá cảnh báo',
+  AGGREGATE_GROWTH_METRICS: 'Tổng hợp tăng trưởng',
+  BULK_PRODUCT_OPERATION: 'Thao tác hàng loạt',
+};
 
 export default function ApprovalQueuePage() {
   const [items, setItems] = useState<SafeJob[]>([]);

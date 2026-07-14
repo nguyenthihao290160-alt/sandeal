@@ -3,6 +3,7 @@ import type { Product } from '../types';
 import { config } from '../config';
 import { isPublicSafeProduct } from '../publicProductFilter';
 import { isReviewIndexable } from '../editorialReview';
+import { PRODUCT_INTELLIGENCE_CONFIG } from '../product-intelligence/config';
 
 export function canonicalProductUrl(product: Pick<Product, 'slug'>): string {
   return new URL(`/deals/${encodeURIComponent(product.slug)}`, config.siteUrl).toString();
@@ -12,6 +13,7 @@ export function getProductIndexingDecision(product?: Product | null): { indexabl
   if (!product) return { indexable: false, reasons: ['missing_product'] };
   const reasons: string[] = [];
   if (!isPublicSafeProduct(product)) reasons.push('safe_publish_blocked');
+  if ((product.duplicateConfidence || 0) >= PRODUCT_INTELLIGENCE_CONFIG.thresholds.duplicateHigh) reasons.push('duplicate_high_confidence');
   if (!isReviewIndexable(product)) reasons.push(...(product.reviewContent?.reviewBlockReasons || ['review_not_ready']));
   if (!product.imageUrl || product.imageHealthStatus !== 'ok') reasons.push('broken_image');
   if (product.status !== 'published' || product.publicHidden !== false) reasons.push('not_public');

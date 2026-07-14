@@ -1,0 +1,42 @@
+.container {
+  border: 1px solid var(--border-color, #dbe2ea);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  margin: 12px 0;
+}
+
+.container > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  font-weight: 700;
+  padding: 12px 14px;
+}
+
+.body { border-top: 1px solid var(--border-color, #dbe2ea); padding: 14px; }
+.createRow { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(180px, 1fr) auto auto; }
+.createRow label:not(.checkbox) { display: grid; gap: 5px; }
+.createRow label span { color: var(--text-secondary, #52606d); font-size: .8rem; }
+.createRow input, .viewTitle input { border: 1px solid var(--border-color, #cbd5e1); border-radius: 8px; min-height: 38px; padding: 7px 9px; }
+.createRow button, .actions button { border: 1px solid var(--border-color, #cbd5e1); border-radius: 8px; background: var(--surface, #fff); cursor: pointer; min-height: 36px; padding: 6px 10px; }
+.createRow button:disabled, .actions button:disabled { cursor: not-allowed; opacity: .55; }
+.checkbox { align-items: center; display: flex; gap: 7px; min-height: 38px; }
+.list { display: grid; gap: 8px; list-style: none; margin: 14px 0 0; padding: 0; }
+.list li { align-items: center; border-top: 1px solid var(--border-color, #e2e8f0); display: flex; gap: 12px; justify-content: space-between; padding-top: 10px; }
+.viewTitle { align-items: center; display: flex; gap: 7px; min-width: 0; }
+.viewTitle strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewTitle span { background: #eef2ff; border-radius: 999px; color: #4338ca; font-size: .72rem; padding: 3px 7px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.actions .danger { color: #b42318; }
+.empty, .message { color: var(--text-secondary, #52606d); margin: 12px 0 0; }
+
+@media (max-width: 760px) {
+  .createRow { align-items: stretch; grid-template-columns: 1fr; }
+  .list li { align-items: stretch; flex-direction: column; }
+  .actions { justify-content: flex-start; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .container *, .container *::before, .container *::after { scroll-behavior: auto !important; transition: none !important; }
+}

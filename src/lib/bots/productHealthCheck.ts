@@ -11,6 +11,8 @@
 // - Affiliate deeplink domains handled correctly
 // ===========================================
 
+import { assertPublicDns, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
+
 // ---- Link Health Check ----
 
 export type LinkCheckStatus =
@@ -58,6 +60,11 @@ export interface ImageCheckResult {
   retryable?: boolean;
 }
 
+export interface HealthCheckRequestOptions {
+  fetchImpl?: typeof fetch;
+  resolveDns?: boolean;
+}
+
 // ---- Source Preflight Check ----
 
 export type SourcePreflightStatus =
@@ -82,6 +89,7 @@ export interface SourcePreflightResult {
 
 const LINK_CHECK_TIMEOUT_MS = 10_000;
 const IMAGE_CHECK_TIMEOUT_MS = 8_000;
+const INITIAL_FETCH = globalThis.fetch;
 const MAX_BODY_BYTES = 8_192; // 8KB — enough to detect error text, not download large files
 
 /**
@@ -195,16 +203,40 @@ function buildImageRequestHeaders(method: 'HEAD' | 'GET'): Record<string, string
   return headers;
 }
 
-async function fetchSafeRedirects(url: string, method: string, timeoutMs: number, customHeaders?: Record<string, string>): Promise<Response> {
+async function fetchSafeRedirects(
+  url: string,
+  method: 'HEAD' | 'GET',
+  timeoutMs: number,
+  customHeaders?: Record<string, string>,
+  options: HealthCheckRequestOptions = {},
+): Promise<Response> {
   let currentUrl = url;
   let redirects = 0;
+  const visited = new Set<string>();
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  // Injected transports can disable DNS for isolated tests; runtime requests resolve every hop.
+  const resolveDns = options.resolveDns ?? fetchImpl === INITIAL_FETCH;
   while (redirects < 5) {
+    const validation = validateExternalUrl(currentUrl);
+    if (!validation.safe || !validation.normalizedUrl) {
+      throw new Error(`SSRF blocked: ${validation.code || 'INVALID_URL'}`);
+    }
+    currentUrl = validation.normalizedUrl;
+    if (visited.has(currentUrl)) throw new Error('Too many redirects: redirect loop');
+    visited.add(currentUrl);
     const parsed = new URL(currentUrl);
-    if (isPrivateIp(parsed.hostname)) {
-      throw new Error(`SSRF blocked: ${parsed.hostname}`);
+    if (resolveDns) {
+      try {
+        await assertPublicDns(parsed.hostname);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'PRIVATE_NETWORK') {
+          throw new Error(`SSRF blocked: ${parsed.hostname}`);
+        }
+        throw error;
+      }
     }
     const headers = customHeaders || (method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : undefined);
-    const res = await fetch(currentUrl, {
+    const res = await fetchImpl(currentUrl, {
       method,
       headers,
       redirect: 'manual',
@@ -213,6 +245,7 @@ async function fetchSafeRedirects(url: string, method: string, timeoutMs: number
     if (res.status >= 300 && res.status < 400 && res.headers.has('location')) {
       const location = res.headers.get('location');
       if (!location) return res;
+      try { await res.body?.cancel(); } catch { /* ignore */ }
       currentUrl = new URL(location, currentUrl).toString();
       redirects++;
     } else {
@@ -384,7 +417,7 @@ function classifyGetResponse(status: number): LinkCheckResult | null {
  * 6. 5xx = server_error (retryable).
  * 7. timeout = timeout (retryable).
  */
-export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
+export async function checkLinkHealth(url: string, options: HealthCheckRequestOptions = {}): Promise<LinkCheckResult> {
   // Validate URL
   if (!url || !url.trim()) {
     return { status: 'error', ok: false, reason: 'URL rỗng' };
@@ -410,7 +443,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
     // Step 1: HEAD request (probe only — skip if domain needs GET)
     if (!forceGet) {
       try {
-        const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('HEAD'));
+        const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('HEAD'), options);
 
         if (headResponse.ok) {
           // HEAD 200 — link is ok
@@ -440,7 +473,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
     }
 
     // Step 2: GET request (authoritative check)
-    const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('GET'));
+    const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('GET'), options);
 
     // Check HTTP status
     const statusResult = classifyGetResponse(getResponse.status);
@@ -493,7 +526,7 @@ export async function checkLinkHealth(url: string): Promise<LinkCheckResult> {
  * - HEAD failure always falls through to GET
  * - Proper status types for all temporary failures
  */
-export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResult> {
+export async function checkImageHealth(imageUrl: string, options: HealthCheckRequestOptions = {}): Promise<ImageCheckResult> {
   // Validate URL
   if (!imageUrl || !imageUrl.trim()) {
     return { status: 'error', ok: false, reason: 'Image URL rỗng' };
@@ -519,7 +552,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
     let headContentType: string | null = null;
 
     try {
-      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('HEAD'));
+      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('HEAD'), options);
 
       if (headResponse.status >= 400) {
         // HEAD 404/410 — still try GET to confirm
@@ -562,7 +595,7 @@ export async function checkImageHealth(imageUrl: string): Promise<ImageCheckResu
 
     // Step 2: GET fallback (if HEAD didn't resolve or had issues)
     if (!headOk || !headContentType) {
-      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('GET'));
+      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('GET'), options);
 
       if (getResponse.status >= 400) {
         // Definitively dead

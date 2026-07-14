@@ -5,7 +5,7 @@
 import { type NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { getProductById, updateProduct, deleteProduct } from '@/lib/storage/products';
-import { requireAuth } from '@/lib/auth';
+import { requirePermission } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,7 +14,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const authError = await requireAuth(request);
+    const authError = await requirePermission(request, 'VIEW_PRODUCTS');
     if (authError) return authError;
     const { id } = await params;
     const product = await getProductById(id);
@@ -32,7 +32,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const authError = await requireAuth(request);
+    const authError = await requirePermission(request, 'EDIT_PRODUCTS');
     if (authError) return authError;
     const { id } = await params;
     let body: Record<string, unknown>;
@@ -77,7 +77,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const authError = await requireAuth(request);
+    const authError = await requirePermission(request, 'EDIT_PRODUCTS');
     if (authError) return authError;
     const { id } = await params;
     const deleted = await deleteProduct(id);

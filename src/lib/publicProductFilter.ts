@@ -3,6 +3,7 @@ import {
   classifyProductKind,
   looksLikeVoucherOrCampaign,
 } from './sourceItemClassifier';
+import { PRODUCT_INTELLIGENCE_CONFIG } from './product-intelligence/config';
 
 const DEMO_TITLES = [
   'Tai nghe Bluetooth TWS Pro Max',
@@ -586,12 +587,18 @@ function isSourceExplicitlyUnverified(
   );
 }
 
-function isApprovedOrPublished(product: Product): boolean {
+function isPublished(product: Product): boolean {
   const status = normalizeText(product.status);
 
+  return status === 'published';
+}
+
+function hasHighDuplicateConfidence(product: Product): boolean {
+  const confidence = Number(product.duplicateConfidence);
+
   return (
-      status === 'approved' ||
-      status === 'published'
+      Number.isFinite(confidence) &&
+      confidence >= PRODUCT_INTELLIGENCE_CONFIG.thresholds.duplicateHigh
   );
 }
 
@@ -826,7 +833,7 @@ export function getPublicProductBlockReason(
 
   const p = asRecord(product);
 
-  if (!isApprovedOrPublished(product)) {
+  if (!isPublished(product)) {
     return 'Chưa được duyệt hoặc chưa publish.';
   }
 
@@ -893,6 +900,10 @@ export function getPublicProductBlockReason(
         getStoredBlockReason(product) ||
         'Public decision đang chặn sản phẩm khỏi public.'
     );
+  }
+
+  if (hasHighDuplicateConfidence(product)) {
+    return 'Sản phẩm có nguy cơ trùng lặp cao và cần được xử lý trước khi public.';
   }
 
   if (!hasPlatformOrSource(product)) {

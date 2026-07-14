@@ -3208,6 +3208,26 @@ tr:hover td {
 .dashboard-shell .dashboard-topbar-title strong { color: var(--ds-text); font-weight: 650; }
 .dashboard-shell .dashboard-sidebar-group { margin-bottom: 18px; }
 .dashboard-shell .dashboard-sidebar-group-label { margin-bottom: 5px; color: #64748b; font-size: 12px; font-weight: 650; }
+.dashboard-shell .dashboard-sidebar-group-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 4px 10px;
+  color: var(--ds-text-muted);
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: var(--ds-radius-md);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .055em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.dashboard-shell .dashboard-sidebar-group-toggle:hover { color: var(--ds-text); background: var(--ds-surface-muted) !important; }
 .dashboard-shell .dashboard-sidebar-link { min-height: 40px; transition: color var(--ds-duration) ease, background var(--ds-duration) ease, border-color var(--ds-duration) ease; }
 .dashboard-shell .dashboard-sidebar-link-icon { display: grid; place-items: center; width: 22px; color: #7b8798; }
 .dashboard-shell .dashboard-sidebar-link.active .dashboard-sidebar-link-icon { color: var(--ds-primary); }

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { requireAuth } from '@/lib/auth';
+import { requirePermission } from '@/lib/auth';
 import {
   buildDashboardProducts,
   parseDashboardProductQuery,
@@ -10,7 +10,7 @@ import { getAllProducts } from '@/lib/storage/products';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
-  const authError = await requireAuth(request);
+  const authError = await requirePermission(request, 'VIEW_PRODUCTS');
 
   if (authError) {
     return authError;

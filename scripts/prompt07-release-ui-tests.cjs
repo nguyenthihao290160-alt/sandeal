@@ -120,13 +120,18 @@ test('Nguồn sản phẩm giải thích thuật ngữ và tab mobile chỉ có 
   assert.equal((page.match(/className="tabs-bar product-source-tabs"/g) || []).length, 1);
 });
 
-test('route nội dung được hạ ưu tiên trung thực và giữ đường dẫn cũ', () => {
+test('Content Studio hoạt động thật và sidebar giữ route cũ, bổ sung Product Intelligence', () => {
   const content = read('src/app/dashboard/content/page.tsx');
   const layout = read('src/app/dashboard/layout.tsx');
-  assert(content.includes('Đang hoàn thiện'));
-  assert(content.includes('chưa có backend hoàn chỉnh'));
+  assert(content.includes('title="Content Studio"'));
+  assert(content.includes("'create_local'"));
+  assert(content.includes("'check'"));
+  assert(content.includes("view === 'kanban'"));
   assert(layout.includes("href: '/dashboard/content'"));
-  assert(layout.includes("badge: 'Đang hoàn thiện'"));
+  for (const route of ['/dashboard/today', '/dashboard/growth', '/dashboard/import', '/dashboard/quality', '/dashboard/price-history', '/dashboard/alerts']) {
+    assert(layout.includes(`href: '${route}'`), route);
+  }
+  assert(!layout.includes("badge: 'Đang hoàn thiện'"));
 });
 
 test('release CI có đủ gate và tuyệt đối không deploy', () => {

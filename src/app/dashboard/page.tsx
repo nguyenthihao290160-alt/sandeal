@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
+import { BusinessOverview } from '@/components/dashboard/business-overview';
 import styles from './dashboard.module.css';
 
 type Range = 'today' | '7d' | '30d';
@@ -27,7 +28,12 @@ const STATUS_LABELS: Record<string, string> = {
   SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng',
   active: 'Đang hoạt động', paused: 'Đã tạm dừng', stale: 'Mất tín hiệu', unverified: 'Không thể xác minh', not_configured: 'Chưa cấu hình',
 };
-const TYPE_LABELS: Record<string, string> = { PRODUCT_SCAN: 'Quét sản phẩm', AUTO_PILOT: 'Chế độ tự động', SAFE_PUBLISH: 'Đăng an toàn', AI_ANALYSIS: 'Phân tích AI', HEALTH_CHECK: 'Kiểm tra hệ thống' };
+const TYPE_LABELS: Record<string, string> = {
+  PRODUCT_SCAN: 'Quét sản phẩm', AUTO_PILOT: 'Chế độ tự động', SAFE_PUBLISH: 'Đăng an toàn', AI_ANALYSIS: 'Phân tích AI', HEALTH_CHECK: 'Kiểm tra hệ thống',
+  IMPORT_PRODUCTS: 'Nhập sản phẩm', RECHECK_PRODUCT_HEALTH: 'Kiểm tra lại link và ảnh', DETECT_DUPLICATES: 'Phát hiện trùng lặp', SCORE_PRODUCTS: 'Chấm điểm sản phẩm',
+  CAPTURE_PRICE_HISTORY: 'Ghi nhận lịch sử giá', PREPARE_CONTENT_DRAFT: 'Chuẩn bị khung nội dung', EDITORIAL_CHECK: 'Kiểm tra biên tập', EVALUATE_ALERTS: 'Đánh giá cảnh báo',
+  AGGREGATE_GROWTH_METRICS: 'Tổng hợp tăng trưởng', BULK_PRODUCT_OPERATION: 'Thao tác hàng loạt',
+};
 const RISK_LABELS: Record<string, string> = { LOW: 'Rủi ro thấp', MEDIUM: 'Rủi ro trung bình', HIGH: 'Rủi ro cao', BLOCKER: 'Bị chặn' };
 
 function ActivityChart({ points }: { points: ActivityPoint[] }) {
@@ -128,6 +134,7 @@ export default function DashboardPage() {
     <header className={styles.header}><div><div className={styles.headerStatus}><span className={data?.control.killSwitch ? styles.dangerDot : styles.okDot} />{data?.control.killSwitch ? 'Dừng khẩn cấp đang bật' : data ? 'Hệ thống sẵn sàng' : 'Đang kiểm tra'}</div><h1>Bảng điều khiển</h1><p>Theo dõi hoạt động bot, tác vụ, nguồn dữ liệu và tình trạng hệ thống.</p>{data && <div className={styles.updated}>Cập nhật gần nhất: {new Date(data.updatedAt).toLocaleString('vi-VN')}</div>}</div><div className={styles.headerActions}><label><span>Khoảng thời gian</span><select value={range} onChange={event => setRange(event.target.value as Range)}><option value="today">Hôm nay</option><option value="7d">7 ngày</option><option value="30d">30 ngày</option></select></label><button type="button" onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />{loading ? 'Đang làm mới' : 'Làm mới'}</button></div></header>
     {error && <section className={styles.error}><h2>Không thể tải bảng điều khiển</h2><p>{error} Dữ liệu hiện tại không bị thay đổi.</p><button type="button" onClick={() => void load()}>Thử lại</button></section>}
     {loading && !data && <div className={styles.skeleton}><span /><span /><span /></div>}
+    <BusinessOverview />
     {data && <>
       <section className={styles.kpis} aria-label="Chỉ số chính">{kpis.map(item => <article key={item.label} className={styles[item.tone]} title={item.help}><div className={styles.kpiTop}><span className={styles.kpiIcon}><DashboardIcon name={item.icon} size={22} /></span><span>{item.label}</span></div><strong>{item.value}</strong><small>{item.help}</small></article>)}</section>
       <section className={styles.mainGrid}><article className={`${styles.panel} ${styles.chartPanel}`}><div className={styles.panelHeader}><div><h2><DashboardIcon name="task" size={19} />Hoạt động xử lý theo thời gian</h2><p>Dữ liệu tác vụ thực tế trong khoảng đã chọn.</p></div></div>{data.activity.length ? <ActivityChart points={data.activity} /> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={24} /></span><h3>Chưa có hoạt động trong khoảng này</h3><p>Hãy tạo một tác vụ chạy thử an toàn để bắt đầu ghi nhận dữ liệu.</p><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Chạy thử an toàn</button></div>}</article>

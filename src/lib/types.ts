@@ -196,6 +196,42 @@ export interface Product {
   autoPublished?: boolean;
   needsVerification?: boolean;
   qualityScore?: number;
+  qualityBand?: 'good' | 'fair' | 'needs_data' | 'poor' | 'blocked';
+  opportunityScore?: number;
+  opportunityBand?: 'priority' | 'recommended' | 'consider' | 'low' | 'blocked';
+  scoreVersion?: string;
+  scoreCalculatedAt?: string;
+  scoreBreakdown?: Record<string, number>;
+  dealScore?: number;
+  dealBand?: 'featured' | 'consider' | 'normal' | 'verify' | 'ineligible';
+  dealReasons?: string[];
+  dealConfidence?: 'high' | 'medium' | 'low' | 'none';
+  priceLastChangedAt?: string;
+  lastSeenAt?: string;
+  availability?: 'available' | 'unavailable' | 'unknown';
+  duplicateGroupId?: string;
+  duplicateConfidence?: number;
+  contentWorkflowStatus?:
+    | 'insufficient_data'
+    | 'ready_for_draft'
+    | 'drafting'
+    | 'needs_verification'
+    | 'pending_review'
+    | 'approved'
+    | 'scheduled'
+    | 'published'
+    | 'stale'
+    | 'blocked'
+    | 'archived';
+  lastEditorialCheckAt?: string;
+  analyticsSummary?: {
+    views: number;
+    clicks: number;
+    ctr?: number;
+    updatedAt: string;
+  };
+  dataIssues?: string[];
+  recommendedActions?: string[];
   publishedAt?: string;
   productHealthStatus?: string;
   affiliateLastCheckedAt?: string;
