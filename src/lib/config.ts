@@ -6,7 +6,7 @@ export const config = {
   // Branding
   appName: process.env.NEXT_PUBLIC_APP_NAME || 'SanDeal',
   engineName: process.env.NEXT_PUBLIC_ENGINE_NAME || 'ReviewPilot AI',
-  siteUrl: process.env.NEXT_PUBLIC_SITE_URL || 'https://sandeal.tech',
+  siteUrl: process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
 
   // Cost / Safety Mode
   costMode: process.env.AI_COST_MODE || 'safe_free',

@@ -159,19 +159,19 @@ export const PLATFORM_CONFIG: Record<CredentialPlatform, { label: string; icon: 
   instagram: { label: 'Instagram', icon: '📷', group: 'Social Channels' },
   threads: { label: 'Threads', icon: '🧵', group: 'Social Channels' },
   youtube: { label: 'YouTube', icon: '▶️', group: 'Social Channels' },
-  system: { label: 'System', icon: '⚙️', group: 'System' },
+  system: { label: 'Hệ thống', icon: '⚙️', group: 'System' },
   other: { label: 'Khác', icon: '🔌', group: 'System' },
 };
 
 export const CREDENTIAL_TYPE_LABELS: Record<CredentialType, string> = {
-  api_key: 'API Key',
-  user_token: 'User Token',
-  page_token: 'Page Token',
-  access_token: 'Access Token',
-  refresh_token: 'Refresh Token',
-  client_id: 'Client ID',
-  client_secret: 'Client Secret',
-  app_secret: 'App Secret',
+  api_key: 'Khóa API (khóa truy cập dịch vụ)',
+  user_token: 'Mã truy cập người dùng',
+  page_token: 'Mã truy cập trang',
+  access_token: 'Mã truy cập',
+  refresh_token: 'Mã làm mới kết nối',
+  client_id: 'Mã ứng dụng',
+  client_secret: 'Khóa bí mật ứng dụng',
+  app_secret: 'Khóa bí mật hệ thống',
   other: 'Khác',
 };
 

@@ -4,6 +4,7 @@
 
 import { type NextRequest } from 'next/server';
 import { successResponse, serverErrorResponse } from '@/lib/apiResponse';
+import { requireAuth } from '@/lib/auth';
 import {
   searchAccessTrade,
   isAccessTradeConfigured,
@@ -121,6 +122,8 @@ function emptyAccessTradeResult(message: string) {
 
 export async function POST(request: NextRequest) {
   try {
+    const authError = await requireAuth(request);
+    if (authError) return authError;
     const configured = await isAccessTradeConfigured();
 
     if (!configured) {

@@ -45,3 +45,8 @@ yarn-error.log*
 next-env.d.ts
 
 /.test-tmp/node-compile-cache/
+
+# local release artifacts and verified backups
+/.release/
+/.backups/
+.idea/*.xml~

@@ -1,0 +1,91 @@
+name: Release quality gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Validate release artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASIC_AUTH_ENABLED: "false"
+      ALLOW_PAID_AI: "false"
+      ALLOW_PUBLISHING_API: "false"
+      AUTO_PUBLISH_ENABLED: "false"
+      TZ: Asia/Ho_Chi_Minh
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Targeted dashboard tests
+        run: npm run test:dashboard
+
+      - name: Targeted automation tests
+        run: npm run test:automation
+
+      - name: Targeted release UI tests
+        run: npm run test:release-ui
+
+      - name: Full test suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Scan committed source for secrets
+        run: npm run release:secret-scan
+
+      - name: Check generated files
+        run: npm run release:generated-check
+
+      - name: Validate storage compatibility
+        run: npm run release:migration-check
+
+      - name: Run local preflight
+        run: npm run release:preflight
+
+      - name: Verify backup and restore
+        run: npm run release:backup-verify
+
+      - name: Create checksummed artifact and manifest
+        run: npm run release:manifest:create
+
+      - name: Validate release manifest
+        run: npm run release:manifest:validate
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandeal-release-${{ github.sha }}
+          path: .release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## SanDeal release quality gate" >> "$GITHUB_STEP_SUMMARY"
+          echo "No production deployment is performed by this workflow." >> "$GITHUB_STEP_SUMMARY"
+          if [ -f .release/release-manifest.json ]; then
+            echo "A checksummed artifact and manifest were created." >> "$GITHUB_STEP_SUMMARY"
+          fi

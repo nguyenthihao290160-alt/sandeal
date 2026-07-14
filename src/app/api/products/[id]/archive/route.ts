@@ -5,14 +5,17 @@
 import { type NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { archiveProduct } from '@/lib/storage/products';
+import { requireAuth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authError = await requireAuth(request);
+    if (authError) return authError;
     const { id } = await params;
     const product = await archiveProduct(id);
     if (!product) {

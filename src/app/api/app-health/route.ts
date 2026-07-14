@@ -2,7 +2,9 @@
 // API: App Health — System Health Check
 // ===========================================
 
+import { type NextRequest } from 'next/server';
 import { successResponse, serverErrorResponse } from '@/lib/apiResponse';
+import { requireAuth } from '@/lib/auth';
 import { getProductStats } from '@/lib/storage/products';
 import { getVaultStats } from '@/lib/storage/tokenVault';
 import { isAccessTradeConfigured } from '@/lib/integrations/accesstrade';
@@ -14,8 +16,10 @@ import { getContentPackageStats } from '@/lib/storage/contentPackages';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const authError = await requireAuth(request);
+    if (authError) return authError;
     const stats = await getProductStats();
     let vaultStats = null;
     try {

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
+import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
 import type {
   SafeCredential,
   CredentialGroup,
@@ -32,6 +33,17 @@ const PLATFORM_TYPES: Record<string, CredentialType[]> = {
 };
 
 const GROUP_ORDER = ['AI Providers', 'Affiliate Sources', 'Social Channels', 'System'];
+const GROUP_LABELS: Record<string, string> = {
+  'AI Providers': 'Dịch vụ AI',
+  'Affiliate Sources': 'Nguồn tiếp thị liên kết',
+  'Social Channels': 'Kết nối mạng xã hội',
+  System: 'Kết nối hệ thống',
+};
+const PLATFORM_ICONS: Record<CredentialPlatform, DashboardIconName> = {
+  gemini: 'ai', accesstrade: 'source', shopee: 'product', lazada: 'product', tiktok: 'external',
+  facebook: 'external', instagram: 'external', threads: 'external', youtube: 'external',
+  system: 'settings', other: 'security',
+};
 
 interface FormState {
   platform: CredentialPlatform;
@@ -79,7 +91,7 @@ export default function TokenVaultPage() {
         setGroups(data.data.groups);
       }
     } catch {
-      showToast('error', 'Không thể tải danh sách credentials.');
+      showToast('error', 'Không thể tải danh sách kết nối bảo mật.');
     }
     setLoading(false);
   }, [showToast]);
@@ -105,7 +117,7 @@ export default function TokenVaultPage() {
 
   const handleSave = async (andTest = false) => {
     if (!form.value.trim()) {
-      showToast('error', 'Giá trị token/API key là bắt buộc.');
+      showToast('error', 'Giá trị khóa kết nối là bắt buộc.');
       return;
     }
 
@@ -136,7 +148,7 @@ export default function TokenVaultPage() {
       });
       const data = await res.json();
       if (data.ok) {
-        showToast('success', data.message || 'Đã lưu credential.');
+        showToast('success', data.message || 'Đã lưu kết nối.');
         setForm(EMPTY_FORM);
         setShowForm(false);
         setShowValue(false);
@@ -195,9 +207,9 @@ export default function TokenVaultPage() {
     try {
       const res = await fetch('/api/token-vault/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
       const data = await res.json();
-      showToast(data.ok && data.data?.generationStatus === 'available' ? 'success' : 'warning', data.message || 'Generation probe completed.');
+      showToast(data.ok && data.data?.generationStatus === 'available' ? 'success' : 'warning', data.message || 'Đã kiểm tra khả năng tạo nội dung.');
       await loadCredentials();
-    } catch { showToast('error', 'Generation probe failed.'); }
+    } catch { showToast('error', 'Không thể kiểm tra khả năng tạo nội dung.'); }
     finally { setTestingId(null); }
   };
 
@@ -205,9 +217,9 @@ export default function TokenVaultPage() {
     setTestingAll(true);
     try {
       const res = await fetch('/api/token-vault/test-all', { method: 'POST' });
-      const data = await res.json(); showToast(data.ok ? 'success' : 'warning', data.message || 'Gemini key tests completed.');
+      const data = await res.json(); showToast(data.ok ? 'success' : 'warning', data.message || 'Đã kiểm tra các kết nối Gemini.');
       await loadCredentials();
-    } catch { showToast('error', 'Gemini key tests failed.'); }
+    } catch { showToast('error', 'Không thể kiểm tra các kết nối Gemini.'); }
     finally { setTestingAll(false); }
   };
 
@@ -269,23 +281,14 @@ export default function TokenVaultPage() {
       const config = PLATFORM_CONFIG[g.platform];
       return config?.group === sectionName;
     });
-    return { name: sectionName, groups: sectionGroups };
+    return { name: GROUP_LABELS[sectionName] || sectionName, groups: sectionGroups };
   }).filter(s => s.groups.length > 0);
 
   const totalCredentials = groups.reduce((sum, g) => sum + g.credentials.length, 0);
+  const geminiCredentials = groups.find(g => g.platform === 'gemini')?.credentials.length ?? 0;
 
   // ---- Render ----
   return (
-    <>
-      <div className="topbar">
-        <div className="topbar-title">Token Vault Security Center</div>
-        <div className="safe-mode-badges">
-          <span className="dashboard-status-badge success">Safe Mode: ON</span>
-          <span className="dashboard-status-badge success">Free Only: ON</span>
-          <span className="dashboard-status-badge success">Safe Publish ON</span>
-          <span className="dashboard-status-badge success">Secrets Hidden</span>
-        </div>
-      </div>
       <div className="page-content">
         {/* Toast */}
         {toast && (
@@ -300,83 +303,87 @@ export default function TokenVaultPage() {
         {deleteConfirm && (
           <div className="dialog-overlay" onClick={() => setDeleteConfirm(null)}>
             <div className="dialog" onClick={e => e.stopPropagation()}>
-              <div className="dialog-title">Xác nhận xoá credential</div>
+              <div className="dialog-title">Xác nhận xóa kết nối</div>
               <div className="dialog-message">
-                Bạn chắc chắn muốn xoá credential này? Hành động không thể hoàn tác. Token/API key sẽ bị xoá vĩnh viễn.
+                Bạn chắc chắn muốn xóa kết nối này? Hành động không thể hoàn tác. Khóa kết nối sẽ bị xóa vĩnh viễn.
               </div>
               <div className="dialog-actions">
                 <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Huỷ</button>
-                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm)}>Xoá credential</button>
+                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm)}>Xóa kết nối</button>
               </div>
             </div>
           </div>
         )}
 
         {/* Header */}
-        <div className="page-header">
-          <div>
-            <h1 className="page-header-title">Token Vault Security Center</h1>
-            <p className="page-header-desc">Quản lý API key và token bảo mật cho đội bot AI. Token luôn được che và không hiển thị thô.</p>
+        <div className="page-header dashboard-tinted-header">
+          <div className="flex items-start gap-md">
+            <span className="dashboard-page-icon"><DashboardIcon name="security" size={24} /></span>
+            <div>
+            <h1 className="page-header-title">Trung tâm kết nối bảo mật</h1>
+            <p className="page-header-desc">Quản lý khóa kết nối cho dịch vụ AI và nguồn sản phẩm. Giá trị bí mật luôn được che trên giao diện.</p>
+            <span className="badge badge-success" style={{ marginTop: 8 }}>Thông tin nhạy cảm luôn được che</span>
+            </div>
           </div>
           <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>
-            {showForm ? 'Đóng form' : '+ Thêm credential'}
+            {showForm ? 'Đóng biểu mẫu' : 'Thêm kết nối'}
           </button>
         </div>
 
         {/* Security Notice */}
         <div className="disclosure-banner" style={{ marginBottom: 'var(--space-lg)' }}>
-          <strong>Bảo mật:</strong> Token/API key được mã hoá và lưu phía server. Giao diện chỉ hiển thị dạng rút gọn (VD: <code style={{ color: 'var(--color-primary-light)' }}>AIza****3456</code>). Không nhập App Secret vào ô công khai nếu chưa thật sự cần.
+          <strong>Bảo mật:</strong> Khóa kết nối được mã hóa và lưu phía máy chủ. Giao diện chỉ hiển thị dạng rút gọn. Không nhập thông tin bí mật vào trường công khai.
         </div>
 
         {/* Stats */}
         <div style={{ marginBottom: 'var(--space-md)', textAlign: 'right' }}>
-          <button className="btn btn-secondary" disabled={testingAll} onClick={handleTestAll}>{testingAll ? 'Testing Gemini keys...' : 'Test All Gemini Keys'}</button>
+          <button className="btn btn-secondary" disabled={testingAll || geminiCredentials === 0} title={geminiCredentials === 0 ? 'Cần thiết lập ít nhất một kết nối Gemini trước khi kiểm tra.' : 'Kiểm tra các kết nối Gemini đã lưu'} onClick={handleTestAll}>{testingAll ? 'Đang kiểm tra các kết nối Gemini...' : 'Kiểm tra các kết nối Gemini'}</button>
         </div>
         <div className="grid grid-4" style={{ marginBottom: 'var(--space-xl)' }}>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'rgba(124,58,237,0.12)', color: '#8b5cf6' }}>V</div>
+            <div className="stat-card-icon" style={{ background: 'var(--ds-surface-purple)', color: '#7c3aed' }}><DashboardIcon name="security" size={21} /></div>
             <div className="stat-card-value">{totalCredentials}</div>
-            <div className="stat-card-label">Tổng credentials</div>
+            <div className="stat-card-label">Tổng kết nối</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-info-bg)', color: 'var(--color-info)' }}>G</div>
-            <div className="stat-card-value">{groups.find(g => g.platform === 'gemini')?.credentials.length ?? 0}</div>
-            <div className="stat-card-label">Gemini keys</div>
+            <div className="stat-card-icon" style={{ background: 'var(--ds-surface-blue)', color: 'var(--ds-info)' }}><DashboardIcon name="ai" size={21} /></div>
+            <div className="stat-card-value">{geminiCredentials}</div>
+            <div className="stat-card-label">Kết nối Gemini</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success)' }}>A</div>
+            <div className="stat-card-icon" style={{ background: 'var(--ds-surface-green)', color: 'var(--ds-success)' }}><DashboardIcon name="source" size={21} /></div>
             <div className="stat-card-value">
               {groups.filter(g => ['accesstrade', 'shopee', 'lazada'].includes(g.platform)).reduce((s, g) => s + g.credentials.length, 0)}
             </div>
-            <div className="stat-card-label">Affiliate keys</div>
+            <div className="stat-card-label">Nguồn tiếp thị liên kết</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card-icon" style={{ background: 'var(--color-warning-bg)', color: 'var(--color-warning)' }}>S</div>
+            <div className="stat-card-icon" style={{ background: 'var(--ds-surface-amber)', color: 'var(--ds-warning)' }}><DashboardIcon name="external" size={21} /></div>
             <div className="stat-card-value">
               {groups.filter(g => ['facebook', 'instagram', 'threads', 'youtube', 'tiktok'].includes(g.platform)).reduce((s, g) => s + g.credentials.length, 0)}
             </div>
-            <div className="stat-card-label">Social tokens</div>
+            <div className="stat-card-label">Kết nối mạng xã hội</div>
           </div>
         </div>
 
         {/* Add Credential Form */}
         {showForm && (
-          <div className="gradient-card" style={{ marginBottom: 'var(--space-xl)', maxWidth: '800px' }}>
-            <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>Thêm credential mới</h3>
+          <div className="card" style={{ marginBottom: 'var(--space-xl)', maxWidth: '800px' }}>
+            <h3 className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>Thêm kết nối mới</h3>
 
             <fieldset className="form-fieldset">
-              <legend className="form-legend">Thông tin credential</legend>
+              <legend className="form-legend">Thông tin kết nối</legend>
               <div className="form-row">
                 <div className="form-group" style={{ flex: 1 }}>
                   <label className="label">Nền tảng *</label>
                   <select className="select" name="platform" value={form.platform} onChange={handleChange}>
                     {Object.entries(PLATFORM_CONFIG).map(([key, config]) => (
-                      <option key={key} value={key}>{config.icon} {config.label}</option>
+                      <option key={key} value={key}>{config.label}</option>
                     ))}
                   </select>
                 </div>
                 <div className="form-group" style={{ flex: 1 }}>
-                  <label className="label">Loại credential *</label>
+                  <label className="label">Loại kết nối *</label>
                   <select className="select" name="credentialType" value={form.credentialType} onChange={handleChange}>
                     {(PLATFORM_TYPES[form.platform] || ['api_key']).map(type => (
                       <option key={type} value={type}>{CREDENTIAL_TYPE_LABELS[type]}</option>
@@ -386,22 +393,22 @@ export default function TokenVaultPage() {
                 <div className="form-group" style={{ flex: 1 }}>
                   <label className="label">Vai trò</label>
                   <select className="select" name="role" value={form.role} onChange={handleChange}>
-                    <option value="primary">Chính (primary)</option>
-                    <option value="backup">Dự phòng (backup)</option>
-                    <option value="testing">Thử nghiệm (testing)</option>
+                    <option value="primary">Kết nối chính</option>
+                    <option value="backup">Kết nối dự phòng</option>
+                    <option value="testing">Kết nối thử nghiệm</option>
                   </select>
                 </div>
               </div>
               <div className="form-group">
                 <label className="label">Nhãn (tuỳ chọn)</label>
-                <input className="input" name="label" value={form.label} onChange={handleChange} placeholder="VD: Gemini Key #1, Facebook Page Token chính..." />
+                <input className="input" name="label" value={form.label} onChange={handleChange} placeholder="Ví dụ: Kết nối Gemini chính, Trang Facebook chính..." />
               </div>
             </fieldset>
 
             <fieldset className="form-fieldset">
               <legend className="form-legend">Giá trị bí mật</legend>
               <div className="form-group">
-                <label className="label">Token / API Key *</label>
+                <label className="label">Khóa kết nối *</label>
                 <div style={{ position: 'relative' }}>
                   <input
                     className="input"
@@ -409,7 +416,7 @@ export default function TokenVaultPage() {
                     type={showValue ? 'text' : 'password'}
                     value={form.value}
                     onChange={handleChange}
-                    placeholder="Dán token/API key vào đây..."
+                    placeholder="Dán khóa kết nối vào đây..."
                     style={{ paddingRight: '80px' }}
                     autoComplete="off"
                   />
@@ -423,11 +430,11 @@ export default function TokenVaultPage() {
                   </button>
                 </div>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                  Không dùng mật khẩu Gmail/GitHub làm API key. Không chia sẻ token công khai.
+                  Không dùng mật khẩu tài khoản làm khóa kết nối. Không chia sẻ giá trị này công khai.
                 </p>
               </div>
               <div className="form-group">
-                <label className="label">Metadata (JSON, tuỳ chọn)</label>
+                <label className="label">Chi tiết kỹ thuật (JSON, tùy chọn)</label>
                 <textarea
                   className="textarea"
                   name="metadata"
@@ -442,7 +449,7 @@ export default function TokenVaultPage() {
 
             <div className="form-actions">
               <button className="btn btn-primary" disabled={saving} onClick={() => handleSave(false)}>
-                {saving ? 'Đang lưu...' : 'Lưu credential'}
+                {saving ? 'Đang lưu...' : 'Lưu kết nối'}
               </button>
               <button className="btn btn-accent" disabled={saving} onClick={() => handleSave(true)}>
                 {saving ? '...' : 'Lưu và kiểm tra'}
@@ -489,13 +496,13 @@ export default function TokenVaultPage() {
         {/* Empty state */}
         {!loading && totalCredentials === 0 && !showForm && (
           <div className="empty-state" style={{ marginTop: 'var(--space-xl)' }}>
-            <div className="empty-state-icon" style={{ fontSize: '32px', opacity: 0.3 }}>V</div>
-            <div className="empty-state-title">Chưa có credential nào</div>
+            <div className="empty-state-icon"><DashboardIcon name="security" size={28} /></div>
+            <div className="empty-state-title">Chưa có kết nối nào</div>
             <div className="empty-state-desc">
-              Thêm API key hoặc token để kết nối với các nền tảng. Bắt đầu bằng cách thêm Gemini API Key hoặc AccessTrade API Key.
+              Thêm khóa để kết nối với dịch vụ bên ngoài. Có thể bắt đầu bằng kết nối Gemini hoặc AccessTrade.
             </div>
             <button className="btn btn-primary" style={{ marginTop: 'var(--space-lg)' }} onClick={() => setShowForm(true)}>
-              + Thêm credential đầu tiên
+              Thêm kết nối đầu tiên
             </button>
           </div>
         )}
@@ -503,13 +510,12 @@ export default function TokenVaultPage() {
         {/* Next module link */}
         <div className="disclosure-banner" style={{ marginTop: 'var(--space-xl)' }}>
           <strong>Tiếp theo:</strong>{' '}
-          <Link href="/dashboard/content" style={{ color: 'var(--color-primary-light)' }}>
-            Tạo nội dung bằng AI →
+          <Link href="/dashboard/content" style={{ color: 'var(--ds-primary)' }}>
+            Xem trạng thái phần tạo nội dung
           </Link>{' '}
-          (Cần có Gemini API Key đã cấu hình trong Token Vault)
+          (Cần có kết nối Gemini đã được thiết lập trong Kết nối bảo mật)
         </div>
       </div>
-    </>
   );
 }
 
@@ -554,12 +560,12 @@ function PlatformCard({
       {/* Platform Header */}
       <div className="flex items-center justify-between" style={{ marginBottom: hasCredentials ? 'var(--space-md)' : 0 }}>
         <div className="flex items-center gap-sm">
-          <span style={{ fontSize: '24px' }}>{group.icon}</span>
+          <span className="dashboard-page-icon" style={{ width: 38, height: 38, flexBasis: 38 }}><DashboardIcon name={PLATFORM_ICONS[group.platform]} size={20} /></span>
           <div>
             <div style={{ fontWeight: 700, fontSize: 'var(--text-sm)' }}>{group.label}</div>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
               {hasCredentials
-                ? `${group.credentials.length} credential${group.credentials.length > 1 ? 's' : ''}`
+                ? `${group.credentials.length} kết nối`
                 : 'Chưa cấu hình'}
             </div>
           </div>
@@ -570,7 +576,7 @@ function PlatformCard({
            </span>
         ) : hasCredentials ? (
           <span className="badge badge-warning" style={{ fontSize: '10px' }}>
-            Chưa có primary
+            Chưa chọn kết nối chính
           </span>
         ) : (
           <span className="badge badge-neutral" style={{ fontSize: '10px' }}>
@@ -692,32 +698,32 @@ function CredentialRow({
           )}
           {cred.platform === 'gemini' && (
             <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-              Project: {String(cred.metadata?.projectAlias || 'unset')} · Group: {String(cred.metadata?.quotaGroupId || 'unset')} · Billing: {String(cred.metadata?.billingMode || 'unknown')}<br />
-              Key type: {String(cred.metadata?.keyType || 'unknown')} · Generation: {String(cred.metadata?.generationStatus || 'unchecked')} · Model: {String(cred.metadata?.preferredModel || 'unset')}<br />
-              Cooldown: {cred.metadata?.cooldownUntil ? new Date(String(cred.metadata.cooldownUntil)).toLocaleString('vi-VN') : 'none'} · Requests: {String(cred.metadata?.requestsTodayEstimated || 0)}
+              Dự án: {String(cred.metadata?.projectAlias || 'chưa đặt')} · Nhóm hạn mức: {String(cred.metadata?.quotaGroupId || 'chưa đặt')} · Thanh toán: {String(cred.metadata?.billingMode || 'chưa rõ')}<br />
+              Loại khóa: {String(cred.metadata?.keyType || 'chưa rõ')} · Kiểm tra tạo nội dung: {String(cred.metadata?.generationStatus || 'chưa kiểm tra')} · Mô hình: {String(cred.metadata?.preferredModel || 'chưa đặt')}<br />
+              Chờ phục hồi: {cred.metadata?.cooldownUntil ? new Date(String(cred.metadata.cooldownUntil)).toLocaleString('vi-VN') : 'không có'} · Số yêu cầu: {String(cred.metadata?.requestsTodayEstimated || 0)}
             </div>
           )}
         </div>
         <div className="flex gap-xs" style={{ flexShrink: 0, flexWrap: 'wrap' }}>
           <button className="btn btn-ghost btn-sm" onClick={() => onTest(cred.id)} disabled={isTesting} title="Kiểm tra">
-            {isTesting ? '...' : 'Test'}
+            {isTesting ? '...' : 'Kiểm tra'}
           </button>
-          {cred.platform === 'gemini' && <button className="btn btn-ghost btn-sm" onClick={() => onProbe(cred.id)} disabled={isTesting}>Generation Probe</button>}
+          {cred.platform === 'gemini' && <button className="btn btn-ghost btn-sm" onClick={() => onProbe(cred.id)} disabled={isTesting}>Thử tạo nội dung</button>}
           {cred.role !== 'primary' && cred.role !== 'disabled' && (
             <button className="btn btn-ghost btn-sm" onClick={() => onSetPrimary(cred.id)} title="Đặt làm chính">
-              Set Primary
+              Đặt làm chính
             </button>
           )}
           <button className="btn btn-ghost btn-sm" onClick={() => onReplace(cred.id)} title="Thay thế">
-            Replace
+            Thay thế
           </button>
           {cred.role !== 'disabled' && (
             <button className="btn btn-ghost btn-sm" onClick={() => onDisable(cred.id)} title="Tắt">
-              Disable
+              Tắt
             </button>
           )}
           <button className="btn btn-ghost btn-sm" onClick={() => onDelete(cred.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>
-            Del
+            Xóa
           </button>
         </div>
       </div>

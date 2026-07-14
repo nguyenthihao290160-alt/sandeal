@@ -3,20 +3,20 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useState,
 } from 'react';
 import Link from 'next/link';
+import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
 import type { Product, ProductKind } from '@/lib/types';
 
 // ---- Tab IDs ----
 const TABS = [
-  { id: 'accesstrade', label: 'AccessTrade', icon: 'AT' },
-  { id: 'shopee', label: 'Shopee Affiliate', icon: 'SP' },
-  { id: 'tiktok', label: 'TikTok Shop', icon: 'TK' },
-  { id: 'lazada', label: 'Lazada', icon: 'LZ' },
-  { id: 'csv', label: 'CSV Import', icon: 'CS' },
-  { id: 'other', label: 'Nguồn khác', icon: '+' },
+  { id: 'accesstrade', label: 'AccessTrade', icon: 'source' },
+  { id: 'shopee', label: 'Nguồn Shopee', icon: 'product' },
+  { id: 'tiktok', label: 'TikTok Shop', icon: 'external' },
+  { id: 'lazada', label: 'Lazada', icon: 'product' },
+  { id: 'csv', label: 'Nhập tệp bảng dữ liệu (CSV)', icon: 'content' },
+  { id: 'other', label: 'Nguồn khác', icon: 'source' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -87,14 +87,6 @@ type AccessTradeResults = {
   };
 };
 
-type SourceStatus = {
-  name: string;
-  tab: TabId;
-  status: 'active' | 'pending' | 'placeholder' | 'coming';
-  note: string;
-  icon: string;
-};
-
 type ApiEnvelope<T> = {
   ok?: boolean;
   success?: boolean;
@@ -107,10 +99,10 @@ type ApiEnvelope<T> = {
 
 const KIND_LABELS: Record<string, string> = {
   product: 'Sản phẩm',
-  deal: 'Deal',
+  deal: 'Ưu đãi',
   store_offer: 'Ưu đãi shop',
-  voucher: 'Voucher',
-  campaign: 'Campaign',
+  voucher: 'Mã giảm giá (voucher)',
+  campaign: 'Chiến dịch',
   unknown: 'Chưa rõ',
 };
 
@@ -296,11 +288,11 @@ function translateInternalReason(value: unknown): string {
   if (!normalized) return '';
 
   if (normalized === 'auto_mode_disabled') {
-    return 'AutoPilot đang tắt hoặc chưa cho phép tự public.';
+    return 'Chế độ tự động đang tắt hoặc chưa cho phép tự đăng.';
   }
 
   if (normalized === 'free_only_guard_failed') {
-    return 'Free Only Guard chưa đạt yêu cầu.';
+    return 'Quy tắc chỉ dùng dịch vụ miễn phí chưa đạt yêu cầu.';
   }
 
   if (
@@ -319,11 +311,11 @@ function translateInternalReason(value: unknown): string {
   }
 
   if (normalized === 'title_looks_like_voucher_campaign_or_store_offer') {
-    return 'Tên giống voucher/campaign/ưu đãi shop.';
+    return 'Tên giống mã giảm giá, chiến dịch hoặc ưu đãi cửa hàng.';
   }
 
   if (normalized === 'classifier_detected_voucher_or_campaign') {
-    return 'Bộ phân loại phát hiện dữ liệu giống voucher hoặc campaign.';
+    return 'Bộ phân loại phát hiện dữ liệu giống mã giảm giá hoặc chiến dịch.';
   }
 
   if (
@@ -361,7 +353,7 @@ function translateInternalReason(value: unknown): string {
   }
 
   if (normalized.startsWith('public_decision_')) {
-    return 'Quyết định Safe Publish hiện đang chặn sản phẩm.';
+    return 'Quy trình đăng an toàn hiện đang chặn sản phẩm.';
   }
 
   if (normalized === 'source_quality_score_too_low') {
@@ -420,9 +412,9 @@ function getKindBadge(kind?: ProductKind | string) {
 function getNonProductReason(kind?: ProductKind | string): string {
   if (kind === 'store_offer') return 'Chưa phải sản phẩm cụ thể.';
   if (kind === 'voucher')
-    return 'Voucher/mã giảm giá không public như sản phẩm.';
+    return 'Mã giảm giá (voucher) không được đăng công khai như sản phẩm.';
   if (kind === 'campaign')
-    return 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
+    return 'Chiến dịch khuyến mãi không được đăng công khai như sản phẩm.';
   if (kind === 'unknown') return 'Chưa xác định được đây là sản phẩm thật.';
   return '';
 }
@@ -473,8 +465,8 @@ function getAtItemMainReason(item: AccessTradeItem): string {
       (getBoolean(item.needsVerification)
           ? 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.'
           : isRealProductKind(kind)
-              ? 'Đây mới là ứng viên nguồn; vẫn phải qua Health Guard trước khi public.'
-              : 'Không public tự động.')
+              ? 'Đây mới là ứng viên nguồn; vẫn phải qua bước kiểm tra chất lượng trước khi đăng công khai.'
+              : 'Không tự động đăng công khai.')
   );
 }
 
@@ -698,7 +690,7 @@ function getRecentPublicState(product: Product): {
       record.publicHidden !== true &&
       record.needsVerification !== true
   ) {
-    return { label: 'Đang public', badge: 'badge-success' };
+    return { label: 'Đang công khai', badge: 'badge-success' };
   }
 
   if (status === 'archived' || publicDecision === 'archived') {
@@ -737,8 +729,7 @@ function SafeThumb({
               height: size,
               borderRadius: 'var(--radius-md)',
               overflow: 'hidden',
-              background:
-                  'radial-gradient(circle at 50% 20%, rgba(14,165,233,0.18), transparent 38%), linear-gradient(135deg, rgba(15,23,42,0.7), rgba(30,41,59,0.95))',
+              background: '#eef2f6',
               color: '#ffffff',
               display: 'grid',
               placeItems: 'center',
@@ -794,49 +785,6 @@ export default function ProductSourcesPage() {
   const [atResults, setAtResults] = useState<AccessTradeResults | null>(null);
   const [atSaving, setAtSaving] = useState<string | null>(null);
   const [atConfigured, setAtConfigured] = useState(false);
-
-  const sourceStatuses = useMemo<SourceStatus[]>(
-      () => [
-        {
-          name: 'AccessTrade',
-          tab: 'accesstrade',
-          status: atConfigured ? 'active' : 'pending',
-          note: atConfigured
-              ? 'Đang hoạt động — ưu tiên sản phẩm thật'
-              : 'Cần cấu hình API key',
-          icon: 'AT',
-        },
-        {
-          name: 'Shopee',
-          tab: 'shopee',
-          status: 'placeholder',
-          note: 'Sắp kết nối',
-          icon: 'SP',
-        },
-        {
-          name: 'TikTok Shop',
-          tab: 'tiktok',
-          status: 'placeholder',
-          note: 'Sắp kết nối',
-          icon: 'TK',
-        },
-        {
-          name: 'Lazada',
-          tab: 'lazada',
-          status: 'placeholder',
-          note: 'Sắp kết nối',
-          icon: 'LZ',
-        },
-        {
-          name: 'CSV',
-          tab: 'csv',
-          status: 'coming',
-          note: 'Sắp có',
-          icon: 'CS',
-        },
-      ],
-      [atConfigured],
-  );
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
     setToast({ type, message });
@@ -926,8 +874,8 @@ export default function ProductSourcesPage() {
       showToast(
           'success',
           mode === 'full_safe_run'
-              ? 'Đã khởi chạy AutoPilot toàn bộ. Chỉ sản phẩm thật đạt chuẩn mới được public.'
-              : 'Đã khởi chạy Source Scout. Bot sẽ ưu tiên sản phẩm thật và giữ voucher/campaign nội bộ.',
+              ? 'Đã khởi chạy chế độ tự động. Chỉ sản phẩm thật đạt chuẩn mới được đăng công khai.'
+              : 'Đã tạo tác vụ quét nguồn. Bot sẽ ưu tiên sản phẩm thật và giữ mã giảm giá, chiến dịch trong nội bộ.',
       );
 
       await loadRecent();
@@ -945,7 +893,7 @@ export default function ProductSourcesPage() {
     if (!atConfigured) {
       showToast(
           'error',
-          'AccessTrade chưa được cấu hình. Hãy mở Token Vault để thêm API key.',
+          'AccessTrade chưa được cấu hình. Hãy mở Kết nối bảo mật để thêm khóa kết nối.',
       );
       return;
     }
@@ -1039,7 +987,7 @@ export default function ProductSourcesPage() {
         ? getNonProductReason(kind)
         : validationIssues.length > 0
             ? validationIssues.join(' ')
-            : 'Đã lưu ứng viên sản phẩm. Cần chạy Product Health Guard để kiểm link và ảnh trước khi public.';
+            : 'Đã lưu ứng viên sản phẩm. Cần chạy kiểm tra chất lượng liên kết và ảnh trước khi đăng công khai.';
 
     setAtSaving(itemId);
 
@@ -1139,8 +1087,8 @@ export default function ProductSourcesPage() {
         showToast(
             'success',
             isProduct
-                ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ. Chưa public cho tới khi Health Guard kiểm link và ảnh OK.'
-                : 'Đã lưu item AccessTrade nội bộ. Voucher/campaign/ưu đãi shop sẽ không public như sản phẩm.',
+                ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ. Chưa đăng công khai cho tới khi liên kết và ảnh đạt kiểm tra chất lượng.'
+                : 'Đã lưu dữ liệu AccessTrade trong nội bộ. Mã giảm giá, chiến dịch và ưu đãi cửa hàng không được đăng như sản phẩm.',
         );
 
         await loadRecent();
@@ -1184,7 +1132,7 @@ export default function ProductSourcesPage() {
               style={{ textAlign: 'left', margin: 'var(--space-lg) 0 0' }}
           >
             Các nguồn này sẽ được thêm sau. Hiện tại nên nhập thủ công vào hàng
-            chờ an toàn, không public trực tiếp nếu chưa kiểm link, ảnh, giá và
+            chờ an toàn, không đăng công khai trực tiếp nếu chưa kiểm tra liên kết, ảnh, giá và
             nguồn xác minh.
           </div>
 
@@ -1196,7 +1144,7 @@ export default function ProductSourcesPage() {
               AccessTrade
             </button>
             <Link href="/dashboard/token-vault" className="btn btn-secondary">
-              Cấu hình API
+              Thiết lập kết nối
             </Link>
           </div>
 
@@ -1226,7 +1174,7 @@ export default function ProductSourcesPage() {
 
         {/* Header */}
         <section
-            className="command-hero"
+            className="command-hero product-source-hero"
             style={{ marginBottom: 'var(--space-xl)' }}
         >
           <div className="command-hero-content">
@@ -1234,14 +1182,14 @@ export default function ProductSourcesPage() {
                 className="badge badge-purple"
                 style={{ marginBottom: 'var(--space-md)' }}
             >
-              Data Source Center
+              Nguồn dữ liệu và kết nối
             </div>
 
-            <h1 className="page-title">Trung tâm nguồn dữ liệu</h1>
+            <h1 className="page-title">Trung tâm nguồn sản phẩm</h1>
 
             <p className="page-subtitle" style={{ maxWidth: 760 }}>
               Kết nối nguồn sản phẩm thật để bot AI tự quét, phân loại, chấm điểm
-              và public an toàn. Voucher, campaign, ưu đãi shop và dữ liệu thiếu
+              và đăng an toàn. Mã giảm giá (voucher), chiến dịch, ưu đãi cửa hàng và dữ liệu thiếu
               link/ảnh/giá chỉ được lưu nội bộ.
             </p>
 
@@ -1249,10 +1197,8 @@ export default function ProductSourcesPage() {
                 className="flex gap-sm"
                 style={{ flexWrap: 'wrap', marginTop: 'var(--space-md)' }}
             >
-              <span className="badge badge-success">Safe Mode ON</span>
-              <span className="badge badge-success">Free Only ON</span>
-              <span className="badge badge-info">AutoPilot ON</span>
-              <span className="badge badge-success">Safe Publish ON</span>
+              <span className="badge badge-success">Chế độ an toàn</span>
+              <span className="badge badge-success">Chỉ dùng dịch vụ miễn phí</span>
             </div>
 
             <div
@@ -1267,7 +1213,7 @@ export default function ProductSourcesPage() {
               >
                 {runningBot
                     ? 'Đang chạy...'
-                    : 'Quét sản phẩm thật & tự public an toàn'}
+                    : 'Quét và kiểm tra sản phẩm'}
               </button>
 
               <button
@@ -1276,7 +1222,7 @@ export default function ProductSourcesPage() {
                   disabled={runningBot}
                   onClick={() => void handleRunAutoPilot('full_safe_run')}
               >
-                Chạy AutoPilot toàn bộ
+                Chạy chế độ tự động
               </button>
 
               <Link href="/dashboard/products" className="secondary-button">
@@ -1284,7 +1230,7 @@ export default function ProductSourcesPage() {
               </Link>
 
               <Link href="/dashboard/token-vault" className="secondary-button">
-                Token Vault
+                Kết nối bảo mật
               </Link>
             </div>
           </div>
@@ -1301,28 +1247,28 @@ export default function ProductSourcesPage() {
                             : 'var(--color-warning)',
                       }}
                   >
-                  {atConfigured ? 'Đã cấu hình' : 'Cần API key'}
+                  {atConfigured ? 'Đã cấu hình' : 'Cần khóa kết nối'}
                 </span>
                 </div>
 
                 <div className="detail-meta-row">
                   <span>Ưu tiên</span>
                   <span style={{ color: 'var(--color-success)' }}>
-                  Sản phẩm thật/datafeed
+                  Sản phẩm thật từ nguồn dữ liệu
                 </span>
                 </div>
 
                 <div className="detail-meta-row">
-                  <span>Voucher/campaign</span>
+                  <span>Mã giảm giá / chiến dịch</span>
                   <span style={{ color: 'var(--color-warning)' }}>
                   Chỉ lưu nội bộ
                 </span>
                 </div>
 
                 <div className="detail-meta-row">
-                  <span>Chi phí API</span>
+                  <span>Chi phí gọi dịch vụ</span>
                   <span style={{ color: 'var(--color-success)' }}>
-                  0đ Free Only
+                  Chỉ dùng dịch vụ miễn phí
                 </span>
                 </div>
               </div>
@@ -1366,7 +1312,7 @@ export default function ProductSourcesPage() {
                     lineHeight: 1.5,
                   }}
               >
-                Sản phẩm thật/datafeed có tên, link, ảnh, giá và nguồn xác minh.
+                Sản phẩm thật có tên, liên kết, ảnh, giá và nguồn xác minh.
               </div>
             </div>
 
@@ -1379,12 +1325,12 @@ export default function ProductSourcesPage() {
                     lineHeight: 1.5,
                   }}
               >
-                Voucher, campaign, store offer không được public như sản phẩm.
+                Mã giảm giá (voucher), chiến dịch và ưu đãi cửa hàng không được đăng như sản phẩm.
               </div>
             </div>
 
             <div className="metric-card">
-              <span className="badge badge-info">Health Guard</span>
+              <span className="badge badge-info">Kiểm tra chất lượng</span>
               <div
                   style={{
                     fontSize: 'var(--text-sm)',
@@ -1392,12 +1338,12 @@ export default function ProductSourcesPage() {
                     lineHeight: 1.5,
                   }}
               >
-                Chỉ public khi link và ảnh kiểm tra OK, không 404/403/timeout.
+                Chỉ đăng khi liên kết và ảnh hợp lệ, không gặp lỗi truy cập.
               </div>
             </div>
 
             <div className="metric-card">
-              <span className="badge badge-success">Affiliate minh bạch</span>
+              <span className="badge badge-success">Minh bạch tiếp thị liên kết</span>
               <div
                   style={{
                     fontSize: 'var(--text-sm)',
@@ -1412,53 +1358,8 @@ export default function ProductSourcesPage() {
           </div>
         </div>
 
-        {/* Source Status Cards */}
-        <div className="source-cards">
-          {sourceStatuses.map((source) => (
-              <button
-                  key={source.name}
-                  type="button"
-                  className={`source-card${activeTab === source.tab ? ' active' : ''}`}
-                  onClick={() => setActiveTab(source.tab)}
-                  style={{ textAlign: 'left', cursor: 'pointer' }}
-              >
-                <div className="source-card-icon">{source.icon}</div>
-                <div className="source-card-name">{source.name}</div>
-                <div
-                    style={{
-                      color: 'var(--text-tertiary)',
-                      fontSize: 11,
-                      marginTop: 4,
-                      minHeight: 28,
-                      lineHeight: 1.35,
-                    }}
-                >
-                  {source.note}
-                </div>
-                <div className="source-card-status" style={{ marginTop: 8 }}>
-              <span
-                  className={`badge ${
-                      source.status === 'active'
-                          ? 'badge-success'
-                          : source.status === 'pending'
-                              ? 'badge-warning'
-                              : 'badge-neutral'
-                  }`}
-                  style={{ fontSize: '9px', padding: '2px 6px' }}
-              >
-                {source.status === 'active'
-                    ? 'Khả dụng'
-                    : source.status === 'pending'
-                        ? 'Cần cấu hình'
-                        : 'Sắp có'}
-              </span>
-                </div>
-              </button>
-          ))}
-        </div>
-
         {/* Tabs */}
-        <div className="tabs-bar">
+        <div className="tabs-bar product-source-tabs">
           {TABS.map((tab) => (
               <button
                   key={tab.id}
@@ -1466,7 +1367,7 @@ export default function ProductSourcesPage() {
                   className={`tab-btn${activeTab === tab.id ? ' tab-btn-active' : ''}`}
                   onClick={() => setActiveTab(tab.id)}
               >
-                <span>{tab.icon}</span> {tab.label}
+                <DashboardIcon name={tab.icon as DashboardIconName} size={17} /> {tab.label}
               </button>
           ))}
         </div>
@@ -1485,22 +1386,22 @@ export default function ProductSourcesPage() {
                       style={{ marginBottom: 'var(--space-md)' }}
                   >
                     <div>
-                      <h3 className="card-title">AccessTrade Real Product Feed</h3>
+                      <h3 className="card-title">Nguồn sản phẩm AccessTrade</h3>
                       <p
                           className="page-subtitle"
                           style={{ marginTop: 6, maxWidth: 720 }}
                       >
                         Tìm và kiểm tra dữ liệu AccessTrade. Hệ thống sẽ phân loại
-                        rõ sản phẩm thật, voucher, campaign và ưu đãi shop. Chỉ sản
-                        phẩm thật có link/ảnh/giá hợp lệ mới có thể đi tiếp vào Safe
-                        Publish.
+                        rõ sản phẩm thật, mã giảm giá, chiến dịch và ưu đãi cửa hàng. Chỉ sản
+                        phẩm thật có liên kết, ảnh và giá hợp lệ mới có thể đi tiếp
+                        vào quy trình đăng an toàn.
                       </p>
                     </div>
 
                     <span
                         className={`badge ${atConfigured ? 'badge-success' : 'badge-warning'}`}
                     >
-                  {atConfigured ? 'AccessTrade Ready' : 'Cần API Key'}
+                  {atConfigured ? 'Đã kết nối AccessTrade' : 'Cần thiết lập kết nối'}
                 </span>
                   </div>
 
@@ -1528,7 +1429,7 @@ export default function ProductSourcesPage() {
                               fontWeight: 900,
                             }}
                         >
-                          AT
+                          <DashboardIcon name="source" size={24} />
                         </div>
                         <h4
                             style={{
@@ -1538,7 +1439,7 @@ export default function ProductSourcesPage() {
                               marginBottom: 'var(--space-xs)',
                             }}
                         >
-                          Thiếu API Key AccessTrade
+                          Chưa thiết lập kết nối AccessTrade
                         </h4>
                         <p
                             style={{
@@ -1546,14 +1447,14 @@ export default function ProductSourcesPage() {
                               marginBottom: 'var(--space-lg)',
                             }}
                         >
-                          Bạn cần cấu hình API key của AccessTrade trong Token Vault
-                          để tìm kiếm và quét sản phẩm. Không gửi API key vào chat.
+                          Bạn cần thêm khóa kết nối AccessTrade trong Kết nối bảo mật
+                          để tìm kiếm và quét sản phẩm. Không gửi khóa kết nối qua trò chuyện.
                         </p>
                         <Link
                             href="/dashboard/token-vault"
                             className="btn btn-primary"
                         >
-                          Mở Token Vault
+                          Mở Kết nối bảo mật
                         </Link>
                       </div>
                   )}
@@ -1566,17 +1467,20 @@ export default function ProductSourcesPage() {
                         opacity: atConfigured ? 1 : 0.65,
                       }}
                   >
-                    <strong>Luồng an toàn:</strong> ưu tiên sản phẩm thật/datafeed →
-                    lưu nội bộ → kiểm link/ảnh/giá → chỉ public nếu đạt chuẩn.
-                    Voucher/campaign/store offer không public như sản phẩm.
+                    <strong>Luồng an toàn:</strong> ưu tiên sản phẩm thật → lưu nội bộ
+                    → kiểm tra liên kết, ảnh và giá → chỉ đăng nếu đạt chuẩn. Mã giảm giá,
+                    chiến dịch và ưu đãi cửa hàng không được đăng như sản phẩm.
                   </div>
 
                   <div
                       className="form-row"
                       style={{
-                        opacity: atConfigured ? 1 : 0.5,
-                        pointerEvents: atConfigured ? 'auto' : 'none',
+                        padding: atConfigured ? 0 : 'var(--space-md)',
+                        background: atConfigured ? 'transparent' : 'var(--ds-surface-muted)',
+                        border: atConfigured ? 0 : '1px solid var(--ds-border)',
+                        borderRadius: 'var(--ds-radius-md)',
                       }}
+                      title={!atConfigured ? 'Được bảo vệ bởi chính sách hệ thống. Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : undefined}
                   >
                     <div className="form-group" style={{ flex: 2 }}>
                       <label className="label">Từ khoá sản phẩm cụ thể</label>
@@ -1590,7 +1494,8 @@ export default function ProductSourcesPage() {
                               void handleAtSearch();
                             }
                           }}
-                          placeholder="VD: tai nghe, serum, sữa tắm, laptop..."
+                          placeholder="Ví dụ: tai nghe, serum, sữa tắm, laptop..."
+                          disabled={!atConfigured}
                       />
 
                       <div
@@ -1603,7 +1508,7 @@ export default function ProductSourcesPage() {
                                 type="button"
                                 className="btn btn-ghost btn-sm"
                                 onClick={() => setAtKeyword(keyword)}
-                                disabled={atLoading}
+                                disabled={atLoading || !atConfigured}
                             >
                               {keyword}
                             </button>
@@ -1617,11 +1522,12 @@ export default function ProductSourcesPage() {
                           className="select"
                           value={atKind}
                           onChange={(event) => setAtKind(event.target.value)}
+                          disabled={!atConfigured}
                       >
                         <option value="product">Ưu tiên sản phẩm thật</option>
                         <option value="all">Tất cả để kiểm tra</option>
-                        <option value="voucher">Voucher</option>
-                        <option value="campaign">Campaign</option>
+                        <option value="voucher">Mã giảm giá (voucher)</option>
+                        <option value="campaign">Chiến dịch</option>
                         <option value="store_offer">Ưu đãi shop</option>
                         <option value="unknown">Chưa rõ</option>
                       </select>
@@ -1637,6 +1543,7 @@ export default function ProductSourcesPage() {
                         className="btn btn-primary"
                         onClick={() => void handleAtSearch()}
                         disabled={atLoading || !atConfigured}
+                        title={!atConfigured ? 'Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : 'Tìm kiếm dữ liệu AccessTrade'}
                     >
                       {atLoading ? 'Đang tìm...' : 'Tìm kiếm AccessTrade'}
                     </button>
@@ -1646,6 +1553,7 @@ export default function ProductSourcesPage() {
                         className="btn btn-accent"
                         onClick={() => void handleRunAutoPilot('source_scan')}
                         disabled={runningBot || !atConfigured}
+                        title={!atConfigured ? 'Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : 'Tạo tác vụ quét nguồn an toàn'}
                     >
                       {runningBot ? 'Đang chạy...' : 'Cho bot quét sản phẩm thật'}
                     </button>
@@ -1732,7 +1640,7 @@ export default function ProductSourcesPage() {
                           >
                             {atResults.summary.vouchers ?? 0}
                           </div>
-                          <div className="stat-card-label">Voucher</div>
+                          <div className="stat-card-label">Mã giảm giá</div>
                         </div>
 
                         <div
@@ -1745,7 +1653,7 @@ export default function ProductSourcesPage() {
                           >
                             {atResults.summary.campaigns ?? 0}
                           </div>
-                          <div className="stat-card-label">Campaign</div>
+                          <div className="stat-card-label">Chiến dịch</div>
                         </div>
 
                         <div
@@ -1788,7 +1696,7 @@ export default function ProductSourcesPage() {
                                 atResults.summary.nonProducts ??
                                 0}
                           </div>
-                          <div className="stat-card-label">Chưa được public</div>
+                          <div className="stat-card-label">Chưa được đăng công khai</div>
                         </div>
                       </div>
 
@@ -1868,7 +1776,7 @@ export default function ProductSourcesPage() {
 
                                   {!isProduct && (
                                       <span className="badge badge-neutral">
-                              Không public tự động
+                              Không tự động đăng công khai
                             </span>
                                   )}
 
@@ -1900,7 +1808,7 @@ export default function ProductSourcesPage() {
                                   <span
                                       className={`badge ${hasAffiliateLink ? 'badge-success' : 'badge-danger'}`}
                                   >
-                            Link affiliate: {hasAffiliateLink ? 'Có' : 'Thiếu'}
+                            Liên kết tiếp thị: {hasAffiliateLink ? 'Có' : 'Thiếu'}
                           </span>
 
                                   <span
@@ -1974,8 +1882,8 @@ export default function ProductSourcesPage() {
           {activeTab === 'shopee' &&
               renderPlaceholderTab(
                   'SP',
-                  'Shopee Affiliate',
-                  'Shopee Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link Shopee thủ công vào hàng chờ an toàn.',
+                  'Tiếp thị liên kết Shopee',
+                  'Nguồn tiếp thị liên kết Shopee sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm liên kết Shopee thủ công vào hàng chờ an toàn.',
                   'SHOPEE_AFFILIATE_APP_ID, SHOPEE_AFFILIATE_SECRET',
               )}
 
@@ -1983,8 +1891,8 @@ export default function ProductSourcesPage() {
           {activeTab === 'tiktok' &&
               renderPlaceholderTab(
                   'TK',
-                  'TikTok Shop Affiliate',
-                  'TikTok Shop Affiliate sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm link sản phẩm thủ công.',
+                  'Tiếp thị liên kết TikTok Shop',
+                  'Nguồn tiếp thị liên kết TikTok Shop sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm liên kết sản phẩm thủ công.',
                   'TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET',
               )}
 
@@ -1992,8 +1900,8 @@ export default function ProductSourcesPage() {
           {activeTab === 'lazada' &&
               renderPlaceholderTab(
                   'LZ',
-                  'Lazada Affiliate',
-                  'Lazada Affiliate sẽ được kết nối ở bước sau.',
+                  'Tiếp thị liên kết Lazada',
+                  'Nguồn tiếp thị liên kết Lazada sẽ được kết nối ở bước sau.',
                   'LAZADA_AFFILIATE_APP_KEY, LAZADA_AFFILIATE_APP_SECRET',
               )}
 
@@ -2012,10 +1920,10 @@ export default function ProductSourcesPage() {
                       className="coming-soon-title"
                       style={{ fontSize: 'var(--text-xl)' }}
                   >
-                    Nhập từ CSV
+                    Nhập tệp bảng dữ liệu (CSV)
                   </h3>
                   <p className="coming-soon-desc">
-                    Tính năng nhập CSV sẽ được thêm ở bước sau.
+                    CSV là tệp bảng dữ liệu. Chức năng nhập tệp sẽ được thêm ở bước sau.
                   </p>
 
                   <div
@@ -2036,7 +1944,7 @@ export default function ProductSourcesPage() {
               renderPlaceholderTab(
                   '+',
                   'Nguồn khác',
-                  'Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công hoặc sử dụng API nội bộ ở bước sau.',
+                  'Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công. Giao diện tích hợp nội bộ (API) sẽ được hoàn thiện ở bước sau.',
               )}
         </div>
 
@@ -2054,7 +1962,7 @@ export default function ProductSourcesPage() {
                     <th>Nền tảng</th>
                     <th>Nguồn</th>
                     <th>Trạng thái</th>
-                    <th>Safe Publish</th>
+                    <th>Đăng an toàn</th>
                     <th>Điểm</th>
                     <th>Cập nhật</th>
                   </tr>

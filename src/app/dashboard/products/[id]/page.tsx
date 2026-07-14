@@ -116,14 +116,14 @@ export default function ProductDetailPage() {
           {/* Left: Main info */}
           <div>
             {/* Product Header */}
-            <div className="gradient-card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
               <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
                 {product.imageUrl ? (
                   <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
                     <img src={product.imageUrl} alt={product.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </div>
                 ) : (
-                  <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', background: 'linear-gradient(135deg, #1a2237, #111827)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '40px', flexShrink: 0 }}>📦</div>
+                  <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', background: '#eef2f6', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', fontWeight: 700, flexShrink: 0 }}>SP</div>
                 )}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: '6px', letterSpacing: '-0.01em' }}>{product.title}</h1>
@@ -233,7 +233,7 @@ export default function ProductDetailPage() {
           {/* Right: Score + Actions */}
           <div>
             {/* Score Card */}
-            <div className="gradient-card" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">📊 Điểm đánh giá</h3>
               {product.score != null ? (
                 <>
