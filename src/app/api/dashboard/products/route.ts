@@ -1,4 +1,4 @@
-import { type NextRequest, NextResponse } from 'next/server';
+git status --short --branchimport { type NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getAllProducts } from '@/lib/storage/products';
 import { buildDashboardProducts, parseDashboardProductQuery } from '@/lib/dashboard/products';
