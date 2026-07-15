@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 require('./register-typescript.cjs');
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-automation-tests-'));
+const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-automation-tests-${process.pid}-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'automation-test';
@@ -151,6 +151,5 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
   });
 
   console.log(`\nAutomation targeted: ${passed} passed, ${failed} failed`);
-  fs.rmSync(tempDir, { recursive: true, force: true });
   if (failed) process.exit(1);
 })().catch(error => { console.error(error); process.exit(1); });

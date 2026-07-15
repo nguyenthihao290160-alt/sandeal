@@ -199,9 +199,46 @@ export interface PublicationOperationContext {
   candidateId?: string;
   actor?: string;
   environment?: OperationEnvironment;
+  jobId?: string;
+  workerId?: string;
+  operationId?: string;
+  /** @deprecated A caller-provided boolean is not accepted as publish approval. */
   approval?: boolean;
   dryRun?: boolean;
   idempotencyKey?: string;
+}
+
+async function requireDurableSafePublishApproval(
+  productId: string,
+  context: PublicationOperationContext,
+) {
+  if (!context.jobId || !context.workerId) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
+  const [{ getAutomationControl, getAutomationJob }, { getAutomationSettings }] = await Promise.all([
+    import('../automation/store'),
+    import('./automationSettings'),
+  ]);
+  const [job, control, settings] = await Promise.all([
+    getAutomationJob(context.jobId),
+    getAutomationControl(),
+    getAutomationSettings(),
+  ]);
+  if (control.killSwitch) throw new Error('KILL_SWITCH_ACTIVE');
+  if (!settings.safePublish || !settings.freeOnly || settings.allowPaidAi) {
+    throw new Error('SAFE_PUBLISH_POLICY_BLOCKED');
+  }
+  if (!job || job.type !== 'SAFE_PUBLISH' || job.status !== 'RUNNING') {
+    throw new Error('SAFE_PUBLISH_JOB_INVALID');
+  }
+  if (job.claimedBy !== context.workerId) throw new Error('SAFE_PUBLISH_WORKER_MISMATCH');
+  if (job.approvalStatus !== 'APPROVED' || !job.approvedBy) throw new Error('APPROVAL_REQUIRED');
+  if (job.approvalExpiresAt && Date.parse(job.approvalExpiresAt) <= Date.now()) {
+    throw new Error('APPROVAL_EXPIRED');
+  }
+  if (job.payload.productId !== productId) throw new Error('SAFE_PUBLISH_TARGET_MISMATCH');
+  if (context.idempotencyKey && context.idempotencyKey !== job.idempotencyKey) {
+    throw new Error('SAFE_PUBLISH_IDEMPOTENCY_MISMATCH');
+  }
+  return job;
 }
 
 export function publicationIdempotencyKey(product: Product): string {
@@ -224,19 +261,21 @@ export function publicationIdempotencyKey(product: Product): string {
 
 export async function publishCanonicalProductTransaction(id: string, updates: Partial<Product>, audit: PublicationOperationContext = {}): Promise<Product | null> {
   return withProductWrite(async () => {
+    const job = await requireDurableSafePublishApproval(id, audit);
     const products = await readCanonicalProducts(); const index = products.findIndex((item) => item.id === id); if (index < 0) return null;
     const previous = products[index]; const now = new Date().toISOString();
     const requestedSlug = updates.slug || previous.slug || generateStableSlug(previous.title, previous.sourceHash || previous.id);
     const candidate = evaluateCanonicalProduct({ ...previous, ...updates, id, slug: ensureUniqueSlug(requestedSlug, products.filter((item) => item.id !== id), previous.sourceHash || previous.id), updatedAt: now }, now);
     const guarded = await runGuardedOperation({
       operationType: 'safe_publish',
-      actor: audit.actor || 'scheduler',
+      operationId: job.operationId,
+      actor: job.approvedBy!,
       environment: audit.environment || getOperationEnvironment(),
       target: id,
-      approval: audit.approval,
+      approval: true,
       riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM',
       dryRun: audit.dryRun,
-      idempotencyKey: audit.idempotencyKey || publicationIdempotencyKey(candidate),
+      idempotencyKey: job.idempotencyKey,
     }, async () => {
       products[index] = candidate;
       try {
@@ -244,11 +283,11 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
         const confirmed = (await readCanonicalProducts()).find((item) => item.id === id);
         if (!confirmed) throw new Error('canonical_readback_failed');
         if (candidate.status === 'published' && (!isPublicSafeProduct(confirmed) || !isReviewIndexable(confirmed))) throw new Error('public_selector_inconsistent');
-        await appendPublicationAudit({ operationId: audit.idempotencyKey, runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM', dryRun: false, timestamp: now });
+        await appendPublicationAudit({ operationId: job.operationId, runId: audit.runId || job.id, candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM', dryRun: false, timestamp: now });
         return confirmed;
       } catch (error) {
         products[index] = previous; await writeCollection(COLLECTION, products);
-        await appendPublicationAudit({ operationId: audit.idempotencyKey, runId: audit.runId || 'scheduler', candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [sanitizeErrorMessage(error instanceof Error ? error.message : 'publication_error')], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, riskLevel: 'HIGH', dryRun: false, timestamp: now });
+        await appendPublicationAudit({ operationId: job.operationId, runId: audit.runId || job.id, candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [sanitizeErrorMessage(error instanceof Error ? error.message : 'publication_error')], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, riskLevel: 'HIGH', dryRun: false, timestamp: now });
         throw error;
       }
     });

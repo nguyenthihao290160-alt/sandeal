@@ -2,39 +2,24 @@
 // API: Score Product
 // ===========================================
 
-import { type NextRequest } from 'next/server';
-import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
-import { getProductById, updateProduct } from '@/lib/storage/products';
-import { scoreProductV2 } from '@/lib/productScoring';
+import { type NextRequest, NextResponse } from 'next/server';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { enqueueProductAction } from '@/lib/automation/productActions';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requirePermission(request, 'RUN_QUALITY_CHECK');
+  if (denied) return denied;
+  const { id } = await params;
   try {
-    const { id } = await params;
-    const product = await getProductById(id);
-    if (!product) {
-      return errorResponse('Không tìm thấy sản phẩm.', undefined, 404);
-    }
-
-    const result = scoreProductV2(product);
-
-    const updated = await updateProduct(id, {
-      score: result.score,
-      scoreLabel: result.label,
-      scoreReasons: result.reasons,
-      scoreWarnings: result.warnings,
-      riskLevel: result.riskLevel,
-    });
-
-    return successResponse('Đã chấm điểm sản phẩm.', {
-      product: updated,
-      scoring: result,
-    });
-  } catch (err) {
-    return serverErrorResponse('Không thể chấm điểm sản phẩm.', err);
+    const result = await enqueueProductAction({ actor: getServerActor(), action: 'score', productId: id });
+    return NextResponse.json({ ok: true, code: result.code, message: 'Đã đưa chấm điểm vào hàng đợi.', data: result.data }, { status: result.created ? 202 : 200 });
+  } catch (error) {
+    const code = error instanceof Error && error.message === 'PRODUCT_NOT_FOUND' ? 'NOT_FOUND' : 'VALIDATION_ERROR';
+    return NextResponse.json({ ok: false, code, message: code === 'NOT_FOUND' ? 'Không tìm thấy sản phẩm.' : 'Không thể tạo tác vụ chấm điểm.' }, { status: code === 'NOT_FOUND' ? 404 : 400 });
   }
 }

@@ -1,6 +1,7 @@
 export type DashboardOperationStatus =
   | 'pending'
   | 'waiting_approval'
+  | 'waiting_manual'
   | 'running'
   | 'waiting_retry'
   | 'completed'

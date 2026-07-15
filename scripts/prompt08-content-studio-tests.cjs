@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const testAuthValue = ['local', 'only', 'value'].join('-');
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-content-studio-'));
+const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-content-studio-${process.pid}-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'content-test';
@@ -192,7 +192,6 @@ async function reset() {
     assert.equal(Object.prototype.hasOwnProperty.call(body.data.items[0].product, 'rawPayload'), false);
   });
 
-  fs.rmSync(tempDir, { recursive: true, force: true });
   if (failed) {
     console.error(`\nContent Studio: ${passed} passed, ${failed} failed`);
     process.exitCode = 1;

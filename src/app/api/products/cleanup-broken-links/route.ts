@@ -4,40 +4,31 @@
 // ===========================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import { listProducts } from '@/lib/storage/products';
-import { createProductCleanup } from '@/lib/bots/productCleanup';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { enqueueProductAction } from '@/lib/automation/productActions';
 
 export async function POST(req: NextRequest) {
   try {
-    // Check auth
-    const authError = await requireAuth(req);
+    const authError = await requirePermission(req, 'MANAGE_AUTOMATION');
     if (authError) return authError;
 
-    // Get published/approved products
-    const products = await listProducts({ status: 'approved' });
-    const productIds = products.map(p => p.id);
-
-    // Cleanup
-    const runId = `cleanup-${Date.now()}`;
-    const cleanupBot = await createProductCleanup(runId);
-    const cleaned = await cleanupBot.bulkCleanup(productIds);
-
+    const result = await enqueueProductAction({ actor: getServerActor(), action: 'health', limit: 50 });
     return NextResponse.json({
       success: true,
-      data: {
-        checked: productIds.length,
-        archived: cleaned,
-      },
-    });
-  } catch (error) {
-    console.error('[cleanup-broken-links] Error:', error);
+      ok: true,
+      code: 'HEALTH_RECHECK_ENQUEUED_NO_AUTO_ARCHIVE',
+      message: 'Đã tạo tác vụ kiểm tra. Sản phẩm lỗi chỉ được đề xuất lưu trữ và cần phê duyệt riêng.',
+      data: result.data,
+    }, { status: result.created ? 202 : 200 });
+  } catch {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        ok: false,
+        code: 'VALIDATION_ERROR',
+        message: 'Không thể tạo tác vụ kiểm tra sản phẩm.',
       },
-      { status: 500 }
+      { status: 400 }
     );
   }
 }

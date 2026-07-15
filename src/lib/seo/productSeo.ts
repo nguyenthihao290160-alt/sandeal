@@ -4,6 +4,7 @@ import { config } from '../config';
 import { isPublicSafeProduct } from '../publicProductFilter';
 import { isReviewIndexable } from '../editorialReview';
 import { PRODUCT_INTELLIGENCE_CONFIG } from '../product-intelligence/config';
+import { publicTaxonomySlug, taxonomyPath } from './taxonomySeo';
 
 export function canonicalProductUrl(product: Pick<Product, 'slug'>): string {
   return new URL(`/deals/${encodeURIComponent(product.slug)}`, config.siteUrl).toString();
@@ -53,19 +54,24 @@ export function buildProductJsonLd(product: Product): Record<string, unknown> | 
     sku: product.sku || undefined, gtin: product.gtin || undefined, mpn: product.mpn || undefined,
     offers: currentPrice > 0 ? {
       '@type': 'Offer', price: currentPrice, priceCurrency: product.currency,
-      url: product.affiliateUrl || product.originalUrl, seller: { '@type': 'Organization', name: String(product.source || 'Nguồn đối tác') },
+      url: new URL(`/go/${encodeURIComponent(product.id)}`, config.siteUrl).toString(),
     } : undefined,
   };
   return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
 }
 
 export function buildBreadcrumbJsonLd(product: Product): Record<string, unknown> {
+  const categorySlug = product.category ? publicTaxonomySlug(product.category) : '';
+  const middle = categorySlug
+    ? [{ '@type': 'ListItem', position: 3, name: product.category, item: new URL(taxonomyPath('category', categorySlug), config.siteUrl).toString() }]
+    : [];
   return {
     '@context': 'https://schema.org', '@type': 'BreadcrumbList',
     itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'Trang chủ', item: config.siteUrl },
       { '@type': 'ListItem', position: 2, name: 'Sản phẩm', item: new URL('/deals', config.siteUrl).toString() },
-      { '@type': 'ListItem', position: 3, name: product.title, item: canonicalProductUrl(product) },
+      ...middle,
+      { '@type': 'ListItem', position: middle.length ? 4 : 3, name: product.title, item: canonicalProductUrl(product) },
     ],
   };
 }

@@ -17,23 +17,18 @@ export class GeminiAnalystBot {
   async analyzeProduct(product: Product): Promise<Partial<Product>> {
     const token = await getPrimaryCredential('gemini');
     if (!token || token.status !== 'valid') {
-      await this.ctx.warn('Gemini token not available - skipping analysis');
-      return {};
+      await this.ctx.warn('Gemini analysis requires provider configuration', {
+        productId: product.id,
+        code: 'CONFIGURATION_REQUIRED',
+      });
+      throw new Error('CONFIGURATION_REQUIRED');
     }
 
-    // TODO: Implement actual Gemini API call
-    // For now, return basic analysis
-    const analysis: Partial<Product> = {
-      contentAngles: ['Giá hợp lý', 'Chất lượng tốt'],
-      warnings: [],
-    };
-
-    await this.ctx.info('Product analyzed', {
+    await this.ctx.warn('Legacy Gemini analyst adapter is not implemented', {
       productId: product.id,
-      analysisFields: Object.keys(analysis),
+      code: 'PROVIDER_NOT_IMPLEMENTED',
     });
-
-    return analysis;
+    throw new Error('PROVIDER_NOT_IMPLEMENTED');
   }
 }
 

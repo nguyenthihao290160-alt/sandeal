@@ -17,6 +17,7 @@ type Envelope<T> = { ok: boolean; code?: string; message: string; data?: T; fiel
 type Toast = { type: 'success' | 'error' | 'info'; message: string };
 type ViewMode = 'list' | 'grid';
 type OperationMode = 'source_scan' | 'full_safe_run';
+type ProductActionTracking = { job: SafeAutomationJob; jobId: string; operationId: string; trackingRoute: string };
 
 const PLATFORM_LABELS: Record<string, string> = { shopee: 'Shopee', tiktok_shop: 'TikTok Shop', lazada: 'Lazada', accesstrade: 'AccessTrade', website: 'Website', other: 'Khác' };
 const TYPE_LABELS: Record<string, string> = { product: 'Sản phẩm', deal: 'Ưu đãi sản phẩm', voucher: 'Mã giảm giá (voucher)', campaign: 'Chiến dịch', store_offer: 'Ưu đãi cửa hàng', unknown: 'Chưa phân loại' };
@@ -31,17 +32,17 @@ type SafeAutomationJob = Omit<AutomationJob, 'payload'>;
 function toDashboardOperation(job: SafeAutomationJob): DashboardOperation {
   const statuses: Record<AutomationJob['status'], DashboardOperation['status']> = {
     PENDING: 'pending', WAITING_APPROVAL: 'waiting_approval', RUNNING: 'running', RETRY_SCHEDULED: 'waiting_retry',
-    SUCCEEDED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled', BLOCKED: 'blocked', PAUSED: 'pending',
+    WAITING_FOR_MANUAL_INPUT: 'waiting_manual', SUCCEEDED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled', BLOCKED: 'blocked', PAUSED: 'pending',
   };
   const status = statuses[job.status];
   const messages: Record<DashboardOperation['status'], string> = {
-    pending: 'Tác vụ đang chờ bộ xử lý nền.', waiting_approval: 'Tác vụ rủi ro cao đang chờ quản trị viên phê duyệt.', running: 'Bộ xử lý nền đang thực hiện tác vụ.',
+    pending: 'Tác vụ đang chờ bộ xử lý nền.', waiting_approval: 'Tác vụ rủi ro cao đang chờ quản trị viên phê duyệt.', waiting_manual: 'Tác vụ cần thông tin đã kiểm chứng từ hộp thư công việc thủ công.', running: 'Bộ xử lý nền đang thực hiện tác vụ.',
     waiting_retry: 'Tác vụ đang chờ chạy lại theo giới hạn an toàn.', completed: 'Tác vụ đã hoàn thành.', failed: job.lastErrorMessage || 'Tác vụ không thể hoàn thành.',
     cancelled: 'Tác vụ đã bị hủy.', blocked: job.lastErrorMessage || 'Tác vụ bị quy tắc an toàn chặn.', unavailable: 'Tạm thời chưa thể cập nhật tác vụ.',
   };
-  return { operationId: job.operationId, jobId: job.id, status, progress: status === 'completed' ? 100 : status === 'running' ? 50 : 0,
+  return { operationId: job.operationId, jobId: job.id, status, progress: job.progress?.percentage ?? (status === 'completed' ? 100 : null),
     result: job.result || null, errorCode: job.lastErrorCode || null, message: messages[status], startedAt: job.startedAt || null,
-    completedAt: job.completedAt || null, updatedAt: job.updatedAt, canCancel: ['PENDING','WAITING_APPROVAL','RETRY_SCHEDULED','PAUSED'].includes(job.status),
+    completedAt: job.completedAt || null, updatedAt: job.updatedAt, canCancel: ['PENDING','WAITING_APPROVAL','WAITING_FOR_MANUAL_INPUT','RETRY_SCHEDULED','PAUSED'].includes(job.status),
     canRetry: job.status === 'FAILED' && job.attemptCount < job.maxAttempts, requiresApproval: job.status === 'WAITING_APPROVAL' };
 }
 
@@ -61,18 +62,17 @@ function Badge({ children, tone = 'neutral' }: { children: React.ReactNode; tone
   return <span className={`${styles.badge} ${styles[tone]}`}>{children}</span>;
 }
 
-function ProductActions({ item, busy, onAction }: { item: DashboardProductItem; busy: string | null; onAction: (action: 'approve' | 'archive' | 'delete', item: DashboardProductItem) => void }) {
+function ProductActions({ item, busy, onAction }: { item: DashboardProductItem; busy: string | null; onAction: (action: 'approve' | 'archive', item: DashboardProductItem) => void }) {
   const disabled = busy !== null;
   return (
     <div className={styles.rowActions}>
       <Link href={`/dashboard/products/${item.id}`} className={styles.textButton}>Xem chi tiết</Link>
       {item.status !== 'approved' && item.status !== 'published' && item.status !== 'archived' && (
-        <button type="button" className={styles.textButton} disabled={disabled || item.safePublishStatus === 'blocked'} title={item.safePublishStatus === 'blocked' ? item.publish.message : 'Phê duyệt sản phẩm'} onClick={() => onAction('approve', item)}>
-          {busy === `approve:${item.id}` ? 'Đang duyệt' : 'Phê duyệt'}
+        <button type="button" className={styles.textButton} disabled={disabled || item.safePublishStatus === 'blocked'} title={item.safePublishStatus === 'blocked' ? item.publish.message : 'Tạo yêu cầu Safe Publish'} onClick={() => onAction('approve', item)}>
+          {busy === `approve:${item.id}` ? 'Đang tạo' : 'Safe Publish'}
         </button>
       )}
-      {item.status !== 'archived' && <button type="button" className={styles.textButton} disabled={disabled} onClick={() => onAction('archive', item)}>{busy === `archive:${item.id}` ? 'Đang lưu' : 'Lưu trữ'}</button>}
-      <button type="button" className={`${styles.textButton} ${styles.dangerText}`} disabled={disabled} onClick={() => onAction('delete', item)}>Xóa</button>
+      {item.status !== 'archived' && <button type="button" className={styles.textButton} disabled={disabled} onClick={() => onAction('archive', item)}>{busy === `archive:${item.id}` ? 'Đang tạo' : 'Lưu trữ'}</button>}
     </div>
   );
 }
@@ -93,7 +93,6 @@ export default function ProductsDashboard() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [confirmItem, setConfirmItem] = useState<DashboardProductItem | null>(null);
   const [operationDialog, setOperationDialog] = useState<OperationMode | null>(null);
   const [limit, setLimit] = useState(10);
   const [dryRun, setDryRun] = useState(true);
@@ -108,7 +107,6 @@ export default function ProductsDashboard() {
   const [sourceBusy, setSourceBusy] = useState(false);
   const [sourceForm, setSourceForm] = useState({ name: '', url: '', platform: 'website', kind: 'product', enabled: true, scanSchedule: '', description: '' });
   const dialogFocusRef = useRef<HTMLInputElement>(null);
-  const dialogButtonRef = useRef<HTMLButtonElement>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
@@ -209,27 +207,41 @@ export default function ProductsDashboard() {
     return () => window.clearTimeout(timer);
   }, [loadConnections]);
   useEffect(() => {
-    if (!operationDialog && !sourceDialog && !confirmItem) return;
-    const timer = window.setTimeout(() => (dialogFocusRef.current || dialogButtonRef.current)?.focus(), 0);
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !operationBusy && !sourceBusy && !busy) { setOperationDialog(null); setSourceDialog(false); setConfirmItem(null); } };
+    if (!operationDialog && !sourceDialog) return;
+    const timer = window.setTimeout(() => dialogFocusRef.current?.focus(), 0);
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !operationBusy && !sourceBusy && !busy) { setOperationDialog(null); setSourceDialog(false); } };
     window.addEventListener('keydown', close);
     return () => { window.clearTimeout(timer); window.removeEventListener('keydown', close); };
-  }, [operationDialog, sourceDialog, confirmItem, operationBusy, sourceBusy, busy]);
+  }, [operationDialog, sourceDialog, operationBusy, sourceBusy, busy]);
   useEffect(() => () => pollAbortRef.current?.abort(), []);
 
   const refresh = () => { setError(null); setSelectedIds([]); setRefreshing(true); setRefreshKey((value) => value + 1); };
 
-  const runItemAction = async (action: 'approve' | 'archive' | 'delete', item: DashboardProductItem) => {
-    if (action === 'delete' && confirmItem?.id !== item.id) { setConfirmItem(item); return; }
+  const runItemAction = async (action: 'approve' | 'archive', item: DashboardProductItem) => {
     setBusy(`${action}:${item.id}`);
-    const endpoint = action === 'delete' ? `/api/products/${item.id}` : `/api/products/${item.id}/${action}`;
+    const endpoint = `/api/products/${item.id}/${action}`;
     try {
-      const response = await fetch(endpoint, { method: action === 'delete' ? 'DELETE' : 'POST' });
-      const body = await response.json().catch(() => null) as Envelope<unknown> | null;
-      if (!response.ok || !body?.ok) throw new Error(body?.message || 'Không thể thực hiện thao tác. Dữ liệu chưa được thay đổi. Vui lòng thử lại.');
-      showToast('success', body.message);
-      setConfirmItem(null);
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          reason: action === 'approve' ? 'Yêu cầu Safe Publish từ Product Operations' : 'Lưu trữ từ Product Operations',
+        }),
+      });
+      const body = await response.json().catch(() => null) as Envelope<ProductActionTracking> | null;
+      if (!response.ok || !body?.ok || !body.data?.job) throw new Error(body?.message || 'Không thể tạo tác vụ. Dữ liệu chưa được thay đổi. Vui lòng thử lại.');
+      const next = toDashboardOperation(body.data.job);
+      setOperation(next);
+      showToast('info', body.message);
       refresh();
+      if (!['waiting_approval', 'waiting_manual', 'completed', 'failed', 'cancelled', 'blocked'].includes(next.status)) {
+        void pollOperation(body.data.jobId).catch((reason) => setOperation((current) => current ? {
+          ...current,
+          errorCode: 'STATUS_UNAVAILABLE',
+          message: reason instanceof Error ? reason.message : 'Tạm thời không thể cập nhật trạng thái tác vụ.',
+        } : current));
+      }
     } catch (reason) { showToast('error', reason instanceof Error ? reason.message : 'Không thể thực hiện thao tác. Dữ liệu chưa được thay đổi. Vui lòng thử lại.'); }
     finally { setBusy(null); }
   };
@@ -400,7 +412,6 @@ export default function ProductsDashboard() {
 
       {sourceDialog && <div className={styles.modalBackdrop} onMouseDown={(e) => { if (e.currentTarget === e.target && !sourceBusy) setSourceDialog(false); }}><form className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="source-title" onSubmit={submitSource}><h2 id="source-title">Thêm nguồn sản phẩm</h2><div className={styles.formGrid}><label><span>Tên nguồn</span><input ref={dialogFocusRef} value={sourceForm.name} onChange={(e) => setSourceForm({ ...sourceForm, name: e.target.value })} aria-invalid={Boolean(sourceFields.name)} aria-describedby={sourceFields.name ? 'source-name-error' : undefined} />{sourceFields.name && <small id="source-name-error" className={styles.fieldError}>{sourceFields.name}</small>}</label><label><span>Địa chỉ nguồn</span><input type="url" placeholder="https://" value={sourceForm.url} onChange={(e) => setSourceForm({ ...sourceForm, url: e.target.value })} aria-invalid={Boolean(sourceFields.url)} aria-describedby={sourceFields.url ? 'source-url-error' : undefined} />{sourceFields.url && <small id="source-url-error" className={styles.fieldError}>{sourceFields.url}</small>}</label><label><span>Nền tảng</span><select value={sourceForm.platform} onChange={(e) => setSourceForm({ ...sourceForm, platform: e.target.value })}>{Object.entries(PLATFORM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Loại dữ liệu</span><select value={sourceForm.kind} onChange={(e) => setSourceForm({ ...sourceForm, kind: e.target.value })}>{Object.entries(TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Lịch quét (không bắt buộc)</span><input value={sourceForm.scanSchedule} onChange={(e) => setSourceForm({ ...sourceForm, scanSchedule: e.target.value })} placeholder="Ví dụ: mỗi ngày lúc 08:00" /></label><label className={styles.fullField}><span>Mô tả</span><textarea rows={3} value={sourceForm.description} onChange={(e) => setSourceForm({ ...sourceForm, description: e.target.value })} /></label></div><label className={styles.checkbox}><input type="checkbox" checked={sourceForm.enabled} onChange={(e) => setSourceForm({ ...sourceForm, enabled: e.target.checked })} /><span>Bật nguồn sau khi lưu</span></label><p className={styles.modalNote}>Không nhập khóa kết nối hoặc thông tin đăng nhập vào các trường này. Thông tin nhạy cảm phải được lưu trong Kết nối bảo mật.</p><div className={styles.modalActions}><button type="button" className={styles.ghostButton} disabled={sourceBusy} onClick={() => setSourceDialog(false)}>Đóng</button><button type="submit" className={styles.primaryButton} disabled={sourceBusy}>{sourceBusy ? 'Đang lưu' : 'Lưu nguồn'}</button></div></form></div>}
 
-      {confirmItem && <div className={styles.modalBackdrop}><section className={styles.modal} role="alertdialog" aria-modal="true" aria-labelledby="delete-title"><h2 id="delete-title">Xóa sản phẩm</h2><p>Bạn sắp xóa “{confirmItem.title}”. Sản phẩm sẽ bị xóa khỏi kho dữ liệu local và thao tác không thể hoàn tác.</p><div className={styles.modalActions}><button ref={dialogButtonRef} type="button" className={styles.ghostButton} disabled={busy !== null} onClick={() => setConfirmItem(null)}>Giữ sản phẩm</button><button type="button" className={styles.dangerButton} disabled={busy !== null} onClick={() => void runItemAction('delete', confirmItem)}>{busy === `delete:${confirmItem.id}` ? 'Đang xóa' : 'Xác nhận xóa'}</button></div></section></div>}
     </div>
   );
 }

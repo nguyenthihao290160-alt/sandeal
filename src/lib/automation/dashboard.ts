@@ -1,6 +1,7 @@
 import { getAllProducts } from '@/lib/storage/products';
 import { listProductSources } from '@/lib/storage/productSources';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
+import { buildOperationsOnboarding } from '@/lib/operations/onboarding';
 import {
   getAiUsage,
   getAllAutomationJobs,
@@ -33,9 +34,10 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     getAiUsage(), getCircuit('autopilot'), getCircuit('gemini'), listAutomationAudit(1, 20), getAutomationSettings(),
   ]);
   const start = rangeStart(range);
+  const onboarding = await buildOperationsOnboarding();
   const current = jobs.filter(job => Date.parse(job.createdAt) >= start);
   const terminal = current.filter(job => ['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED'].includes(job.status));
-  const completed = current.filter(job => job.status === 'SUCCEEDED');
+  const completed = current.filter(job => job.status === 'SUCCEEDED' && job.outcomeStatus !== 'PARTIALLY_COMPLETED');
   const workerHeartbeatMs = control.workerHeartbeatAt ? Date.parse(control.workerHeartbeatAt) : Number.NaN;
   const workerFresh = Number.isFinite(workerHeartbeatMs) && Date.now() - workerHeartbeatMs < 45_000;
   const schedulerHeartbeatMs = control.schedulerHeartbeatAt ? Date.parse(control.schedulerHeartbeatAt) : Number.NaN;
@@ -68,7 +70,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     kpis: {
       productsProcessed: products.length,
       running: queue.RUNNING,
-      waiting: queue.PENDING + queue.RETRY_SCHEDULED,
+      waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT,
       waitingApproval: queue.WAITING_APPROVAL,
       completionRate: terminal.length ? Math.round((completed.length / terminal.length) * 100) : null,
       systemErrors: queue.FAILED,
@@ -98,6 +100,15 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     circuits: [autopilotCircuit, geminiCircuit],
     control: { workerPaused: control.workerPaused, schedulerPaused: control.schedulerPaused, killSwitch: control.killSwitch, reason: control.reason || null },
     sources: { configured: sources.length, products: products.length },
+    zeroData: !onboarding.hasOperationalData,
+    onboarding,
+    groups: {
+      workItems: { waitingApproval: queue.WAITING_APPROVAL, waitingManual: queue.WAITING_FOR_MANUAL_INPUT, failed: queue.FAILED, openAlerts: onboarding.facts.openAlerts },
+      dataReadiness: { products: onboarding.facts.products, enabledSources: onboarding.facts.sources, pendingSources: onboarding.facts.pendingSources, unscored: onboarding.facts.unscored },
+      qualityContent: { scored: onboarding.facts.scored, drafts: onboarding.facts.drafts, editorialChecked: onboarding.facts.editorialChecked },
+      botOperations: { running: queue.RUNNING, waiting: queue.PENDING + queue.RETRY_SCHEDULED, waitingManual: queue.WAITING_FOR_MANUAL_INPUT },
+      growth: { published: onboarding.facts.published, outboundEvents: onboarding.facts.outboundEvents, openAlerts: onboarding.facts.openAlerts },
+    },
     recentActivity: jobs.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 10).map(job => ({
       ...publicAutomationJob(job), durationMs: jobDuration(job.startedAt, job.completedAt), payload: undefined,
     })),

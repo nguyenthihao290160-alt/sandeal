@@ -1,9 +1,11 @@
-import { runAutoPilot } from '@/lib/bots/autoPilotRunner';
+import { createHash } from 'node:crypto';
+import { processReviewQueue, scanSourcesToQueue, selectOperationMode } from '@/lib/bots/productPipeline';
 import { buildDashboardProducts } from '@/lib/dashboard/products';
 import { executeProductIntelligenceJob } from '@/lib/product-intelligence/jobs';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
-import { getProductById, getAllProducts, publishCanonicalProductTransaction } from '@/lib/storage/products';
-import { getPrimaryCredential } from '@/lib/storage/tokenVault';
+import { getProductById, getAllProducts, getPublicProducts, publishCanonicalProductTransaction } from '@/lib/storage/products';
+import { completeManualTask, createManualTask, getManualTask } from './manualTasks';
+import { routeProviderExecution } from './providerRouter';
 import {
   canUseCircuit,
   claimAutomationJobs,
@@ -14,8 +16,10 @@ import {
   heartbeatAutomationJob,
   recordCircuitResult,
   updateAutomationControl,
+  updateAutomationJobExecution,
+  waitAutomationJobForManual,
 } from './store';
-import type { AutomationJob } from './types';
+import type { AutomationCheckpoint, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
 
 function assertUnhandledJobType(type: never): never {
   throw new Error(`UNSUPPORTED_JOB_TYPE:${String(type)}`);
@@ -27,15 +31,54 @@ export interface WorkerRunResult {
   succeeded: number;
   failed: number;
   skipped: number;
+  waitingManual: number;
+}
+
+function hashValue(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function disclosure(
+  job: AutomationJob,
+  executionMode: ActualExecutionMode,
+  input: Partial<AutomationExecutionDisclosure> = {},
+): AutomationExecutionDisclosure {
+  return {
+    status: input.status || (executionMode === 'LOCAL_TEMPLATE' ? 'COMPLETED_WITH_LOCAL_TEMPLATE' : executionMode === 'MANUAL_INPUT' ? 'COMPLETED_WITH_MANUAL_INPUT' : executionMode === 'API' ? 'COMPLETED_WITH_API' : 'COMPLETED_WITH_LOCAL_RULES'),
+    requestedMode: job.requestedExecutionMode || 'AUTO',
+    executionMode,
+    provider: input.provider || (executionMode === 'MANUAL_INPUT' ? 'manual' : executionMode === 'API' ? 'gemini' : 'local'),
+    modelId: input.modelId,
+    promptVersion: input.promptVersion,
+    rulesVersion: input.rulesVersion,
+    templateVersion: input.templateVersion,
+    manualActor: input.manualActor,
+    fallbackReason: input.fallbackReason,
+    confidence: input.confidence,
+    evidenceCoverage: input.evidenceCoverage,
+    warnings: input.warnings || [],
+    limitations: input.limitations || [],
+    aiRequests: input.aiRequests || 0,
+    externalRequests: input.externalRequests || 0,
+    completedSteps: input.completedSteps || [],
+    pendingSteps: input.pendingSteps || [],
+    completedAt: input.completedAt,
+  };
 }
 
 function errorCode(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (/not.?implemented|handler.?unavailable/i.test(message)) return 'PROVIDER_NOT_IMPLEMENTED';
+  if (/invalid.?credential|401/i.test(message)) return 'INVALID_CREDENTIAL';
+  if (/credential.?expired|403/i.test(message)) return 'CREDENTIAL_EXPIRED';
   if (/timeout|abort/i.test(message)) return 'TIMEOUT';
   if (/429|rate.?limit/i.test(message)) return 'RATE_LIMITED';
   if (/network|fetch|socket/i.test(message)) return 'NETWORK_ERROR';
   if (/credential|api.?key|configuration/i.test(message)) return 'CONFIGURATION_REQUIRED';
-  if (/budget|quota|limit/i.test(message)) return 'AI_BUDGET_EXCEEDED';
+  if (/budget|quota/i.test(message)) return 'QUOTA_EXCEEDED';
+  if (/schema/i.test(message)) return 'SCHEMA_VALIDATION_FAILED';
+  if (/provider.?response|json.?response/i.test(message)) return 'INVALID_PROVIDER_RESPONSE';
+  if (/safety|policy|kill.?switch|paid.?provider/i.test(message)) return 'SAFETY_POLICY_BLOCKED';
   if (/validation|invalid/i.test(message)) return 'VALIDATION_ERROR';
   return 'INTERNAL_ERROR';
 }
@@ -73,13 +116,39 @@ async function executeAutoPilotJob(
   const circuit = await canUseCircuit('autopilot');
   if (!circuit.allowed) throw new Error('CIRCUIT_OPEN');
   try {
-    const result = await runAutoPilot({
-      mode,
-      trigger: job.requestedBy === 'scheduler' ? 'scheduler' : 'dashboard',
-    });
-    if (result.status !== 'completed') throw new Error(result.error || result.message || 'AUTOPILOT_NOT_COMPLETED');
+    const settings = await getAutomationSettings();
+    const operationMode = selectOperationMode((await getPublicProducts()).length);
+    const deadline = Date.now() + settings.maxRunDurationMs;
+    const scan = await scanSourcesToQueue(operationMode, deadline);
+    await assertKillSwitchInactive();
+    const review = mode === 'full_safe_run' && Date.now() < deadline
+      ? await processReviewQueue(operationMode, deadline)
+      : null;
+    const failed = scan.failed + (review?.failed || 0);
+    const result = {
+      executionStatus: failed > 0 ? 'PARTIALLY_COMPLETED' : 'COMPLETED_WITH_LOCAL_RULES',
+      executionMode: 'LOCAL_RULES',
+      provider: 'local',
+      rulesVersion: 'product-pipeline-v2',
+      aiRequests: 0,
+      externalRequests: scan.sourceRequests + (review?.networkChecks || 0),
+      fallbackReason: null,
+      limitations: ['Safe Publish được tạo thành tác vụ riêng và luôn cần phê duyệt.'],
+      operationMode,
+      summary: {
+        sourceRequests: scan.sourceRequests,
+        found: scan.found,
+        queued: scan.queued,
+        reviewed: review?.reviewed || 0,
+        created: review?.created || 0,
+        updated: review?.updated || 0,
+        needsReview: review?.needsReview || 0,
+        published: 0,
+        failed,
+      },
+    };
     await recordCircuitResult('autopilot', true);
-    return { runId: result.runId, summary: result.summary, durationMs: result.durationMs || 0 };
+    return result;
   } catch (error) {
     if (['TIMEOUT', 'RATE_LIMITED', 'NETWORK_ERROR', 'SERVICE_UNAVAILABLE'].includes(errorCode(error))) {
       await recordCircuitResult('autopilot', false);
@@ -88,7 +157,161 @@ async function executeAutoPilotJob(
   }
 }
 
-async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> {
+async function executeLocalIntelligenceJob(job: AutomationJob): Promise<Record<string, unknown>> {
+  const output = await executeProductIntelligenceJob(job);
+  const executionMode: ActualExecutionMode = job.dryRun
+    ? 'SHADOW_MODE'
+    : job.type === 'PREPARE_CONTENT_DRAFT'
+      ? 'LOCAL_TEMPLATE'
+      : 'LOCAL_RULES';
+  return {
+    ...output,
+    executionStatus: job.dryRun
+      ? 'COMPLETED_WITH_LOCAL_RULES'
+      : executionMode === 'LOCAL_TEMPLATE'
+        ? 'COMPLETED_WITH_LOCAL_TEMPLATE'
+        : 'COMPLETED_WITH_LOCAL_RULES',
+    executionMode,
+    provider: 'local',
+    rulesVersion: executionMode === 'LOCAL_RULES' ? 'product-intelligence-v1' : undefined,
+    templateVersion: executionMode === 'LOCAL_TEMPLATE' ? 'content-template-v1' : undefined,
+    aiRequests: 0,
+    fallbackReason: null,
+    limitations: ['Kết quả local không tạo canonical fact mới và không tự đăng sản phẩm.'],
+  };
+}
+
+async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
+  if (job.dryRun) {
+    return {
+      ...(await dryRunPreview(job)),
+      executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
+      executionMode: 'SHADOW_MODE',
+      provider: 'local',
+      rulesVersion: 'evidence-contract-v1',
+      aiRequests: 0,
+      externalRequests: 0,
+      warnings: ['Không gọi provider và không ghi draft trong chế độ chạy thử.'],
+    };
+  }
+  await assertKillSwitchInactive();
+
+  if (job.manualTaskId) {
+    const task = await getManualTask(job.manualTaskId);
+    if (!task || task.jobId !== job.id || task.status !== 'SUBMITTED' || !task.submittedInput) throw new Error('MANUAL_INPUT_NOT_READY');
+    const completedAt = new Date().toISOString();
+    const completedDisclosure = disclosure(job, 'MANUAL_INPUT', {
+      provider: 'manual',
+      manualActor: task.submittedBy,
+      aiRequests: 0,
+      externalRequests: 0,
+      evidenceCoverage: 0,
+      warnings: ['Nội dung là draft do người vận hành cung cấp; claim vẫn phải qua Editorial Guard.'],
+      limitations: ['Không chuyển dữ liệu thủ công thành canonical fact hoặc phê duyệt đăng.'],
+      completedSteps: ['provider-routing', 'manual-evidence-draft'],
+      pendingSteps: ['editorial-validation'],
+      completedAt,
+    });
+    const checkpoint: AutomationCheckpoint = {
+      version: 1,
+      completedSteps: ['provider-routing', 'manual-evidence-draft'],
+      pendingSteps: ['editorial-validation'],
+      outputs: { manualDraftHash: hashValue(task.submittedInput), validationStatus: 'UNVERIFIED' },
+      executionModes: ['MANUAL_INPUT'],
+      providerStatus: { provider: 'manual', status: 'SUBMITTED' },
+      inputHash: job.checkpoint?.inputHash || hashValue(job.payload),
+      outputHash: hashValue(task.submittedInput),
+      updatedAt: completedAt,
+    };
+    await updateAutomationJobExecution(job.id, workerId, { executionMode: 'MANUAL_INPUT', outcomeStatus: 'PARTIALLY_COMPLETED', checkpoint, disclosure: completedDisclosure });
+    await completeManualTask(task.id, job.id, workerId);
+    return {
+      executionStatus: 'PARTIALLY_COMPLETED',
+      executionMode: 'MANUAL_INPUT',
+      provider: 'manual',
+      manualActor: task.submittedBy,
+      draftSuggestion: task.submittedInput,
+      validationStatus: 'UNVERIFIED',
+      evidenceCoverage: 0,
+      aiRequests: 0,
+      externalRequests: 0,
+      canonicalDataChanged: false,
+      published: false,
+      warnings: completedDisclosure.warnings,
+      limitations: completedDisclosure.limitations,
+    };
+  }
+
+  const decision = await routeProviderExecution({
+    capability: job.capability || 'ANALYZE_WITH_EVIDENCE',
+    requestedMode: job.requestedExecutionMode || 'AUTO',
+    provider: 'gemini',
+    providerAdapterAvailable: false,
+    localMode: 'LOCAL_TEMPLATE',
+    deterministicFirst: false,
+    allowLocalFallback: true,
+    allowManualFallback: true,
+    allowPaidFallback: false,
+    shadowMode: false,
+    estimatedRequests: Math.max(1, Math.min(10, Number(job.payload.limit) || 1)),
+    estimatedTokens: 2_000,
+  });
+
+  // A local template can prepare verified fields, but cannot satisfy evidence-grounded analysis by itself.
+  const task = await createManualTask({
+    jobId: job.id,
+    operationId: job.operationId,
+    capability: job.capability || 'ANALYZE_WITH_EVIDENCE',
+    targetType: 'product-set',
+    title: 'Bổ sung phân tích dựa trên bằng chứng',
+    reasonCode: decision.failureCode || (decision.executionMode === 'LOCAL_TEMPLATE' ? 'LOCAL_TEMPLATE_INSUFFICIENT' : 'MANUAL_INPUT_REQUIRED'),
+    instructions: [
+      'Chỉ sử dụng dữ kiện đã được xác minh trong màn hình sản phẩm.',
+      'Nêu rõ giới hạn và không đưa ra claim về trải nghiệm, tồn kho, rating hoặc hiệu quả khi thiếu bằng chứng.',
+    ],
+    verifiedFacts: {},
+    evidence: [],
+    missingInformation: ['Phân tích có liên kết evidence fact rõ ràng.'],
+    questions: ['Tóm tắt phân tích nào được dữ kiện hiện có hỗ trợ?', 'Những giới hạn nào cần hiển thị công khai?'],
+    expectedInputSchema: { version: 1, fields: [
+      { name: 'analysisSummary', label: 'Bản nháp phân tích', type: 'string', required: true, maximumLength: 2_000 },
+      { name: 'evidenceFactIds', label: 'Mã dữ kiện bằng chứng', type: 'string_array', required: true, maximumLength: 120 },
+      { name: 'limitations', label: 'Giới hạn cần công bố', type: 'string_array', required: true, maximumLength: 300 },
+    ] },
+    validationRules: ['Claim quan trọng thiếu evidence sẽ giữ trạng thái UNVERIFIED.', 'Dữ liệu thủ công không tự phê duyệt hoặc đăng.'],
+    risk: 'MEDIUM',
+    approvalRequired: false,
+    resumeCheckpoint: 'manual-evidence-draft',
+    actor: workerId,
+  });
+  const now = new Date().toISOString();
+  const checkpoint: AutomationCheckpoint = {
+    version: 1,
+    completedSteps: ['provider-routing'],
+    pendingSteps: ['manual-evidence-draft', 'editorial-validation'],
+    outputs: { providerFailureCode: decision.failureCode || null, localTemplatePrepared: decision.executionMode === 'LOCAL_TEMPLATE' },
+    executionModes: decision.executionMode === 'LOCAL_TEMPLATE' ? ['LOCAL_TEMPLATE'] : ['MANUAL_INPUT'],
+    providerStatus: { provider: 'gemini', configured: decision.providerConfigured, ready: decision.providerReady, failureCode: decision.failureCode },
+    inputHash: job.checkpoint?.inputHash || hashValue(job.payload),
+    updatedAt: now,
+  };
+  const waitingDisclosure = disclosure(job, 'MANUAL_INPUT', {
+    status: 'WAITING_FOR_MANUAL_INPUT',
+    provider: 'manual',
+    fallbackReason: decision.failureCode || 'LOCAL_TEMPLATE_INSUFFICIENT',
+    warnings: ['Chưa có phân tích hoàn chỉnh; không hiển thị là AI đã hoàn thành.'],
+    limitations: decision.limitations,
+    aiRequests: 0,
+    externalRequests: 0,
+    completedSteps: checkpoint.completedSteps,
+    pendingSteps: checkpoint.pendingSteps,
+  });
+  const waiting = await waitAutomationJobForManual(job.id, workerId, task.id, checkpoint, waitingDisclosure);
+  if (!waiting) throw new Error('MANUAL_WAIT_TRANSITION_FAILED');
+  return { waitingForManualInput: true, taskId: task.id, executionStatus: 'WAITING_FOR_MANUAL_INPUT' };
+}
+
+async function executeJob(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
   switch (job.type) {
     case 'IMPORT_PRODUCTS':
     case 'RECHECK_PRODUCT_HEALTH':
@@ -101,7 +324,7 @@ async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> 
     case 'AGGREGATE_GROWTH_METRICS':
     case 'BULK_PRODUCT_OPERATION': {
       if (!job.dryRun) await assertKillSwitchInactive();
-      return executeProductIntelligenceJob(job);
+      return executeLocalIntelligenceJob(job);
     }
     case 'PRODUCT_SCAN':
       return executeAutoPilotJob(job, 'source_scan');
@@ -121,11 +344,12 @@ async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> 
       const product = await getProductById(productId);
       if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
       const published = await publishCanonicalProductTransaction(productId, { status: 'published' }, {
-        actor: job.approvedBy || job.requestedBy,
-        approval: true,
+        jobId: job.id,
+        workerId: job.claimedBy,
         dryRun: false,
         idempotencyKey: job.idempotencyKey,
-        runId: job.operationId,
+        operationId: job.operationId,
+        runId: job.id,
       });
       if (!published || published.status !== 'published') throw new Error('SAFE_PUBLISH_BLOCKED');
       return { productId, status: published.status, publishedAt: published.publishedAt || null };
@@ -133,16 +357,7 @@ async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> 
     case 'AI_ANALYSIS': {
       if (job.dryRun) return dryRunPreview(job);
       await assertKillSwitchInactive();
-      const settings = await getAutomationSettings();
-      if (!settings.freeOnly || settings.allowPaidAi) throw new Error('PAID_PROVIDER_BLOCKED');
-      const credential = await getPrimaryCredential('gemini');
-      if (!credential || credential.status !== 'valid') throw new Error('CONFIGURATION_REQUIRED');
-      const estimate = Math.max(1, Math.min(10, Number(job.payload.limit) || 1));
-      const circuit = await canUseCircuit('gemini');
-      if (!circuit.allowed) throw new Error('CIRCUIT_OPEN');
-      // Reserve usage only at the future provider call boundary; no provider is called here.
-      void estimate;
-      throw new Error('AI_HANDLER_UNAVAILABLE');
+      return executeEvidenceAnalysis(job, workerId);
     }
     default:
       return assertUnhandledJobType(job.type);
@@ -150,7 +365,7 @@ async function executeJob(job: AutomationJob): Promise<Record<string, unknown>> 
 }
 
 export async function processAutomationBatch(workerId: string, limit = 2): Promise<WorkerRunResult> {
-  const result: WorkerRunResult = { workerId, claimed: 0, succeeded: 0, failed: 0, skipped: 0 };
+  const result: WorkerRunResult = { workerId, claimed: 0, succeeded: 0, failed: 0, skipped: 0, waitingManual: 0 };
   await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
   const claimed = await claimAutomationJobs(workerId, limit);
   result.claimed = claimed.length;
@@ -165,9 +380,70 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
     const heartbeat = setInterval(() => { void heartbeatAutomationJob(job.id, workerId); }, 20_000);
     try {
-      const output = await executeJob(job);
+      const startedPlan = (job.executionPlan || []).map((step, index) => index === 0 && step.status === 'PENDING' ? { ...step, status: 'RUNNING' as const } : step);
+      await updateAutomationJobExecution(job.id, workerId, {
+        executionPlan: startedPlan,
+        progress: { processed: 0, total: startedPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: new Date().toISOString() },
+      });
+      const output = await executeJob(job, workerId);
       const latest = await getAutomationJob(job.id);
       if (latest?.status === 'CANCELLED') { result.skipped += 1; continue; }
+      if (latest?.status === 'WAITING_FOR_MANUAL_INPUT') { result.waitingManual += 1; continue; }
+      const rawMode = output.executionMode;
+      const executionMode: ActualExecutionMode = ['API', 'LOCAL_RULES', 'LOCAL_TEMPLATE', 'MANUAL_INPUT', 'SHADOW_MODE'].includes(String(rawMode))
+        ? rawMode as ActualExecutionMode
+        : job.dryRun
+          ? 'SHADOW_MODE'
+          : 'LOCAL_RULES';
+      const rawStatus = String(output.executionStatus || '');
+      const outcomeStatus = rawStatus === 'PARTIALLY_COMPLETED'
+        ? 'PARTIALLY_COMPLETED' as const
+        : executionMode === 'API'
+          ? 'COMPLETED_WITH_API' as const
+          : executionMode === 'LOCAL_TEMPLATE'
+            ? 'COMPLETED_WITH_LOCAL_TEMPLATE' as const
+            : executionMode === 'MANUAL_INPUT'
+              ? 'COMPLETED_WITH_MANUAL_INPUT' as const
+              : 'COMPLETED_WITH_LOCAL_RULES' as const;
+      const completedAt = new Date().toISOString();
+      const completedPlan = (latest?.executionPlan || startedPlan).map(step => ({ ...step, status: step.status === 'SKIPPED' ? 'SKIPPED' as const : 'COMPLETED' as const }));
+      const completedSteps = completedPlan.filter(step => step.status === 'COMPLETED').map(step => step.id);
+      const pendingSteps = outcomeStatus === 'PARTIALLY_COMPLETED' && latest?.checkpoint?.pendingSteps.length
+        ? latest.checkpoint.pendingSteps
+        : [];
+      const progressTotal = Math.max(1, completedSteps.length + pendingSteps.length);
+      const progressPercentage = Math.floor((completedSteps.length / progressTotal) * 100);
+      await updateAutomationJobExecution(job.id, workerId, {
+        executionMode,
+        outcomeStatus,
+        executionPlan: completedPlan,
+        progress: { processed: completedSteps.length, total: progressTotal, succeeded: completedSteps.length, skipped: 0, failed: 0, percentage: progressPercentage, updatedAt: completedAt },
+        checkpoint: {
+          version: 1,
+          completedSteps,
+          pendingSteps,
+          outputs: { resultHash: hashValue(output) },
+          executionModes: [...new Set([...(latest?.checkpoint?.executionModes || []), executionMode])],
+          providerStatus: latest?.checkpoint?.providerStatus,
+          inputHash: latest?.checkpoint?.inputHash || job.checkpoint?.inputHash || hashValue(job.payload),
+          outputHash: hashValue(output),
+          updatedAt: completedAt,
+        },
+        disclosure: latest?.disclosure || disclosure(job, executionMode, {
+          status: outcomeStatus,
+          provider: typeof output.provider === 'string' ? output.provider : undefined,
+          rulesVersion: typeof output.rulesVersion === 'string' ? output.rulesVersion : undefined,
+          templateVersion: typeof output.templateVersion === 'string' ? output.templateVersion : undefined,
+          fallbackReason: typeof output.fallbackReason === 'string' ? output.fallbackReason : undefined,
+          warnings: Array.isArray(output.warnings) ? output.warnings.filter((item): item is string => typeof item === 'string') : [],
+          limitations: Array.isArray(output.limitations) ? output.limitations.filter((item): item is string => typeof item === 'string') : [],
+          aiRequests: Number(output.aiRequests) || 0,
+          externalRequests: Number(output.externalRequests) || 0,
+          completedSteps,
+          pendingSteps,
+          completedAt,
+        }),
+      });
       const completed = await completeAutomationJob(job.id, workerId, output);
       if (completed) result.succeeded += 1; else result.skipped += 1;
     } catch (error) {

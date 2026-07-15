@@ -19,10 +19,14 @@ export async function recordGrowthEvent(
   const event: OutboundEvent = {
     ...input,
     id: requestedId,
-    productId: input.productId.slice(0, 160),
-    source: input.source.slice(0, 120),
+    productId: input.productId?.slice(0, 160),
+    source: input.source?.slice(0, 120),
     campaign: input.campaign?.slice(0, 160),
     contentPageId: input.contentPageId?.slice(0, 160),
+    contextKey: input.contextKey && /^[a-z0-9:_-]{1,120}$/i.test(input.contextKey) ? input.contextKey : undefined,
+    resultCount: Number.isSafeInteger(input.resultCount) && Number(input.resultCount) >= 0 && Number(input.resultCount) <= 50
+      ? Number(input.resultCount)
+      : undefined,
     timestamp: input.timestamp && Number.isFinite(Date.parse(input.timestamp)) ? input.timestamp : new Date().toISOString(),
   };
   let stored = event;
@@ -47,18 +51,27 @@ export async function aggregateGrowthMetrics(now = Date.now()): Promise<{ days: 
   const grouped = new Map<string, OutboundEvent[]>();
   for (const event of events) grouped.set(dayInVietnam(event.timestamp), [...(grouped.get(dayInVietnam(event.timestamp)) || []), event]);
   const daily: GrowthDaily[] = [...grouped.entries()].map(([day, dayEvents]) => {
-    const views = dayEvents.filter(event => event.eventType === 'view').length;
-    const clicks = dayEvents.filter(event => event.eventType === 'click').length;
+    const listViews = dayEvents.filter(event => event.eventType === 'PRODUCT_CARD_VIEW').length;
+    const detailViews = dayEvents.filter(event => event.eventType === 'view' || event.eventType === 'PRODUCT_DETAIL_VIEW').length;
+    const outboundClicks = dayEvents.filter(event => event.eventType === 'click' || event.eventType === 'OUTBOUND_CLICK').length;
+    const views = detailViews;
+    const clicks = outboundClicks;
     const productClicks: Record<string, number> = {};
     const sourceClicks: Record<string, number> = {};
     const contentClicks: Record<string, number> = {};
-    for (const event of dayEvents.filter(item => item.eventType === 'click')) {
-      productClicks[event.productId] = (productClicks[event.productId] || 0) + 1;
-      sourceClicks[event.source] = (sourceClicks[event.source] || 0) + 1;
+    for (const event of dayEvents.filter(item => item.eventType === 'click' || item.eventType === 'OUTBOUND_CLICK')) {
+      if (event.productId) productClicks[event.productId] = (productClicks[event.productId] || 0) + 1;
+      if (event.source) sourceClicks[event.source] = (sourceClicks[event.source] || 0) + 1;
       if (event.contentPageId) contentClicks[event.contentPageId] = (contentClicks[event.contentPageId] || 0) + 1;
     }
     return {
       id: day, day, views, clicks, ctr: views > 0 ? Math.round((clicks / views) * 10_000) / 100 : undefined,
+      listViews,
+      detailViews,
+      outboundClicks,
+      searches: dayEvents.filter(event => event.eventType === 'PUBLIC_SEARCH').length,
+      noResultSearches: dayEvents.filter(event => event.eventType === 'SEARCH_NO_RESULT').length,
+      compareOpens: dayEvents.filter(event => event.eventType === 'COMPARE_OPEN').length,
       productClicks, sourceClicks, contentClicks, updatedAt: new Date(now).toISOString(),
     };
   }).sort((a, b) => a.day.localeCompare(b.day));
@@ -79,11 +92,21 @@ export async function getGrowthSummary(days = 30) {
   const daily = (await readCollection<GrowthDaily>(DAILY)).filter(item => item.day >= cutoff).sort((a, b) => a.day.localeCompare(b.day));
   const views = daily.reduce((sum, item) => sum + item.views, 0);
   const clicks = daily.reduce((sum, item) => sum + item.clicks, 0);
+  const listViews = daily.reduce((sum, item) => sum + (item.listViews || 0), 0);
+  const detailViews = daily.reduce((sum, item) => sum + (item.detailViews ?? item.views), 0);
+  const outboundClicks = daily.reduce((sum, item) => sum + (item.outboundClicks ?? item.clicks), 0);
   return {
     rangeDays: safeDays,
     views,
     clicks,
     ctr: views > 0 ? Math.round((clicks / views) * 10_000) / 100 : undefined,
+    funnel: {
+      listViews,
+      detailViews,
+      outboundClicks,
+      listToDetailRate: listViews > 0 ? Math.round((detailViews / listViews) * 10_000) / 100 : undefined,
+      detailToOutboundRate: detailViews > 0 ? Math.round((outboundClicks / detailViews) * 10_000) / 100 : undefined,
+    },
     trend: daily.map(item => ({ day: item.day, views: item.views, clicks: item.clicks, ctr: item.ctr })),
     topProducts: totals(daily.map(item => item.productClicks)).slice(0, 10),
     topSources: totals(daily.map(item => item.sourceClicks)).slice(0, 10),

@@ -1,0 +1,23 @@
+.commandBar { display: flex; flex-wrap: wrap; gap: 8px; }
+.tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--ds-border, #e2e8f0); }
+.tab, .activeTab { display: inline-flex; align-items: center; gap: 7px; min-height: 42px; flex: 0 0 auto; border: 0; border-bottom: 2px solid transparent; padding: 0 13px; background: transparent; color: var(--ds-text-muted, #64748b); font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
+.activeTab { border-bottom-color: var(--ds-primary, #3157c8); color: var(--ds-primary, #3157c8); }
+.linkButton { border: 0; padding: 0; background: none; color: var(--ds-primary, #3157c8); font: inherit; font-weight: 650; cursor: pointer; }
+.planList { display: grid; gap: 12px; padding: 16px; }
+.planStep { border-left: 3px solid var(--ds-primary, #3157c8); padding: 10px 12px; background: var(--ds-surface-muted, #f8fafc); }
+.planStep > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.planStep p { margin: 8px 0; color: var(--ds-text-muted, #64748b); }
+.planStep dl { display: grid; grid-template-columns: 110px 1fr; gap: 5px 10px; margin: 0; font-size: 12px; }
+.planStep dt { color: var(--ds-text-muted, #64748b); font-weight: 650; }
+.disclosure { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; border-top: 1px solid var(--ds-border, #e2e8f0); padding-top: 12px; font-size: 12px; }
+.disclosure strong { grid-column: 1 / -1; }
+.taskList { display: grid; max-height: 520px; overflow: auto; }
+.task, .selectedTask { display: grid; gap: 4px; border: 0; border-bottom: 1px solid var(--ds-border, #e2e8f0); padding: 13px 15px; background: var(--ds-surface, #fff); color: inherit; text-align: left; cursor: pointer; }
+.selectedTask { border-left: 3px solid var(--ds-primary, #3157c8); background: var(--ds-surface-blue, #eef4ff); }
+.task span, .selectedTask span, .task small, .selectedTask small { color: var(--ds-text-muted, #64748b); }
+.manualForm { display: grid; gap: 13px; padding: 16px; }
+.manualForm p { margin: 0; color: var(--ds-text-muted, #64748b); }
+.manualForm label { display: grid; gap: 6px; font-size: 13px; font-weight: 650; }
+.manualForm textarea, .manualForm select { width: 100%; border: 1px solid var(--ds-border-strong, #cbd5e1); border-radius: 7px; padding: 9px 10px; background: #fff; color: inherit; font: inherit; }
+.manualForm input[type='checkbox'] { width: 18px; height: 18px; }
+@media (max-width: 760px) { .commandBar > button { flex: 1 1 140px; } .disclosure { grid-template-columns: 1fr 1fr; } }

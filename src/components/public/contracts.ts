@@ -1,6 +1,8 @@
 export interface PublicCategoryItem {
   name: string;
+  slug: string;
   count: number;
+  lastModified?: string;
 }
 
 export interface PublicDealCardData {
@@ -10,6 +12,7 @@ export interface PublicDealCardData {
   imageUrl?: string | null;
   platform: string;
   category?: string | null;
+  brand?: string | null;
   currentPrice?: number | null;
   originalPrice?: number | null;
   currency?: string | null;
@@ -17,8 +20,12 @@ export interface PublicDealCardData {
   dealScore?: number | null;
   dealBand?: string | null;
   qualityScore?: number | null;
+  opportunityScore?: number | null;
   verifiedSource?: boolean;
+  verifiedAt?: string | null;
   priceUpdatedAt?: string | null;
+  priceMovement?: { direction: 'down' | 'up'; amount: number; percent: number; capturedAt: string } | null;
+  warnings?: string[];
   sourceLabel?: string | null;
   outboundHref?: string | null;
 }

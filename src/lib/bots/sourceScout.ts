@@ -32,13 +32,6 @@ type SafeAutoPublishDecision = {
   reason: string;
 };
 
-type HealthGuardDecision = {
-  allowed: boolean;
-  reason: string;
-  blockedBy?: 'link' | 'image' | 'health_error';
-  updates: MutableProductDraft;
-};
-
 export type ScanCounters = {
   found: number;
   created: number;
@@ -79,7 +72,8 @@ type ExistingProductIndex = {
 
 const AUTO_SAFE_MODE = process.env.AI_AUTO_MODE !== 'false';
 const AUTO_APPROVE_SAFE_PRODUCTS = process.env.AUTO_APPROVE_SAFE_PRODUCTS !== 'false';
-const AUTO_PUBLISH_SAFE_PRODUCTS = process.env.AUTO_PUBLISH_SAFE_PRODUCTS !== 'false';
+// Source Scout can identify candidates, but only a durable SAFE_PUBLISH job may make them public.
+const AUTO_PUBLISH_SAFE_PRODUCTS = false;
 
 // Hard policy for this bot.
 // Do not wire paid AI/API behavior here.
@@ -639,158 +633,6 @@ function buildAccessTradeProductDraft(
   }
 
   return draft;
-}
-
-async function runHealthGuardBeforePublish(
-    productDraft: MutableProductDraft,
-): Promise<HealthGuardDecision> {
-  const checkUrl = getDraftUrl(productDraft);
-
-  if (!checkUrl) {
-    return {
-      allowed: false,
-      reason: 'missing_or_invalid_link_before_health_check',
-      blockedBy: 'link',
-      updates: {
-        publicHidden: true,
-        unpublishedReason: 'Thiếu link sản phẩm hoặc affiliate link hợp lệ.',
-      },
-    };
-  }
-
-  const imageUrl = getText(productDraft.imageUrl);
-
-  if (!isValidHttpUrl(imageUrl)) {
-    return {
-      allowed: false,
-      reason: 'missing_or_invalid_image_before_health_check',
-      blockedBy: 'image',
-      updates: {
-        publicHidden: true,
-        unpublishedReason: 'Thiếu ảnh sản phẩm hợp lệ.',
-      },
-    };
-  }
-
-  try {
-    const linkResult = await checkLinkHealth(checkUrl);
-
-    if (!linkResult.ok) {
-      return {
-        allowed: false,
-        reason: `Link lỗi: ${linkResult.reason}`,
-        blockedBy: 'link',
-        updates: {
-          linkHealthStatus: linkResult.status as Product['linkHealthStatus'],
-          linkLastCheckedAt: new Date().toISOString(),
-          publicHidden: true,
-          unpublishedReason: `Link lỗi: ${linkResult.reason}`,
-        },
-      };
-    }
-
-    const imageResult = await checkImageHealth(imageUrl);
-
-    if (!imageResult.ok) {
-      return {
-        allowed: false,
-        reason: `Ảnh lỗi: ${imageResult.reason}`,
-        blockedBy: 'image',
-        updates: {
-          imageHealthStatus: imageResult.status as Product['imageHealthStatus'],
-          imageLastCheckedAt: new Date().toISOString(),
-          publicHidden: true,
-          unpublishedReason: `Ảnh lỗi: ${imageResult.reason}`,
-        },
-      };
-    }
-
-    const now = new Date().toISOString();
-
-    return {
-      allowed: true,
-      reason: 'health_ok',
-      updates: {
-        linkHealthStatus: 'ok' as Product['linkHealthStatus'],
-        imageHealthStatus: 'ok' as Product['imageHealthStatus'],
-        linkLastCheckedAt: now,
-        imageLastCheckedAt: now,
-      },
-    };
-  } catch (error) {
-    return {
-      allowed: false,
-      reason: `health_check_error: ${error instanceof Error ? error.message : String(error)}`,
-      blockedBy: 'health_error',
-      updates: {
-        publicHidden: true,
-        unpublishedReason: 'Lỗi khi kiểm tra link/ảnh, cần xem xét thủ công.',
-      },
-    };
-  }
-}
-
-function markDraftAsAutoPublished(
-    productDraft: MutableProductDraft,
-    reason: string,
-    healthUpdates: MutableProductDraft,
-): MutableProductDraft {
-  const now = new Date().toISOString();
-
-  return {
-    ...productDraft,
-    ...healthUpdates,
-
-    status: 'published' as Product['status'],
-    publicHidden: false,
-
-    needsVerification: false,
-    verifiedSource: true,
-    sourceVerified: true,
-
-    aiApproved: true,
-    approvalMode: 'ai_auto_safe_publish',
-    approvedAt: now,
-    publishedAt: now,
-
-    autoPublished: true,
-    autoPublishReason: reason,
-    autoPublishBlockedReason: undefined,
-
-    publicDecision: 'published',
-    publicBlockReason: undefined,
-
-    // Do not claim generated content when Source Scout did not generate it.
-    contentPackageStatus: 'none',
-    complianceStatus: 'needs_edit',
-    riskLevel: 'low',
-  };
-}
-
-function markDraftAsBlocked(
-    productDraft: MutableProductDraft,
-    reason: string,
-    updates?: MutableProductDraft,
-): MutableProductDraft {
-  const kind = getDraftKind(productDraft);
-
-  return {
-    ...productDraft,
-    ...(updates || {}),
-
-    status: getBlockedStatus(kind),
-    publicHidden: true,
-
-    aiApproved: false,
-    autoPublished: false,
-
-    autoPublishReason: null,
-    autoPublishBlockedReason: reason,
-    publicBlockReason: reason,
-
-    needsVerification: true,
-    approvalMode: 'manual_or_auto_safe_required',
-  };
 }
 
 function getKindCounterKey(kind: ProductKind | string | undefined): keyof Pick<
@@ -1527,19 +1369,19 @@ export class SourceScoutBot {
             let finalUpdates: MutableProductDraft = { ...healthUpdates };
 
             if (isHealthOk) {
-               // Safe Publish
+               // Candidate is ready for the separate durable Safe Publish gate.
                finalUpdates = {
                  ...finalUpdates,
-                 status: 'published',
-                 publicHidden: false,
-                 needsVerification: false,
+                 status: 'needs_review',
+                 publicHidden: true,
+                 needsVerification: true,
                  verifiedSource: true,
-                 aiApproved: true,
-                 autoPublished: true,
-                 autoPublishReason: 'auto_published_verified_real_product_link_image_ok',
-                 autoPublishBlockedReason: undefined,
-                 publicBlockReason: undefined,
-                 unpublishedReason: undefined,
+                 aiApproved: false,
+                 autoPublished: false,
+                 autoPublishReason: undefined,
+                 autoPublishBlockedReason: 'safe_publish_approval_required',
+                 publicBlockReason: 'safe_publish_approval_required',
+                 unpublishedReason: 'Đang chờ tác vụ Safe Publish được phê duyệt.',
                };
             } else {
                // Blocked

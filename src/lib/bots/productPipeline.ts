@@ -2,8 +2,9 @@ import { createHash } from 'crypto';
 import { AccessTradeRequestError, isAccessTradeConfigured, mapAccessTradeToProduct, searchAccessTrade, type AccessTradeResultType, type NormalizedAccessTradeItem } from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, enqueueCandidate, finishCandidate, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem } from '../storage/candidateQueue';
-import { getAllProducts, publishCanonicalProductTransaction, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
+import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
 import { readCollection, writeCollection } from '../storage/adapter';
+import { createAutomationJob } from '../automation/store';
 import { checkImageHealth, checkLinkHealth } from './productHealthCheck';
 import type { Product } from '../types';
 import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
@@ -11,6 +12,7 @@ import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
 import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
 import { scoreCandidateReadiness } from './candidateReadiness';
 import { isDomainCircuitOpen, recordDomainHealth } from './domainCircuitBreaker';
+import { evaluateSafePublish } from '../safePublish';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
@@ -212,6 +214,7 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses, item.attempts)).toISOString(),
       sourceHealthReason: healthy ? undefined : statuses.join(','),
       publicBlockReason: healthy ? '' : statuses.join(','),
+      status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
     } as Partial<Product>;
     const canonical = await upsertCanonicalProduct(draft, { evaluate: false });
     if (canonical.product.reviewContent?.reviewStatus === 'stale') counters.reviewStale++;
@@ -232,11 +235,32 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       if (review.reviewStatus === 'approved') counters.reviewApproved++; else if (review.reviewStatus === 'rejected') counters.reviewRejected++; else counters.reviewNeedsReview++;
       if (isReviewIndexable({ ...canonical.product, reviewContent: review })) counters.seoReady++; else counters.seoBlocked++;
       const publishSettings = await getAutomationSettings();
-      finalProduct = (await publishCanonicalProductTransaction(canonical.product.id, { reviewContent: review, reviewGeneration: useGemini ? { provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion, generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash, generatedAt: gemini!.generatedAt, validationResult: 'approved' } : { provider: 'local', promptVersion: 'local-review-v2', generationFingerprint: canonical.product.sourceHash || canonical.product.id, generatedAt: new Date().toISOString(), validationResult: 'fallback_local' } }, {
-        candidateId: item.id,
-        actor: 'scheduler',
-        approval: publishSettings.safePublish,
+      finalProduct = (await saveCanonicalProduct(canonical.product.id, {
+        reviewContent: review,
+        reviewGeneration: useGemini ? {
+          provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion,
+          generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash,
+          generatedAt: gemini!.generatedAt, validationResult: 'approved',
+        } : {
+          provider: 'local', promptVersion: 'local-review-v2',
+          generationFingerprint: canonical.product.sourceHash || canonical.product.id,
+          generatedAt: new Date().toISOString(), validationResult: 'fallback_local',
+        },
+        status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
       })) || canonical.product;
+      if (publishSettings.safePublish && evaluateSafePublish(finalProduct).eligible) {
+        await createAutomationJob({
+          type: 'SAFE_PUBLISH',
+          payload: { productId: finalProduct.id, candidateId: item.id },
+          idempotencyKey: `safe-publish:${publicationIdempotencyKey(finalProduct)}`,
+          operationId: `pipeline:${item.id}`,
+          requestedBy: 'scheduler',
+          riskLevel: 'HIGH',
+          dryRun: false,
+          maxAttempts: 2,
+          approvalReason: 'Sản phẩm đã qua kiểm tra tự động nhưng chỉ được public sau phê duyệt Safe Publish.',
+        });
+      }
     } else {
       counters.unchanged++;
     }

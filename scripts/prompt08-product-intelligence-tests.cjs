@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-prompt08-tests-'));
+const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-prompt08-tests-${process.pid}-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'prompt08-test';
@@ -600,7 +600,4 @@ main()
     failed += 1;
     console.error(error && error.stack ? error.stack : error);
     process.exitCode = 1;
-  })
-  .finally(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
   });

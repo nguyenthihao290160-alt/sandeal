@@ -2,34 +2,30 @@
 
 import { useEffect } from 'react';
 
-function eventId(productId: string): string {
-  const key = `sandeal:view:${productId}`;
-  try {
-    const existing = window.sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = globalThis.crypto?.randomUUID?.() || `view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    window.sessionStorage.setItem(key, created);
-    return created;
-  } catch {
-    return globalThis.crypto?.randomUUID?.() || `view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
-}
+import { trackPublicEvent, type PublicClientEventType } from './PublicAnalytics';
 
-export function PublicViewTracker({ productId, contentPageId }: { productId: string; contentPageId: string }) {
+export function PublicViewTracker({
+  productId,
+  contentPageId,
+  contextKey,
+  resultCount,
+  eventType = 'PRODUCT_DETAIL_VIEW',
+}: {
+  productId?: string;
+  contentPageId: string;
+  contextKey?: string;
+  resultCount?: number;
+  eventType?: PublicClientEventType;
+}) {
   useEffect(() => {
-    const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void fetch('/api/public/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productId, contentPageId, eventId: eventId(productId) }),
-        cache: 'no-store',
-        keepalive: true,
-        signal: controller.signal,
-      }).catch(() => undefined);
+      trackPublicEvent(
+        { eventType, productId, contentPageId, contextKey, resultCount },
+        `${eventType}:${productId || contextKey || contentPageId}`,
+      );
     }, 0);
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [contentPageId, productId]);
+    return () => window.clearTimeout(timer);
+  }, [contentPageId, contextKey, eventType, productId, resultCount]);
 
   return null;
 }

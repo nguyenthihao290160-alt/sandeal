@@ -3,8 +3,9 @@
 // Safe approve / AutoPilot-compatible approve
 // ===========================================
 
-import { type NextRequest } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { type NextRequest, NextResponse } from 'next/server';
+import { getServerActor, requireAuth, requirePermission } from '@/lib/auth';
+import { enqueueProductAction } from '@/lib/automation/productActions';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { approveProduct, getProductById, updateProduct } from '@/lib/storage/products';
 import {
@@ -315,7 +316,7 @@ function getApproveBlockReason(product: Product): string | null {
   return null;
 }
 
-export async function POST(request: NextRequest, context: RouteContext) {
+async function legacyApproveDisabled(request: NextRequest, context: RouteContext) {
   try {
     const authError = await requireAuth(request);
     if (authError) return authError;
@@ -393,5 +394,38 @@ export async function POST(request: NextRequest, context: RouteContext) {
     return successResponse('Đã duyệt sản phẩm.', product);
   } catch (err) {
     return serverErrorResponse('Không thể duyệt sản phẩm.', err);
+  }
+}
+
+// Retained for migration evidence; this synchronous approval path is not exported.
+void legacyApproveDisabled;
+
+export async function POST(request: NextRequest, context: RouteContext) {
+  const denied = await requirePermission(request, 'PUBLISH_CONTENT');
+  if (denied) return denied;
+  const { id } = await context.params;
+  let body: Record<string, unknown> = {};
+  try { body = await request.json() as Record<string, unknown>; } catch { /* optional body */ }
+  const reason = typeof body.reason === 'string' && body.reason.trim().length >= 5
+    ? body.reason.trim()
+    : 'Yêu cầu Safe Publish từ Product Operations';
+  try {
+    const result = await enqueueProductAction({
+      actor: getServerActor(),
+      action: 'safe_publish',
+      productId: id,
+      reason,
+      idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
+      operationId: typeof body.operationId === 'string' ? body.operationId : undefined,
+    });
+    return NextResponse.json({ ok: true, code: result.code, message: 'Đã tạo Safe Publish job; cần phê duyệt trước khi worker có thể đăng.', data: result.data }, { status: result.created ? 202 : 200 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message === 'PRODUCT_NOT_FOUND') return NextResponse.json({ ok: false, code: 'NOT_FOUND', message: 'Không tìm thấy sản phẩm.' }, { status: 404 });
+    if (message.startsWith('SAFE_PUBLISH_NOT_READY:')) {
+      const blockers = message.slice('SAFE_PUBLISH_NOT_READY:'.length).split(',').filter(Boolean).slice(0, 20);
+      return NextResponse.json({ ok: false, code: 'SAFE_PUBLISH_NOT_READY', message: 'Sản phẩm chưa đạt điều kiện Safe Publish.', data: { blockers } }, { status: 409 });
+    }
+    return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Không thể tạo yêu cầu Safe Publish.' }, { status: 400 });
   }
 }

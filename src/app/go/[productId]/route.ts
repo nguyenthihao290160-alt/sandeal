@@ -13,7 +13,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
   const target = validateExternalUrl(product.affiliateUrl || product.originalUrl);
   if (!target.safe || !target.normalizedUrl) return NextResponse.json({ ok: false, code: 'UNSAFE_TARGET', message: 'Liên kết nhà bán chưa an toàn để chuyển hướng.' }, { status: 410 });
   await recordGrowthEvent({
-    eventType: 'click', productId: product.id, source: product.source, campaign: product.campaignName,
+    eventType: 'OUTBOUND_CLICK', productId: product.id, source: product.source, campaign: product.campaignName,
     contentPageId: request.nextUrl.searchParams.get('content')?.slice(0, 160),
     referrerCategory: classifyReferrer(request.headers.get('referer'), request.nextUrl.hostname),
     deviceCategory: classifyDevice(request.headers.get('user-agent')),

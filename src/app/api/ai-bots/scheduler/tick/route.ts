@@ -1,6 +1,6 @@
 import { type NextRequest } from 'next/server';
-import { runSchedulerTick } from '@/lib/bots/automationScheduler';
-import { getOperationEnvironment, runGuardedOperation, sanitizeErrorMessage } from '@/lib/safety/operationGuard';
+import { runAutomationSchedulerTick, runProductIntelligenceSchedulerTick } from '@/lib/automation/scheduler';
+import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -14,39 +14,28 @@ export async function POST(request: NextRequest) {
   }
   try {
     const dryRun = request.nextUrl.searchParams.get('dryRun') === 'true';
-    const minuteBucket = new Date().toISOString().slice(0, 16);
-    const guarded = await runGuardedOperation({
-      operationType: 'scheduler_tick',
-      actor: 'scheduler',
-      environment: getOperationEnvironment(),
-      target: 'automation_scheduler',
-      approval: true,
-      riskLevel: 'HIGH',
-      dryRun,
-      idempotencyKey: request.headers.get('x-idempotency-key') || `natural-tick:${minuteBucket}`,
-    }, runSchedulerTick);
-    if (guarded.status !== 'COMPLETED') {
+    if (dryRun) {
       return Response.json({
-        ok: guarded.status === 'DRY_RUN' || guarded.status === 'ALREADY_PROCESSED',
-        data: { status: guarded.status, tickDurationMs: Date.now() - tickStartMs },
-      }, { status: guarded.status === 'IN_PROGRESS' ? 409 : guarded.status === 'APPROVAL_REQUIRED' || guarded.status === 'BLOCKED' ? 403 : 200 });
+        ok: true,
+        data: { status: 'DRY_RUN', businessDataChanged: false, externalSideEffect: false, tickDurationMs: Date.now() - tickStartMs },
+      });
     }
-    const result = guarded.value;
+    const now = Date.now();
+    const [automation, intelligence] = await Promise.all([
+      runAutomationSchedulerTick(now),
+      runProductIntelligenceSchedulerTick(now),
+    ]);
     return Response.json({
-      ok: result.status !== 'failed',
+      ok: true,
       data: {
-        status: result.status,
-        reason: result.reason,
-        mode: result.state.currentMode,
+        status: 'ENQUEUE_ONLY',
         trigger: 'scheduler',
-        summary: result.summary,
-        scheduler: result.state,
+        automation,
+        intelligence,
         tickDurationMs: Date.now() - tickStartMs,
-        message: result.status === 'completed'
-          ? 'Scheduler tick hoàn tất.'
-          : (result.reason || result.state.lastError || 'Scheduler tick thất bại.'),
+        message: 'Scheduler đã đánh giá lịch và chỉ tạo durable job khi đến hạn.',
       },
-    }, { status: result.status === 'failed' ? 500 : 200 });
+    });
   } catch (error) {
     const safeError = sanitizeErrorMessage(error instanceof Error ? error.message : 'Unknown error');
     console.error('[scheduler/tick]', safeError);

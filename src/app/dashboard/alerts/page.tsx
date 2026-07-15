@@ -22,6 +22,7 @@ type AlertsResponse = ProductAlert[] | {
   items?: ProductAlert[];
   summary?: Partial<Record<AlertSeverity | AlertStatus, number>> & { total?: number; unresolved?: number };
   updatedAt?: string;
+  evaluation?: { lastEvaluatedAt: string | null; runStatus: string; operationId: string | null; result: { active?: number; created?: number; reopened?: number; resolved?: number } | null; schedulerHeartbeatAt: string | null };
 };
 
 const SEVERITY_LABELS: Record<AlertSeverity, string> = { info: 'Thông tin', attention: 'Cần chú ý', important: 'Quan trọng', critical: 'Khẩn cấp' };
@@ -53,6 +54,20 @@ export default function AlertsPage() {
   const critical = openAlerts.filter((alert) => alert.severity === 'critical').length;
   const important = openAlerts.filter((alert) => alert.severity === 'important').length;
   const summary = Array.isArray(response) ? undefined : response?.summary;
+  const evaluation = Array.isArray(response) ? undefined : response?.evaluation;
+
+  const evaluateNow = async () => {
+    setBusy('evaluate');
+    setActionError('');
+    try {
+      await dashboardRequest('/api/dashboard/alerts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idempotencyKey: `alerts:evaluate:${new Date().toISOString().slice(0, 13)}` }) });
+      resource.reload();
+    } catch (issue) {
+      setActionError(issue instanceof Error ? issue.message : 'Không thể tạo tác vụ đánh giá cảnh báo.');
+    } finally {
+      setBusy('');
+    }
+  };
 
   const updateAlert = async (alert: ProductAlert, nextStatus: AlertStatus, reason?: string) => {
     setBusy(alert.id);
@@ -80,8 +95,8 @@ export default function AlertsPage() {
         eyebrow="Vận hành"
         title="Trung tâm cảnh báo"
         description="Tập trung các vấn đề cần xử lý từ dữ liệu, liên kết, worker và scheduler. Cảnh báo được chống trùng ở backend và mặc định chỉ hiển thị trong ứng dụng."
-        actions={<button type="button" className={styles.secondaryButton} onClick={resource.reload} disabled={resource.loading}><DashboardIcon name="refresh" size={16} />Làm mới</button>}
-        meta={<><StatusBadge tone="info">Thông báo trong ứng dụng</StatusBadge><StatusBadge tone="success">Không gửi webhook thật</StatusBadge></>}
+        actions={<><button type="button" className={styles.primaryButton} onClick={() => void evaluateNow()} disabled={Boolean(busy)}><DashboardIcon name="alert" size={16} />Đánh giá cảnh báo</button><button type="button" className={styles.secondaryButton} onClick={resource.reload} disabled={resource.loading}><DashboardIcon name="refresh" size={16} />Làm mới</button></>}
+        meta={<><StatusBadge tone="info">Lần đánh giá: {evaluation?.lastEvaluatedAt ? formatDateTime(evaluation.lastEvaluatedAt) : 'Chưa có'}</StatusBadge><StatusBadge tone="neutral">Scheduler: {evaluation?.schedulerHeartbeatAt ? formatDateTime(evaluation.schedulerHeartbeatAt) : 'Chưa có heartbeat'}</StatusBadge><StatusBadge tone="success">Không gửi webhook thật</StatusBadge></>}
       />
 
       {resource.loading && !response && <DashboardState kind="loading" title="Đang tải cảnh báo" />}

@@ -168,6 +168,7 @@
 .fileInput { display: grid; justify-items: center; gap: 8px; min-height: 150px; padding: 22px; color: var(--ds-text-muted, #64748b); background: var(--ds-surface-muted, #f1f5f9); border: 1px dashed var(--ds-border-strong, #cbd5e1); border-radius: var(--ds-radius-md, 7px); text-align: center; cursor: pointer; }
 .fileInput input { max-width: 100%; }
 .fileInput strong { color: var(--ds-text, #0f172a); }
+.fileInputActive { border-color: var(--ds-primary, #3157c8); background: var(--ds-surface-blue, #eef4ff); }
 .code { display: block; max-height: 280px; padding: 12px; overflow: auto; color: #dbeafe; background: #172033; border-radius: var(--ds-radius-md, 7px); font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 
 .alertList, .actionList { display: grid; gap: 10px; padding: 14px; }

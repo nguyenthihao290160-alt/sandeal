@@ -71,6 +71,7 @@ type ContentRow = {
 };
 
 type ViewMode = 'list' | 'kanban' | 'calendar';
+type ContentJobTracking = { jobId: string; operationId: string; status: string; trackingRoute: string };
 
 const STATUS_LABELS: Record<ContentWorkflowStatus, string> = {
   insufficient_data: 'Chưa đủ dữ liệu',
@@ -167,13 +168,12 @@ export default function ContentPage() {
     setActionError('');
     setNotice('');
     try {
-      const result = await dashboardRequest<ContentDraft | EditorialCheckResult>('/api/dashboard/content', {
+      const result = await dashboardRequest<ContentJobTracking>('/api/dashboard/content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action === 'create_local_draft' ? 'create_local' : 'check', productId: row.productId, draftId: row.draft?.id }),
       });
-      if (action === 'create_local_draft' && 'productId' in result) setSelectedDraftId(result.id);
-      setNotice(action === 'create_local_draft' ? 'Đã tạo khung bài viết local từ dữ liệu đã xác minh.' : 'Đã hoàn tất kiểm tra biên tập.');
+      setNotice(action === 'create_local_draft' ? `Đã đưa khung local vào hàng chờ (${result.operationId}).` : `Đã đưa Editorial Guard vào hàng chờ (${result.operationId}).`);
       resource.reload();
     } catch (issue) {
       setActionError(issue instanceof Error ? issue.message : 'Không thể thực hiện thao tác nội dung.');

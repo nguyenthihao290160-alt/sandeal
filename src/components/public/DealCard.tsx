@@ -1,9 +1,11 @@
 import Link from 'next/link';
 
 import ProductImage from '@/app/deals/ProductImage';
+import { publicTaxonomySlug } from '@/lib/seo/taxonomySeo';
 
 import type { PublicDealCardData } from './contracts';
 import { ComparisonToggle } from './ProductComparisonTray';
+import { PublicProductCardTracker } from './PublicAnalytics';
 import { PublicIcon } from './PublicIcon';
 import styles from './public.module.css';
 
@@ -89,16 +91,20 @@ export function DealCard({
 }) {
   const platformLabel = PLATFORM_LABELS[product.platform] || product.platform || 'Nguồn khác';
   const checkedAt = formatCheckedAt(product.priceUpdatedAt);
+  const verifiedAt = formatCheckedAt(product.verifiedAt);
   const discount = typeof product.discountPercent === 'number' && product.discountPercent > 0
     ? Math.min(99, Math.round(product.discountPercent))
     : null;
   const outboundHref = product.outboundHref?.startsWith('/go/')
     ? product.outboundHref
     : `/go/${encodeURIComponent(product.id)}`;
+  const detailHref = selectedComparisonIds.length > 0
+    ? `/deals/${encodeURIComponent(product.slug)}?compare=${encodeURIComponent(selectedComparisonIds.join(','))}`
+    : `/deals/${encodeURIComponent(product.slug)}`;
 
   return (
-    <article className={styles.dealCard}>
-      <Link className={styles.dealImageLink} href={`/deals/${encodeURIComponent(product.slug)}`}>
+    <PublicProductCardTracker className={styles.dealCard} productId={product.id}>
+      <Link className={styles.dealImageLink} href={detailHref} data-product-detail-link="true">
         <div className={styles.imageFrame}>
           <ProductImage
             src={product.imageUrl}
@@ -112,7 +118,13 @@ export function DealCard({
         </div>
       </Link>
       <div className={styles.dealBody}>
-        <Link className={styles.dealTitleLink} href={`/deals/${encodeURIComponent(product.slug)}`}>
+        <p className={styles.cardKicker}>
+          {product.brand ? (
+            <Link href={`/deals/brand/${encodeURIComponent(publicTaxonomySlug(product.brand))}`}>{product.brand}</Link>
+          ) : null}
+          {product.brand ? ' · ' : ''}{platformLabel}
+        </p>
+        <Link className={styles.dealTitleLink} href={detailHref} data-product-detail-link="true">
           <h3 className={styles.dealTitle}>{product.title}</h3>
         </Link>
         <PriceDisplay
@@ -125,17 +137,27 @@ export function DealCard({
           {typeof product.qualityScore === 'number' ? (
             <span className={styles.qualityBadge}>Chất lượng {Math.round(product.qualityScore)}</span>
           ) : null}
+          {typeof product.opportunityScore === 'number' ? (
+            <span className={styles.opportunityBadge}>Cơ hội {Math.round(product.opportunityScore)}</span>
+          ) : null}
         </div>
+        {product.priceMovement ? (
+          <p className={product.priceMovement.direction === 'down' ? styles.priceMovementDown : styles.priceMovementUp}>
+            {product.priceMovement.direction === 'down' ? 'Giảm' : 'Tăng'} {Math.round(product.priceMovement.percent * 10) / 10}% trong lịch sử SanDeal
+          </p>
+        ) : null}
         <div className={styles.metaRow}>
           <VerifiedSourceBadge verified={product.verifiedSource} />
           <span className={styles.affiliateBadge}>Có thể có affiliate</span>
         </div>
         <p className={styles.timeNote}>
           {checkedAt ? `Giá được kiểm tra ngày ${checkedAt}` : 'Chưa có thời điểm cập nhật giá'}
+          {verifiedAt ? ` · Xác minh ${verifiedAt}` : ''}
         </p>
+        {product.warnings?.map(warning => <p className={styles.cardWarning} key={warning}><PublicIcon name="warning" size={13} /> {warning}</p>)}
         <p className={styles.cardDisclosure}>Giá và ưu đãi có thể thay đổi tại nhà bán.</p>
         <div className={styles.cardActions}>
-          <Link className={styles.secondaryButton} href={`/deals/${encodeURIComponent(product.slug)}`}>Xem chi tiết</Link>
+          <Link className={styles.secondaryButton} href={detailHref} data-product-detail-link="true">Xem phân tích</Link>
           <a
             className={styles.primaryButton}
             href={outboundHref}
@@ -147,7 +169,7 @@ export function DealCard({
           {comparisonEnabled ? <ComparisonToggle productId={product.id} selectedIds={selectedComparisonIds} /> : null}
         </div>
       </div>
-    </article>
+    </PublicProductCardTracker>
   );
 }
 

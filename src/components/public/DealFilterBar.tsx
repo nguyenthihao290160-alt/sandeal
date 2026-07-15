@@ -10,6 +10,8 @@ export type PublicFilterValues = {
   q?: string;
   platform?: string;
   category?: string;
+  brand?: string;
+  priceTrend?: string;
   priceMin?: string;
   priceMax?: string;
   qualityBand?: string;
@@ -51,12 +53,24 @@ function FilterFields({ values }: { values: PublicFilterValues }) {
         <span>Danh mục</span>
         <input name="category" maxLength={80} defaultValue={values.category} placeholder="Ví dụ: Gia dụng" />
       </label>
+      <label className={styles.filterField}>
+        <span>Thương hiệu</span>
+        <input name="brand" maxLength={80} defaultValue={values.brand} placeholder="Ví dụ: Samsung" />
+      </label>
       <details
         className={styles.advancedFilters}
-        open={Boolean(values.priceMin || values.priceMax || values.qualityBand || values.opportunityBand || values.dealBand || values.updatedWithin || values.hasImage || values.verifiedSource || (values.sort && values.sort !== 'updated_desc') || (values.pageSize && values.pageSize !== '12'))}
+        open={Boolean(values.priceTrend || values.priceMin || values.priceMax || values.qualityBand || values.opportunityBand || values.dealBand || values.updatedWithin || values.hasImage || values.verifiedSource || (values.sort && values.sort !== 'updated_desc') || (values.pageSize && values.pageSize !== '12'))}
       >
         <summary><PublicIcon name="filter" size={15} /> Bộ lọc nâng cao và sắp xếp</summary>
         <div className={styles.advancedGrid}>
+      <label className={styles.filterField}>
+        <span>Biến động giá</span>
+        <select name="priceTrend" defaultValue={values.priceTrend || ''}>
+          <option value="">Mọi biến động</option>
+          <option value="down">Giá vừa giảm</option>
+          <option value="up">Giá vừa tăng</option>
+        </select>
+      </label>
       <label className={styles.filterField}>
         <span>Giá từ</span>
         <input name="priceMin" inputMode="numeric" pattern="[0-9]*" defaultValue={values.priceMin} placeholder="0" />
@@ -117,6 +131,7 @@ function FilterFields({ values }: { values: PublicFilterValues }) {
           <option value="price_asc">Giá thấp đến cao</option>
           <option value="price_desc">Giá cao đến thấp</option>
           <option value="discount_desc">Mức giảm cao</option>
+          <option value="price_drop_desc">Mức giảm vừa ghi nhận</option>
         </select>
       </label>
       <label className={styles.filterField}>

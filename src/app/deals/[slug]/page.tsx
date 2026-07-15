@@ -5,13 +5,17 @@ import { cache } from 'react';
 
 import {
   AffiliateDisclosure,
+  ComparisonToggle,
   DealScoreBadge,
   PriceDisplay,
   PriceHistory,
   ProductEvidence,
+  ProductGallery,
+  ProductComparisonTray,
   PublicFooter,
   PublicHeader,
   PublicIcon,
+  PublicVisibilityTracker,
   PublicViewTracker,
   RelatedDeals,
   SourceSummary,
@@ -25,8 +29,7 @@ import {
   buildProductMetadata,
   getProductIndexingDecision,
 } from '@/lib/seo/productSeo';
-
-import ProductImage from '../ProductImage';
+import { publicTaxonomySlug, taxonomyPath } from '@/lib/seo/taxonomySeo';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,8 +45,21 @@ function claimTexts(items?: Array<{ text: string }>) {
   return (items || []).map((item) => item.text).filter(Boolean);
 }
 
-export default async function DealDetailPage({ params }: { params: Promise<{ slug: string }> }) {
+function comparisonIds(value: string | string[] | undefined): string[] {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return [];
+  return [...new Set(raw.split(',').map(id => id.trim()).filter(id => id.length > 0 && id.length <= 120))].slice(0, 4);
+}
+
+export default async function DealDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { slug } = await params;
+  const selectedComparisonIds = comparisonIds((await searchParams).compare);
   const result = await getSafeDetail(slug);
   if (!result) notFound();
 
@@ -67,7 +83,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ slu
       fields: source.fields,
       checkedAt: source.checkedAt,
     })),
-    warnings: detail.dataIssues,
+    warnings: detail.warnings,
   };
   const contentPageId = `deal:${detail.slug}`;
   const outboundHref = `${detail.outboundHref}?content=${encodeURIComponent(contentPageId)}`;
@@ -93,6 +109,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ slu
             <nav className={styles.breadcrumb} aria-label="Breadcrumb">
               <Link href="/">Trang chủ</Link><span aria-hidden="true">/</span>
               <Link href="/deals">Deal</Link><span aria-hidden="true">/</span>
+              {detail.category ? <><Link href={taxonomyPath('category', publicTaxonomySlug(detail.category))}>{detail.category}</Link><span aria-hidden="true">/</span></> : null}
               <span aria-current="page">{detail.title}</span>
             </nav>
 
@@ -103,19 +120,11 @@ export default async function DealDetailPage({ params }: { params: Promise<{ slu
             ) : null}
 
             <div className={styles.detailGrid}>
-              <div className={styles.galleryMain}>
-                <div className={styles.imageFrame}>
-                  <ProductImage
-                    src={detail.imageUrl}
-                    alt={detail.title}
-                    eager
-                    sizes="(max-width: 800px) calc(100vw - 28px), 520px"
-                  />
-                </div>
-              </div>
+              <ProductGallery images={detail.gallery || []} title={detail.title} />
 
-              <div>
+              <div className={styles.decisionPanel}>
                 <SourceSummary source={detail.sourceLabel} checkedAt={detail.priceUpdatedAt || detail.updatedAt} />
+                {detail.brand ? <p className={styles.cardKicker}><Link href={taxonomyPath('brand', publicTaxonomySlug(detail.brand))}>{detail.brand}</Link></p> : null}
                 <h1 className={styles.detailTitle}>{detail.title}</h1>
                 {detail.description ? <p className={styles.detailSummary}>{detail.description}</p> : null}
                 <PriceDisplay
@@ -129,8 +138,21 @@ export default async function DealDetailPage({ params }: { params: Promise<{ slu
                   {typeof detail.qualityScore === 'number' ? (
                     <span className={styles.qualityBadge}>Quality Score {Math.round(detail.qualityScore)}</span>
                   ) : null}
+                  {typeof detail.opportunityScore === 'number' ? (
+                    <span className={styles.opportunityBadge}>Opportunity Score {Math.round(detail.opportunityScore)}</span>
+                  ) : null}
                   <VerifiedSourceBadge verified={detail.verifiedSource} />
                 </div>
+
+                {detail.priceMovement ? (
+                  <p className={detail.priceMovement.direction === 'down' ? styles.priceMovementDown : styles.priceMovementUp}>
+                    Giá {detail.priceMovement.direction === 'down' ? 'giảm' : 'tăng'} {Math.round(detail.priceMovement.percent * 10) / 10}% giữa hai lần SanDeal ghi nhận gần nhất.
+                  </p>
+                ) : <p className={styles.timeNote}>Chưa đủ snapshot để xác định biến động giá gần nhất.</p>}
+
+                {detail.warnings.map(warning => (
+                  <p className={styles.cardWarning} key={warning}><PublicIcon name="warning" size={13} /> {warning}</p>
+                ))}
 
                 {detail.dealReasons.length > 0 ? (
                   <article className={styles.contentCard}>
@@ -150,6 +172,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ slu
                       Xem tại nhà bán <PublicIcon name="external" size={16} />
                     </a>
                   ) : <span className={styles.warningBox}>Liên kết mua đang chờ xác minh lại.</span>}
+                  <ComparisonToggle productId={detail.id} selectedIds={selectedComparisonIds} />
                   <small>SanDeal có thể nhận hoa hồng. Giá và điều kiện cuối cùng được xác nhận tại nhà bán.</small>
                 </div>
               </div>
@@ -212,14 +235,22 @@ export default async function DealDetailPage({ params }: { params: Promise<{ slu
         <ProductEvidence evidence={evidence} />
 
         <section className={`${styles.section} ${styles.sectionSoft}`}>
-          <div className={styles.container}><PriceHistory points={detail.priceHistory} /></div>
+          <div className={styles.container}>
+            <PublicVisibilityTracker
+              event={{ eventType: 'PRICE_HISTORY_OPEN', productId: detail.id, contentPageId }}
+              dedupeKey={`price-history:${detail.id}`}
+            >
+              <PriceHistory points={detail.priceHistory} />
+            </PublicVisibilityTracker>
+          </div>
         </section>
 
-        <RelatedDeals products={detail.related} />
+        <RelatedDeals products={detail.related} selectedComparisonIds={selectedComparisonIds} />
 
         <section className={styles.section}>
           <div className={styles.container}><AffiliateDisclosure /></div>
         </section>
+        <ProductComparisonTray selectedIds={selectedComparisonIds} />
       </main>
       <PublicFooter />
     </div>

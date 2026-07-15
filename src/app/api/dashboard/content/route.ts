@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission, getServerActor } from '@/lib/auth';
 import { generateId } from '@/lib/storage/adapter';
+import { createAutomationJob } from '@/lib/automation/store';
+import { getProductById } from '@/lib/storage/products';
 import { getContentStudioDashboard } from '@/lib/product-intelligence/insights';
 import {
-  createLocalContentDraft,
-  editorialCheckDraft,
   transitionContentDraft,
   updateContentDraft,
 } from '@/lib/product-intelligence/contentStudio';
@@ -112,7 +112,16 @@ export async function POST(request: NextRequest) {
     const context = { actor, operationId };
 
     if (action === 'create_local') {
-      return response(await createLocalContentDraft(identifier(body, 'productId', 'INVALID_PRODUCT_ID'), actor, operationId), operationId, 201);
+      const productId = identifier(body, 'productId', 'INVALID_PRODUCT_ID');
+      if (!await getProductById(productId)) throw new Error('PRODUCT_NOT_FOUND');
+      const result = await createAutomationJob({
+        type: 'PREPARE_CONTENT_DRAFT', payload: { productIds: [productId] },
+        idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `content:local:${productId}:${new Date().toISOString().slice(0, 13)}`,
+        operationId, requestedBy: actor, riskLevel: 'MEDIUM', dryRun: body.dryRun === true,
+        botId: 'CONTENT_DRAFT_ASSISTANT', capability: 'PREPARE_CONTENT_DRAFT', requestedExecutionMode: 'LOCAL_ONLY',
+        executionPlan: [{ id: 'prepare-local-draft', capability: 'PREPARE_CONTENT_DRAFT', dependsOn: [], reason: 'Tạo draft từ verified facts bằng template deterministic.', status: 'PENDING', risk: 'MEDIUM', approvalRequired: false, expectedWrite: ['content-drafts'], externalCall: false, fallback: ['LOCAL_TEMPLATE', 'MANUAL_INPUT'] }],
+      });
+      return response({ jobId: result.job.id, operationId: result.job.operationId, status: result.job.status, trackingRoute: `/api/automation/jobs/${result.job.id}` }, operationId, result.created ? 202 : 200);
     }
     if (action === 'update') {
       const data = await updateContentDraft(identifier(body, 'draftId', 'INVALID_DRAFT_ID'), body.updates as Partial<ContentDraft>, context);
@@ -120,7 +129,15 @@ export async function POST(request: NextRequest) {
       return response(data, operationId);
     }
     if (action === 'check') {
-      return response(await editorialCheckDraft(identifier(body, 'draftId', 'INVALID_DRAFT_ID'), context), operationId);
+      const draftId = identifier(body, 'draftId', 'INVALID_DRAFT_ID');
+      const result = await createAutomationJob({
+        type: 'EDITORIAL_CHECK', payload: { draftId },
+        idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `editorial:${draftId}:${new Date().toISOString().slice(0, 13)}`,
+        operationId, requestedBy: actor, riskLevel: 'MEDIUM', dryRun: body.dryRun === true,
+        botId: 'EDITORIAL_GUARD', capability: 'VALIDATE_EDITORIAL', requestedExecutionMode: 'LOCAL_ONLY',
+        executionPlan: [{ id: 'editorial-guard', capability: 'VALIDATE_EDITORIAL', dependsOn: [], reason: 'Kiểm tra claim, evidence và readiness bằng rule phiên bản hóa.', status: 'PENDING', risk: 'MEDIUM', approvalRequired: false, expectedWrite: ['content-drafts'], externalCall: false, fallback: ['LOCAL_RULES', 'MANUAL_INPUT'] }],
+      });
+      return response({ jobId: result.job.id, operationId: result.job.operationId, status: result.job.status, trackingRoute: `/api/automation/jobs/${result.job.id}` }, operationId, result.created ? 202 : 200);
     }
 
     const draftId = identifier(body, 'draftId', 'INVALID_DRAFT_ID');

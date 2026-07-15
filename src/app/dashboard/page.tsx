@@ -9,6 +9,8 @@ import styles from './dashboard.module.css';
 type Range = 'today' | '7d' | '30d';
 type Envelope<T> = { ok: boolean; code: string; message: string; data?: T };
 type ActivityPoint = { label: string; completed: number; failed: number; retried: number; blocked: number; scanned: number };
+type OnboardingStep = { id: string; title: string; status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED'; reason: string; cta: string; route: string; completionCriteria: string; updatedAt: string };
+type OnboardingRecommendation = Pick<OnboardingStep, 'id' | 'title' | 'reason' | 'route' | 'cta' | 'status'>;
 type DashboardData = {
   updatedAt: string; range: Range;
   kpis: { productsProcessed: number; running: number; waiting: number; waitingApproval: number; completionRate: number | null; systemErrors: number };
@@ -21,10 +23,19 @@ type DashboardData = {
   circuits: Array<{ provider: string; state: string }>;
   control: { workerPaused: boolean; schedulerPaused: boolean; killSwitch: boolean; reason: string | null };
   recentActivity: Array<{ id: string; operationId: string; type: string; status: string; requestedBy: string; riskLevel: string; updatedAt: string; durationMs: number | null }>;
+  zeroData: boolean;
+  onboarding: { compact: boolean; summary: { completed: number; total: number; blocked: number; inProgress: number }; steps: OnboardingStep[]; recommendations: OnboardingRecommendation[]; updatedAt: string };
+  groups: {
+    workItems: { waitingApproval: number; waitingManual: number; failed: number; openAlerts: number };
+    dataReadiness: { products: number; enabledSources: number; pendingSources: number; unscored: number };
+    qualityContent: { scored: number; drafts: number; editorialChecked: number };
+    botOperations: { running: number; waiting: number; waitingManual: number };
+    growth: { published: number; outboundEvents: number; openAlerts: number };
+  };
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ thử lại',
+  PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ thử lại',
   SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng',
   active: 'Đang hoạt động', paused: 'Đã tạm dừng', stale: 'Mất tín hiệu', unverified: 'Không thể xác minh', not_configured: 'Chưa cấu hình',
 };
@@ -35,6 +46,10 @@ const TYPE_LABELS: Record<string, string> = {
   AGGREGATE_GROWTH_METRICS: 'Tổng hợp tăng trưởng', BULK_PRODUCT_OPERATION: 'Thao tác hàng loạt',
 };
 const RISK_LABELS: Record<string, string> = { LOW: 'Rủi ro thấp', MEDIUM: 'Rủi ro trung bình', HIGH: 'Rủi ro cao', BLOCKER: 'Bị chặn' };
+
+function hasCompletionCriteria(item: OnboardingStep | OnboardingRecommendation): item is OnboardingStep {
+  return 'completionCriteria' in item;
+}
 
 function ActivityChart({ points }: { points: ActivityPoint[] }) {
   const width = 760; const height = 250; const pad = 34;
@@ -120,7 +135,7 @@ export default function DashboardPage() {
   };
 
   const maxQueue = useMemo(() => data ? Math.max(1, data.queue.PENDING || 0, data.queue.RUNNING || 0, data.queue.WAITING_APPROVAL || 0, data.queue.FAILED || 0, data.queue.BLOCKED || 0) : 1, [data]);
-  const kpis: Array<{ label: string; value: string | number; help: string; icon: DashboardIconName; tone: string }> = data ? [
+  const populatedKpis: Array<{ label: string; value: string | number; help: string; icon: DashboardIconName; tone: string }> = data ? [
     { label: 'Sản phẩm đã xử lý', value: data.kpis.productsProcessed, help: 'Tổng sản phẩm trong kho dữ liệu', icon: 'product', tone: 'indigo' },
     { label: 'Tác vụ đang chạy', value: data.kpis.running, help: 'Tác vụ đã được bộ xử lý nền nhận', icon: 'worker', tone: 'cyan' },
     { label: 'Tác vụ đang chờ', value: data.kpis.waiting, help: 'Gồm chờ xử lý và chờ chạy lại', icon: 'queue', tone: 'amber' },
@@ -128,15 +143,24 @@ export default function DashboardPage() {
     { label: 'Tỷ lệ hoàn thành', value: data.kpis.completionRate === null ? 'Chưa đủ dữ liệu' : `${data.kpis.completionRate}%`, help: 'Tác vụ hoàn thành trên tổng tác vụ đã kết thúc', icon: 'check', tone: data.kpis.completionRate === null ? 'neutral' : 'green' },
     { label: 'Lỗi hệ thống', value: data.kpis.systemErrors, help: 'Tác vụ thất bại trong hàng chờ', icon: 'warning', tone: 'red' },
   ] : [];
+  const zeroDataKpis: typeof populatedKpis = data ? [
+    { label: 'Sản phẩm', value: data.groups.dataReadiness.products, help: 'Dữ liệu sản phẩm hiện có', icon: 'product', tone: 'indigo' },
+    { label: 'Nguồn đang bật', value: data.groups.dataReadiness.enabledSources, help: 'Nguồn đã thiết lập server-side', icon: 'source', tone: 'cyan' },
+    { label: 'Tác vụ đang chờ', value: data.kpis.waiting, help: 'Gồm queue và manual input', icon: 'queue', tone: 'amber' },
+    { label: 'Bước bị chặn', value: data.onboarding.summary.blocked, help: 'Cần hoàn tất bước phụ thuộc trước', icon: 'warning', tone: 'red' },
+  ] : [];
+  const kpis = data?.zeroData ? zeroDataKpis : populatedKpis;
 
   return <div className={styles.page} aria-busy={loading}>
     {toast && <div className={styles.toast} role="status">{toast}</div>}
     <header className={styles.header}><div><div className={styles.headerStatus}><span className={data?.control.killSwitch ? styles.dangerDot : styles.okDot} />{data?.control.killSwitch ? 'Dừng khẩn cấp đang bật' : data ? 'Hệ thống sẵn sàng' : 'Đang kiểm tra'}</div><h1>Bảng điều khiển</h1><p>Theo dõi hoạt động bot, tác vụ, nguồn dữ liệu và tình trạng hệ thống.</p>{data && <div className={styles.updated}>Cập nhật gần nhất: {new Date(data.updatedAt).toLocaleString('vi-VN')}</div>}</div><div className={styles.headerActions}><label><span>Khoảng thời gian</span><select value={range} onChange={event => setRange(event.target.value as Range)}><option value="today">Hôm nay</option><option value="7d">7 ngày</option><option value="30d">30 ngày</option></select></label><button type="button" onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />{loading ? 'Đang làm mới' : 'Làm mới'}</button></div></header>
     {error && <section className={styles.error}><h2>Không thể tải bảng điều khiển</h2><p>{error} Dữ liệu hiện tại không bị thay đổi.</p><button type="button" onClick={() => void load()}>Thử lại</button></section>}
     {loading && !data && <div className={styles.skeleton}><span /><span /><span /></div>}
-    <BusinessOverview />
+    {data && !data.zeroData && <BusinessOverview />}
     {data && <>
       <section className={styles.kpis} aria-label="Chỉ số chính">{kpis.map(item => <article key={item.label} className={styles[item.tone]} title={item.help}><div className={styles.kpiTop}><span className={styles.kpiIcon}><DashboardIcon name={item.icon} size={22} /></span><span>{item.label}</span></div><strong>{item.value}</strong><small>{item.help}</small></article>)}</section>
+      <section className={styles.onboarding} aria-labelledby="onboarding-title"><div className={styles.panelHeader}><div><h2 id="onboarding-title"><DashboardIcon name="today" size={19} />{data.onboarding.compact ? 'Việc nên làm tiếp theo' : 'Bắt đầu vận hành SanDeal'}</h2><p>{data.onboarding.summary.completed}/{data.onboarding.summary.total} bước đã hoàn thành, trạng thái được suy ra từ backend.</p></div><Link href="/dashboard/today">Xem việc hôm nay</Link></div><div className={styles.onboardingList}>{(data.onboarding.compact ? data.onboarding.recommendations : data.onboarding.steps).map(item => <article key={item.id} className={styles.onboardingStep}><div><span className={styles[`step${item.status}`]}>{item.status === 'COMPLETED' ? 'Hoàn thành' : item.status === 'IN_PROGRESS' ? 'Đang thực hiện' : item.status === 'BLOCKED' ? 'Bị chặn' : 'Chưa bắt đầu'}</span><h3>{item.title}</h3></div><p>{item.reason}</p>{hasCompletionCriteria(item) && <small>Hoàn thành khi: {item.completionCriteria}</small>}<Link href={item.route}>{item.cta}</Link></article>)}</div></section>
+      {!data.zeroData && <>
       <section className={styles.mainGrid}><article className={`${styles.panel} ${styles.chartPanel}`}><div className={styles.panelHeader}><div><h2><DashboardIcon name="task" size={19} />Hoạt động xử lý theo thời gian</h2><p>Dữ liệu tác vụ thực tế trong khoảng đã chọn.</p></div></div>{data.activity.length ? <ActivityChart points={data.activity} /> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={24} /></span><h3>Chưa có hoạt động trong khoảng này</h3><p>Hãy tạo một tác vụ chạy thử an toàn để bắt đầu ghi nhận dữ liệu.</p><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Chạy thử an toàn</button></div>}</article>
         <aside className={styles.panel}><div className={styles.panelHeader}><div><h2>Hiệu suất nổi bật</h2><p>Nguồn sản phẩm theo dữ liệu hợp lệ.</p></div></div>{data.sourcePerformance.length ? <div className={styles.ranking}>{data.sourcePerformance.map(source => <div key={source.name}><div><strong>{source.name}</strong><span>{source.valid}/{source.total} hợp lệ</span></div><div className={styles.progress}><span style={{ width: `${source.rate}%` }} /></div><small>{source.rate}%</small></div>)}</div> : <div className={styles.emptySmall}>Chưa đủ dữ liệu để xếp hạng nguồn.</div>}</aside>
       </section>
@@ -147,6 +171,7 @@ export default function DashboardPage() {
         <article className={`${styles.panel} ${styles.controlPanel}`}><h2><DashboardIcon name="settings" size={19} />Điều khiển nhanh</h2><div className={styles.quickActions}><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Chạy thử an toàn</button><button type="button" onClick={() => setPendingControl({ action: data.control.schedulerPaused ? 'resume_scheduler' : 'pause_scheduler', title: data.control.schedulerPaused ? 'Tiếp tục lịch tự động' : 'Tạm dừng lịch tự động' })}>{data.control.schedulerPaused ? 'Tiếp tục lịch tự động' : 'Tạm dừng lịch tự động'}</button><Link href="/dashboard/queue">Xem hàng chờ phê duyệt</Link><div className={styles.emergencyAction}><button type="button" className={styles.dangerButton} onClick={() => setPendingControl({ action: data.control.killSwitch ? 'disable_kill_switch' : 'enable_kill_switch', title: data.control.killSwitch ? 'Tắt dừng khẩn cấp' : 'Dừng khẩn cấp', danger: true })}><DashboardIcon name="emergency" size={16} />{data.control.killSwitch ? 'Tắt dừng khẩn cấp' : 'Dừng khẩn cấp'}</button></div></div></article>
       </section>
       <section className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="task" size={19} />Lịch sử hoạt động gần đây</h2><p>Tác vụ và kết quả đã được lưu bền vững.</p></div><Link href="/dashboard/ai-bots">Xem tất cả tác vụ</Link></div>{data.recentActivity.length ? <div className={styles.tableWrap}><table><thead><tr><th>Thời gian</th><th>Tác vụ</th><th>Người thực hiện</th><th>Kết quả</th><th>Mức rủi ro</th><th>Thời gian xử lý</th><th>Mã thao tác</th></tr></thead><tbody>{data.recentActivity.map(item => <tr key={item.id}><td>{new Date(item.updatedAt).toLocaleString('vi-VN')}</td><td>{TYPE_LABELS[item.type] || item.type}</td><td>{item.requestedBy === 'scheduler' ? 'Lịch tự động' : 'Quản trị viên'}</td><td>{STATUS_LABELS[item.status] || item.status}</td><td>{RISK_LABELS[item.riskLevel] || item.riskLevel}</td><td>{item.durationMs === null ? 'Chưa có' : `${Math.round(item.durationMs / 1000)} giây`}</td><td><code>{item.operationId}</code></td></tr>)}</tbody></table></div> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={24} /></span><h3>Chưa có lịch sử hoạt động</h3><p>Tạo một tác vụ chạy thử để xác minh hàng chờ và bắt đầu ghi nhận lịch sử.</p><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Tạo tác vụ chạy thử</button></div>}</section>
+      </>}
     </>}
     {pendingControl && <div className={styles.modalBackdrop}><section className={styles.modal} role="alertdialog" aria-modal="true" aria-labelledby="control-title"><h2 id="control-title">{pendingControl.title}</h2><p>Thao tác này thay đổi trạng thái vận hành và sẽ được ghi vào nhật ký kiểm soát.</p><label><span>Lý do</span><textarea autoFocus rows={3} value={reason} onChange={event => setReason(event.target.value)} /></label><div className={styles.modalActions}><button type="button" onClick={() => { setPendingControl(null); setReason(''); }} disabled={submitting}>Đóng</button><button type="button" className={pendingControl.danger ? styles.dangerButton : ''} onClick={() => void applyControl()} disabled={submitting || reason.trim().length < 8}>{submitting ? 'Đang cập nhật' : 'Xác nhận'}</button></div></section></div>}
   </div>;

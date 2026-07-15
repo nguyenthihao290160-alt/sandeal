@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type DragEvent } from 'react';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
 import {
   DashboardPageHeader,
@@ -121,6 +121,7 @@ function normalizePreview(value: ImportPreview | { preview?: ImportPreview }): I
 export default function ImportProductsPage() {
   const [activeTab, setActiveTab] = useState<'csv' | 'manual' | 'accesstrade'>('csv');
   const [fileName, setFileName] = useState('');
+  const [dragActive, setDragActive] = useState(false);
   const [csv, setCsv] = useState('');
   const [headers, setHeaders] = useState<string[]>([]);
   const [mapping, setMapping] = useState<Partial<Record<MappingField, string>>>({});
@@ -168,6 +169,22 @@ export default function ImportProductsPage() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    if (!busy) void chooseFile(event.dataTransfer.files[0]);
+  };
+
+  const downloadTemplate = () => {
+    const header = MAPPING_FIELDS.map(([field]) => field).join(',');
+    const url = URL.createObjectURL(new Blob([`\uFEFF${header}\n`], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'sandeal-product-import-template.csv';
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   const runPreview = async () => {
@@ -273,12 +290,14 @@ export default function ImportProductsPage() {
       <div className={styles.twoColumns}>
         <Panel title="1. Chọn tệp CSV" icon="import" description="Tệp chỉ được đọc trong trình duyệt và gửi để kiểm tra; SanDeal không lưu tệp upload lâu dài.">
           <div className={styles.panelBody}>
-            <label className={styles.fileInput}>
+            <label className={`${styles.fileInput} ${dragActive ? styles.fileInputActive : ''}`} onDragOver={(event) => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={handleDrop}>
               <DashboardIcon name="import" size={28} />
-              <strong>{fileName || 'Chọn tệp dữ liệu UTF-8'}</strong>
+              <strong>{fileName || 'Kéo thả hoặc chọn tệp dữ liệu UTF-8'}</strong>
               <span>Tối đa 2 MB. Một dòng lỗi không làm dừng toàn bộ tệp.</span>
               <input type="file" accept=".csv,text/csv" disabled={Boolean(busy)} onChange={(event) => void chooseFile(event.target.files?.[0])} />
             </label>
+            <div className={styles.buttonRow}><button type="button" className={styles.secondaryButton} onClick={downloadTemplate}><DashboardIcon name="import" size={16} />Tải mẫu CSV</button></div>
+            <details><summary>Hướng dẫn cột</summary><dl>{MAPPING_FIELDS.map(([field, label]) => <div key={field}><dt>{field}</dt><dd>{label}</dd></div>)}</dl></details>
             <p className={styles.help}>Giá trị bắt đầu bằng ký tự công thức phải được backend vô hiệu hóa khi xuất hoặc xem lại. Không nhập secret, token hay thông tin đăng nhập.</p>
           </div>
         </Panel>

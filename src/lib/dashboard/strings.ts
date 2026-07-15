@@ -14,6 +14,7 @@ export const dashboardStrings = {
   status: {
     pending: 'Chờ xử lý',
     waiting_approval: 'Chờ phê duyệt',
+    waiting_manual: 'Chờ thông tin thủ công',
     running: 'Đang xử lý',
     waiting_retry: 'Đang chờ thử lại',
     completed: 'Hoàn thành',

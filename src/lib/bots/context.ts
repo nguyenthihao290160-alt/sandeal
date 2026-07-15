@@ -5,6 +5,7 @@
 
 import type { BotName } from '../types';
 import { addBotRunLog } from '../storage/botRuns';
+import { sanitizeErrorMessage, sanitizeSensitiveValue } from '../safety/operationGuard';
 
 export class BotContext {
   runId: string;
@@ -20,8 +21,10 @@ export class BotContext {
     message: string,
     data?: Record<string, unknown>
   ): Promise<void> {
-    await addBotRunLog(this.runId, this.botName, level, message, data);
-    console.log(`[${this.botName}] ${level.toUpperCase()}: ${message}`, data ? JSON.stringify(data) : '');
+    const safeMessage = sanitizeErrorMessage(message).slice(0, 1_000);
+    const safeData = sanitizeSensitiveValue(data) as Record<string, unknown> | undefined;
+    await addBotRunLog(this.runId, this.botName, level, safeMessage, safeData);
+    console.log(`[${this.botName}] ${level.toUpperCase()}: ${safeMessage}`, safeData ? JSON.stringify(safeData) : '');
   }
 
   async info(message: string, data?: Record<string, unknown>): Promise<void> {

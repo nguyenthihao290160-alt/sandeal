@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { cache } from 'react';
 
 import {
   AffiliateDisclosure,
@@ -21,21 +22,9 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-export const metadata: Metadata = {
-  title: 'Danh sách deal đã kiểm tra | SanDeal',
-  description: 'Lọc và so sánh sản phẩm công khai theo giá, nền tảng, chất lượng dữ liệu, Deal Score và thời điểm cập nhật.',
-  alternates: { canonical: '/deals' },
-  openGraph: {
-    title: 'Danh sách deal đã kiểm tra | SanDeal',
-    description: 'Tìm sản phẩm theo dữ liệu giá, nguồn và điểm chất lượng hiện có.',
-    url: '/deals',
-    type: 'website',
-    locale: 'vi_VN',
-    siteName: 'SanDeal',
-  },
-};
-
 type RawSearchParams = Record<string, string | string[] | undefined>;
+
+const getPublicSearch = cache((serialized: string) => queryPublicProducts(new URLSearchParams(serialized)));
 
 function appendSearchParams(target: URLSearchParams, source: RawSearchParams) {
   for (const [key, value] of Object.entries(source)) {
@@ -56,6 +45,8 @@ function filterValues(query: PublicProductQuery, selectedIds: string[]): PublicF
     q: query.q,
     platform: query.platform,
     category: query.category,
+    brand: query.brand,
+    priceTrend: query.priceTrend,
     priceMin: query.priceMin === undefined ? undefined : String(query.priceMin),
     priceMax: query.priceMax === undefined ? undefined : String(query.priceMax),
     qualityBand: query.qualityBand,
@@ -77,10 +68,40 @@ function paginationQuery(query: PublicProductQuery, selectedIds: string[]): Reco
 
 function hasFilters(query: PublicProductQuery) {
   return Boolean(
-    query.q || query.platform || query.category || query.priceMin !== undefined || query.priceMax !== undefined
+    query.q || query.platform || query.category || query.brand || query.priceTrend || query.priceMin !== undefined || query.priceMax !== undefined
     || query.qualityBand || query.opportunityBand || query.dealBand || query.hasImage !== undefined
     || query.verifiedSource !== undefined || query.updatedWithin || query.sort !== 'updated_desc' || query.pageSize !== 12,
   );
+}
+
+export async function generateMetadata({ searchParams }: { searchParams: Promise<RawSearchParams> }): Promise<Metadata> {
+  const raw = await searchParams;
+  const params = new URLSearchParams();
+  appendSearchParams(params, raw);
+  const curated = Object.keys(raw).every(key => key === 'page');
+  const description = 'Lọc và so sánh sản phẩm công khai theo giá, nền tảng, chất lượng dữ liệu, Deal Score và thời điểm cập nhật.';
+  try {
+    const result = await getPublicSearch(params.toString());
+    const pageSuffix = result.pagination.page > 1 ? ` - Trang ${result.pagination.page}` : '';
+    const title = `Danh sách deal đã kiểm tra${pageSuffix} | SanDeal`;
+    const canonical = result.pagination.page > 1 ? `/deals?page=${result.pagination.page}` : '/deals';
+    const indexable = curated && !result.pagination.outOfRange;
+    return {
+      title,
+      description,
+      alternates: { canonical },
+      robots: { index: indexable, follow: true, googleBot: { index: indexable, follow: true } },
+      openGraph: { title, description, url: canonical, type: 'website', locale: 'vi_VN', siteName: 'SanDeal' },
+      twitter: { card: 'summary', title, description },
+    };
+  } catch {
+    return {
+      title: 'Danh sách deal đã kiểm tra | SanDeal',
+      description,
+      alternates: { canonical: '/deals' },
+      robots: { index: false, follow: true },
+    };
+  }
 }
 
 export default async function DealsPage({ searchParams }: { searchParams: Promise<RawSearchParams> }) {
@@ -92,11 +113,11 @@ export default async function DealsPage({ searchParams }: { searchParams: Promis
   let invalidFilter: string | null = null;
   let result: Awaited<ReturnType<typeof queryPublicProducts>>;
   try {
-    result = await queryPublicProducts(publicSearch);
+    result = await getPublicSearch(publicSearch.toString());
   } catch (error) {
     if (!(error instanceof PublicProductQueryError)) throw error;
     invalidFilter = error.field;
-    result = await queryPublicProducts(new URLSearchParams());
+    result = await getPublicSearch('');
   }
 
   const values = filterValues(result.filters, selectedIds);
@@ -122,6 +143,12 @@ export default async function DealsPage({ searchParams }: { searchParams: Promis
             {invalidFilter ? (
               <div className={styles.warningBox} role="alert">
                 <strong>Bộ lọc không hợp lệ:</strong> trường “{invalidFilter}” đã được bỏ qua. Danh sách mặc định đang được hiển thị.
+              </div>
+            ) : null}
+
+            {result.pagination.outOfRange ? (
+              <div className={styles.warningBox} role="status">
+                Trang {result.pagination.requestedPage} vượt phạm vi hiện có; đang hiển thị trang {result.pagination.page}.
               </div>
             ) : null}
 

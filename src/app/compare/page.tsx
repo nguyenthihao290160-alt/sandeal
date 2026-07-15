@@ -7,6 +7,7 @@ import {
   PublicFooter,
   PublicHeader,
   PublicIcon,
+  PublicViewTracker,
 } from '@/components/public';
 import styles from '@/components/public/public.module.css';
 import { getPublicComparison } from '@/lib/product-intelligence/publicProducts';
@@ -36,6 +37,7 @@ export default async function ComparePage({ searchParams }: { searchParams: Prom
 
   return (
     <div className={styles.shell}>
+      <PublicViewTracker eventType="COMPARE_OPEN" contentPageId="compare:page" resultCount={products.length} />
       <PublicHeader />
       <main className={styles.section}>
         <div className={styles.container}>

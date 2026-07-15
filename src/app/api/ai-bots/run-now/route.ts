@@ -10,15 +10,15 @@
 // - Invalid JSON or invalid mode must never silently start a workflow.
 
 import { type NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import {
-  runAutoPilot,
-  type AutoPilotMode,
-} from '@/lib/bots/autoPilotRunner';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { enqueueBotExecution } from '@/lib/automation/enqueue';
+import { publicAutomationJob } from '@/lib/automation/store';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
+
+type AutoPilotMode = 'full_safe_run' | 'source_scan' | 'health_check' | 'cleanup_broken_products';
 
 const DEFAULT_MODE: AutoPilotMode = 'full_safe_run';
 
@@ -141,20 +141,9 @@ async function readRequestBody(
   };
 }
 
-function getResultStatusCode(status: unknown): number {
-  if (status === 'skipped') return 409;
-  if (status === 'failed') return 500;
-
-  return 200;
-}
-
-function isSuccessfulResult(status: unknown): boolean {
-  return status !== 'failed' && status !== 'skipped';
-}
-
 export async function POST(request: NextRequest) {
   try {
-    const authError = await requireAuth(request);
+    const authError = await requirePermission(request, 'MANAGE_AUTOMATION');
 
     if (authError) {
       return authError;
@@ -188,42 +177,25 @@ export async function POST(request: NextRequest) {
         ? requestedMode
         : DEFAULT_MODE;
 
-    console.info('[api/ai-bots/run-now] AutoPilot requested', {
+    const result = await enqueueBotExecution({
+      actor: getServerActor(),
       mode,
       trigger: 'dashboard',
-      safeMode: true,
-      freeOnly: true,
-      safePublish: true,
-      allowPaidAi: false,
-    });
-
-    const result = await runAutoPilot({
-      mode,
-      trigger: 'dashboard',
-    });
-
-    const statusCode = getResultStatusCode(result.status);
-    const successful = isSuccessfulResult(result.status);
-
-    console.info('[api/ai-bots/run-now] AutoPilot finished', {
-      mode,
-      status: result.status,
-      successful,
+      requestedExecutionMode: 'AUTO',
     });
 
     return createJsonResponse(
         {
-          ok: successful,
-          success: successful,
-          message:
-              result.message ||
-              result.error ||
-              (successful
-                  ? 'AutoPilot đã hoàn tất.'
-                  : result.status === 'skipped'
-                      ? 'AutoPilot đang chạy hoặc lượt chạy này đã được bỏ qua.'
-                      : 'AutoPilot chạy thất bại.'),
-          data: result,
+          ok: true,
+          success: true,
+          code: result.code,
+          message: result.created ? 'Đã đưa AutoPilot vào hàng đợi bền vững.' : 'Tác vụ tương đương đã tồn tại; không tạo lần chạy thứ hai.',
+          data: {
+            job: publicAutomationJob(result.job),
+            jobId: result.job.id,
+            operationId: result.job.operationId,
+            trackingRoute: `/api/automation/jobs/${result.job.id}`,
+          },
           policy: {
             safeMode: true,
             freeOnly: true,
@@ -232,20 +204,15 @@ export async function POST(request: NextRequest) {
             costMode: 'safe_free',
           },
         },
-        statusCode,
+        result.created ? 202 : 200,
     );
   } catch (error) {
-    console.error('[api/ai-bots/run-now] Error:', error);
-
     return createJsonResponse(
         {
           ok: false,
           success: false,
           message: 'Không thể chạy AutoPilot.',
-          error:
-              error instanceof Error
-                  ? error.message
-                  : 'Lỗi không xác định',
+          error: error instanceof Error && ['INVALID_IDEMPOTENCY_KEY', 'BOT_NOT_AVAILABLE'].includes(error.message) ? error.message : 'VALIDATION_ERROR',
           policy: {
             safeMode: true,
             freeOnly: true,
@@ -254,7 +221,7 @@ export async function POST(request: NextRequest) {
             costMode: 'safe_free',
           },
         },
-        500,
+        400,
     );
   }
 }

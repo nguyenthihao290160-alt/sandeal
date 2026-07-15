@@ -141,7 +141,13 @@ export function PriceHistory({ points }: { points: PublicPricePoint[] }) {
   );
 }
 
-export function RelatedDeals({ products }: { products: PublicDealCardData[] }) {
+export function RelatedDeals({
+  products,
+  selectedComparisonIds = [],
+}: {
+  products: PublicDealCardData[];
+  selectedComparisonIds?: string[];
+}) {
   if (products.length === 0) return null;
   return (
     <section className={styles.section} aria-labelledby="related-deals-title">
@@ -153,7 +159,14 @@ export function RelatedDeals({ products }: { products: PublicDealCardData[] }) {
           </div>
         </div>
         <div className={styles.dealGrid}>
-          {products.map((product) => <DealCard product={product} key={product.id} />)}
+          {products.map((product) => (
+            <DealCard
+              product={product}
+              selectedComparisonIds={selectedComparisonIds}
+              comparisonEnabled
+              key={product.id}
+            />
+          ))}
         </div>
       </div>
     </section>

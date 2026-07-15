@@ -3,11 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "node scripts/test-runner.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08",
+    "test": "node scripts/test-runner.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
     "test:dashboard": "node scripts/prompt05b-dashboard-tests.cjs",
     "test:automation": "node scripts/prompt06-automation-tests.cjs",
     "test:release-ui": "node scripts/prompt07-release-ui-tests.cjs",
     "test:prompt08": "node scripts/prompt08-product-intelligence-tests.cjs && node scripts/prompt08-import-dedupe-tests.cjs && node scripts/prompt08-content-studio-tests.cjs && node scripts/prompt08-growth-alerts-links-tests.cjs && node scripts/prompt08-backend-hardening-tests.cjs",
+    "test:prompt09:a": "node scripts/prompt09-bot-foundation-tests.cjs",
+    "test:prompt09:b": "node scripts/prompt09-operations-tests.cjs",
+    "test:prompt09:c": "node scripts/prompt09-storefront-tests.cjs",
+    "test:prompt09:d": "node scripts/prompt09-seo-analytics-tests.cjs",
+    "test:prompt09": "npm run test:prompt09:a && npm run test:prompt09:b && npm run test:prompt09:c && npm run test:prompt09:d",
     "test:stabilization": "node scripts/stabilization-tests.cjs",
     "dev": "next dev",
     "build": "next build",
@@ -28,7 +33,8 @@
     "release:quality": "npm run typecheck && npm run lint && npm run test:release-ui && npm run test:automation && npm test && npm run build && npm run release:secret-scan && npm run release:generated-check && npm run release:migration-check && npm run release:backup-verify && npm run release:manifest:create && npm run release:manifest:validate",
     "reprocess:v2:dry": "node scripts/reprocess-products-v2.cjs",
     "reprocess:v2:apply": "node scripts/reprocess-products-v2.cjs --apply",
-    "smoke:autonomous": "node scripts/autonomous-pipeline-smoke.cjs"
+    "smoke:autonomous": "node scripts/autonomous-pipeline-smoke.cjs",
+    "smoke:prompt09": "node scripts/prompt09-runtime-smoke.cjs"
   },
   "engines": {
     "node": ">=20.9.0 <25"

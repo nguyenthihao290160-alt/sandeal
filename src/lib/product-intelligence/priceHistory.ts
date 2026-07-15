@@ -76,6 +76,26 @@ export async function listPriceHistory(productId: string, limit = 365): Promise<
     .slice(-Math.max(1, Math.min(limit, CONFIG.limits.priceSnapshotsPerProduct)));
 }
 
+export async function listPriceHistories(
+  productIds: string[],
+  limitPerProduct = 365,
+): Promise<Map<string, PriceSnapshot[]>> {
+  const ids = new Set(productIds.map(String).filter(Boolean).slice(0, 2_000));
+  const limit = Math.max(1, Math.min(limitPerProduct, CONFIG.limits.priceSnapshotsPerProduct));
+  const grouped = new Map<string, PriceSnapshot[]>();
+  if (!ids.size) return grouped;
+  for (const snapshot of await readCollection<PriceSnapshot>(COLLECTION)) {
+    if (!ids.has(snapshot.productId)) continue;
+    grouped.set(snapshot.productId, [...(grouped.get(snapshot.productId) || []), snapshot]);
+  }
+  for (const [productId, snapshots] of grouped) {
+    grouped.set(productId, snapshots
+      .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt))
+      .slice(-limit));
+  }
+  return grouped;
+}
+
 export function calculatePriceStatistics(productId: string, snapshots: PriceSnapshot[]): PriceStatistics {
   const sorted = snapshots.filter(item => item.productId === productId && effectivePrice(item))
     .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt));

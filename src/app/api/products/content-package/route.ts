@@ -4,11 +4,8 @@
 // ===========================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import { getProductById } from '@/lib/storage/products';
-import { createContentReview } from '@/lib/bots/contentReview';
-import { createComplianceGuard } from '@/lib/bots/complianceGuard';
-import { createContentPackage } from '@/lib/storage/contentPackages';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { enqueueProductAction } from '@/lib/automation/productActions';
 
 interface ContentPackageRequest {
   productId: string;
@@ -16,8 +13,7 @@ interface ContentPackageRequest {
 
 export async function POST(req: NextRequest) {
   try {
-    // Check auth
-    const authError = await requireAuth(req);
+    const authError = await requirePermission(req, 'MANAGE_CONTENT');
     if (authError) return authError;
 
     const body = await req.json() as ContentPackageRequest;
@@ -29,45 +25,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Get product
-    const product = await getProductById(body.productId);
-    if (!product) {
-      return NextResponse.json(
-        { success: false, error: 'Product not found' },
-        { status: 404 }
-      );
-    }
-
-    // Create temp run ID for logging
-    const runId = `content-pkg-${Date.now()}`;
-
-    // Generate content
-    const contentBot = await createContentReview(runId);
-    const content = await contentBot.generateContent(product);
-
-    // Check compliance
-    const complianceBot = await createComplianceGuard(runId);
-    const complianceResult = await complianceBot.checkContent(content);
-
-    // Update content with compliance status
-    content.complianceStatus = complianceResult.status;
-    content.complianceIssues = complianceResult.issues;
-
-    // Save package
-    const savedPackage = await createContentPackage(product.id, content);
-
+    const result = await enqueueProductAction({ actor: getServerActor(), action: 'content', productId: body.productId });
     return NextResponse.json({
       success: true,
-      data: savedPackage,
-    });
+      ok: true,
+      code: result.code,
+      message: 'Đã đưa bản nháp nội dung local vào hàng đợi.',
+      data: result.data,
+    }, { status: result.created ? 202 : 200 });
   } catch (error) {
-    console.error('[content-package] Error:', error);
+    const code = error instanceof Error && error.message === 'PRODUCT_NOT_FOUND' ? 'NOT_FOUND' : 'VALIDATION_ERROR';
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        ok: false,
+        code,
+        message: code === 'NOT_FOUND' ? 'Không tìm thấy sản phẩm.' : 'Không thể tạo tác vụ nội dung.',
       },
-      { status: 500 }
+      { status: code === 'NOT_FOUND' ? 404 : 400 }
     );
   }
 }

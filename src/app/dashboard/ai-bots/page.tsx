@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AutomationJob, AutomationJobStatus, AutomationJobType } from '@/lib/automation/types';
 import styles from '../operations.module.css';
+import { BotControlCenter } from './bot-control-center';
 
 type SafeJob = Omit<AutomationJob, 'payload'>;
 type JobsResponse = { ok: boolean; message: string; data?: { items: SafeJob[]; pagination: { page: number; totalItems: number; totalPages: number } } };
-const STATUS_LABELS: Record<AutomationJobStatus, string> = { PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ chạy lại', SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng' };
+const STATUS_LABELS: Record<AutomationJobStatus, string> = { PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ chạy lại', SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng' };
 const TYPE_LABELS: Record<AutomationJobType, string> = {
   PRODUCT_SCAN: 'Quét sản phẩm',
   AUTO_PILOT: 'Chế độ tự động',
@@ -32,7 +33,7 @@ function badge(status: AutomationJobStatus) {
   return `${styles.badge} ${styles.warning}`;
 }
 
-export default function AutomationJobsPage() {
+function LegacyAutomationJobsPage() {
   const [jobs, setJobs] = useState<SafeJob[]>([]);
   const [status, setStatus] = useState('');
   const [type, setType] = useState('');
@@ -60,7 +61,7 @@ export default function AutomationJobsPage() {
 
   useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
   useEffect(() => { if (!action) return; const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) setAction(null); }; window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close); }, [action, busy]);
-  const counts = useMemo(() => ({ running: jobs.filter(job => job.status === 'RUNNING').length, waiting: jobs.filter(job => ['PENDING','RETRY_SCHEDULED'].includes(job.status)).length, approval: jobs.filter(job => job.status === 'WAITING_APPROVAL').length, failed: jobs.filter(job => ['FAILED','BLOCKED'].includes(job.status)).length }), [jobs]);
+  const counts = useMemo(() => ({ running: jobs.filter(job => job.status === 'RUNNING').length, waiting: jobs.filter(job => ['PENDING','WAITING_FOR_MANUAL_INPUT','RETRY_SCHEDULED'].includes(job.status)).length, approval: jobs.filter(job => job.status === 'WAITING_APPROVAL').length, failed: jobs.filter(job => ['FAILED','BLOCKED'].includes(job.status)).length }), [jobs]);
 
   async function createDryRun() {
     setBusy('create'); setError('');
@@ -93,4 +94,11 @@ export default function AutomationJobsPage() {
     <section className={styles.panel}><div className={styles.panelHeader}><h2>Danh sách tác vụ</h2><span className={styles.muted}>{total} kết quả</span></div>{loading ? <div className={styles.empty}>Đang tải tác vụ...</div> : jobs.length === 0 ? <div className={styles.empty}>Chưa có tác vụ phù hợp. Chạy thử an toàn để kiểm tra luồng mà không thay đổi dữ liệu.</div> : <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Tác vụ</th><th>Trạng thái</th><th>Rủi ro</th><th>Tiến độ</th><th>Cập nhật</th><th>Thao tác</th></tr></thead><tbody>{jobs.map(job => <tr key={job.id}><td><span className={styles.name}>{TYPE_LABELS[job.type]}</span><span className={styles.muted}>Mã thao tác: {job.operationId.slice(0, 12)}</span><details className={styles.details}><summary>Chi tiết kỹ thuật</summary><dl><dt>Mã tác vụ</dt><dd>{job.id}</dd><dt>Số lần chạy</dt><dd>{job.attemptCount}/{job.maxAttempts}</dd>{job.lastErrorCode && <><dt>Mã lỗi</dt><dd>{job.lastErrorCode}</dd></>}</dl></details></td><td><span className={badge(job.status)}>{STATUS_LABELS[job.status]}</span></td><td>{job.riskLevel === 'HIGH' ? 'Rủi ro cao' : job.riskLevel === 'BLOCKER' ? 'Bị chặn' : job.riskLevel === 'MEDIUM' ? 'Rủi ro trung bình' : 'Rủi ro thấp'}</td><td>{job.dryRun ? 'Chạy thử an toàn' : 'Thực thi có kiểm soát'}</td><td>{new Date(job.updatedAt).toLocaleString('vi-VN')}</td><td><div className={styles.actions}>{['PENDING','WAITING_APPROVAL','RETRY_SCHEDULED','PAUSED'].includes(job.status) && <button className={styles.button} disabled={busy === job.id} onClick={() => setAction({ job, name: 'cancel' })}>Hủy</button>}{job.status === 'FAILED' && job.attemptCount < job.maxAttempts && <button className={styles.button} disabled={busy === job.id} onClick={() => setAction({ job, name: 'retry' })}>Chạy lại</button>}</div></td></tr>)}</tbody></table></div>}<div className={styles.pagination}><button className={styles.button} disabled={page <= 1} onClick={() => setPage(value => value - 1)}>Trang trước</button><span className={styles.muted}>Trang {page}/{pages}</span><button className={styles.button} disabled={page >= pages} onClick={() => setPage(value => value + 1)}>Trang sau</button></div></section>
     {action && <div className={styles.dialogBackdrop} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setAction(null); }}><div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="job-dialog-title"><h2 id="job-dialog-title">{action.name === 'cancel' ? 'Xác nhận hủy tác vụ' : 'Xác nhận chạy lại tác vụ'}</h2><p>{TYPE_LABELS[action.job.type]} sẽ {action.name === 'cancel' ? 'không được xử lý tiếp' : 'được đưa trở lại hàng chờ'}. Tác vụ đã hoàn thành không bị thay đổi.</p><label>Lý do<textarea value={reason} onChange={event => setReason(event.target.value)} rows={3} autoFocus /></label><div className={styles.dialogActions}><button className={styles.button} onClick={() => setAction(null)}>Đóng</button><button className={action.name === 'cancel' ? styles.danger : styles.primary} disabled={busy === action.job.id} onClick={() => void submitAction()}>Xác nhận</button></div></div></div>}
   </main>;
+}
+
+// Retained as a visual migration reference; the unified control center is the only rendered page.
+void LegacyAutomationJobsPage;
+
+export default function AutomationJobsPage() {
+  return <BotControlCenter />;
 }

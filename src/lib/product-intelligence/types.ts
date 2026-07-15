@@ -225,11 +225,26 @@ export interface EditorialCheckResult {
 
 export interface OutboundEvent {
   id: string;
-  eventType: 'view' | 'click';
-  productId: string;
-  source: string;
+  eventType:
+    | 'view'
+    | 'click'
+    | 'PUBLIC_SEARCH'
+    | 'SEARCH_NO_RESULT'
+    | 'CATEGORY_VIEW'
+    | 'PRODUCT_CARD_VIEW'
+    | 'PRODUCT_CARD_CLICK'
+    | 'PRODUCT_DETAIL_VIEW'
+    | 'PRICE_HISTORY_OPEN'
+    | 'COMPARE_ADD'
+    | 'COMPARE_OPEN'
+    | 'OUTBOUND_CLICK'
+    | 'GUIDE_VIEW';
+  productId?: string;
+  source?: string;
   campaign?: string;
   contentPageId?: string;
+  contextKey?: string;
+  resultCount?: number;
   timestamp: string;
   referrerCategory: 'search' | 'social' | 'internal' | 'direct' | 'other';
   deviceCategory?: 'mobile' | 'tablet' | 'desktop' | 'other';
@@ -241,6 +256,12 @@ export interface GrowthDaily {
   views: number;
   clicks: number;
   ctr?: number;
+  listViews?: number;
+  detailViews?: number;
+  outboundClicks?: number;
+  searches?: number;
+  noResultSearches?: number;
+  compareOpens?: number;
   productClicks: Record<string, number>;
   sourceClicks: Record<string, number>;
   contentClicks: Record<string, number>;

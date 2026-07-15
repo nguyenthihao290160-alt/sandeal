@@ -1,15 +1,19 @@
 import Link from 'next/link';
 
-import type { PublicCategoryItem } from './contracts';
+import ProductImage from '@/app/deals/ProductImage';
+
+import type { PublicCategoryItem, PublicDealCardData } from './contracts';
 import { PublicIcon, type PublicIconName } from './PublicIcon';
 import styles from './public.module.css';
 
 export function HeroSection({
   publicProductCount,
   verifiedSourceCount,
+  featuredProduct,
 }: {
   publicProductCount: number;
   verifiedSourceCount: number;
+  featuredProduct?: PublicDealCardData;
 }) {
   const metrics: Array<{ icon: PublicIconName; title: string; detail: string }> = [
     {
@@ -35,9 +39,13 @@ export function HeroSection({
   ];
 
   return (
-    <section className={styles.hero}>
-      <div className={`${styles.container} ${styles.heroGrid}`}>
-        <div>
+    <section className={`${styles.hero} ${featuredProduct?.imageUrl ? styles.heroWithImage : ''}`}>
+      {featuredProduct?.imageUrl ? (
+        <div className={styles.heroVisual} aria-hidden="true">
+          <ProductImage src={featuredProduct.imageUrl} alt="" eager sizes="100vw" />
+        </div>
+      ) : null}
+      <div className={`${styles.container} ${styles.heroContent}`}>
           <span className={styles.eyebrow}><PublicIcon name="shield" size={15} /> Deal và bằng chứng trong cùng một nơi</span>
           <h1>Kiểm tra deal rõ ràng trước khi quyết định</h1>
           <p className={styles.heroLead}>
@@ -52,16 +60,19 @@ export function HeroSection({
               Cách SanDeal kiểm tra
             </Link>
           </div>
-        </div>
-        <div className={styles.heroPanel} aria-label="Điểm tin cậy của SanDeal">
+        <div className={styles.heroFacts} aria-label="Điểm tin cậy của SanDeal">
           {metrics.map((metric) => (
-            <article className={styles.heroMetric} key={metric.title}>
+            <div className={styles.heroFact} key={metric.title}>
               <span className={styles.heroMetricIcon}><PublicIcon name={metric.icon} size={20} /></span>
-              <strong>{metric.title}</strong>
-              <span>{metric.detail}</span>
-            </article>
+              <span><strong>{metric.title}</strong><small>{metric.detail}</small></span>
+            </div>
           ))}
         </div>
+        {featuredProduct ? (
+          <Link className={styles.heroFeaturedLink} href={`/deals/${encodeURIComponent(featuredProduct.slug)}`}>
+            Đang hiển thị: {featuredProduct.title} <PublicIcon name="arrowRight" size={14} />
+          </Link>
+        ) : null}
       </div>
     </section>
   );
@@ -114,7 +125,7 @@ export function CategoryNavigation({ categories }: { categories: PublicCategoryI
           {categories.map((category) => (
             <Link
               className={styles.categoryLink}
-              href={`/deals?category=${encodeURIComponent(category.name)}`}
+              href={`/deals/category/${encodeURIComponent(category.slug)}`}
               key={category.name}
             >
               <span className={styles.categoryIcon}><PublicIcon name="category" size={15} /></span>

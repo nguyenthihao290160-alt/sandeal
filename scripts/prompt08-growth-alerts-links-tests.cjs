@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const testAuthValue = ['local', 'only', 'value'].join('-');
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-prompt08-growth-alerts-'));
+const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-prompt08-growth-alerts-${process.pid}-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'prompt08-growth-test';
@@ -276,7 +276,4 @@ main()
     failed += 1;
     console.error(error && error.stack ? error.stack : error);
     process.exitCode = 1;
-  })
-  .finally(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
   });

@@ -3,7 +3,7 @@ import { config } from '@/lib/config';
 
 export default function robots(): MetadataRoute.Robots {
   return {
-    rules: { userAgent: '*', allow: ['/', '/deals/', '/sitemap.xml'], disallow: ['/dashboard/', '/api/'] },
+    rules: { userAgent: '*', allow: ['/', '/deals/', '/sitemap.xml'], disallow: ['/dashboard/', '/api/', '/go/', '/compare'] },
     sitemap: new URL('/sitemap.xml', config.siteUrl).toString(), host: config.siteUrl,
   };
 }

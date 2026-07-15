@@ -21,7 +21,7 @@ const TYPES = new Set<AutomationJobType>([
   'AGGREGATE_GROWTH_METRICS',
   'BULK_PRODUCT_OPERATION',
 ]);
-const STATUSES = new Set<AutomationJobStatus>(['PENDING','WAITING_APPROVAL','RUNNING','RETRY_SCHEDULED','SUCCEEDED','FAILED','CANCELLED','BLOCKED','PAUSED']);
+const STATUSES = new Set<AutomationJobStatus>(['PENDING','WAITING_APPROVAL','WAITING_FOR_MANUAL_INPUT','RUNNING','RETRY_SCHEDULED','SUCCEEDED','FAILED','CANCELLED','BLOCKED','PAUSED']);
 
 export async function GET(request: NextRequest) {
   const authError = await requirePermission(request, 'MANAGE_AUTOMATION'); if (authError) return authError;

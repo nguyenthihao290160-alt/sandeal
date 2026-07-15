@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 
 import { PublicIcon } from './PublicIcon';
+import { trackPublicEvent } from './PublicAnalytics';
 import styles from './public.module.css';
 
 const MAX_COMPARISON = 4;
@@ -24,6 +25,7 @@ export function ComparisonToggle({ productId, selectedIds }: { productId: string
     const next = isSelected ? selected.filter((id) => id !== productId) : [...selected, productId];
     if (next.length > 0) params.set('compare', next.join(','));
     else params.delete('compare');
+    if (!isSelected) trackPublicEvent({ eventType: 'COMPARE_ADD', productId });
     router.push(`${pathname}${params.size ? `?${params.toString()}` : ''}`);
   }
 
@@ -64,7 +66,11 @@ export function ProductComparisonTray({ selectedIds }: { selectedIds: string[] }
       <div className={styles.compareActions}>
         <button type="button" className={styles.secondaryButton} onClick={clear}>Xóa lựa chọn</button>
         {selected.length >= 2 ? (
-          <Link className={styles.primaryButton} href={`/compare?ids=${encodeURIComponent(selected.join(','))}`}>
+          <Link
+            className={styles.primaryButton}
+            href={`/compare?ids=${encodeURIComponent(selected.join(','))}`}
+            onClick={() => trackPublicEvent({ eventType: 'COMPARE_OPEN', resultCount: selected.length })}
+          >
             Mở so sánh <PublicIcon name="arrowRight" size={15} />
           </Link>
         ) : <span className={styles.pageDisabled}>Chọn thêm 1 sản phẩm</span>}

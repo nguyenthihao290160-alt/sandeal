@@ -5,25 +5,21 @@
 // Require auth — chỉ admin dashboard dùng
 // ===========================================
 
-import { type NextRequest } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import { successResponse, serverErrorResponse } from '@/lib/apiResponse';
-import { runProductHealthCleanup } from '@/lib/bots/productHealth';
+import { type NextRequest, NextResponse } from 'next/server';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { enqueueProductAction } from '@/lib/automation/productActions';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
+  const denied = await requirePermission(request, 'MANAGE_AUTOMATION');
+  if (denied) return denied;
+  let body: Record<string, unknown> = {};
+  try { body = await request.json() as Record<string, unknown>; } catch { /* optional body */ }
   try {
-    const authError = await requireAuth(request);
-    if (authError) return authError;
-
-    const summary = await runProductHealthCleanup();
-
-    return successResponse(
-      `Health check hoàn tất. Đã kiểm tra ${summary.checked} sản phẩm, ẩn ${summary.hidden}, link lỗi ${summary.linkBroken}, ảnh lỗi ${summary.imageBroken}.`,
-      summary,
-    );
-  } catch (err) {
-    return serverErrorResponse('Không thể chạy health check.', err);
+    const result = await enqueueProductAction({ actor: getServerActor(), action: 'health', dryRun: body.dryRun === true, idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined, limit: Number(body.limit) || 50 });
+    return NextResponse.json({ ok: true, code: result.code, message: 'Đã đưa kiểm tra sức khỏe vào hàng đợi.', data: result.data }, { status: result.created ? 202 : 200 });
+  } catch {
+    return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Không thể tạo tác vụ kiểm tra sức khỏe.' }, { status: 400 });
   }
 }

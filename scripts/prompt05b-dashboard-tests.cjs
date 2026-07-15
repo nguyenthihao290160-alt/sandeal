@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const Module = require('module');
 const ts = require('typescript');
@@ -19,7 +18,8 @@ Module._resolveFilename = function resolve(request, parent, isMain, options) {
   return originalResolve.call(this, request, parent, isMain, options);
 };
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-dashboard-tests-'));
+const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-dashboard-tests-${process.pid}-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'dashboard-test';
@@ -154,6 +154,5 @@ const product = (overrides = {}) => ({
   });
 
   console.log(`\nDashboard targeted: ${passed} passed, ${failed} failed`);
-  fs.rmSync(tempDir, { recursive: true, force: true });
   if (failed) process.exit(1);
 })().catch((error) => { console.error(error); process.exit(1); });

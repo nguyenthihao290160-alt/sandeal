@@ -301,6 +301,20 @@
 .queueBars i { display: block; height: 100%; background: var(--ds-primary, #3157c8); }
 .queueBars strong { text-align: right; }
 
+.onboarding { display: grid; gap: 12px; padding: 2px 0 8px; }
+.onboardingList { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.onboardingStep { display: grid; grid-template-columns: 1fr auto; align-items: start; gap: 6px 12px; min-width: 0; padding: 14px; border: 1px solid var(--ds-border, #e2e8f0); border-radius: var(--ds-radius-lg, 8px); background: var(--ds-surface, #fff); }
+.onboardingStep > div { min-width: 0; }
+.onboardingStep h3 { margin: 5px 0 0; font-size: 15px; letter-spacing: 0; }
+.onboardingStep p { grid-column: 1 / -1; margin: 0; color: var(--ds-text-muted, #64748b); font-size: 13px; line-height: 1.45; }
+.onboardingStep small { grid-column: 1; color: var(--ds-text-soft, #475569); line-height: 1.4; }
+.onboardingStep > a { grid-column: 2; grid-row: 1 / span 2; align-self: center; color: var(--ds-primary, #3157c8); font-size: 13px; font-weight: 650; }
+.stepNOT_STARTED, .stepIN_PROGRESS, .stepCOMPLETED, .stepBLOCKED { display: inline-flex; min-height: 24px; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
+.stepNOT_STARTED { color: #475569; background: #f1f5f9; }
+.stepIN_PROGRESS { color: #2457a8; background: #eef4ff; }
+.stepCOMPLETED { color: #176b3a; background: #ecfdf5; }
+.stepBLOCKED { color: #a92020; background: #fef2f2; }
+
 .details { display: grid; gap: 9px; }
 .details div { display: flex; justify-content: space-between; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--ds-border, #e2e8f0); }
 .details div:last-child { border: 0; }
@@ -433,6 +447,7 @@
   .headerActions select { width: 100%; }
   .mainGrid { grid-template-columns: 1fr; }
   .kpis { grid-template-columns: repeat(2, 1fr); }
+  .onboardingList { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {
@@ -445,6 +460,8 @@
   .chartWrap { overflow: hidden; }
   .chartWrap svg { width: 100%; min-height: 210px; }
   .panelHeader { flex-direction: column; }
+  .onboardingStep { grid-template-columns: 1fr; }
+  .onboardingStep > a { grid-column: 1; grid-row: auto; }
   .modalActions { flex-direction: column-reverse; }
   .modalActions button { width: 100%; }
 }

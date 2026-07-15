@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const Module = require('module');
 const ts = require('typescript');
@@ -16,7 +15,8 @@ Module._resolveFilename = function resolve(request, parent, isMain, options) {
   return originalResolve.call(this, request, parent, isMain, options);
 };
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-tests-'));
+const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-tests-${process.pid}-${Date.now()}`);
+fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.ACCESS_TRADE_API_KEY = 'test-key-never-sent';
 let passed = 0; let failed = 0;
@@ -447,18 +447,25 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     await Promise.all([1, 2, 3].map((id) => geminiRouter.executeGeminiRequest({ modelId: 'gemini-3.1-flash-lite', taskType: 'metadata_repair', idempotencyKey: `concurrency-${id}`, body: {}, timeoutMs: 1000 }, mockFetch))); assert(maximum <= 2, `maximum=${maximum}`);
   });
 
-  await test('V4-15. duplicate slug publication bị chặn và không làm mất canonical', async () => {
+  await test('V4-15. direct duplicate slug publication bị gate chặn và không làm mất canonical', async () => {
     const first = indexableProduct({ id: 'slug-first', sourceId: 'slug-first', slug: 'same-slug', sourceHash: 'slug-first' });
     const second = indexableProduct({ id: 'slug-second', sourceId: 'slug-second', slug: 'same-slug', sourceHash: 'slug-second' });
-    await adapter.writeCollection('products', [first, second]); const saved = await products.publishCanonicalProductTransaction('slug-second', { reviewContent: second.reviewContent }, { approval: true, environment: 'test', idempotencyKey: 'duplicate-slug-test' });
-    assert(saved); assert(saved.slug !== 'same-slug' || saved.status !== 'published'); equal((await products.getAllProducts()).length, 2);
+    await adapter.writeCollection('products', [first, second]); let blockedCode;
+    try {
+      await products.publishCanonicalProductTransaction('slug-second', { reviewContent: second.reviewContent }, { approval: true, environment: 'test', idempotencyKey: 'duplicate-slug-test' });
+    } catch (error) {
+      blockedCode = error instanceof Error ? error.message : String(error);
+    }
+    equal(blockedCode, 'SAFE_PUBLISH_JOB_REQUIRED');
+    const stored = await products.getAllProducts();
+    equal(stored.length, 2); assert(stored.some(item => item.id === 'slug-first')); assert(stored.some(item => item.id === 'slug-second'));
   });
 
   await test('V4-16. canonical JSON corrupt không bị coi là collection rỗng', async () => {
-    const corruptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-corrupt-')); const previous = process.env.SANDEAL_DATA_DIR; process.env.SANDEAL_DATA_DIR = corruptDir;
+    const corruptDir = path.join(process.cwd(), '.test-tmp', `sandeal-corrupt-${process.pid}-${Date.now()}`); fs.mkdirSync(corruptDir, { recursive: true }); const previous = process.env.SANDEAL_DATA_DIR; process.env.SANDEAL_DATA_DIR = corruptDir;
     fs.writeFileSync(path.join(corruptDir, 'products.json'), '{broken', 'utf8'); let threw = false;
     try { await adapter.readCollection('products'); } catch { threw = true; }
-    process.env.SANDEAL_DATA_DIR = previous; fs.rmSync(corruptDir, { recursive: true, force: true }); assert(threw, 'corrupt JSON must fail closed');
+    process.env.SANDEAL_DATA_DIR = previous; assert(threw, 'corrupt JSON must fail closed');
   });
 
   await test('V4-17. scheduler tick uses an exact Basic Auth exemption and still checks its secret', () => {
@@ -471,6 +478,5 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
-  fs.rmSync(tempDir, { recursive: true, force: true });
   process.exitCode = failed ? 1 : 0;
 })();

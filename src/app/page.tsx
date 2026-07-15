@@ -67,15 +67,19 @@ export default async function HomePage() {
     <div className={styles.shell}>
       <PublicHeader />
       <main>
-        <HeroSection publicProductCount={data.totalProducts} verifiedSourceCount={data.verifiedSourceCount} />
+        <HeroSection
+          publicProductCount={data.totalProducts}
+          verifiedSourceCount={data.verifiedSourceCount}
+          featuredProduct={[...data.featured, ...data.verifiedRecently, ...data.recentlyUpdated].find(product => Boolean(product.imageUrl))}
+        />
         <CategoryNavigation categories={data.categories} />
         <TrustHighlights />
 
-        {data.featured.length > 0 ? (
+        {data.verifiedRecently.length > 0 ? (
           <DealSection
-            title="Deal nổi bật theo dữ liệu hiện có"
-            description="Sản phẩm vượt cổng chất lượng và có Deal Score thuộc mức nổi bật hoặc đáng cân nhắc."
-            products={data.featured}
+            title="Deal mới xác minh"
+            description="Sản phẩm công khai có nguồn xác minh và quyết định review mới nhất trong dữ liệu hiện có."
+            products={data.verifiedRecently}
           />
         ) : (
           <section className={styles.section}>
@@ -87,6 +91,17 @@ export default async function HomePage() {
           title="Giá vừa giảm"
           description="Chỉ hiển thị sản phẩm có lịch sử giá nội bộ ghi nhận mức thay đổi giảm."
           products={data.priceDrops}
+          soft
+        />
+        <DealSection
+          title="Deal Score cao"
+          description="Sắp xếp theo Deal Score deterministic trên sản phẩm đã vượt cổng công khai."
+          products={data.featured}
+        />
+        <DealSection
+          title="Chất lượng dữ liệu cao"
+          description="Sản phẩm có Quality Score cao nhất trong tập dữ liệu công khai hiện tại."
+          products={data.highQuality}
           soft
         />
         <DealSection

@@ -4,9 +4,8 @@
 // ===========================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import { getProductById } from '@/lib/storage/products';
-import { createLinkHealthChecker } from '@/lib/bots/linkHealth';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { enqueueProductAction } from '@/lib/automation/productActions';
 
 interface LinkHealthCheckRequest {
   productId: string;
@@ -14,8 +13,7 @@ interface LinkHealthCheckRequest {
 
 export async function POST(req: NextRequest) {
   try {
-    // Check auth
-    const authError = await requireAuth(req);
+    const authError = await requirePermission(req, 'MANAGE_AUTOMATION');
     if (authError) return authError;
 
     const body = await req.json() as LinkHealthCheckRequest;
@@ -27,44 +25,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Get product
-    const product = await getProductById(body.productId);
-    if (!product) {
-      return NextResponse.json(
-        { success: false, error: 'Product not found' },
-        { status: 404 }
-      );
-    }
-
-    // Check links
-    const runId = `link-check-${Date.now()}`;
-    const healthBot = await createLinkHealthChecker(runId);
-    const linkCheck = await healthBot.checkProductLink(
-      product.id,
-      product.originalUrl,
-      product.affiliateUrl,
-      product.imageUrl
-    );
-
-    if (!linkCheck) {
-      return NextResponse.json(
-        { success: false, error: 'Link check failed' },
-        { status: 500 }
-      );
-    }
-
+    const result = await enqueueProductAction({ actor: getServerActor(), action: 'link', productId: body.productId });
     return NextResponse.json({
       success: true,
-      data: linkCheck,
-    });
+      ok: true,
+      code: result.code,
+      message: 'Đã đưa kiểm tra liên kết vào hàng đợi.',
+      data: result.data,
+    }, { status: result.created ? 202 : 200 });
   } catch (error) {
-    console.error('[link-health/check] Error:', error);
+    const code = error instanceof Error && error.message === 'PRODUCT_NOT_FOUND' ? 'NOT_FOUND' : 'VALIDATION_ERROR';
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        ok: false,
+        code,
+        message: code === 'NOT_FOUND' ? 'Không tìm thấy sản phẩm.' : 'Không thể tạo tác vụ kiểm tra liên kết.',
       },
-      { status: 500 }
+      { status: code === 'NOT_FOUND' ? 404 : 400 }
     );
   }
 }

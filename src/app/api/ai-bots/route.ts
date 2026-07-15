@@ -15,7 +15,11 @@
 // - Concurrent workflows are blocked in the current PM2/Node process.
 
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getServerActor, requirePermission } from '@/lib/auth';
+import { listBotRegistry } from '@/lib/automation/botRegistry';
+import { enqueueBotExecution } from '@/lib/automation/enqueue';
+import { getAutomationQueueStats, publicAutomationJob } from '@/lib/automation/store';
+import type { RequestedExecutionMode } from '@/lib/automation/types';
 import {
   createBotRun,
   updateBotRun,
@@ -57,6 +61,10 @@ interface BotRunRequest {
   autoApprove?: boolean;
   autoPublish?: boolean;
   allowPaidAi?: boolean;
+  requestedExecutionMode?: RequestedExecutionMode;
+  idempotencyKey?: string;
+  operationId?: string;
+  dryRun?: boolean;
 }
 
 interface EnforcedRunPolicy {
@@ -96,7 +104,6 @@ type PublicSafetySummary = {
 };
 
 declare global {
-  // eslint-disable-next-line no-var
   var __sandealAiBotWorkflowLock: ActiveWorkflowLock | undefined;
 }
 
@@ -407,8 +414,8 @@ async function scoreProducts(
   return scoredProducts;
 }
 
-export async function GET(req: NextRequest) {
-  const authError = await requireAuth(req);
+async function legacyGetDisabled(req: NextRequest) {
+  const authError = await requirePermission(req, 'MANAGE_AUTOMATION');
   if (authError) return authError;
 
   return NextResponse.json(
@@ -442,12 +449,12 @@ export async function GET(req: NextRequest) {
   );
 }
 
-export async function POST(req: NextRequest) {
+async function legacyPostDisabled(req: NextRequest) {
   let reserved = false;
   let runId: string | undefined;
 
   try {
-    const authError = await requireAuth(req);
+    const authError = await requirePermission(req, 'MANAGE_AUTOMATION');
     if (authError) return authError;
 
     let body: BotRunRequest;
@@ -889,5 +896,96 @@ async function executeWorkflow(
         'error',
         error instanceof Error ? error.message : 'Unknown error',
     );
+  }
+}
+
+// Kept only for migration evidence. Neither handler is exported by this module.
+void legacyGetDisabled;
+void legacyPostDisabled;
+
+const REQUESTED_EXECUTION_MODES = new Set<RequestedExecutionMode>(['AUTO', 'API_ONLY', 'LOCAL_ONLY', 'MANUAL_ONLY']);
+
+export async function GET(req: NextRequest) {
+  const authError = await requirePermission(req, 'MANAGE_AUTOMATION');
+  if (authError) return authError;
+
+  return NextResponse.json({
+    ok: true,
+    success: true,
+    code: 'OK',
+    message: 'Đã tải registry và trạng thái hàng đợi.',
+    data: {
+      registry: listBotRegistry(),
+      queue: await getAutomationQueueStats(),
+      supportedModes: VALID_MODES,
+      supportedSources: VALID_SOURCES,
+      executionModes: ['AUTO', 'LOCAL_ONLY', 'MANUAL_ONLY'],
+      providerCapabilities: { geminiApi: false, accessTradeApi: false },
+      enforcedPolicy: {
+        safeMode: true,
+        freeOnly: true,
+        allowPaidFallback: false,
+        silentFallback: false,
+        preserveCheckpoint: true,
+        requireExecutionDisclosure: true,
+        requireApprovalForPublish: true,
+      },
+      legacyProductionCallable: false,
+    },
+  }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+export async function POST(req: NextRequest) {
+  const authError = await requirePermission(req, 'MANAGE_AUTOMATION');
+  if (authError) return authError;
+
+  let body: BotRunRequest;
+  try {
+    body = await parseRequestBody(req);
+  } catch {
+    return NextResponse.json({ ok: false, success: false, code: 'VALIDATION_ERROR', message: 'Nội dung yêu cầu phải là JSON object hợp lệ.' }, { status: 400 });
+  }
+
+  if (body.mode && !isValidMode(body.mode)) {
+    return NextResponse.json({ ok: false, success: false, code: 'VALIDATION_ERROR', message: 'Chế độ bot không hợp lệ.' }, { status: 400 });
+  }
+  if (body.source && !isValidSource(body.source)) {
+    return NextResponse.json({ ok: false, success: false, code: 'VALIDATION_ERROR', message: 'Nguồn thực thi không hợp lệ.' }, { status: 400 });
+  }
+  if (body.trigger && !isValidTrigger(body.trigger)) {
+    return NextResponse.json({ ok: false, success: false, code: 'VALIDATION_ERROR', message: 'Nguồn kích hoạt không hợp lệ.' }, { status: 400 });
+  }
+  if (body.requestedExecutionMode && !REQUESTED_EXECUTION_MODES.has(body.requestedExecutionMode)) {
+    return NextResponse.json({ ok: false, success: false, code: 'VALIDATION_ERROR', message: 'Kiểu thực thi không hợp lệ.' }, { status: 400 });
+  }
+
+  try {
+    const result = await enqueueBotExecution({
+      actor: getServerActor(),
+      mode: isValidMode(body.mode) ? body.mode : DEFAULT_MODE,
+      source: isValidSource(body.source) ? body.source : DEFAULT_SOURCE,
+      limit: normalizeLimit(body.limit),
+      trigger: isValidTrigger(body.trigger) ? body.trigger : 'manual',
+      requestedExecutionMode: body.requestedExecutionMode,
+      idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
+      operationId: typeof body.operationId === 'string' ? body.operationId : undefined,
+      dryRun: body.dryRun === true,
+    });
+    return NextResponse.json({
+      ok: true,
+      success: true,
+      code: result.code,
+      message: result.created ? 'Đã tạo tác vụ bền vững.' : 'Tác vụ trùng đã được nhận diện; không tạo lần chạy thứ hai.',
+      data: {
+        job: publicAutomationJob(result.job),
+        jobId: result.job.id,
+        operationId: result.job.operationId,
+        trackingRoute: `/api/automation/jobs/${result.job.id}`,
+      },
+    }, { status: result.created ? 202 : 200, headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'VALIDATION_ERROR';
+    const clientCode = ['INVALID_IDEMPOTENCY_KEY', 'PAYLOAD_TOO_LARGE', 'INVALID_BOT_MODE', 'INVALID_BOT_SOURCE', 'BOT_NOT_AVAILABLE', 'CAPABILITY_JOB_TYPE_MISMATCH', 'MANUAL_MODE_NOT_SUPPORTED'].includes(code) ? code : 'VALIDATION_ERROR';
+    return NextResponse.json({ ok: false, success: false, code: clientCode, message: 'Không thể tạo tác vụ từ dữ liệu yêu cầu.' }, { status: 400 });
   }
 }
