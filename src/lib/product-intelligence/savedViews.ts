@@ -4,7 +4,7 @@ import type { SavedView } from './types';
 
 const COLLECTION = 'saved-views';
 const FILTERS: Record<SavedView['page'], Set<string>> = {
-  products: new Set(['q', 'platform', 'source', 'status', 'qualityBand', 'opportunityBand', 'dealBand', 'hasImage']),
+  products: new Set(['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel']),
   quality: new Set(['q', 'qualityBand', 'hasBlocker', 'hasIssue']),
   duplicates: new Set(['status', 'confidence']),
   content: new Set(['q', 'status', 'opportunityBand', 'assignee']),
@@ -24,7 +24,7 @@ function validate(input: Partial<SavedView>): Omit<SavedView, 'id' | 'createdAt'
     return [key, typeof value === 'string' ? value.trim().slice(0, 200) : value];
   }));
   const columns = Array.isArray(input.columns) ? input.columns.map(String).map(value => value.slice(0, 80)).slice(0, 30) : [];
-  const viewMode = input.viewMode && ['list', 'table', 'kanban', 'calendar'].includes(input.viewMode) ? input.viewMode : 'table';
+  const viewMode = input.viewMode && ['list', 'grid', 'table', 'kanban', 'calendar'].includes(input.viewMode) ? input.viewMode : 'table';
   return {
     name, page: input.page, filters, sort: typeof input.sort === 'string' ? input.sort.slice(0, 80) : undefined,
     columns, viewMode, createdBy: String(input.createdBy || 'dashboard-admin').slice(0, 120), isDefault: input.isDefault === true,

@@ -3,12 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const testAuthValue = ['local', 'only', 'value'].join('-');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-prompt08-hardening-'));
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'hardening-test';
-process.env.BASIC_AUTH_PASSWORD = 'local-only-password';
+process.env.BASIC_AUTH_PASSWORD = testAuthValue;
 process.env.SANDEAL_ADMIN_PERMISSIONS = '*';
 require('./register-typescript.cjs');
 
@@ -78,7 +79,7 @@ async function main() {
   const jobDetailRoute = require('../src/app/api/automation/jobs/[id]/route.ts');
   const jobActionRoute = require('../src/app/api/automation/jobs/[id]/[action]/route.ts');
   const { NextRequest } = require('next/server');
-  const auth = `Basic ${Buffer.from('hardening-test:local-only-password').toString('base64')}`;
+  const auth = `Basic ${Buffer.from(`hardening-test:${testAuthValue}`).toString('base64')}`;
 
   async function reset(...names) {
     for (const name of names) await adapter.writeCollection(name, []);

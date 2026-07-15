@@ -294,7 +294,7 @@ export interface SavedView {
   filters: Record<string, string | number | boolean>;
   sort?: string;
   columns: string[];
-  viewMode: 'list' | 'table' | 'kanban' | 'calendar';
+  viewMode: 'list' | 'grid' | 'table' | 'kanban' | 'calendar';
   createdBy: string;
   isDefault: boolean;
   createdAt: string;

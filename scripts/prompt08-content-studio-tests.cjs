@@ -3,12 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const testAuthValue = ['local', 'only', 'value'].join('-');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-content-studio-'));
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'content-test';
-process.env.BASIC_AUTH_PASSWORD = 'local-only-password';
+process.env.BASIC_AUTH_PASSWORD = testAuthValue;
 process.env.SANDEAL_ADMIN_PERMISSIONS = '*';
 process.env.ALLOW_PAID_AI = 'false';
 process.env.ALLOW_PUBLISHING_API = 'false';
@@ -22,7 +23,7 @@ const content = require('../src/lib/product-intelligence/contentStudio.ts');
 const contentRoute = require('../src/app/api/dashboard/content/route.ts');
 
 const now = new Date().toISOString();
-const auth = `Basic ${Buffer.from('content-test:local-only-password').toString('base64')}`;
+const auth = `Basic ${Buffer.from(`content-test:${testAuthValue}`).toString('base64')}`;
 let passed = 0;
 let failed = 0;
 

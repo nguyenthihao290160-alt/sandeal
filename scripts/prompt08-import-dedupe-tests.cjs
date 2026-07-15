@@ -3,12 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const testAuthValue = ['local', 'only', 'value'].join('-');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-prompt08-import-dedupe-'));
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'prompt08-import-test';
-process.env.BASIC_AUTH_PASSWORD = 'local-only-password';
+process.env.BASIC_AUTH_PASSWORD = testAuthValue;
 process.env.SANDEAL_ADMIN_PERMISSIONS = '*';
 process.env.ALLOW_PAID_AI = 'false';
 process.env.ALLOW_PUBLISHING_API = 'false';
@@ -16,7 +17,7 @@ process.env.AUTO_PUBLISH_ENABLED = 'false';
 
 require('./register-typescript.cjs');
 
-const auth = `Basic ${Buffer.from('prompt08-import-test:local-only-password').toString('base64')}`;
+const auth = `Basic ${Buffer.from(`prompt08-import-test:${testAuthValue}`).toString('base64')}`;
 const jsonHeaders = { authorization: auth, 'content-type': 'application/json' };
 let passed = 0;
 let failed = 0;

@@ -441,17 +441,35 @@ async function main() {
     assert.deepEqual(second.map(item => item.id).sort(), first.map(item => item.id).sort());
   });
 
-  await test('saved views reject non-whitelisted filters and keep one default per page', async () => {
+  await test('saved views match product filters, support grid and keep one default per page', async () => {
     await reset('saved-views');
     await assert.rejects(
       savedViews.createSavedView({ name: 'Unsafe view', page: 'products', filters: { apiKey: 'secret' }, columns: [], viewMode: 'table' }),
       /INVALID_FILTER/,
     );
-    const first = await savedViews.createSavedView({ name: 'Quality first', page: 'products', filters: { qualityBand: 'good' }, columns: ['title'], viewMode: 'table', isDefault: true, createdBy: 'dashboard-admin' });
+    const first = await savedViews.createSavedView({
+      name: 'Product safety', page: 'products',
+      filters: { q: 'audio', platform: 'website', status: 'needs_review', kind: 'product', safePublishStatus: 'needs_review', riskLevel: 'low' },
+      columns: ['title'], viewMode: 'grid', isDefault: true, createdBy: 'dashboard-admin',
+    });
     const second = await savedViews.createSavedView({ name: 'Recent products', page: 'products', filters: { status: 'needs_review' }, columns: ['title'], viewMode: 'list', isDefault: true, createdBy: 'dashboard-admin' });
     const stored = await savedViews.listSavedViews('products');
+    assert.equal(stored.find(item => item.id === first.id).viewMode, 'grid');
+    assert.equal(stored.find(item => item.id === first.id).filters.safePublishStatus, 'needs_review');
     assert.equal(stored.find(item => item.id === first.id).isDefault, false);
     assert.equal(stored.find(item => item.id === second.id).isDefault, true);
+  });
+
+  await test('products dashboard wires saved views, selection and durable bulk actions', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/products/products-dashboard.tsx'), 'utf8');
+    for (const marker of ['SavedViewsToolbar', 'BulkProductActions', 'selectedIds', 'toggleVisibleSelection']) {
+      assert.equal(source.includes(marker), true, marker);
+    }
+    const packageJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
+    for (const script of ['prompt08-product-intelligence-tests.cjs', 'prompt08-import-dedupe-tests.cjs', 'prompt08-content-studio-tests.cjs', 'prompt08-growth-alerts-links-tests.cjs', 'prompt08-backend-hardening-tests.cjs']) {
+      assert.equal(packageJson.scripts['test:prompt08'].includes(script), true, script);
+    }
+    assert.equal(packageJson.scripts.test.includes('npm run test:prompt08'), true);
   });
 
   await test('bulk preview is side-effect free and reports skipped items plus approval', async () => {
@@ -483,6 +501,29 @@ async function main() {
     assert.equal(onDisk[0].type, 'BULK_PRODUCT_OPERATION');
     assert.equal(onDisk[0].riskLevel, 'HIGH');
     assert.equal((await productsStore.getProductById('bulk-durable')).status, 'needs_review');
+  });
+
+  await test('bulk dry-run needs no confirmation and queues a LOW-risk idempotent job', async () => {
+    await reset('products', 'automation-jobs', 'automation-control', 'automation-audit');
+    await adapter.writeCollection('products', [makeProduct({ id: 'bulk-dry-run' })]);
+    const request = () => bulkRoute.POST(new NextRequest('http://localhost/api/dashboard/bulk', {
+      method: 'POST', headers: jsonHeaders,
+      body: JSON.stringify({ mode: 'apply', confirmed: false, dryRun: true, action: 'archive', productIds: ['bulk-dry-run'], idempotencyKey: 'bulk-dry-run-job-001', operationId: 'bulk-dry-run-operation' }),
+    }));
+    const first = await request();
+    const second = await request();
+    assert.equal(first.status, 201);
+    assert.equal(second.status, 200);
+    const firstBody = await first.json();
+    const secondBody = await second.json();
+    assert.equal(firstBody.data.jobId, secondBody.data.jobId);
+    assert.equal(firstBody.data.status, 'PENDING');
+    const jobs = await automationStore.getAllAutomationJobs();
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].riskLevel, 'LOW');
+    assert.equal(jobs[0].dryRun, true);
+    assert.equal(jobs[0].approvalStatus, 'NOT_REQUIRED');
+    assert.equal((await productsStore.getProductById('bulk-dry-run')).status, 'needs_review');
   });
 
   await test('worker dispatches SCORE_PRODUCTS and maps legacy score to opportunityScore', async () => {

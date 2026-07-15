@@ -3,11 +3,14 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { BulkProductActions } from '@/components/dashboard/bulk-product-actions';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
+import { SavedViewsToolbar } from '@/components/dashboard/saved-views-toolbar';
 import { TaskStatus } from '@/components/dashboard/task-status';
 import type { DashboardOperation } from '@/lib/dashboard/operations';
 import type { DashboardProductItem, DashboardProductsResult } from '@/lib/dashboard/products';
 import type { AutomationJob } from '@/lib/automation/types';
+import type { SavedView } from '@/lib/product-intelligence/types';
 import styles from './products.module.css';
 
 type Envelope<T> = { ok: boolean; code?: string; message: string; data?: T; fields?: Record<string, string> };
@@ -21,6 +24,8 @@ const STATUS_LABELS: Record<string, string> = { draft: 'Bản nháp', needs_revi
 const SAFE_LABELS: Record<string, string> = { qualified: 'Đủ điều kiện', needs_review: 'Chờ phê duyệt', blocked: 'Bị chặn', published: 'Đã đăng', archived: 'Đã lưu trữ' };
 const RISK_LABELS: Record<string, string> = { low: 'Rủi ro thấp', medium: 'Rủi ro trung bình', high: 'Rủi ro cao', unknown: 'Chưa đánh giá' };
 const FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'sort', 'page', 'pageSize'] as const;
+const SAVED_FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel'] as const;
+const PRODUCT_COLUMNS = ['title', 'kind', 'source', 'status', 'price', 'riskLevel'];
 type SafeAutomationJob = Omit<AutomationJob, 'payload'>;
 
 function toDashboardOperation(job: SafeAutomationJob): DashboardOperation {
@@ -84,6 +89,7 @@ export default function ProductsDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -115,6 +121,7 @@ export default function ProductsDashboard() {
     Object.entries(updates).forEach(([key, value]) => value ? next.set(key, value) : next.delete(key));
     if (!Object.prototype.hasOwnProperty.call(updates, 'page')) next.delete('page');
     const nextQuery = next.toString();
+    setSelectedIds([]);
     setRefreshing(true);
     router.replace(`/dashboard/products${nextQuery ? `?${nextQuery}` : ''}`, { scroll: false });
   }, [queryString, router]);
@@ -140,6 +147,22 @@ export default function ProductsDashboard() {
   const selectView = (mode: ViewMode) => {
     setViewMode(mode);
     try { window.localStorage.setItem('sandeal-products-view', mode); } catch { /* Keep in-memory selection. */ }
+  };
+
+  const applySavedView = (view: Pick<SavedView, 'filters' | 'sort' | 'columns' | 'viewMode'>) => {
+    const next = new URLSearchParams();
+    for (const key of SAVED_FILTER_KEYS) {
+      const value = view.filters[key];
+      if (value !== undefined && value !== '') next.set(key, String(value));
+    }
+    if (view.sort) next.set('sort', view.sort);
+    const nextSearch = next.get('q') || '';
+    setSearchDraft({ base: nextSearch, value: nextSearch });
+    if (view.viewMode === 'list' || view.viewMode === 'grid') selectView(view.viewMode);
+    setSelectedIds([]);
+    setRefreshing(true);
+    const nextQuery = next.toString();
+    router.replace(`/dashboard/products${nextQuery ? `?${nextQuery}` : ''}`, { scroll: false });
   };
 
   useEffect(() => {
@@ -194,7 +217,7 @@ export default function ProductsDashboard() {
   }, [operationDialog, sourceDialog, confirmItem, operationBusy, sourceBusy, busy]);
   useEffect(() => () => pollAbortRef.current?.abort(), []);
 
-  const refresh = () => { setError(null); setRefreshing(true); setRefreshKey((value) => value + 1); };
+  const refresh = () => { setError(null); setSelectedIds([]); setRefreshing(true); setRefreshKey((value) => value + 1); };
 
   const runItemAction = async (action: 'approve' | 'archive' | 'delete', item: DashboardProductItem) => {
     if (action === 'delete' && confirmItem?.id !== item.id) { setConfirmItem(item); return; }
@@ -270,6 +293,14 @@ export default function ProductsDashboard() {
   const activeFilterCount = FILTER_KEYS.filter((key) => !['sort', 'page', 'pageSize'].includes(key) && Boolean(searchParams.get(key))).length;
   const activeFilters = activeFilterCount > 0;
   const setFilter = (key: string, value: string) => updateQuery({ [key]: value || null });
+  const savedViewFilters = Object.fromEntries(SAVED_FILTER_KEYS.flatMap((key) => {
+    const value = searchParams.get(key);
+    return value ? [[key, value]] : [];
+  })) as Record<string, string>;
+  const visibleIds = data?.items.map((item) => item.id) || [];
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+  const toggleSelection = (id: string) => setSelectedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+  const toggleVisibleSelection = () => setSelectedIds(allVisibleSelected ? [] : visibleIds);
 
   return (
     <div className={styles.productsPage} aria-busy={loading || refreshing}>
@@ -343,9 +374,24 @@ export default function ProductsDashboard() {
           </details>
         </div>
 
+        <SavedViewsToolbar
+          page="products"
+          filters={savedViewFilters}
+          sort={searchParams.get('sort') || 'updated_desc'}
+          columns={PRODUCT_COLUMNS}
+          viewMode={viewMode}
+          onApply={applySavedView}
+        />
+
+        {visibleIds.length > 0 && <div className={styles.selectionToolbar}>
+          <label><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisibleSelection} /><span>Chọn toàn bộ {visibleIds.length} sản phẩm trên trang</span></label>
+          <span>{selectedIds.length ? `${selectedIds.length} sản phẩm đã chọn` : 'Chưa chọn sản phẩm'}</span>
+        </div>}
+        <BulkProductActions productIds={selectedIds} onClear={() => setSelectedIds([])} />
+
         {data && data.items.length === 0 ? <div className={styles.emptyState}><span className={styles.emptyIcon}><DashboardIcon name="product" size={24} /></span><h3>{activeFilters ? 'Không tìm thấy kết quả' : 'Chưa có sản phẩm'}</h3><p>{activeFilters ? 'Không có sản phẩm phù hợp với bộ lọc hiện tại.' : 'Thêm nguồn sản phẩm hoặc tạo tác vụ chạy thử an toàn để bắt đầu kiểm tra dữ liệu.'}</p>{activeFilters ? <button type="button" className={styles.secondaryButton} onClick={clearFilters}>Xóa bộ lọc</button> : <div className={styles.emptyActions}><button type="button" className={styles.secondaryButton} onClick={() => setSourceDialog(true)}><DashboardIcon name="source" size={16} />Thêm nguồn sản phẩm</button><button type="button" className={styles.ghostButton} onClick={() => { setDryRun(true); setOperationDialog('source_scan'); }}><DashboardIcon name="task" size={16} />Chạy thử an toàn</button></div>}</div> : (
-          viewMode === 'list' ? <div className={styles.tableWrap}><table><thead><tr><th>Sản phẩm</th><th>Loại và nguồn</th><th>Trạng thái</th><th>Giá</th><th>Rủi ro</th><th>Thao tác</th></tr></thead><tbody>{data?.items.map((item) => <tr key={item.id}><td><div className={styles.productCell}><SafeImage item={item} /><div><Link href={`/dashboard/products/${item.id}`}>{item.title}</Link><small>{item.publish.message}</small></div></div></td><td><Badge>{TYPE_LABELS[item.type]}</Badge><small>{PLATFORM_LABELS[item.platform]} · {item.source}</small></td><td><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{SAFE_LABELS[item.safePublishStatus]}</Badge><small>{STATUS_LABELS[item.status]}</small></td><td>{formatPrice(item.price)}</td><td><Badge tone={item.riskLevel === 'high' ? 'danger' : item.riskLevel === 'medium' ? 'warning' : item.riskLevel === 'low' ? 'success' : 'neutral'}>{RISK_LABELS[item.riskLevel]}</Badge></td><td><ProductActions item={item} busy={busy} onAction={runItemAction} /></td></tr>)}</tbody></table></div>
-          : <div className={styles.productGrid}>{data?.items.map((item) => <article key={item.id} className={styles.productCard}><SafeImage item={item} /><div className={styles.productCardBody}><div className={styles.cardBadges}><Badge>{TYPE_LABELS[item.type]}</Badge><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{SAFE_LABELS[item.safePublishStatus]}</Badge></div><Link href={`/dashboard/products/${item.id}`} className={styles.cardTitle}>{item.title}</Link><p>{item.publish.message}</p><strong>{formatPrice(item.price)}</strong><ProductActions item={item} busy={busy} onAction={runItemAction} /></div></article>)}</div>
+          viewMode === 'list' ? <div className={styles.tableWrap}><table><thead><tr><th>Chọn</th><th>Sản phẩm</th><th>Loại và nguồn</th><th>Trạng thái</th><th>Giá</th><th>Rủi ro</th><th>Thao tác</th></tr></thead><tbody>{data?.items.map((item) => <tr key={item.id}><td className={styles.selectionCell}><input type="checkbox" aria-label={`Chọn ${item.title}`} checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /></td><td><div className={styles.productCell}><SafeImage item={item} /><div><Link href={`/dashboard/products/${item.id}`}>{item.title}</Link><small>{item.publish.message}</small></div></div></td><td><Badge>{TYPE_LABELS[item.type]}</Badge><small>{PLATFORM_LABELS[item.platform]} · {item.source}</small></td><td><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{SAFE_LABELS[item.safePublishStatus]}</Badge><small>{STATUS_LABELS[item.status]}</small></td><td>{formatPrice(item.price)}</td><td><Badge tone={item.riskLevel === 'high' ? 'danger' : item.riskLevel === 'medium' ? 'warning' : item.riskLevel === 'low' ? 'success' : 'neutral'}>{RISK_LABELS[item.riskLevel]}</Badge></td><td><ProductActions item={item} busy={busy} onAction={runItemAction} /></td></tr>)}</tbody></table></div>
+          : <div className={styles.productGrid}>{data?.items.map((item) => <article key={item.id} className={styles.productCard}><SafeImage item={item} /><div className={styles.productCardBody}><label className={styles.cardSelect}><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /><span>Chọn sản phẩm</span></label><div className={styles.cardBadges}><Badge>{TYPE_LABELS[item.type]}</Badge><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{SAFE_LABELS[item.safePublishStatus]}</Badge></div><Link href={`/dashboard/products/${item.id}`} className={styles.cardTitle}>{item.title}</Link><p>{item.publish.message}</p><strong>{formatPrice(item.price)}</strong><ProductActions item={item} busy={busy} onAction={runItemAction} /></div></article>)}</div>
         )}
         {data && data.pagination.totalItems > 0 && <nav className={styles.pagination} aria-label="Phân trang"><button type="button" disabled={page <= 1} onClick={() => updateQuery({ page: String(page - 1) })}>Trang trước</button><span>Trang {page} / {totalPages}</span><button type="button" disabled={page >= totalPages} onClick={() => updateQuery({ page: String(page + 1) })}>Trang sau</button></nav>}
       </section>}

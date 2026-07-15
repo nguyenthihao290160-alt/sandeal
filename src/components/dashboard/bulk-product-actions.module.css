@@ -1,4 +1,4 @@
-.panel { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 12px; display: grid; gap: 12px; margin: 12px 0; padding: 14px; }
+.panel { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; display: grid; gap: 12px; margin: 12px 0; padding: 14px; }
 .heading { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
 .heading div { display: grid; gap: 3px; }
 .heading span, .message, .job span { color: #52606d; font-size: .82rem; }

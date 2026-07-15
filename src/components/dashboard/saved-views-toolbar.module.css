@@ -1,6 +1,6 @@
 .container {
   border: 1px solid var(--border-color, #dbe2ea);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--surface, #fff);
   margin: 12px 0;
 }

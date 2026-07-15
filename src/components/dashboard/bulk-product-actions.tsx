@@ -39,6 +39,8 @@ export function BulkProductActions({ productIds, onClear }: { productIds: string
   const [preview, setPreview] = useState<Preview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [dryRun, setDryRun] = useState(true);
+  const [previewKey, setPreviewKey] = useState('');
+  const [operationId, setOperationId] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [job, setJob] = useState<JobResult | null>(null);
@@ -51,6 +53,7 @@ export function BulkProductActions({ productIds, onClear }: { productIds: string
   }), [action, category, productIds, tag]);
 
   const inputMissing = (action === 'assign_category' && category.trim().length === 0) || (action === 'add_tag' && tag.trim().length === 0);
+  const payloadKey = useMemo(() => JSON.stringify({ ...payload, dryRun }), [dryRun, payload]);
 
   const submit = async (mode: 'preview' | 'apply') => {
     setBusy(true);
@@ -60,12 +63,20 @@ export function BulkProductActions({ productIds, onClear }: { productIds: string
       const response = await fetch('/api/dashboard/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...payload, mode, confirmed: mode === 'apply' ? confirmed : false, dryRun }),
+        body: JSON.stringify({
+          ...payload,
+          mode,
+          confirmed: mode === 'apply' ? dryRun || confirmed : false,
+          dryRun,
+          ...(mode === 'apply' && operationId ? { operationId, idempotencyKey: `bulk:${operationId}` } : {}),
+        }),
       });
       const body = await response.json().catch(() => null) as Envelope<Preview | JobResult> | null;
       if (!response.ok || !body?.ok || !body.data) throw new Error(body?.message || body?.code || 'BULK_UNAVAILABLE');
       if (mode === 'preview') {
         setPreview(body.data as Preview);
+        setPreviewKey(payloadKey);
+        setOperationId(crypto.randomUUID());
         setConfirmed(false);
         setMessage('Đã tạo preview, chưa có dữ liệu nào bị thay đổi.');
       } else {
@@ -78,7 +89,7 @@ export function BulkProductActions({ productIds, onClear }: { productIds: string
   };
 
   if (!productIds.length) return null;
-  const previewMatches = preview && preview.action === action && preview.requested === productIds.length;
+  const previewMatches = preview && previewKey === payloadKey;
   return (
     <section className={styles.panel} aria-label="Thao tác hàng loạt">
       <div className={styles.heading}>

@@ -43,7 +43,10 @@ export function SavedViewsToolbar({ page, filters, sort, columns = [], viewMode 
     }
   }, [page]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void load(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const defaultView = useMemo(() => items.find((item) => item.isDefault), [items]);
 

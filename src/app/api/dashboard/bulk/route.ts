@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission, getServerActor } from '@/lib/auth';
 import { previewBulkOperation } from '@/lib/product-intelligence/jobs';
 import { createAutomationJob } from '@/lib/automation/store';
+import { generateId } from '@/lib/storage/adapter';
 
 const MAX_BODY_BYTES = 64_000;
 const PAYLOAD_KEYS = new Set(['action', 'productIds', 'category', 'tag', 'groupId', 'primaryId', 'limit']);
@@ -24,13 +25,17 @@ export async function POST(request: NextRequest) {
   try {
     const preview = await previewBulkOperation(body);
     if (body.mode !== 'apply') return NextResponse.json({ ok: true, code: 'PREVIEW', data: preview });
-    if (body.confirmed !== true) return NextResponse.json({ ok: false, code: 'CONFIRMATION_REQUIRED', data: preview }, { status: 409 });
+    const dryRun = body.dryRun === true;
+    if (!dryRun && body.confirmed !== true) return NextResponse.json({ ok: false, code: 'CONFIRMATION_REQUIRED', data: preview }, { status: 409 });
     const payload = Object.fromEntries(Object.entries(body).filter(([key]) => PAYLOAD_KEYS.has(key)));
     const result = await createAutomationJob({
       type: 'BULK_PRODUCT_OPERATION', payload,
-      idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `bulk:${preview.action}:${new Date().toISOString().slice(0, 16).replace(/[^0-9]/g, '')}`,
-      operationId: typeof body.operationId === 'string' ? body.operationId : undefined, requestedBy: getServerActor(), riskLevel: preview.requiresApproval ? 'HIGH' : 'MEDIUM', dryRun: body.dryRun === true,
-      approvalReason: preview.requiresApproval ? 'Bulk action tác động lớn cần phê duyệt.' : undefined,
+      idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `bulk:${generateId()}`,
+      operationId: typeof body.operationId === 'string' ? body.operationId : undefined,
+      requestedBy: getServerActor(),
+      riskLevel: dryRun ? 'LOW' : preview.requiresApproval ? 'HIGH' : 'MEDIUM',
+      dryRun,
+      approvalReason: !dryRun && preview.requiresApproval ? 'Bulk action tác động lớn cần phê duyệt.' : undefined,
     });
     return NextResponse.json({ ok: true, code: result.code, data: { jobId: result.job.id, operationId: result.job.operationId, status: result.job.status } }, { status: result.created ? 201 : 200 });
   } catch (error) { return NextResponse.json({ ok: false, code: error instanceof Error ? error.message : 'VALIDATION_ERROR' }, { status: 400 }); }
