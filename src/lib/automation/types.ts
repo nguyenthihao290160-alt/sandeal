@@ -122,6 +122,7 @@ export interface AutomationJob {
   policyVersion: string;
   handlerVersion: string;
   id: string;
+  correlationId?: string;
   type: AutomationJobType;
   status: AutomationJobStatus;
   payload: Record<string, unknown>;
@@ -130,6 +131,11 @@ export interface AutomationJob {
   idempotencyKey: string;
   operationId: string;
   requestedBy: string;
+  sourceMetadata?: {
+    producer: string;
+    source?: string;
+    trigger?: string;
+  };
   parentJobId?: string;
   botId?: string;
   capability?: string;

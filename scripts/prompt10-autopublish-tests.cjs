@@ -60,9 +60,12 @@ async function main() {
   const worker = require('../src/lib/automation/worker.ts');
   const canary = require('../src/lib/automation/canaryController.ts');
   const journal = require('../src/lib/automation/operationJournal.ts');
+  const settings = require('../src/lib/storage/automationSettings.ts');
+  const sourceQuality = require('../src/lib/autonomous/sourceQuality.ts');
   global.fetch = async () => { throw new Error('NETWORK_FORBIDDEN_IN_PROMPT10_AUTOPUBLISH'); };
   async function reset(mode = 'AUTONOMOUS') {
-    for (const collection of ['products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-canary', 'operation-journal', 'automation-outbound-events', 'publication-audit']) await adapter.writeCollection(collection, []);
+    for (const collection of ['products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-canary', 'operation-journal', 'automation-outbound-events', 'publication-audit', 'source-quality']) await adapter.writeCollection(collection, []);
+    await settings.updateAutomationSettings({ launchEnabled: true });
     await store.updateAutomationControl({ mode, effectiveMode: mode, publishPaused: false, ingestionPaused: false, workerPaused: false, schedulerPaused: false, killSwitch: false }, 'autopublish-test');
   }
 
@@ -75,6 +78,7 @@ async function main() {
     const published = await products.getProductById(product.id);
     assert.equal(published.status, 'published'); assert.equal(published.publicHidden, false); assert.equal(published.lifecycleState, 'PUBLISHED');
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 1);
+    assert.equal((await sourceQuality.getSourceQualitySnapshot(product.source)).counters.publishedProducts, 1);
     assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 1);
     const lifecycleEvents = (await adapter.readCollection('product-lifecycle-events')).filter(event => event.productId === product.id);
     assert.deepEqual(lifecycleEvents.map(event => `${event.previousState}->${event.nextState}:${event.status}`), [

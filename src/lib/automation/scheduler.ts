@@ -1,6 +1,7 @@
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { createAutomationJob, getAutomationControl, updateAutomationControl } from './store';
 import { getAutomationPolicy } from './policyRegistry';
+import { heartbeatRuntimeRole, isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import type { AutomationJobType } from './types';
 
 export interface SchedulerTickResult {
@@ -130,6 +131,30 @@ export async function runAutomationSchedulerTick(now = Date.now()): Promise<Sche
 export interface RuntimeControlSchedulerTickResult {
   status: 'scheduled' | 'duplicate';
   jobId: string;
+}
+
+export interface OwnedSchedulerCycleResult {
+  status: 'completed' | 'role_lost';
+  guardian?: RuntimeControlSchedulerTickResult;
+  automation?: SchedulerTickResult;
+  intelligence?: ProductIntelligenceSchedulerTickResult;
+}
+
+/**
+ * Runtime scheduler entrypoint. Every durable enqueue is preceded by a
+ * persisted ownership check so a rejected or fenced process cannot tick.
+ */
+export async function runOwnedSchedulerCycle(
+  ownership: RuntimeRoleOwnership,
+  now = Date.now(),
+): Promise<OwnedSchedulerCycleResult> {
+  if (!await heartbeatRuntimeRole('SCHEDULER', ownership, undefined, now)) return { status: 'role_lost' };
+  const guardian = await runRuntimeControlSchedulerTick(now);
+  if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian };
+  const automation = await runAutomationSchedulerTick(now);
+  if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, automation };
+  const intelligence = await runProductIntelligenceSchedulerTick(now);
+  return { status: 'completed', guardian, automation, intelligence };
 }
 
 export async function runRuntimeControlSchedulerTick(now = Date.now()): Promise<RuntimeControlSchedulerTickResult> {

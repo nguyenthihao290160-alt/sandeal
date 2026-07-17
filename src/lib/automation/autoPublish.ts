@@ -6,6 +6,7 @@ import {
   type AutonomousPublishDecision,
   type PersistedEvidenceVerification,
 } from '@/lib/autonomous/publishPolicy';
+import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 import {
   getLifecycleTransitionEvent,
   persistLifecycleTransition,
@@ -344,6 +345,11 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
     await completeCanaryEffect(control.effectiveMode, effectKey, true);
     const published = await getProductById(productId);
     if (published?.lifecycleState !== 'PUBLISHED') throw new Error('AUTO_SAFE_PUBLISH_NOT_PUBLIC_AFTER_LIFECYCLE');
+    await recordSourceQualityObservation(published.source, {
+      idempotencyKey: `source-publish:${effectKey}`.slice(0, 200),
+      observedAt: published.publishedAt || job.createdAt,
+      publishedProducts: 1,
+    });
     const eventCount = (await readCollection<PublicationEvent>(OUTBOUND_COLLECTION)).filter(event => event.effectKey === effectKey).length;
     return {
       executionStatus: 'COMPLETED_WITH_LOCAL_RULES',

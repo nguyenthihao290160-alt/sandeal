@@ -43,7 +43,7 @@ function accessTradeItem(id = 'source-fixture') {
     publicDecision: 'public_candidate',
     publicBlockReason: '',
     qualityScore: 96,
-    rawData: { api_key: 'must-not-cross-normalization-boundary', internal: true },
+    rawData: { api_key: 'fixture-not-a-real-secret-2', internal: true },
   };
 }
 
@@ -154,6 +154,74 @@ async function main() {
     assert.equal(registry.disclosures()[0].details.apiKey, '[redacted]');
     assert.throws(() => registry.register(registry.get('fixture')), /SOURCE_ADAPTER_ALREADY_REGISTERED/);
   });
+
+  await test('runtime source scan uses the registered adapter, normalizes before queueing, and persists measured run quality', async () => {
+    const pipeline = require('../src/lib/bots/productPipeline.ts');
+    await storage.writeCollection('candidate-queue', []);
+    await storage.writeCollection('products', []);
+    await storage.writeCollection('pipeline-daily-usage', []);
+    await storage.writeCollection('source-keyword-state', []);
+    await storage.writeCollection('source-quality', []);
+    let calls = 0;
+    const registry = new platform.SourceAdapterRegistry();
+    registry.register({
+      id: 'accesstrade', version: 'fixture-runtime-v1',
+      isConfigured: async () => true,
+      healthCheck: async () => ({ status: 'configured', configured: true, ready: false, reason: 'fixture_probe_not_run' }),
+      discover: async input => {
+        calls += 1;
+        const items = calls === 1
+          ? Array.from({ length: input.limit }, (_, index) => accessTradeItem(`runtime-${index}`))
+          : [];
+        return { items, requests: 1, outcomes: { [items.length ? 'success_with_results' : 'success_empty']: 1 } };
+      },
+      normalize: item => {
+        const normalized = { ...item };
+        delete normalized.rawData;
+        return normalized;
+      },
+      budget: async () => ({ maximumRequests: 100, usedRequests: 0, remainingRequests: 100 }),
+      classifyError: () => 'last_check_failed', retryAfter: () => undefined,
+      disclosure: () => ({ fixture: true }),
+    });
+    const result = await pipeline.scanSourcesToQueue('bootstrap', Date.now() + 30_000, { registry, runId: 'runtime-adapter-scan:1' });
+    assert.equal(result.sourceStatus, 'configured');
+    assert.equal(result.found, 50); assert.equal(result.normalized, 50); assert.equal(result.queued, 50);
+    assert.equal(result.rejected, 0); assert.equal(result.failed, 0); assert.equal(result.reason, 'source_scan_completed');
+    assert.equal(result.sourceRequests, calls); assert.ok(result.durationMs >= 0);
+    const queue = await storage.readCollection('candidate-queue');
+    assert.equal(queue.length, 50);
+    assert.equal(JSON.stringify(queue).includes('must-not-cross-normalization-boundary'), false);
+    const snapshot = await quality.getSourceQualitySnapshot('accesstrade');
+    assert.equal(snapshot.counters.candidatesObserved, 50);
+    assert.equal(snapshot.counters.validCandidates, 50);
+    assert.equal(snapshot.counters.pricesAvailable, 50);
+    assert.equal(snapshot.counters.externalRequests, calls);
+  });
+
+  await test('an empty runtime source run is bounded and reports a truthful next eligible time', async () => {
+    const pipeline = require('../src/lib/bots/productPipeline.ts');
+    await storage.writeCollection('pipeline-daily-usage', []);
+    await storage.writeCollection('source-keyword-state', []);
+    let calls = 0;
+    const registry = new platform.SourceAdapterRegistry();
+    registry.register({
+      id: 'accesstrade', version: 'fixture-empty-v1',
+      isConfigured: async () => true,
+      healthCheck: async () => ({ status: 'configured', configured: true, ready: false }),
+      discover: async () => { calls += 1; return { items: [], requests: 1, outcomes: { success_empty: 1 } }; },
+      normalize: item => item,
+      budget: async () => ({ maximumRequests: 100, usedRequests: 0, remainingRequests: 100 }),
+      classifyError: () => 'last_check_failed', retryAfter: () => undefined,
+      disclosure: () => ({ fixture: true }),
+    });
+    const result = await pipeline.scanSourcesToQueue('bootstrap', Date.now() + 30_000, { registry, runId: 'runtime-empty-scan:1' });
+    assert.equal(result.found, 0); assert.equal(result.reason, 'source_no_results');
+    assert.ok(Number.isFinite(Date.parse(result.nextEligibleAt)));
+    assert.ok(calls > 0 && calls <= 12);
+  });
+
+  await storage.writeCollection('source-quality', []);
 
   let goodSnapshot;
   await test('Source Quality Bot persists every required business and health metric', async () => {

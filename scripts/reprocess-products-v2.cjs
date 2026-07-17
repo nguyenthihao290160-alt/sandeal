@@ -129,7 +129,7 @@ assertSafeDataDir(process.env.SANDEAL_DATA_DIR, isApply);
 
           if (isApply) {
             // Atomic write via saveCanonicalProduct
-            await saveCanonicalProduct(product.id, { reviewContent: review }, { evaluate: true });
+            await saveCanonicalProduct(product.id, { reviewContent: review });
           }
 
           results.regenerated++;

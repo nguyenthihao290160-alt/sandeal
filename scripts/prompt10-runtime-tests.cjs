@@ -36,8 +36,19 @@ async function main() {
     await store.updateAutomationControl({ mode: 'SHADOW', effectiveMode: 'SHADOW', publishPaused: false, ingestionPaused: false, workerPaused: false, schedulerPaused: false, killSwitch: false }, 'runtime-test');
   }
 
-  await test('PM2 ecosystem defines exactly one fork process for web, worker, and scheduler', () => {
-    const config = require('../ecosystem.config.cjs');
+  await test('PM2 keeps Prompt 10 runtime disabled by default and enables exactly one opt-in worker and scheduler', () => {
+    const configPath = require.resolve('../ecosystem.config.cjs');
+    const previous = process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME;
+    delete process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME;
+    delete require.cache[configPath];
+    const safeConfig = require(configPath);
+    assert.deepEqual(safeConfig.apps.map(app => app.name), ['sandeal']);
+    process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME = 'true';
+    delete require.cache[configPath];
+    const config = require(configPath);
+    if (previous === undefined) delete process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME;
+    else process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME = previous;
+    delete require.cache[configPath];
     assert.deepEqual(config.apps.map(app => app.name), ['sandeal', 'sandeal-worker', 'sandeal-scheduler']);
     assert.equal(new Set(config.apps.map(app => app.cwd)).size, 1);
     assert.equal(new Set(config.apps.map(app => app.env.SANDEAL_DATA_DIR)).size, 1);
@@ -51,30 +62,45 @@ async function main() {
 
   await test('worker role lease rejects a concurrent holder and permits stale takeover', async () => {
     await reset(); const base = Date.now();
-    assert.equal((await roles.acquireRuntimeRole({ role: 'WORKER', holderId: 'worker-a', now: base, leaseMs: 5000 })).acquired, true);
-    const duplicate = await roles.acquireRuntimeRole({ role: 'WORKER', holderId: 'worker-b', now: base + 1, leaseMs: 5000 });
+    const first = await roles.acquireRuntimeRole({ role: 'WORKER', ownerId: 'worker-a', instanceId: 'worker-a:instance-1', now: base, leaseMs: 5000 });
+    assert.equal(first.acquired, true); assert.equal(first.event, 'ACQUIRED'); assert.ok(first.ownership);
+    const duplicate = await roles.acquireRuntimeRole({ role: 'WORKER', ownerId: 'worker-b', instanceId: 'worker-b:instance-1', now: base + 1, leaseMs: 5000 });
     assert.equal(duplicate.acquired, false); assert.equal(duplicate.reason, 'ROLE_ALREADY_ACTIVE');
-    assert.equal(await roles.heartbeatRuntimeRole('WORKER', 'worker-b', 5000, base + 2), false);
-    const takeover = await roles.acquireRuntimeRole({ role: 'WORKER', holderId: 'worker-b', now: base + 5001, leaseMs: 5000 });
-    assert.equal(takeover.acquired, true); assert.equal(takeover.lease.previousHolderId, 'worker-a'); assert.equal(takeover.lease.takeoverCount, 1);
-    assert.equal(await roles.releaseRuntimeRole('WORKER', 'worker-b', base + 5002), true);
+    assert.equal(await roles.heartbeatRuntimeRole('WORKER', { ownerId: 'worker-b', instanceId: 'worker-b:instance-1', fencingToken: 1 }, 5000, base + 2), false);
+    const takeover = await roles.acquireRuntimeRole({ role: 'WORKER', ownerId: 'worker-b', instanceId: 'worker-b:instance-1', now: base + 5001, leaseMs: 5000 });
+    assert.equal(takeover.acquired, true); assert.equal(takeover.event, 'TAKEN_OVER');
+    assert.equal(takeover.lease.previousHolderId, 'worker-a'); assert.equal(takeover.lease.takeoverCount, 1);
+    assert.ok(takeover.lease.fencingToken > first.lease.fencingToken);
+    assert.equal(await roles.heartbeatRuntimeRole('WORKER', first.ownership, 5000, base + 5002), false);
+    assert.equal(await roles.releaseRuntimeRole('WORKER', first.ownership, base + 5002), false);
+    assert.equal(await roles.releaseRuntimeRole('WORKER', takeover.ownership, base + 5002), true);
   });
 
   await test('scheduler role lease independently enforces one JSON-storage scheduler', async () => {
     await reset(); const now = Date.now();
-    assert.equal((await roles.acquireRuntimeRole({ role: 'SCHEDULER', holderId: 'scheduler-a', now })).acquired, true);
-    assert.equal((await roles.acquireRuntimeRole({ role: 'SCHEDULER', holderId: 'scheduler-b', now: now + 1 })).acquired, false);
+    assert.equal((await roles.acquireRuntimeRole({ role: 'SCHEDULER', ownerId: 'scheduler-a', instanceId: 'scheduler-a:1', now })).acquired, true);
+    assert.equal((await roles.acquireRuntimeRole({ role: 'SCHEDULER', ownerId: 'scheduler-b', instanceId: 'scheduler-b:1', now: now + 1 })).acquired, false);
+  });
+
+  await test('near-concurrent scheduler acquire elects exactly one fenced leader', async () => {
+    await reset(); const now = Date.now();
+    const attempts = await Promise.all(Array.from({ length: 8 }, (_, index) => roles.acquireRuntimeRole({
+      role: 'SCHEDULER', ownerId: `scheduler-${index}`, instanceId: `scheduler-${index}:instance`, now,
+    })));
+    assert.equal(attempts.filter(item => item.acquired).length, 1);
+    assert.equal(new Set(attempts.filter(item => item.acquired).map(item => item.lease.fencingToken)).size, 1);
   });
 
   await test('worker and scheduler entrypoints reject a second live process role', async () => {
     await reset(); const now = Date.now();
-    await roles.acquireRuntimeRole({ role: 'WORKER', holderId: 'held-worker', now, leaseMs: 45_000 });
-    await roles.acquireRuntimeRole({ role: 'SCHEDULER', holderId: 'held-scheduler', now, leaseMs: 45_000 });
+    await roles.acquireRuntimeRole({ role: 'WORKER', ownerId: 'held-worker', instanceId: 'held-worker:1', now, leaseMs: 45_000 });
+    await roles.acquireRuntimeRole({ role: 'SCHEDULER', ownerId: 'held-scheduler', instanceId: 'held-scheduler:1', now, leaseMs: 45_000 });
     const env = { ...process.env, SANDEAL_DATA_DIR: tempDir, NODE_ENV: 'test' };
     const workerResult = spawnSync(process.execPath, [path.join(root, 'scripts', 'automation-worker.cjs'), '--once'], { cwd: root, env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
     const schedulerResult = spawnSync(process.execPath, [path.join(root, 'scripts', 'automation-scheduler.cjs'), '--once'], { cwd: root, env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
     assert.notEqual(workerResult.status, 0); assert.match(workerResult.stderr, /WORKER_ROLE_ALREADY_ACTIVE/);
-    assert.notEqual(schedulerResult.status, 0); assert.match(schedulerResult.stderr, /SCHEDULER_ROLE_ALREADY_ACTIVE/);
+    assert.notEqual(schedulerResult.status, 0); assert.match(schedulerResult.stderr, /scheduler_role_rejected/); assert.match(schedulerResult.stderr, /SCHEDULER_ROLE_ALREADY_ACTIVE/);
+    assert.equal(schedulerResult.stdout.includes('scheduler_tick'), false);
   });
 
   await test('one-shot entrypoints acquire and release their roles cleanly', async () => {
@@ -83,10 +109,30 @@ async function main() {
     const workerResult = spawnSync(process.execPath, [path.join(root, 'scripts', 'automation-worker.cjs'), '--once'], { cwd: root, env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
     assert.equal(workerResult.status, 0, workerResult.stderr); assert.match(workerResult.stdout, /worker_idle/);
     const schedulerResult = spawnSync(process.execPath, [path.join(root, 'scripts', 'automation-scheduler.cjs'), '--once'], { cwd: root, env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
-    assert.equal(schedulerResult.status, 0, schedulerResult.stderr); assert.match(schedulerResult.stdout, /scheduler_tick/);
+    assert.equal(schedulerResult.status, 0, schedulerResult.stderr); assert.match(schedulerResult.stdout, /scheduler_role_acquired/); assert.match(schedulerResult.stdout, /scheduler_tick/); assert.match(schedulerResult.stdout, /scheduler_role_released/); assert.match(schedulerResult.stdout, /scheduler_shutdown/);
     const leases = await roles.listRuntimeRoleLeases();
     assert.equal(leases.find(item => item.role === 'WORKER').status, 'RELEASED');
     assert.equal(leases.find(item => item.role === 'SCHEDULER').status, 'RELEASED');
+  });
+
+  await test('SIGTERM wakes scheduler wait, stops new ticks, and releases the owned lease', async () => {
+    await reset();
+    const env = { ...process.env, SANDEAL_DATA_DIR: tempDir, NODE_ENV: 'test' };
+    const entry = path.join(root, 'scripts', 'automation-scheduler.cjs');
+    const wrapper = `setTimeout(() => process.emit('SIGTERM'), 250); require(${JSON.stringify(entry)});`;
+    const startedAt = Date.now();
+    const result = spawnSync(process.execPath, ['-e', wrapper], { cwd: root, env, encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    assert.equal(result.status, 0, result.stderr); assert.ok(Date.now() - startedAt < 10_000);
+    assert.match(result.stdout, /"type":"scheduler_shutdown".*"phase":"requested".*"signal":"SIGTERM"/);
+    assert.match(result.stdout, /"type":"scheduler_role_released"/);
+    assert.match(result.stdout, /"type":"scheduler_shutdown".*"phase":"completed".*"signal":"SIGTERM".*"released":true/);
+  });
+
+  await test('scheduler without current ownership cannot enqueue any job', async () => {
+    await reset(); const now = Date.now();
+    await roles.acquireRuntimeRole({ role: 'SCHEDULER', ownerId: 'scheduler-leader', instanceId: 'scheduler-leader:1', now });
+    const result = await scheduler.runOwnedSchedulerCycle({ ownerId: 'scheduler-contender', instanceId: 'scheduler-contender:1', fencingToken: 99 }, now + 1);
+    assert.equal(result.status, 'role_lost'); assert.equal((await store.getAllAutomationJobs()).length, 0);
   });
 
   await test('Guardian reports healthy active roles without pausing ingestion', async () => {

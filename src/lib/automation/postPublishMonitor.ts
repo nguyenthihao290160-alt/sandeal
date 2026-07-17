@@ -14,6 +14,7 @@ import {
   readinessSnapshotHash,
   verifyAutonomousPublishEvidence,
 } from '@/lib/autonomous/publishPolicy';
+import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 import { isReviewIndexable } from '@/lib/editorialReview';
 import { evaluateSafePublish } from '@/lib/safePublish';
 import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
@@ -444,6 +445,11 @@ async function hideConfirmedProduct(
     nextAutomaticAction: 'RECHECK_HIDDEN_PRODUCT',
   });
   if (!saved) throw new Error('POST_PUBLISH_MONITOR_HIDE_WRITE_FAILED');
+  await recordSourceQualityObservation(saved.source, {
+    idempotencyKey: `source-rollback:${saved.publicationEffectKey || saved.publishedAt || saved.id}`.slice(0, 200),
+    observedAt: saved.hiddenAt || checkedAt,
+    rolledBackProducts: 1,
+  });
   const childJobId = await scheduleNextMonitor(job, current.id, DAY, sequenceOf(job) + 1, '24h', 'hidden-recheck', true);
   return { product: saved, childJobId };
 }

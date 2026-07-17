@@ -183,7 +183,7 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
       const publicCount = (await getPublicProducts()).length;
       const operationMode = selectOperationMode(publicCount);
       const deadline = Date.now() + settings.maxRunDurationMs;
-      const scan = await scanSourcesToQueue(operationMode, deadline);
+      const scan = await scanSourcesToQueue(operationMode, deadline, { runId: `autopilot-run:${runId}` });
       const review = mode === 'full_safe_run' && Date.now() < deadline
         ? await processReviewQueue(operationMode, deadline)
         : null;

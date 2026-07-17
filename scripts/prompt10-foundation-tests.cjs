@@ -164,7 +164,7 @@ async function main() {
     assert.equal(disclosure.approvalMode, policy.approvalMode);
   });
 
-  await test('worker rejects a job whose bot snapshot violates policy', async () => {
+  await test('claim gate blocks a job whose bot snapshot violates policy before worker execution', async () => {
     await adapter.writeCollection('automation-jobs', []);
     await store.updateAutomationControl({ workerPaused: false, killSwitch: false }, 'foundation-test');
     const created = await store.createAutomationJob({ type: 'HEALTH_CHECK', payload: {}, idempotencyKey: 'prompt10-worker-policy-001', requestedBy: 'test', riskLevel: 'LOW' });
@@ -173,11 +173,12 @@ async function main() {
       return items;
     });
     const result = await worker.processAutomationBatch('foundation-worker', 1);
-    assert.equal(result.failed, 1);
-    assert.equal((await store.getAutomationJob(created.job.id)).status, 'FAILED');
+    assert.equal(result.claimed, 0); assert.equal(result.failed, 0);
+    const blocked = await store.getAutomationJob(created.job.id);
+    assert.equal(blocked.status, 'BLOCKED'); assert.equal(blocked.lastErrorCode, 'SCHEMA_VALIDATION_FAILED');
   });
 
-  await test('worker fails closed when a legacy job is missing policy snapshots', async () => {
+  await test('claim gate fails closed before worker when a legacy job is missing policy snapshots', async () => {
     await adapter.writeCollection('automation-jobs', []);
     await store.updateAutomationControl({ workerPaused: false, killSwitch: false }, 'foundation-test');
     const created = await store.createAutomationJob({ type: 'HEALTH_CHECK', payload: {}, idempotencyKey: 'prompt10-worker-fail-closed', requestedBy: 'foundation-test' });
@@ -187,8 +188,9 @@ async function main() {
       return items;
     });
     const result = await worker.processAutomationBatch('foundation-fail-closed-worker', 1);
-    assert.equal(result.failed, 1);
-    assert.equal((await store.getAutomationJob(created.job.id)).status, 'FAILED');
+    assert.equal(result.claimed, 0); assert.equal(result.failed, 0);
+    const blocked = await store.getAutomationJob(created.job.id);
+    assert.equal(blocked.status, 'BLOCKED'); assert.equal(blocked.lastErrorCode, 'AUTOMATION_JOB_SCHEMA_UNSUPPORTED');
   });
 
   await test('enabled Runtime Guardian policy has an executable worker handler', async () => {

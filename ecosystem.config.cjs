@@ -3,6 +3,7 @@ const path = require('node:path');
 
 const cwd = __dirname;
 const dataDir = path.resolve(cwd, process.env.SANDEAL_DATA_DIR || '.data');
+const prompt10RuntimeEnabled = process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME === 'true';
 const shared = {
   cwd,
   exec_mode: 'fork',
@@ -29,16 +30,17 @@ module.exports = {
       script: path.join(cwd, 'node_modules', 'next', 'dist', 'bin', 'next'),
       args: 'start',
     },
-    // PROMPT 10 workers disabled for emergency stabilization
-    // {
-    //   ...shared,
-    //   name: 'sandeal-worker',
-    //   script: path.join(cwd, 'scripts', 'automation-worker.cjs'),
-    // },
-    // {
-    //   ...shared,
-    //   name: 'sandeal-scheduler',
-    //   script: path.join(cwd, 'scripts', 'automation-scheduler.cjs'),
-    // },
+    ...(prompt10RuntimeEnabled ? [
+      {
+        ...shared,
+        name: 'sandeal-worker',
+        script: path.join(cwd, 'scripts', 'automation-worker.cjs'),
+      },
+      {
+        ...shared,
+        name: 'sandeal-scheduler',
+        script: path.join(cwd, 'scripts', 'automation-scheduler.cjs'),
+      },
+    ] : []),
   ],
 };

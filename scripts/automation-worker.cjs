@@ -1,21 +1,28 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 require('./register-typescript.cjs');
+const crypto = require('node:crypto');
+const os = require('node:os');
 const { processAutomationBatch } = require('../src/lib/automation/worker.ts');
 const { acquireRuntimeRole, heartbeatRuntimeRole, releaseRuntimeRole } = require('../src/lib/automation/runtimeRoles.ts');
-const workerId = `worker-${process.pid}`;
+const hostname = os.hostname();
+const workerId = `worker:${hostname}`;
+const instanceId = `${workerId}:${process.pid}:${crypto.randomUUID()}`;
+const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 1000)).toISOString();
 const once = process.argv.includes('--once');
 let stopping = false;
 process.on('SIGINT', () => { stopping = true; });
 process.on('SIGTERM', () => { stopping = true; });
 
 (async () => {
-  const role = await acquireRuntimeRole({ role: 'WORKER', holderId: workerId, pid: process.pid });
+  const role = await acquireRuntimeRole({ role: 'WORKER', ownerId: workerId, instanceId, hostname, pid: process.pid, processStartedAt });
   if (!role.acquired) throw new Error(`WORKER_ROLE_ALREADY_ACTIVE:${role.lease.holderId}`);
-  const roleHeartbeat = setInterval(() => { void heartbeatRuntimeRole('WORKER', workerId); }, 15_000);
+  if (!role.ownership) throw new Error('WORKER_ROLE_OWNERSHIP_MISSING');
+  const ownership = role.ownership;
+  const roleHeartbeat = setInterval(() => { void heartbeatRuntimeRole('WORKER', ownership); }, 15_000);
   let lastIdleLogAt = 0;
   try {
     do {
-      const result = await processAutomationBatch(workerId, 2);
+      const result = await processAutomationBatch(instanceId, 2);
       const now = Date.now();
       if (once || result.claimed > 0 || now - lastIdleLogAt >= 60_000) {
         console.log(JSON.stringify({ type: result.claimed ? 'worker_tick' : 'worker_idle', ...result }));
@@ -25,6 +32,6 @@ process.on('SIGTERM', () => { stopping = true; });
     } while (!once && !stopping);
   } finally {
     clearInterval(roleHeartbeat);
-    await releaseRuntimeRole('WORKER', workerId);
+    await releaseRuntimeRole('WORKER', ownership);
   }
 })().catch(error => { console.error('Worker failed:', error instanceof Error ? error.message : 'unknown_error'); process.exitCode = 1; });

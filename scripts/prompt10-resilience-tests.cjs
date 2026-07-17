@@ -8,7 +8,7 @@ fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.NODE_ENV = 'test';
 process.env.ALLOW_PAID_AI = 'false';
-process.env.ACCESS_TRADE_API_KEY = 'fixture-access-trade-key';
+process.env.ACCESS_TRADE_API_KEY = 'fixture-not-a-real-secret-3';
 require('./register-typescript.cjs');
 
 let passed = 0; let failed = 0;

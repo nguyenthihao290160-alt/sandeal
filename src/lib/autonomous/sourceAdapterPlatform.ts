@@ -44,6 +44,7 @@ export interface SourceDiscoveryResult<T> {
   items: T[];
   requests: number;
   retryAfter?: string;
+  outcomes?: Record<string, number>;
 }
 
 export interface ProductSourceAdapter<TSource = unknown, TNormalized = unknown> {
@@ -192,6 +193,10 @@ export function createAccessTradeSourceAdapter(dependencies: AccessTradeAdapterD
         items: result.items,
         requests: result.requests.reduce((total, request) => total + Math.max(0, request.attempts ?? 1), 0),
         retryAfter: result.requests.map(request => request.retryAfter).filter((item): item is string => Boolean(item)).sort().at(-1),
+        outcomes: result.requests.reduce<Record<string, number>>((outcomes, request) => {
+          outcomes[request.resultType] = (outcomes[request.resultType] || 0) + 1;
+          return outcomes;
+        }, {}),
       };
     },
     normalize(item) {

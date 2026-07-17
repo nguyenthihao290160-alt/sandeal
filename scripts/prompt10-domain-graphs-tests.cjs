@@ -49,6 +49,7 @@ async function main() {
   const evidence = require('../src/lib/autonomous/evidenceGraph.ts');
   const confidence = require('../src/lib/autonomous/confidenceEngine.ts');
   const identity = require('../src/lib/autonomous/productIdentityGraph.ts');
+  const priceTruth = require('../src/lib/autonomous/priceTruthEngine.ts');
   global.fetch = async () => { throw new Error('NETWORK_FORBIDDEN_IN_PROMPT10_DOMAIN_GRAPHS'); };
   await adapter.writeCollection('evidence-facts', []);
 
@@ -192,6 +193,50 @@ async function main() {
     const first = identity.canonicalizeProductUrl('https://WWW.Merchant.Example/item/1/?utm_source=x&b=2&a=1#section');
     const second = identity.canonicalizeProductUrl('https://www.merchant.example/item/1?a=1&b=2&utm_campaign=y');
     assert.equal(first, second);
+  });
+
+  await test('price truth emits factual freshness states and rejects unavailable prices', () => {
+    const now = Date.parse('2026-07-16T10:00:00.000Z');
+    const observation = observedAt => [{
+      sourceId: 'source-a', value: 1000000, currency: 'VND', observedAt,
+      evidenceFactIds: ['price-fact-a'], verified: true, confidence: 0.95,
+    }];
+    assert.equal(priceTruth.evaluatePriceTruth({}, observation('2026-07-16T09:00:00.000Z'), now).state, 'FRESH');
+    assert.equal(priceTruth.evaluatePriceTruth({}, observation('2026-07-14T10:00:00.000Z'), now).state, 'AGING');
+    assert.equal(priceTruth.evaluatePriceTruth({}, observation('2026-07-12T09:00:00.000Z'), now).state, 'STALE');
+    assert.equal(priceTruth.evaluatePriceTruth({}, [{ sourceId: 'source-a', value: 0, currency: 'VND', observedAt: '2026-07-16T09:00:00.000Z', verified: true }], now).state, 'UNAVAILABLE');
+    assert.equal(priceTruth.evaluatePriceTruth({}, [{ sourceId: 'source-a', value: -1, currency: 'VND', observedAt: '2026-07-16T09:00:00.000Z', verified: true }], now).state, 'UNAVAILABLE');
+  });
+
+  await test('price conflicts and large changes require cross-check instead of producing a public price', () => {
+    const now = Date.parse('2026-07-16T10:00:00.000Z');
+    const base = { currency: 'VND', verified: true, confidence: 0.95, evidenceFactIds: ['price-fact'] };
+    const conflicted = priceTruth.evaluatePriceTruth({}, [
+      { ...base, sourceId: 'source-a', value: 1000000, observedAt: '2026-07-16T09:00:00.000Z' },
+      { ...base, sourceId: 'source-b', value: 1500000, observedAt: '2026-07-16T09:05:00.000Z' },
+    ], now);
+    assert.equal(conflicted.state, 'CONFLICTED'); assert.equal(conflicted.requiresCrossCheck, true); assert.equal(conflicted.effectivePrice, undefined);
+    const anomalous = priceTruth.evaluatePriceTruth({}, [
+      { ...base, sourceId: 'source-a', value: 2000000, observedAt: '2026-07-15T09:00:00.000Z' },
+      { ...base, sourceId: 'source-a', value: 900000, observedAt: '2026-07-16T09:00:00.000Z' },
+    ], now);
+    assert.equal(anomalous.state, 'ANOMALOUS'); assert.equal(anomalous.requiresCrossCheck, true); assert.equal(anomalous.effectivePrice, undefined);
+  });
+
+  await test('discount is emitted only when current and original prices both carry evidence', () => {
+    const now = Date.parse('2026-07-16T10:00:00.000Z');
+    const current = { sourceId: 'source-a', value: 800000, currency: 'VND', observedAt: '2026-07-16T09:00:00.000Z', evidenceFactIds: ['current-price'], verified: true, kind: 'CURRENT' };
+    const evidenced = priceTruth.evaluatePriceTruth({}, [
+      current,
+      { sourceId: 'source-a', value: 1000000, currency: 'VND', observedAt: '2026-07-16T09:00:00.000Z', evidenceFactIds: ['original-price'], verified: true, kind: 'ORIGINAL' },
+    ], now);
+    assert.equal(evidenced.discountPercent, 20);
+    const missingOriginalEvidence = priceTruth.evaluatePriceTruth({}, [
+      current,
+      { sourceId: 'source-a', value: 1000000, currency: 'VND', observedAt: '2026-07-16T09:00:00.000Z', verified: true, kind: 'ORIGINAL' },
+    ], now);
+    assert.equal(missingOriginalEvidence.discountPercent, undefined);
+    assert.ok(missingOriginalEvidence.reasons.includes('discount_evidence_incomplete'));
   });
 
   await test('offer observation replay dedupes while a newer price replaces the same offer', () => {

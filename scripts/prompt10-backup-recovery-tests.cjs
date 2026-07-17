@@ -25,11 +25,11 @@ process.env.NODE_ENV = 'test';
 process.env.ALLOW_PAID_AI = 'false';
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'prompt10-backup-test';
-process.env.BASIC_AUTH_PASSWORD = 'prompt10-backup-fixture-password';
+process.env.BASIC_AUTH_PASSWORD = 'fixture-not-a-real-secret-1';
 process.env.SANDEAL_ADMIN_PERMISSIONS = '*';
 require('./register-typescript.cjs');
 
-const auth = `Basic ${Buffer.from('prompt10-backup-test:prompt10-backup-fixture-password').toString('base64')}`;
+const auth = `Basic ${Buffer.from('prompt10-backup-test:fixture-not-a-real-secret-1').toString('base64')}`;
 let passed = 0;
 let failed = 0;
 async function test(name, work) {

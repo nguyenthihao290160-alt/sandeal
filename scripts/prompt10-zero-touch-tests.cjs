@@ -13,11 +13,11 @@ process.env.ACCESS_TRADE_API_KEY = '';
 process.env.ALLOW_PAID_AI = 'false';
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'prompt10-zero-touch';
-process.env.BASIC_AUTH_PASSWORD = 'isolated-zero-touch-password';
+process.env.BASIC_AUTH_PASSWORD = 'fixture-not-a-real-secret-4';
 process.env.SANDEAL_ADMIN_PERMISSIONS = '*';
 require('./register-typescript.cjs');
 
-const auth = `Basic ${Buffer.from('prompt10-zero-touch:isolated-zero-touch-password').toString('base64')}`;
+const auth = `Basic ${Buffer.from('prompt10-zero-touch:fixture-not-a-real-secret-4').toString('base64')}`;
 const testFilter = String(process.env.PROMPT10_ZERO_TOUCH_FILTER || '').trim().toLowerCase();
 let passed = 0;
 let failed = 0;
@@ -90,6 +90,7 @@ async function main() {
   const worker = require('../src/lib/automation/worker.ts');
   const canary = require('../src/lib/automation/canaryController.ts');
   const products = require('../src/lib/storage/products.ts');
+  const settings = require('../src/lib/storage/automationSettings.ts');
   const lifecycle = require('../src/lib/autonomous/lifecycleStore.ts');
   const evidence = require('../src/lib/autonomous/evidenceGraph.ts');
   const productRoute = require('../src/app/api/products/route.ts');
@@ -119,6 +120,7 @@ async function main() {
 
   async function reset(mode = 'CANARY') {
     for (const collection of collections) await adapter.writeCollection(collection, []);
+    await settings.updateAutomationSettings({ launchEnabled: mode === 'CANARY' || mode === 'AUTONOMOUS' });
     await store.updateAutomationControl({
       mode,
       effectiveMode: mode,

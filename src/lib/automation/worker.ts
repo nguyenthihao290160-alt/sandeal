@@ -16,6 +16,7 @@ import {
   canUseCircuit,
   claimAutomationJobs,
   completeAutomationJob,
+  AUTOMATION_JOB_SCHEMA_VERSION,
   createAutomationJob,
   failAutomationJob,
   getAutomationControl,
@@ -28,6 +29,7 @@ import {
   waitAutomationJobForManual,
 } from './store';
 import type { AutomationCheckpoint, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
+import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 
 function assertUnhandledJobType(type: never): never {
   throw new Error(`UNSUPPORTED_JOB_TYPE:${String(type)}`);
@@ -50,7 +52,7 @@ function hashValue(value: unknown): string {
 function assertWorkerPolicy(job: AutomationJob): void {
   const policy = getAutomationPolicy(job.type);
   const riskRank = { LOW: 0, MEDIUM: 1, HIGH: 2, BLOCKER: 3 } as const;
-  if (job.schemaVersion !== 2) throw new Error('AUTOMATION_JOB_SCHEMA_UNSUPPORTED');
+  if (job.schemaVersion !== AUTOMATION_JOB_SCHEMA_VERSION) throw new Error('AUTOMATION_JOB_SCHEMA_UNSUPPORTED');
   if (!job.policyVersion || job.policyVersion !== policy.policyVersion) throw new Error('STALE_POLICY_SNAPSHOT');
   if (!job.handlerVersion || job.handlerVersion !== policy.handlerVersion) throw new Error('STALE_HANDLER_VERSION');
   if (!job.botId || job.botId !== policy.botId) throw new Error('POLICY_BOT_MISMATCH');
@@ -108,6 +110,7 @@ function errorCode(error: unknown): string {
   if (/budget|quota/i.test(message)) return 'QUOTA_EXCEEDED';
   if (/schema/i.test(message)) return 'SCHEMA_VALIDATION_FAILED';
   if (/provider.?response|json.?response/i.test(message)) return 'INVALID_PROVIDER_RESPONSE';
+  if (/publish.*(?:paused|disabled|blocked)|mode.*blocked|dry.?run.*publish/i.test(message)) return 'SAFETY_POLICY_BLOCKED';
   if (/safety|policy|kill.?switch|paid.?provider/i.test(message)) return 'SAFETY_POLICY_BLOCKED';
   if (/validation|invalid/i.test(message)) return 'VALIDATION_ERROR';
   return 'INTERNAL_ERROR';
@@ -149,7 +152,9 @@ async function executeAutoPilotJob(
     const settings = await getAutomationSettings();
     const operationMode = selectOperationMode((await getPublicProducts()).length);
     const deadline = Date.now() + settings.maxRunDurationMs;
-    const scan = await scanSourcesToQueue(operationMode, deadline);
+    const scan = await scanSourcesToQueue(operationMode, deadline, {
+      runId: `automation-job:${job.id}:attempt:${job.attemptCount}`,
+    });
     await assertKillSwitchInactive();
     const bridge = mode === 'full_safe_run' && Date.now() < deadline
       ? await bridgeCandidatesToDurableJobs({ parentJobId: job.id, requestedBy: 'autopilot-worker', limit: settings.maxItemsPerRun })
@@ -418,6 +423,11 @@ async function executeJob(job: AutomationJob, workerId: string): Promise<Record<
         runId: job.id,
       });
       if (!published || published.status !== 'published') throw new Error('SAFE_PUBLISH_BLOCKED');
+      await recordSourceQualityObservation(published.source, {
+        idempotencyKey: `source-publish:manual:${job.id}`.slice(0, 200),
+        observedAt: published.publishedAt || job.createdAt,
+        publishedProducts: 1,
+      });
       return { productId, status: published.status, publishedAt: published.publishedAt || null };
     }
     case 'AI_ANALYSIS': {

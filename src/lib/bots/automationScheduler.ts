@@ -105,7 +105,7 @@ export async function runSchedulerTick(now = Date.now()): Promise<{ status: 'com
     const recovered = await recoverDueGeminiCredentials(now, 1);
     if (recovered.length) ran.push(`gemini_recovery:${recovered[0].generationStatus}`);
     if (settings.sourceScanEnabled && isJobDue(state.nextSourceScanAt, now) && (!state.sourceRateLimitUntil || Date.parse(state.sourceRateLimitUntil) <= now)) {
-      const scan = await scanSourcesToQueue(mode, deadlineMs);
+      const scan = await scanSourcesToQueue(mode, deadlineMs, { runId: `legacy-scheduler:${now}` });
       summary = addCounters(summary, scan);
       state.lastSourceScanAt = new Date(now).toISOString();
       state.nextSourceScanAt = new Date(now + intervals.sourceMs).toISOString();

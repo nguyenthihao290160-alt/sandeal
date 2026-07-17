@@ -99,7 +99,12 @@ export async function getPublicProducts(filters?: ProductFilters): Promise<Produ
   return filtered.map(p => normalizeProductForPublic(p));
 }
 
+function requestsPublicProductState(updates: Partial<Product>): boolean {
+  return updates.status === 'published' || updates.publicHidden === false || updates.autoPublished === true;
+}
+
 export async function createProduct(data: CreateProductInput): Promise<Product> {
+  if (requestsPublicProductState(data as Partial<Product>)) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
     const products = await readCanonicalProducts();
     if (products.some((item) =>
@@ -123,8 +128,8 @@ export async function createProduct(data: CreateProductInput): Promise<Product> 
 }
 
 export async function updateProduct(id: string, updates: Partial<Product>): Promise<Product | null> {
-  const requestsPublicState = updates.status === 'published' || updates.publicHidden === false || updates.autoPublished === true;
-  return saveCanonicalProduct(id, updates, { evaluate: requestsPublicState });
+  if (requestsPublicProductState(updates)) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
+  return saveCanonicalProduct(id, updates);
 }
 
 export async function saveCanonicalProduct(
@@ -132,10 +137,13 @@ export async function saveCanonicalProduct(
   updates: Partial<Product>,
   options: { evaluate?: boolean } = {},
 ): Promise<Product | null> {
+  if (options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
     const products = await readCanonicalProducts();
     const index = products.findIndex((item) => item.id === id);
     if (index < 0) return null;
+    const alreadyPublic = products[index].status === 'published' && products[index].publicHidden === false;
+    if (requestsPublicProductState(updates) && !alreadyPublic) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
     const now = new Date().toISOString();
     const merged = { ...products[index], ...updates, id, updatedAt: now };
     const before = JSON.stringify({ ...products[index], updatedAt: undefined });
@@ -153,6 +161,7 @@ export async function upsertCanonicalProduct(
   draft: Partial<Product>,
   options: { evaluate?: boolean } = {},
 ): Promise<{ product: Product; created: boolean; unchanged: boolean }> {
+  if (requestsPublicProductState(draft) || options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
     const products = await readCanonicalProducts();
     const sourceId = String(draft.sourceId || draft.externalId || '');
@@ -227,9 +236,13 @@ async function requireDurablePublishAuthorization(
   if (!settings.safePublish || !settings.freeOnly || settings.allowPaidAi) {
     throw new Error('SAFE_PUBLISH_POLICY_BLOCKED');
   }
+  if (control.publishPaused) throw new Error('PUBLISH_LANE_PAUSED');
+  if (!settings.launchEnabled) throw new Error('PUBLISH_LAUNCH_DISABLED');
+  if (!['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode)) throw new Error('PUBLISH_MODE_BLOCKED');
   if (!job || !['SAFE_PUBLISH', 'AUTO_SAFE_PUBLISH'].includes(job.type) || job.status !== 'RUNNING') {
     throw new Error('PUBLISH_JOB_INVALID');
   }
+  if (job.dryRun || context.dryRun) throw new Error('DRY_RUN_PUBLISH_BLOCKED');
   if (job.claimedBy !== context.workerId) throw new Error('PUBLISH_WORKER_MISMATCH');
   if (job.type === 'SAFE_PUBLISH') {
     if (job.approvalStatus !== 'APPROVED' || !job.approvedBy) throw new Error('APPROVAL_REQUIRED');
@@ -238,7 +251,6 @@ async function requireDurablePublishAuthorization(
     const { getAutomationPolicy } = await import('../automation/policyRegistry');
     const policy = getAutomationPolicy('AUTO_SAFE_PUBLISH');
     if (!policy.autonomousAllowed || policy.publishPermission !== 'AUTONOMOUS_GUARDED' || policy.approvalMode !== 'NEVER') throw new Error('AUTONOMOUS_PUBLISH_POLICY_BLOCKED');
-    if (!['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode) || control.publishPaused) throw new Error('AUTONOMOUS_MODE_BLOCKED');
     if (job.riskLevel !== 'LOW' || job.approvalStatus !== 'NOT_REQUIRED') throw new Error('AUTONOMOUS_RISK_BLOCKED');
     if (!['scheduler', 'autonomous-reconciler', 'autopilot-worker'].includes(job.requestedBy)) throw new Error('AUTONOMOUS_ACTOR_BLOCKED');
   }

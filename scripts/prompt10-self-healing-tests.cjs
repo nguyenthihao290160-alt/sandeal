@@ -112,11 +112,13 @@ async function main() {
   const confidence = require('../src/lib/autonomous/confidenceEngine.ts');
   const backups = require('../src/lib/autonomous/backupManager.ts');
   const publicFilter = require('../src/lib/publicProductFilter.ts');
+  const settings = require('../src/lib/storage/automationSettings.ts');
+  const sourceQuality = require('../src/lib/autonomous/sourceQuality.ts');
 
   const collections = [
     'products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs',
     'automation-control', 'automation-audit', 'automation-canary', 'operation-journal',
-    'automation-outbound-events', 'publication-audit', 'manual-tasks',
+    'automation-outbound-events', 'publication-audit', 'manual-tasks', 'source-quality',
   ];
 
   const forbidNetwork = () => {
@@ -126,6 +128,7 @@ async function main() {
   async function reset(mode = 'AUTONOMOUS') {
     forbidNetwork();
     for (const collection of collections) await adapter.writeCollection(collection, []);
+    await settings.updateAutomationSettings({ launchEnabled: mode === 'CANARY' || mode === 'AUTONOMOUS' });
     await store.updateAutomationControl({
       mode,
       effectiveMode: mode,
@@ -239,6 +242,7 @@ async function main() {
     assert.equal(current.status, 'needs_review');
     assert.equal(current.publicHidden, true);
     assert.equal(current.hiddenReason, 'confirmed_broken');
+    assert.equal((await sourceQuality.getSourceQualitySnapshot(seeded.source)).counters.rolledBackProducts, 1);
     assert.equal(publicFilter.isPublicSafeProduct(current), false);
     assert.equal((await products.getPublicProducts()).some(product => product.id === seeded.id), false);
     const transitions = (await adapter.readCollection('product-lifecycle-events')).map(event => `${event.previousState}->${event.nextState}`);

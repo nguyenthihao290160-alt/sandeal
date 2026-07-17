@@ -5,7 +5,7 @@ const { execFileSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const command = process.argv[2];
-const excludedDirectories = new Set(['.git', '.next', '.data', '.release', 'node_modules', 'coverage', 'out', 'build']);
+const excludedDirectories = new Set(['.git', '.next', '.data', '.release', '.test-tmp', 'node_modules', 'coverage', 'out', 'build']);
 
 function walk(directory, files = []) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {

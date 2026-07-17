@@ -503,7 +503,7 @@ async function main() {
     assert.equal((await productsStore.getProductById('bulk-durable')).status, 'needs_review');
   });
 
-  await test('bulk dry-run needs no confirmation and queues a LOW-risk idempotent job', async () => {
+  await test('bulk dry-run needs no confirmation and keeps the policy-default MEDIUM risk', async () => {
     await reset('products', 'automation-jobs', 'automation-control', 'automation-audit');
     await adapter.writeCollection('products', [makeProduct({ id: 'bulk-dry-run' })]);
     const request = () => bulkRoute.POST(new NextRequest('http://localhost/api/dashboard/bulk', {
@@ -520,7 +520,7 @@ async function main() {
     assert.equal(firstBody.data.status, 'PENDING');
     const jobs = await automationStore.getAllAutomationJobs();
     assert.equal(jobs.length, 1);
-    assert.equal(jobs[0].riskLevel, 'LOW');
+    assert.equal(jobs[0].riskLevel, 'MEDIUM');
     assert.equal(jobs[0].dryRun, true);
     assert.equal(jobs[0].approvalStatus, 'NOT_REQUIRED');
     assert.equal((await productsStore.getProductById('bulk-dry-run')).status, 'needs_review');

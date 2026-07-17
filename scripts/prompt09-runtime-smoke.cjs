@@ -199,6 +199,7 @@ async function main() {
       ['/review-methodology', 200, false],
       ['/robots.txt', 200, false],
       ['/sitemap.xml', 200, false],
+      [`/go/${published[0].id}`, 302, false],
       ['/api/public/products?pageSize=6', 200, false],
       ['/api/public/products?pageSize=51', 400, false],
       ['/api/health', 200, true],
@@ -206,7 +207,16 @@ async function main() {
       ['/api/automation/jobs', 200, true],
       ['/api/automation/health', 200, true],
       ['/api/automation/onboarding', 200, true],
+      ['/dashboard', 401, false],
+      ['/dashboard', 200, true],
+      ['/dashboard/products', 200, true],
+      ['/dashboard/import', 200, true],
+      ['/dashboard/quality', 200, true],
+      ['/dashboard/content', 200, true],
       ['/dashboard/ai-bots', 200, true],
+      ['/dashboard/automation', 200, true],
+      ['/dashboard/alerts', 200, true],
+      ['/dashboard/product-sources', 200, true],
     ];
     for (const [route, expected, authenticated] of routes) {
       const response = await fetch(`${baseUrl}${route}`, {

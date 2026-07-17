@@ -5,7 +5,7 @@ import type { Product, ProductOffer } from '@/lib/types';
 
 export const REVENUE_INTEGRITY_RULE_VERSION = 'revenue-integrity-v2';
 
-const BOT_PATTERN = /(?:^|[^a-z])(?:bot|crawler|spider|preview|headless|lighthouse|uptime|monitor|curl|wget)(?:[^a-z]|$)/i;
+const BOT_PATTERN = /(?:bot|crawler|spider|preview|headless|lighthouse|uptime|monitor|curl|wget)/i;
 const TRACKING_PATTERN = /^(?:aff(?:iliate)?(?:_?(?:id|sid|sub))?|click_?id|sub(?:_?id)?|tracking(?:_?id)?|ref|utm_.+)$/i;
 const HEALTHY_PRODUCT_LINK = new Set(['ok', 'redirect_ok']);
 const BROKEN_PRODUCT_LINK = new Set(['broken', 'not_found', 'affiliate_error', 'product_unavailable', 'forbidden']);
@@ -36,7 +36,8 @@ export interface RevenueIntegrityMerchantHealth {
 
 export interface RevenueIntegritySummary {
   outboundClicks: number;
-  redirectSuccesses: number;
+  redirectSuccesses: number | null;
+  redirectMeasurementStatus: 'insufficient_data';
   brokenAffiliateProducts: number;
   degradedAffiliateProducts: number;
   trafficWithBrokenOffer: Array<{ productId: string; outboundClicks: number }>;
@@ -228,7 +229,8 @@ export function summarizeRevenueIntegrity(input: {
 
   return {
     outboundClicks: clicks.length,
-    redirectSuccesses: clicks.length,
+    redirectSuccesses: null,
+    redirectMeasurementStatus: 'insufficient_data',
     brokenAffiliateProducts: [...states.values()].filter(state => state === 'broken').length,
     degradedAffiliateProducts: [...states.values()].filter(state => state === 'degraded').length,
     trafficWithBrokenOffer: [...clicksByProduct.entries()]

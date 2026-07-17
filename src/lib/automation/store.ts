@@ -26,6 +26,7 @@ const AUDIT = 'automation-audit';
 const USAGE = 'automation-ai-usage';
 const CIRCUITS = 'automation-circuits';
 const MAX_PAYLOAD_BYTES = 16 * 1024;
+export const AUTOMATION_JOB_SCHEMA_VERSION = 2;
 const SECRET_KEY = /token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key|credential/i;
 const TERMINAL = new Set<AutomationJobStatus>(['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED']);
 const COOPERATIVELY_CANCELLABLE = new Set<AutomationJobType>([
@@ -123,6 +124,7 @@ export interface CreateAutomationJobInput {
   payload?: Record<string, unknown>;
   priority?: number;
   idempotencyKey: string;
+  correlationId?: string;
   operationId?: string;
   requestedBy: string;
   riskLevel?: AutomationRiskLevel;
@@ -144,69 +146,190 @@ function effectiveRisk(defaultRisk: AutomationRiskLevel, requested?: AutomationR
   return requested;
 }
 
-export async function createAutomationJob(input: CreateAutomationJobInput): Promise<{ job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' }> {
-  const key = input.idempotencyKey.trim();
-  if (!/^[a-zA-Z0-9:_-]{8,160}$/.test(key)) throw new Error('INVALID_IDEMPOTENCY_KEY');
+export interface AutomationJobContractValidation {
+  valid: boolean;
+  code?: 'AUTOMATION_JOB_SCHEMA_UNSUPPORTED' | 'AUTOMATION_JOB_TYPE_UNSUPPORTED' | 'STALE_POLICY_SNAPSHOT' | 'STALE_HANDLER_VERSION' | 'SCHEMA_VALIDATION_FAILED';
+  reasons: string[];
+}
+
+export class AutomationJobEnqueueError extends Error {
+  readonly code: string;
+  readonly reasons: string[];
+
+  constructor(code: string, reasons: string[] = []) {
+    super(reasons.length ? `${code}:${reasons.join('|')}` : code);
+    this.name = 'AutomationJobEnqueueError';
+    this.code = code;
+    this.reasons = [...reasons];
+  }
+}
+
+function rejectAutomationJob(code: string, reasons: string[] = []): never {
+  throw new AutomationJobEnqueueError(code, reasons);
+}
+
+export function validateAutomationJobContract(
+  job: Partial<AutomationJob>,
+  options: { requireFactoryMetadata?: boolean } = {},
+): AutomationJobContractValidation {
+  if (job.schemaVersion !== AUTOMATION_JOB_SCHEMA_VERSION) {
+    return { valid: false, code: 'AUTOMATION_JOB_SCHEMA_UNSUPPORTED', reasons: [`schemaVersion must be ${AUTOMATION_JOB_SCHEMA_VERSION}`] };
+  }
+  let policy;
+  try {
+    policy = getAutomationPolicy(job.type as AutomationJobType);
+  } catch {
+    return { valid: false, code: 'AUTOMATION_JOB_TYPE_UNSUPPORTED', reasons: ['job type is not registered'] };
+  }
+  if (job.policyVersion !== policy.policyVersion) return { valid: false, code: 'STALE_POLICY_SNAPSHOT', reasons: ['policyVersion does not match the current registry'] };
+  if (job.handlerVersion !== policy.handlerVersion) return { valid: false, code: 'STALE_HANDLER_VERSION', reasons: ['handlerVersion does not match the current registry'] };
+  const reasons: string[] = [];
+  if (typeof job.id !== 'string' || !job.id.trim()) reasons.push('id is required');
+  if (typeof job.idempotencyKey !== 'string' || !/^[a-zA-Z0-9:_-]{8,160}$/.test(job.idempotencyKey)) reasons.push('idempotencyKey is invalid');
+  if (typeof job.operationId !== 'string' || !job.operationId.trim()) reasons.push('operationId is required');
+  if (typeof job.requestedBy !== 'string' || !job.requestedBy.trim()) reasons.push('requestedBy is required');
+  if (!job.payload || typeof job.payload !== 'object' || Array.isArray(job.payload)) reasons.push('payload must be an object');
+  if (job.botId !== policy.botId) reasons.push('botId does not match policy');
+  if (typeof job.capability !== 'string' || !job.capability.trim()) reasons.push('capability is required');
+  if (!job.riskLevel || !(job.riskLevel in RISK_RANK) || RISK_RANK[job.riskLevel] < RISK_RANK[policy.defaultRisk]) reasons.push('riskLevel understates policy');
+  if (job.maxAttempts !== policy.retryPolicy.maxAttempts) reasons.push('maxAttempts does not match policy');
+  if (!['AUTO', 'API_ONLY', 'LOCAL_ONLY', 'MANUAL_ONLY'].includes(String(job.requestedExecutionMode || ''))) reasons.push('requestedExecutionMode is invalid');
+  if (!Number.isFinite(Date.parse(job.scheduledAt || ''))) reasons.push('scheduledAt is invalid');
+  if (!Number.isFinite(Date.parse(job.createdAt || ''))) reasons.push('createdAt is invalid');
+  if (!Number.isFinite(Date.parse(job.updatedAt || ''))) reasons.push('updatedAt is invalid');
+  if (options.requireFactoryMetadata) {
+    if (typeof job.correlationId !== 'string' || !job.correlationId.trim()) reasons.push('correlationId is required');
+    if (!job.sourceMetadata || job.sourceMetadata.producer !== job.requestedBy) reasons.push('sourceMetadata producer is invalid');
+    if (!Array.isArray(job.executionPlan) || !job.executionPlan.length) reasons.push('executionPlan is required');
+  }
+  return reasons.length
+    ? { valid: false, code: 'SCHEMA_VALIDATION_FAILED', reasons }
+    : { valid: true, reasons: [] };
+}
+
+export function assertAutomationJobContract(
+  job: Partial<AutomationJob>,
+  options: { requireFactoryMetadata?: boolean } = {},
+): void {
+  const validation = validateAutomationJobContract(job, options);
+  if (!validation.valid) rejectAutomationJob(validation.code || 'SCHEMA_VALIDATION_FAILED', validation.reasons);
+}
+
+export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs = Date.now()): AutomationJob {
+  const key = typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : '';
+  if (!/^[a-zA-Z0-9:_-]{8,160}$/.test(key)) rejectAutomationJob('INVALID_IDEMPOTENCY_KEY', ['idempotencyKey must be 8-160 safe characters']);
+  const requestedBy = typeof input.requestedBy === 'string' ? input.requestedBy.trim() : '';
+  if (!requestedBy) rejectAutomationJob('AUTOMATION_JOB_REQUESTED_BY_REQUIRED', ['requestedBy is required']);
   const payload = sanitizeAutomationData(input.payload || {}) as Record<string, unknown>;
-  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_PAYLOAD_BYTES) throw new Error('PAYLOAD_TOO_LARGE');
-  const jobPolicy = getAutomationPolicy(input.type);
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_PAYLOAD_BYTES) rejectAutomationJob('PAYLOAD_TOO_LARGE', [`payload exceeds ${MAX_PAYLOAD_BYTES} bytes`]);
+  let jobPolicy;
+  try {
+    jobPolicy = getAutomationPolicy(input.type);
+  } catch {
+    rejectAutomationJob('AUTOMATION_JOB_TYPE_UNSUPPORTED', ['job type is not registered']);
+  }
   const risk = effectiveRisk(jobPolicy.defaultRisk, input.riskLevel);
   const registryDefaults = getJobRegistryDefaults(input.type, payload);
-  const capability = input.capability || jobPolicy.capability;
-  const now = new Date().toISOString();
+  const capability = typeof input.capability === 'string' && input.capability.trim()
+    ? input.capability.trim()
+    : jobPolicy.capability;
+  const now = new Date(nowMs).toISOString();
+  const approvalStatus: ApprovalStatus = approvalStatusForPolicy(jobPolicy, risk);
+  const status: AutomationJobStatus = initialStatusForPolicy(jobPolicy, risk);
+  const requestedPlan = input.executionPlan?.length ? input.executionPlan : input.type === 'AUTO_PILOT' ? buildAutoPilotExecutionPlan() : [{
+    id: capability.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'execute-job',
+    capability,
+    dependsOn: [],
+    reason: 'Thực thi capability đã đăng ký qua durable worker hiện có.',
+    status: 'PENDING' as const,
+    risk,
+    approvalRequired: approvalStatus === 'PENDING',
+    expectedWrite: registryDefaults.writeScope,
+    externalCall: registryDefaults.externalSideEffect,
+    fallback: registryDefaults.fallback,
+  }];
+  const executionPlan = (sanitizeAutomationData(requestedPlan) as AutomationExecutionPlanStep[]).slice(0, 30).map(step => ({
+    ...step,
+    risk: RISK_RANK[step.risk] > RISK_RANK[risk] ? step.risk : risk,
+    approvalRequired: approvalStatus === 'PENDING',
+    expectedWrite: [...jobPolicy.writeScope],
+    externalCall: jobPolicy.externalSideEffect,
+    fallback: [...jobPolicy.fallbackPolicy],
+  }));
+  const inputHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  const operationId = typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : generateId();
+  const correlationId = typeof input.correlationId === 'string' && input.correlationId.trim() ? input.correlationId.trim() : operationId;
+  const source = typeof payload.source === 'string' ? payload.source.slice(0, 100) : undefined;
+  const trigger = typeof payload.trigger === 'string' ? payload.trigger.slice(0, 100) : undefined;
+  const job: AutomationJob = {
+    schemaVersion: AUTOMATION_JOB_SCHEMA_VERSION, policyVersion: jobPolicy.policyVersion, handlerVersion: jobPolicy.handlerVersion,
+    id: generateId(), correlationId, type: input.type, status, payload,
+    priority: Math.max(0, Math.min(100, input.priority ?? 50)), idempotencyKey: key, operationId, requestedBy,
+    sourceMetadata: { producer: requestedBy, source, trigger },
+    parentJobId: input.parentJobId,
+    botId: jobPolicy.botId,
+    capability,
+    requestedExecutionMode: input.requestedExecutionMode || registryDefaults.requestedExecutionMode,
+    executionPlan,
+    progress: { processed: 0, total: executionPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: now },
+    checkpoint: { version: 1, completedSteps: [], pendingSteps: executionPlan.map(step => step.id), outputs: {}, executionModes: [], inputHash, updatedAt: now },
+    approvalStatus, approvalReason: input.approvalReason, approvalExpiresAt: approvalStatus === 'PENDING' ? new Date(nowMs + 24 * 60 * 60_000).toISOString() : undefined,
+    riskLevel: risk, dryRun: input.dryRun === true, attemptCount: 0,
+    maxAttempts: jobPolicy.retryPolicy.maxAttempts,
+    scheduledAt: input.scheduledAt && Number.isFinite(Date.parse(input.scheduledAt)) ? input.scheduledAt : now,
+    createdAt: now, updatedAt: now,
+  };
+  assertAutomationJobContract(job, { requireFactoryMetadata: true });
+  return job;
+}
+
+async function auditRejectedAutomationJob(input: CreateAutomationJobInput, error: unknown): Promise<void> {
+  const operationId = typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : generateId();
+  const correlationId = typeof input.correlationId === 'string' && input.correlationId.trim() ? input.correlationId.trim() : operationId;
+  const actor = typeof input.requestedBy === 'string' && input.requestedBy.trim() ? input.requestedBy.trim() : 'unknown-producer';
+  try {
+    await appendAutomationAudit({
+      correlationId,
+      operationId,
+      operationType: 'JOB_ENQUEUE_REJECTED',
+      actor,
+      target: String(input.type || 'unknown-job-type'),
+      nextState: 'REJECTED_BEFORE_PERSIST',
+      risk: 'BLOCKER',
+      reasons: [error instanceof Error ? error.message : String(error)],
+      dryRun: input.dryRun === true,
+      attempts: 0,
+    });
+  } catch (auditError) {
+    console.error(JSON.stringify({
+      type: 'automation_job_enqueue_audit_failed',
+      code: auditError instanceof Error ? auditError.message : 'unknown_error',
+    }));
+  }
+}
+
+export async function createAutomationJob(input: CreateAutomationJobInput): Promise<{ job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' }> {
+  let job: AutomationJob;
+  try {
+    job = createAutomationJobRecord(input);
+    assertAutomationJobContract(job, { requireFactoryMetadata: true });
+  } catch (error) {
+    await auditRejectedAutomationJob(input, error);
+    throw error;
+  }
   let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
   await runTransaction<AutomationJob>(JOBS, items => {
-    const existing = items.find(item => item.type === input.type && item.idempotencyKey === key);
+    const existing = items.find(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey);
     if (existing) {
       response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
       return undefined;
     }
-    const approvalStatus: ApprovalStatus = approvalStatusForPolicy(jobPolicy, risk);
-    const status: AutomationJobStatus = initialStatusForPolicy(jobPolicy, risk);
-    const requestedPlan = input.executionPlan?.length ? input.executionPlan : input.type === 'AUTO_PILOT' ? buildAutoPilotExecutionPlan() : [{
-      id: capability.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'execute-job',
-      capability,
-      dependsOn: [],
-      reason: 'Thực thi capability đã đăng ký qua durable worker hiện có.',
-      status: 'PENDING' as const,
-      risk,
-      approvalRequired: approvalStatus === 'PENDING',
-      expectedWrite: registryDefaults.writeScope,
-      externalCall: registryDefaults.externalSideEffect,
-      fallback: registryDefaults.fallback,
-    }];
-    const executionPlan = (sanitizeAutomationData(requestedPlan) as AutomationExecutionPlanStep[]).slice(0, 30).map(step => ({
-      ...step,
-      risk: RISK_RANK[step.risk] > RISK_RANK[risk] ? step.risk : risk,
-      approvalRequired: approvalStatus === 'PENDING',
-      expectedWrite: [...jobPolicy.writeScope],
-      externalCall: jobPolicy.externalSideEffect,
-      fallback: [...jobPolicy.fallbackPolicy],
-    }));
-    const inputHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-    const job: AutomationJob = {
-      schemaVersion: 2, policyVersion: jobPolicy.policyVersion, handlerVersion: jobPolicy.handlerVersion,
-      id: generateId(), type: input.type, status, payload, priority: Math.max(0, Math.min(100, input.priority ?? 50)),
-      idempotencyKey: key, operationId: input.operationId || generateId(), requestedBy: input.requestedBy,
-      parentJobId: input.parentJobId,
-      botId: jobPolicy.botId,
-      capability,
-      requestedExecutionMode: input.requestedExecutionMode || registryDefaults.requestedExecutionMode,
-      executionPlan,
-      progress: { processed: 0, total: executionPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: now },
-      checkpoint: { version: 1, completedSteps: [], pendingSteps: executionPlan.map(step => step.id), outputs: {}, executionModes: [], inputHash, updatedAt: now },
-      approvalStatus, approvalReason: input.approvalReason, approvalExpiresAt: approvalStatus === 'PENDING' ? new Date(Date.now() + 24 * 60 * 60_000).toISOString() : undefined,
-      riskLevel: risk, dryRun: input.dryRun === true, attemptCount: 0,
-      maxAttempts: jobPolicy.retryPolicy.maxAttempts,
-      scheduledAt: input.scheduledAt && Number.isFinite(Date.parse(input.scheduledAt)) ? input.scheduledAt : now,
-      createdAt: now, updatedAt: now,
-    };
     items.push(job);
     response = { job, created: true, code: 'CREATED' };
     return items;
   });
   if (response.created) {
-    await appendAutomationAudit({ correlationId: response.job.operationId, operationId: response.job.operationId, jobId: response.job.id,
+    await appendAutomationAudit({ correlationId: response.job.correlationId || response.job.operationId, operationId: response.job.operationId, jobId: response.job.id,
       operationType: response.job.type, actor: response.job.requestedBy, nextState: response.job.status, risk: response.job.riskLevel,
       reasons: input.approvalReason ? [input.approvalReason] : [], dryRun: response.job.dryRun, attempts: 0 });
   }
@@ -457,10 +580,28 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
   const control = await getAutomationControl();
   if (control.workerPaused) return [];
   const claimed: AutomationJob[] = [];
+  const rejectedBeforeClaim: Array<{ job: AutomationJob; validation: AutomationJobContractValidation; previousStatus: AutomationJobStatus }> = [];
   const now = new Date(nowMs).toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     let changed = false;
     for (const item of items) {
+      if (!TERMINAL.has(item.status)) {
+        const validation = validateAutomationJobContract(item);
+        if (!validation.valid) {
+          const previousStatus = item.status;
+          item.status = 'BLOCKED';
+          item.lastErrorCode = validation.code || 'SCHEMA_VALIDATION_FAILED';
+          item.lastErrorMessage = sanitizeErrorMessage(validation.reasons.join('; ') || 'Automation job contract is invalid.');
+          item.claimedBy = undefined;
+          item.claimedAt = undefined;
+          item.leaseExpiresAt = undefined;
+          item.completedAt = now;
+          item.updatedAt = now;
+          rejectedBeforeClaim.push({ job: { ...item }, validation, previousStatus });
+          changed = true;
+          continue;
+        }
+      }
       if (item.status === 'RUNNING' && item.leaseExpiresAt && Date.parse(item.leaseExpiresAt) <= nowMs) {
         item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
         item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
@@ -479,6 +620,23 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
     }
     return changed ? items : undefined;
   });
+  for (const rejected of rejectedBeforeClaim) {
+    const operationId = rejected.job.operationId || generateId();
+    const risk = rejected.job.riskLevel && rejected.job.riskLevel in RISK_RANK ? rejected.job.riskLevel : 'BLOCKER';
+    await appendAutomationAudit({
+      correlationId: rejected.job.correlationId || operationId,
+      operationId,
+      jobId: rejected.job.id,
+      operationType: 'JOB_REJECTED_BEFORE_CLAIM',
+      actor: workerId,
+      previousState: rejected.previousStatus,
+      nextState: 'BLOCKED',
+      risk,
+      reasons: [rejected.validation.code || 'SCHEMA_VALIDATION_FAILED', ...rejected.validation.reasons],
+      dryRun: rejected.job.dryRun === true,
+      attempts: Number(rejected.job.attemptCount || 0),
+    });
+  }
   return claimed;
 }
 

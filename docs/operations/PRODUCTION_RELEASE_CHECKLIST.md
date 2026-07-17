@@ -12,6 +12,9 @@
 - [ ] Storage schema is v1; migration list is empty for this release.
 - [ ] Single-instance limitation is accepted; only one web writer is planned.
 - [ ] Rollback artifact and its checksum are available before deployment.
+- [ ] Every real `test:prompt10:*` script passed on the exact commit; runtime and job-schema contracts have no blocked regression.
+- [ ] Isolated autonomous/runtime smoke passed with a test port, temporary data, mock/local-only providers, and zero external requests.
+- [ ] Worker/scheduler PM2 entries remain opt-in; initial automation state is SHADOW, publishing paused, and launch disabled.
 
 ## Immediately after deployment
 
@@ -21,12 +24,17 @@
 - [ ] Dashboard, Kết quả bot, Tác vụ, Tự động hóa, Nguồn, Kết nối bảo mật, Sức khỏe, and Cài đặt render.
 - [ ] Worker heartbeat is fresh and no second worker claims the same task.
 - [ ] Scheduler last/next run is plausible and does not enqueue duplicates.
+- [ ] Dashboard distinguishes scheduler process online from active/standby/rejected lease role and shows owner, heartbeat, lease expiry, last tick, and next run truthfully.
+- [ ] Provider `configured` and `ready` states are displayed separately; degraded and insufficient-data states are not shown as success.
+- [ ] Job diagnostics show terminal state, reason/error, retry, and schema/policy/handler versions without secret/internal payload leakage.
 - [ ] Queue depth and failure rate are stable.
 - [ ] A dry-run task completes without business-data or external side effects.
 - [ ] AI usage, circuit breaker, and missing-provider states are accurate.
 - [ ] Kill switch state matches the approved state.
 - [ ] Source connections show configured/unconfigured accurately.
 - [ ] Browser console has no new error, hydration mismatch, or request loop.
+- [ ] Desktop and mobile views have no horizontal overflow; loading, empty, populated, error, and degraded states are usable with keyboard and visible focus.
+- [ ] Public cards with missing facts remain truthful; prices show observation/freshness, Trust Panel claims have evidence, and affiliate disclosure is visible.
 - [ ] 5xx rate and response latency remain within the approved baseline.
 
 ## Rollback triggers

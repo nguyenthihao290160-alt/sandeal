@@ -1,5 +1,5 @@
-import { createHash } from 'crypto';
-import { AccessTradeRequestError, isAccessTradeConfigured, mapAccessTradeToProduct, searchAccessTrade, type AccessTradeResultType, type NormalizedAccessTradeItem } from '../integrations/accesstrade';
+import { createHash, randomUUID } from 'crypto';
+import { AccessTradeRequestError, mapAccessTradeToProduct, type AccessTradeResultType, type NormalizedAccessTradeItem } from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
 import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
@@ -21,6 +21,8 @@ import { buildOffer, deriveProductIdentity, identityMatchConfidence, mergeOffers
 import { evaluatePriceTruth, offerPriceObservations, priceTruthProductPatch } from '../autonomous/priceTruthEngine';
 import { persistLifecycleTransition } from '../autonomous/lifecycleStore';
 import { readinessSnapshotHash } from '../autonomous/publishPolicy';
+import { createDefaultSourceAdapterRegistry, type SourceAdapterRegistry, type SourceProviderStatus } from '../autonomous/sourceAdapterPlatform';
+import { applySourceQualityPriority, getSourceQualitySnapshot, recordSourceQualityObservation } from '../autonomous/sourceQuality';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
@@ -41,6 +43,22 @@ export interface PipelineCounters {
 interface KeywordStat { keyword: string; found: number; valid: number; published: number; empty: number; cursor: number; lastUsedAt?: string; }
 interface RuntimeState { id: string; currentConcurrency: number; rateLimitUntil?: string; timeoutStreak: number; updatedAt: string; }
 export interface DailyPipelineUsage { id: string; sourceRequests: number; candidatesFound: number; candidatesQueued: number; networkChecks: number; productsReviewed: number; productsPublished: number; updatedAt: string; }
+
+export interface SourceRunMetrics {
+  normalized: number;
+  rejected: number;
+  timeout: number;
+  rateLimited: number;
+  durationMs: number;
+  sourceStatus: SourceProviderStatus;
+  reason: string;
+  nextEligibleAt?: string;
+}
+
+export interface SourceScanOptions {
+  registry?: SourceAdapterRegistry;
+  runId?: string;
+}
 
 export function selectOperationMode(publicProductCount: number): OperationMode {
   return publicProductCount < 100 ? 'bootstrap' : 'steady';
@@ -116,48 +134,85 @@ function selectKeywords(stats: KeywordStat[], count: number): KeywordStat[] {
   return [...new Map([...exploration, ...ranked].map((item) => [item.keyword, item])).values()].slice(0, count);
 }
 
-export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.now() + 240_000): Promise<PipelineCounters & { resultTypes: Partial<Record<AccessTradeResultType, number>>; retryAfter?: string }> {
+export async function scanSourcesToQueue(
+  mode: OperationMode,
+  deadlineMs = Date.now() + 240_000,
+  options: SourceScanOptions = {},
+): Promise<PipelineCounters & SourceRunMetrics & { resultTypes: Partial<Record<AccessTradeResultType, number>>; retryAfter?: string }> {
+  const startedMs = Date.now();
   const counters = emptyCounters();
   const resultTypes: Partial<Record<AccessTradeResultType, number>> = {};
   let retryAfter: string | undefined;
+  let normalized = 0;
+  let rejected = 0;
+  let validCandidates = 0;
+  let pricesAvailable = 0;
+  let timeout = 0;
+  let rateLimited = 0;
+  let sourceStatus: SourceProviderStatus = 'not_configured';
   const settings = await getAutomationSettings();
   const usage = await getDailyPipelineUsage();
   const sourceBudgetRemaining = Math.max(0, settings.sourceRequestBudgetPerDay - usage.sourceRequests);
-  if (!(await isAccessTradeConfigured())) return { ...counters, resultTypes, retryAfter };
-  if (sourceBudgetRemaining <= 0) return { ...counters, resultTypes, retryAfter };
+  const registry = options.registry || createDefaultSourceAdapterRegistry();
+  const adapter = registry.get<NormalizedAccessTradeItem, NormalizedAccessTradeItem>('accesstrade');
+  if (!adapter) {
+    return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus: 'adapter_unavailable', reason: 'source_adapter_unavailable', resultTypes };
+  }
+  const sourceHealth = await adapter.healthCheck();
+  sourceStatus = sourceHealth.status;
+  if (!(await adapter.isConfigured())) {
+    return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus, reason: 'source_not_configured', resultTypes };
+  }
+  if (sourceBudgetRemaining <= 0) {
+    const nextEligibleAt = new Date(startedMs + 24 * 60 * 60_000).toISOString();
+    return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus, reason: 'source_budget_exhausted', nextEligibleAt, resultTypes };
+  }
   const keywordCount = mode === 'bootstrap' ? settings.bootstrapKeywordCount : settings.steadyKeywordCount;
   const candidateLimit = mode === 'bootstrap' ? settings.bootstrapCandidateLimit : settings.steadyCandidateLimit;
   const stats = await loadKeywordStats(settings.sourceKeywords);
   const selected = selectKeywords(stats, keywordCount);
   const products = await getAllProducts();
+  const qualitySnapshot = await getSourceQualitySnapshot(adapter.id);
   let timeoutStreak = 0;
 
   for (const stat of selected) {
     if (Date.now() >= deadlineMs || counters.found >= candidateLimit || counters.sourceRequests >= sourceBudgetRemaining) break;
     stat.lastUsedAt = new Date().toISOString();
     try {
-      const result = await searchAccessTrade({ keyword: stat.keyword, kind: 'product', limit: Math.min(50, candidateLimit - counters.found) });
-      counters.sourceRequests += result.requests.reduce((total, request) => total + (request.attempts ?? 1), 0);
-      for (const request of result.requests) resultTypes[request.resultType] = (resultTypes[request.resultType] || 0) + 1;
+      const result = await adapter.discover({ keyword: stat.keyword, limit: Math.min(50, candidateLimit - counters.found) });
+      counters.sourceRequests += result.requests;
+      retryAfter = result.retryAfter || retryAfter;
+      for (const [outcome, count] of Object.entries(result.outcomes || {})) {
+        if (outcome in resultTypes || ['success_with_results', 'success_empty', 'unauthorized', 'forbidden', 'rate_limited', 'circuit_open', 'timeout', 'network_error', 'upstream_error', 'invalid_response'].includes(outcome)) {
+          const typedOutcome = outcome as AccessTradeResultType;
+          resultTypes[typedOutcome] = (resultTypes[typedOutcome] || 0) + count;
+        }
+        if (outcome === 'timeout') timeout += count;
+        if (outcome === 'rate_limited') rateLimited += count;
+      }
       timeoutStreak = 0;
       stat.found += result.items.length;
       if (!result.items.length) stat.empty++;
       counters.found += result.items.length;
-      for (const item of result.items) {
+      for (const sourceItem of result.items) {
+        const item = adapter.normalize(sourceItem);
+        normalized++;
         const payload = toPayload(item);
         const earlyReason = fastReject(payload);
-        if (!earlyReason) stat.valid++;
+        if (!earlyReason) { stat.valid++; validCandidates++; } else rejected++;
+        if (Number(payload.salePrice || payload.price || 0) > 0) pricesAvailable++;
         const sourceHash = hashPayload(payload);
         const existing = products.find((product) =>
-          (product.source === 'accesstrade' && (product.sourceId === item.id || product.externalId === item.id)) ||
+          (product.source === adapter.id && (product.sourceId === item.id || product.externalId === item.id)) ||
           product.originalUrl === payload.originalUrl || product.affiliateUrl === payload.affiliateUrl,
         );
         if (existing?.sourceHash === sourceHash) { counters.duplicate++; counters.unchanged++; continue; }
         if (existing?.sourceHealthCooldownUntil && Date.parse(existing.sourceHealthCooldownUntil) > Date.now()) { counters.skippedCooldown++; continue; }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.affiliateUrl, payload.imageUrl].filter(Boolean).length;
-        const priority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) - (earlyReason ? 25 : 0));
+        const basePriority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) - (earlyReason ? 25 : 0));
+        const priority = applySourceQualityPriority(basePriority, qualitySnapshot).effectivePriority;
         const readiness = scoreCandidateReadiness(payload);
-        const queued = await enqueueCandidate({ source: 'accesstrade', sourceId: item.id, priority, readinessScore: readiness.score, lane: readiness.lane, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
+        const queued = await enqueueCandidate({ source: adapter.id as CandidateQueueItem['source'], sourceId: item.id, priority, readinessScore: readiness.score, lane: readiness.lane, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
         if (queued.queued) { counters.queued++; counters.reviewQueued++; } else { counters.duplicate++; counters.unchanged++; }
       }
     } catch (error) {
@@ -165,15 +220,41 @@ export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.
         counters.sourceRequests += error.requests.reduce((total, request) => total + (request.attempts ?? 1), 0);
         retryAfter = error.requests.map((request) => request.retryAfter).filter((value): value is string => Boolean(value)).sort().at(-1) || retryAfter;
         resultTypes[error.resultType] = (resultTypes[error.resultType] || 0) + 1;
-        if (error.resultType === 'timeout') timeoutStreak++; else timeoutStreak = 0;
+        if (error.resultType === 'timeout') { timeoutStreak++; timeout++; } else timeoutStreak = 0;
+        if (error.resultType === 'rate_limited') rateLimited++;
         if (['unauthorized', 'forbidden', 'rate_limited', 'circuit_open'].includes(error.resultType) || timeoutStreak >= 2) break;
-      } else counters.failed++;
+      } else {
+        counters.failed++;
+        const classified = adapter.classifyError(error);
+        sourceStatus = classified;
+        retryAfter = adapter.retryAfter(error) || retryAfter;
+        if (classified === 'rate_limited') rateLimited++;
+        if (classified === 'degraded' && /timeout|abort/i.test(error instanceof Error ? `${error.name}:${error.message}` : String(error))) timeout++;
+        if (['invalid_credential', 'quota_exhausted', 'rate_limited', 'circuit_open'].includes(classified)) break;
+      }
     }
   }
   await writeCollection(KEYWORD_COLLECTION, stats);
   counters.queueSize = (await getQueueStats()).total;
   await recordDailyUsage(counters);
-  return { ...counters, resultTypes, retryAfter };
+  await recordSourceQualityObservation(adapter.id, {
+    idempotencyKey: (options.runId || `source-scan:${startedMs}:${process.pid}:${randomUUID()}`).slice(0, 200),
+    observedAt: new Date(startedMs).toISOString(),
+    candidatesObserved: normalized,
+    validCandidates,
+    pricesChecked: normalized,
+    pricesAvailable,
+    timeouts: Math.min(timeout, counters.sourceRequests),
+    externalRequests: counters.sourceRequests,
+  });
+  const durationMs = Date.now() - startedMs;
+  const reason = rateLimited > 0 ? 'source_rate_limited'
+    : timeout > 0 && counters.found === 0 ? 'source_timeout'
+    : counters.failed > 0 ? 'source_partial_failure'
+    : counters.found === 0 ? 'source_no_results'
+    : 'source_scan_completed';
+  const nextEligibleAt = retryAfter || (counters.found === 0 ? new Date(startedMs + 15 * 60_000).toISOString() : undefined);
+  return { ...counters, normalized, rejected, timeout, rateLimited, durationMs, sourceStatus, reason, nextEligibleAt, resultTypes, retryAfter };
 }
 
 function cooldownFor(statuses: string[], attempts = 1): number {
@@ -184,6 +265,27 @@ function cooldownFor(statuses: string[], attempts = 1): number {
 }
 
 interface CandidateReviewOutcome { status: CandidateQueueStatus; terminal: boolean; nextRetryAt?: string; reason?: string; productId?: string }
+
+async function recordCandidateHealthQuality(input: {
+  item: CandidateQueueItem;
+  productHealthy: boolean;
+  affiliateHealthy: boolean;
+  imageHealthy: boolean;
+  imageChecks: number;
+  statuses: string[];
+  externalRequests: number;
+}): Promise<void> {
+  await recordSourceQualityObservation(input.item.source, {
+    idempotencyKey: `candidate-health:${input.item.id}:attempt:${input.item.attempts}`.slice(0, 200),
+    observedAt: input.item.processingStartedAt || input.item.updatedAt,
+    linksChecked: 2,
+    healthyLinks: Number(input.productHealthy) + Number(input.affiliateHealthy),
+    imagesChecked: input.imageChecks,
+    healthyImages: input.imageHealthy ? 1 : 0,
+    timeouts: input.externalRequests > 0 ? input.statuses.filter(status => status === 'timeout').length : 0,
+    externalRequests: input.externalRequests,
+  });
+}
 
 export class CandidateRetryScheduledError extends Error {
   constructor(public readonly nextRetryAt: string, public readonly candidateStatus: CandidateQueueStatus, reason?: string) {
@@ -435,14 +537,25 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   const affiliateHealth = fixture ? fixtureLink : await checkLinkHealth(payload.affiliateUrl); counters.networkChecks += 1;
   let imageUrl = payload.imageUrl;
   let imageHealth = fixture ? fixtureImage : await checkImageHealth(imageUrl); counters.networkChecks += 1;
+  let imageChecks = 1;
   if (!imageHealth.ok) {
     for (const candidate of payload.imageCandidates || []) {
       if (candidate === imageUrl) continue;
       const fallback = fixture ? fixtureImage : await checkImageHealth(candidate); counters.networkChecks += 1;
+      imageChecks += 1;
       if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
     }
   }
   const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+  await recordCandidateHealthQuality({
+    item,
+    productHealthy: productHealth.ok,
+    affiliateHealthy: affiliateHealth.ok,
+    imageHealthy: imageHealth.ok,
+    imageChecks,
+    statuses,
+    externalRequests: fixture ? 0 : 2 + imageChecks,
+  });
   await recordDomainHealth(payload.originalUrl, productHealth.status);
   await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status);
   await recordDomainHealth(imageUrl, imageHealth.status);
@@ -623,14 +736,25 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
     const affiliateHealth = fixture ? fixtureLink : await checkLinkHealth(payload.affiliateUrl); counters.networkChecks++;
     let imageUrl = payload.imageUrl;
     let imageHealth = fixture ? fixtureImage : await checkImageHealth(imageUrl); counters.networkChecks++;
+    let imageChecks = 1;
     if (!imageHealth.ok) {
       for (const candidate of payload.imageCandidates || []) {
         if (candidate === imageUrl) continue;
         const fallback = fixture ? fixtureImage : await checkImageHealth(candidate); counters.networkChecks++;
+        imageChecks += 1;
         if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
       }
     }
     const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+    await recordCandidateHealthQuality({
+      item,
+      productHealthy: productHealth.ok,
+      affiliateHealthy: affiliateHealth.ok,
+      imageHealthy: imageHealth.ok,
+      imageChecks,
+      statuses,
+      externalRequests: fixture ? 0 : 2 + imageChecks,
+    });
     await recordDomainHealth(payload.originalUrl, productHealth.status); await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status); await recordDomainHealth(imageUrl, imageHealth.status);
     const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
     const now = new Date().toISOString();

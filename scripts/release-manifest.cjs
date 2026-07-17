@@ -5,12 +5,13 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
-const releaseDir = path.join(root, '.release');
 
 function option(name, fallback = '') {
   const prefix = `--${name}=`;
   return process.argv.find(argument => argument.startsWith(prefix))?.slice(prefix.length) || fallback;
 }
+
+const releaseDir = path.resolve(option('output', process.env.SANDEAL_RELEASE_DIR || path.join(root, '.release')));
 
 function checksum(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');

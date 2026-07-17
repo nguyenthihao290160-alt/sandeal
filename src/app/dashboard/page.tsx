@@ -11,6 +11,8 @@ type Envelope<T> = { ok: boolean; code: string; message: string; data?: T };
 type ActivityPoint = { label: string; completed: number; failed: number; retried: number; blocked: number; scanned: number };
 type OnboardingStep = { id: string; title: string; status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED'; reason: string; cta: string; route: string; completionCriteria: string; updatedAt: string };
 type OnboardingRecommendation = Pick<OnboardingStep, 'id' | 'title' | 'reason' | 'route' | 'cta' | 'status'>;
+type JobDiagnostic = { id: string; type: string; status: string; outcomeStatus: string | null; updatedAt: string; nextRetryAt: string | null; lastErrorCode: string | null; lastErrorMessage: string | null; reasons: string[]; schemaVersion: number; policyVersion: string; handlerVersion: string };
+type RoleDiagnostic = { processStatus: string; activeRole: boolean; roleState: string; owner: string | null; instanceId: string | null; heartbeatAt: string | null; acquiredAt: string | null; leaseAgeMs: number | null; expiresAt: string | null; fencingToken: number | null; takeoverCount: number };
 type DashboardData = {
   updatedAt: string; range: Range;
   kpis: { productsProcessed: number; running: number; waiting: number; waitingApproval: number; completionRate: number | null; systemErrors: number };
@@ -21,7 +23,17 @@ type DashboardData = {
   scheduler: { status: string; lastRunAt: string | null; nextRunAt: string | null; timezone: string };
   aiUsage: { requests: number; requestLimit: number; tokens: number; tokenLimit: number; blocked: number; freeOnly: boolean };
   circuits: Array<{ provider: string; state: string }>;
-  control: { workerPaused: boolean; schedulerPaused: boolean; killSwitch: boolean; reason: string | null };
+  runtime: {
+    web: { status: string; checkedAt: string | null };
+    worker: RoleDiagnostic;
+    scheduler: RoleDiagnostic & { lastContenderState: string; rejectedOwner: string | null; rejectedAt: string | null; lastSuccessfulTickAt: string | null; nextRunAt: string | null };
+    guardianCheckedAt: string | null; reasons: string[];
+  };
+  control: { mode: string; effectiveMode: string; publishPaused: boolean; ingestionPaused: boolean; workerPaused: boolean; schedulerPaused: boolean; killSwitch: boolean; launchEnabled: boolean; reason: string | null; safePublish: { state: string; reasons: string[] } };
+  pipeline: { sourceRequests: number; sourceFound: number; candidateQueued: number; duplicateRejected: number; validationRejected: number; productCreated: number; productUpdated: number; publishEligible: number; publishBlocked: number; quarantined: number; failed: number; durationMs: number };
+  jobs: { productScan: JobDiagnostic | null; autoPilot: JobDiagnostic | null; runtimeGuardian: JobDiagnostic | null; latestError: JobDiagnostic | null };
+  providers: Array<{ id: string; status: string; configured: boolean | null; ready: boolean; degraded: boolean; checkedAt: string | null }>;
+  business: { publicProducts: number; freshPrice: number; stalePrice: number; healthyAffiliateLinks: number; brokenLinks: number; outboundClicks: number; degradedProviders: string[] };
   recentActivity: Array<{ id: string; operationId: string; type: string; status: string; requestedBy: string; riskLevel: string; updatedAt: string; durationMs: number | null }>;
   zeroData: boolean;
   onboarding: { compact: boolean; summary: { completed: number; total: number; blocked: number; inProgress: number }; steps: OnboardingStep[]; recommendations: OnboardingRecommendation[]; updatedAt: string };
@@ -46,6 +58,96 @@ const TYPE_LABELS: Record<string, string> = {
   AGGREGATE_GROWTH_METRICS: 'Tổng hợp tăng trưởng', BULK_PRODUCT_OPERATION: 'Thao tác hàng loạt',
 };
 const RISK_LABELS: Record<string, string> = { LOW: 'Rủi ro thấp', MEDIUM: 'Rủi ro trung bình', HIGH: 'Rủi ro cao', BLOCKER: 'Bị chặn' };
+
+const MODE_LABELS: Record<string, string> = { OBSERVE: 'Chỉ quan sát', SHADOW: 'Chạy bóng an toàn', CANARY: 'Canary có kiểm soát', AUTONOMOUS: 'Tự động có kiểm soát', EMERGENCY_STOP: 'Dừng khẩn cấp' };
+const RUNTIME_LABELS: Record<string, string> = { ready: 'Sẵn sàng', alive: 'Đang phục vụ', active: 'Đang giữ vai trò', paused: 'Đã tạm dừng', disabled: 'Chưa bật', stale: 'Mất tín hiệu', missing: 'Không có tiến trình', crashed: 'Đã dừng bất thường', unverified: 'Chưa xác minh', standby: 'Chờ dự phòng', rejected: 'Bị từ chối vai trò', configured: 'Đã cấu hình, chưa sẵn sàng', not_configured: 'Chưa cấu hình', degraded: 'Suy giảm' };
+const REASON_LABELS: Record<string, string> = {
+  safe_publish_disabled: 'Safe Publish đang tắt', launch_not_enabled: 'Chưa cho phép khởi chạy đăng',
+  kill_switch_active: 'Dừng khẩn cấp đang bật', publish_paused: 'Luồng đăng đang tạm dừng',
+  effective_mode_not_publishable: 'Chế độ hiệu lực không cho phép đăng',
+};
+
+function formatTime(value: string | null): string {
+  return value ? new Date(value).toLocaleString('vi-VN') : 'Chưa có dữ liệu';
+}
+
+function formatDuration(value: number | null): string {
+  if (value === null) return 'Chưa xác minh';
+  if (value < 1000) return `${value} ms`;
+  if (value < 60_000) return `${Math.round(value / 1000)} giây`;
+  return `${Math.round(value / 60_000)} phút`;
+}
+
+function JobDiagnosticCard({ title, job }: { title: string; job: JobDiagnostic | null }) {
+  return <article className={styles.diagnosticCard}><h3>{title}</h3>{job ? <>
+    <div className={styles.diagnosticHeadline}><span className={styles.statusText}>{STATUS_LABELS[job.status] || job.status}</span><time dateTime={job.updatedAt}>{formatTime(job.updatedAt)}</time></div>
+    {job.reasons.length ? <p className={styles.reasonText}>Lý do: {job.reasons.join(' · ')}</p> : <p className={styles.mutedText}>Không có lỗi hoặc lý do chặn được ghi nhận.</p>}
+    <dl className={styles.compactDetails}><div><dt>Thử lại</dt><dd>{formatTime(job.nextRetryAt)}</dd></div><div><dt>Hợp đồng</dt><dd>schema {job.schemaVersion} · policy {job.policyVersion} · handler {job.handlerVersion}</dd></div></dl>
+  </> : <p className={styles.mutedText}>Chưa có tác vụ loại này.</p>}</article>;
+}
+
+function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, runDry, submitting }: {
+  data: DashboardData; selectedMode: string; setSelectedMode: (mode: string) => void;
+  openControl: (input: { action: string; title: string; danger?: boolean; mode?: string }) => void;
+  runDry: () => void; submitting: boolean;
+}) {
+  const pipelineMetrics: Array<[string, string | number]> = [
+    ['Yêu cầu nguồn', data.pipeline.sourceRequests], ['Nguồn tìm thấy', data.pipeline.sourceFound], ['Candidate vào hàng', data.pipeline.candidateQueued],
+    ['Trùng lặp bị loại', data.pipeline.duplicateRejected], ['Validation bị loại', data.pipeline.validationRejected], ['Sản phẩm tạo', data.pipeline.productCreated],
+    ['Sản phẩm cập nhật', data.pipeline.productUpdated], ['Đủ điều kiện đăng', data.pipeline.publishEligible], ['Bị chặn đăng', data.pipeline.publishBlocked],
+    ['Quarantine', data.pipeline.quarantined], ['Thất bại', data.pipeline.failed], ['Thời gian', formatDuration(data.pipeline.durationMs)],
+  ];
+  const businessMetrics: Array<[string, string | number]> = [
+    ['Sản phẩm public', data.business.publicProducts], ['Giá fresh', data.business.freshPrice], ['Giá stale / xung đột', data.business.stalePrice],
+    ['Affiliate khỏe', data.business.healthyAffiliateLinks], ['Link hỏng', data.business.brokenLinks], ['Outbound click', data.business.outboundClicks],
+    ['Provider suy giảm', data.business.degradedProviders.length],
+  ];
+  const paused = data.control.schedulerPaused || data.control.publishPaused;
+  return <>
+    <section className={styles.operationsGrid} aria-label="Trạng thái vận hành thực tế">
+      <article className={styles.panel}>
+        <div className={styles.panelHeader}><div><h2><DashboardIcon name="health" size={19} />Runtime</h2><p>Trạng thái tiến trình và vai trò chủ động là hai tín hiệu riêng.</p></div></div>
+        <dl className={styles.details}>
+          <div><dt>Web</dt><dd>{RUNTIME_LABELS[data.runtime.web.status] || data.runtime.web.status}</dd></div>
+          <div><dt>Worker / vai trò</dt><dd>{RUNTIME_LABELS[data.runtime.worker.processStatus] || data.runtime.worker.processStatus} · {RUNTIME_LABELS[data.runtime.worker.roleState] || data.runtime.worker.roleState}</dd></div>
+          <div><dt>Scheduler / vai trò</dt><dd>{RUNTIME_LABELS[data.runtime.scheduler.processStatus] || data.runtime.scheduler.processStatus} · {RUNTIME_LABELS[data.runtime.scheduler.roleState] || data.runtime.scheduler.roleState}</dd></div>
+          <div><dt>Leader</dt><dd>{data.runtime.scheduler.owner || 'Chưa có leader'}</dd></div>
+          <div><dt>Heartbeat / hết lease</dt><dd>{formatTime(data.runtime.scheduler.heartbeatAt)} · {formatTime(data.runtime.scheduler.expiresAt)}</dd></div>
+          <div><dt>Tuổi lease</dt><dd>{formatDuration(data.runtime.scheduler.leaseAgeMs)}</dd></div>
+          <div><dt>Scheduler tick / lần tới</dt><dd>{formatTime(data.runtime.scheduler.lastSuccessfulTickAt)} · {formatTime(data.runtime.scheduler.nextRunAt)}</dd></div>
+        </dl>
+        {data.runtime.scheduler.lastContenderState === 'rejected' && <div className={styles.degradedNotice} role="status">Một scheduler online đã bị từ chối vai trò vì leader <strong>{data.runtime.scheduler.owner || 'khác'}</strong> còn lease hợp lệ. Tiến trình online không đồng nghĩa đang active.</div>}
+      </article>
+      <article className={styles.panel}>
+        <div className={styles.panelHeader}><div><h2><DashboardIcon name="settings" size={19} />Automation</h2><p>Chế độ yêu cầu, chế độ hiệu lực và các khóa an toàn.</p></div></div>
+        <dl className={styles.details}>
+          <div><dt>Chế độ / hiệu lực</dt><dd>{MODE_LABELS[data.control.mode] || data.control.mode} · {MODE_LABELS[data.control.effectiveMode] || data.control.effectiveMode}</dd></div>
+          <div><dt>Đăng / ingestion</dt><dd>{data.control.publishPaused ? 'Đăng đang dừng' : 'Đăng chưa bị pause'} · {data.control.ingestionPaused ? 'Nhập đang dừng' : 'Nhập được phép'}</dd></div>
+          <div><dt>Worker / scheduler</dt><dd>{data.control.workerPaused ? 'Worker dừng' : 'Worker được phép'} · {data.control.schedulerPaused ? 'Scheduler dừng' : 'Scheduler được phép'}</dd></div>
+          <div><dt>Khởi chạy đăng</dt><dd>{data.control.launchEnabled ? 'Đã cho phép' : 'Chưa cho phép'}</dd></div>
+          <div><dt>Safe Publish</dt><dd>{data.control.safePublish.state === 'ready' ? 'Sẵn sàng theo policy' : 'Đang bị chặn'}</dd></div>
+        </dl>
+        {data.control.safePublish.reasons.length > 0 && <p className={styles.reasonText}>Lý do chặn: {data.control.safePublish.reasons.map(item => REASON_LABELS[item] || item).join(' · ')}</p>}
+        <div className={styles.primaryControls} aria-label="Ba điều khiển vận hành chính">
+          <button type="button" onClick={() => openControl({ action: paused ? 'resume_autopilot' : 'pause_autopilot', title: paused ? 'Tiếp tục automation' : 'Tạm dừng automation' })}>{paused ? 'Tiếp tục' : 'Tạm dừng'}</button>
+          <label><span>Chế độ mới</span><select value={selectedMode} onChange={event => setSelectedMode(event.target.value)}><option value="OBSERVE">Chỉ quan sát</option><option value="SHADOW">Chạy bóng an toàn</option><option value="CANARY">Canary có kiểm soát</option><option value="AUTONOMOUS">Tự động có kiểm soát</option></select></label>
+          <button type="button" onClick={() => openControl({ action: 'set_mode', mode: selectedMode, title: `Đổi sang ${MODE_LABELS[selectedMode]}`, danger: true })}>Đổi chế độ</button>
+          <button type="button" className={styles.dangerButton} onClick={() => openControl({ action: data.control.killSwitch ? 'disable_kill_switch' : 'enable_kill_switch', title: data.control.killSwitch ? 'Tắt dừng khẩn cấp' : 'Dừng khẩn cấp', danger: true })}><DashboardIcon name="emergency" size={16} />{data.control.killSwitch ? 'Tắt Emergency Stop' : 'Emergency Stop'}</button>
+        </div>
+        {['CANARY', 'AUTONOMOUS'].includes(selectedMode) && <p className={styles.degradedNotice}>Chế độ này cần lý do, xác nhận rõ ràng và pre-canary backup. `launchEnabled` vẫn là một cổng độc lập.</p>}
+      </article>
+    </section>
+    <section className={styles.metricGroups} aria-label="Số liệu pipeline và kinh doanh">
+      <article className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="queue" size={19} />Pipeline</h2><p>Số liệu từ durable job trong khoảng đã chọn.</p></div></div><div className={styles.metricList}>{pipelineMetrics.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></article>
+      <article className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="analytics" size={19} />Business</h2><p>Chỉ hiển thị fact đang có; không suy diễn conversion hoặc doanh thu.</p></div></div><div className={styles.metricList}>{businessMetrics.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className={styles.providerList}>{data.providers.map(provider => <div key={provider.id}><strong>{provider.id}</strong><span>{provider.configured === null ? 'Chưa xác minh cấu hình' : provider.configured ? 'Đã cấu hình' : 'Chưa cấu hình'} · {provider.ready ? 'Sẵn sàng' : 'Chưa sẵn sàng'}</span></div>)}</div></article>
+    </section>
+    <details className={styles.advancedDiagnostics}>
+      <summary>Advanced Diagnostics</summary><p>Thông tin kỹ thuật phục vụ chẩn đoán; không phải tín hiệu thành công trên màn hình chính.</p>
+      <div className={styles.diagnosticGrid}><JobDiagnosticCard title="PRODUCT_SCAN gần nhất" job={data.jobs.productScan} /><JobDiagnosticCard title="AUTO_PILOT gần nhất" job={data.jobs.autoPilot} /><JobDiagnosticCard title="RUNTIME_GUARDIAN gần nhất" job={data.jobs.runtimeGuardian} /><JobDiagnosticCard title="Lỗi/chặn gần nhất" job={data.jobs.latestError} /></div>
+      <div className={styles.advancedActions}><button type="button" onClick={runDry} disabled={submitting}>{submitting ? 'Đang tạo' : 'Tạo dry-run an toàn'}</button><Link href="/dashboard/queue">Mở hàng chờ phê duyệt</Link><Link href="/dashboard/app-health">Mở health chi tiết</Link></div>
+    </details>
+  </>;
+}
 
 function hasCompletionCriteria(item: OnboardingStep | OnboardingRecommendation): item is OnboardingStep {
   return 'completionCriteria' in item;
@@ -88,7 +190,8 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
-  const [pendingControl, setPendingControl] = useState<{ action: string; title: string; danger?: boolean } | null>(null);
+  const [pendingControl, setPendingControl] = useState<{ action: string; title: string; danger?: boolean; mode?: string } | null>(null);
+  const [selectedMode, setSelectedMode] = useState('SHADOW');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -128,7 +231,7 @@ export default function DashboardPage() {
     if (!pendingControl || reason.trim().length < 8) return;
     setSubmitting(true);
     try {
-      const response = await fetch('/api/automation/control', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: pendingControl.action, reason: reason.trim(), confirmed: pendingControl.danger === true }) });
+      const response = await fetch('/api/automation/control', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: pendingControl.action, mode: pendingControl.mode, reason: reason.trim(), confirmed: pendingControl.danger === true }) });
       const body = await response.json() as Envelope<unknown>; if (!response.ok || !body.ok) throw new Error(body.message);
       notify(body.message); setPendingControl(null); setReason(''); await load();
     } catch (issue) { notify(issue instanceof Error ? issue.message : 'Không thể cập nhật trạng thái vận hành.'); } finally { setSubmitting(false); }
@@ -160,6 +263,7 @@ export default function DashboardPage() {
     {data && <>
       <section className={styles.kpis} aria-label="Chỉ số chính">{kpis.map(item => <article key={item.label} className={styles[item.tone]} title={item.help}><div className={styles.kpiTop}><span className={styles.kpiIcon}><DashboardIcon name={item.icon} size={22} /></span><span>{item.label}</span></div><strong>{item.value}</strong><small>{item.help}</small></article>)}</section>
       <section className={styles.onboarding} aria-labelledby="onboarding-title"><div className={styles.panelHeader}><div><h2 id="onboarding-title"><DashboardIcon name="today" size={19} />{data.onboarding.compact ? 'Việc nên làm tiếp theo' : 'Bắt đầu vận hành SanDeal'}</h2><p>{data.onboarding.summary.completed}/{data.onboarding.summary.total} bước đã hoàn thành, trạng thái được suy ra từ backend.</p></div><Link href="/dashboard/today">Xem việc hôm nay</Link></div><div className={styles.onboardingList}>{(data.onboarding.compact ? data.onboarding.recommendations : data.onboarding.steps).map(item => <article key={item.id} className={styles.onboardingStep}><div><span className={styles[`step${item.status}`]}>{item.status === 'COMPLETED' ? 'Hoàn thành' : item.status === 'IN_PROGRESS' ? 'Đang thực hiện' : item.status === 'BLOCKED' ? 'Bị chặn' : 'Chưa bắt đầu'}</span><h3>{item.title}</h3></div><p>{item.reason}</p>{hasCompletionCriteria(item) && <small>Hoàn thành khi: {item.completionCriteria}</small>}<Link href={item.route}>{item.cta}</Link></article>)}</div></section>
+      <OwnerDiagnostics data={data} selectedMode={selectedMode} setSelectedMode={setSelectedMode} openControl={setPendingControl} runDry={() => void createDryRun()} submitting={submitting} />
       {!data.zeroData && <>
       <section className={styles.mainGrid}><article className={`${styles.panel} ${styles.chartPanel}`}><div className={styles.panelHeader}><div><h2><DashboardIcon name="task" size={19} />Hoạt động xử lý theo thời gian</h2><p>Dữ liệu tác vụ thực tế trong khoảng đã chọn.</p></div></div>{data.activity.length ? <ActivityChart points={data.activity} /> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={24} /></span><h3>Chưa có hoạt động trong khoảng này</h3><p>Hãy tạo một tác vụ chạy thử an toàn để bắt đầu ghi nhận dữ liệu.</p><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Chạy thử an toàn</button></div>}</article>
         <aside className={styles.panel}><div className={styles.panelHeader}><div><h2>Hiệu suất nổi bật</h2><p>Nguồn sản phẩm theo dữ liệu hợp lệ.</p></div></div>{data.sourcePerformance.length ? <div className={styles.ranking}>{data.sourcePerformance.map(source => <div key={source.name}><div><strong>{source.name}</strong><span>{source.valid}/{source.total} hợp lệ</span></div><div className={styles.progress}><span style={{ width: `${source.rate}%` }} /></div><small>{source.rate}%</small></div>)}</div> : <div className={styles.emptySmall}>Chưa đủ dữ liệu để xếp hạng nguồn.</div>}</aside>

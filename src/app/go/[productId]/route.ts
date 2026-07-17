@@ -30,13 +30,21 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
     purpose: `${request.headers.get('purpose') || ''} ${request.headers.get('sec-purpose') || ''}`,
     nextRouterPrefetch: request.headers.get('next-router-prefetch') || undefined,
   })) {
-    await recordGrowthEvent({
-      eventType: 'OUTBOUND_CLICK', productId: product.id, source: product.source, campaign: product.campaignName,
-      contentPageId: request.nextUrl.searchParams.get('content')?.slice(0, 160),
-      contextKey: 'redirect:validated',
-      referrerCategory: classifyReferrer(request.headers.get('referer'), request.nextUrl.hostname),
-      deviceCategory: classifyDevice(request.headers.get('user-agent')),
-    }).catch(() => undefined);
+    try {
+      await recordGrowthEvent({
+        eventType: 'OUTBOUND_CLICK', productId: product.id, source: product.source, campaign: product.campaignName,
+        contentPageId: request.nextUrl.searchParams.get('content')?.slice(0, 160),
+        contextKey: 'redirect:validated',
+        referrerCategory: classifyReferrer(request.headers.get('referer'), request.nextUrl.hostname),
+        deviceCategory: classifyDevice(request.headers.get('user-agent')),
+      });
+    } catch (error) {
+      console.warn(JSON.stringify({
+        event: 'outbound_click_log_failed',
+        productId: product.id,
+        errorCode: error instanceof Error ? error.name : 'UNKNOWN_ERROR',
+      }));
+    }
   }
   return NextResponse.redirect(target.normalizedUrl, {
     status: 302,

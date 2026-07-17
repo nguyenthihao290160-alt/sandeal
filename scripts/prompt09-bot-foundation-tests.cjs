@@ -86,6 +86,7 @@ async function main() {
   const worker = require('../src/lib/automation/worker.ts');
   const reconciler = require('../src/lib/automation/reconciler.ts');
   const productsStore = require('../src/lib/storage/products.ts');
+  const automationSettings = require('../src/lib/storage/automationSettings.ts');
   const editorial = require('../src/lib/editorialReview.ts');
   const aiBotsRoute = require('../src/app/api/ai-bots/route.ts');
   const runNowRoute = require('../src/app/api/ai-bots/run-now/route.ts');
@@ -185,6 +186,8 @@ async function main() {
 
   await test('Safe Publish từ chối direct write và chỉ chạy sau durable approval', async () => {
     await reset();
+    await automationSettings.updateAutomationSettings({ launchEnabled: true });
+    await store.updateAutomationControl({ mode: 'CANARY', effectiveMode: 'CANARY', publishPaused: false, killSwitch: false, workerPaused: false }, 'prompt09-safe-publish-test');
     const product = makeProduct();
     product.reviewContent = editorial.generateEditorialReview(product, [], product.updatedAt);
     await adapter.writeCollection('products', [product]);
