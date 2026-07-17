@@ -6,7 +6,7 @@
 // - Authentication is required.
 // - Safe Mode / Free Only / Safe Publish are enforced by AutoPilot Runner.
 // - Paid AI must never be enabled from this route.
-// - Run locking and duplicate-run prevention remain inside runAutoPilot().
+// - Idempotency and duplicate prevention are enforced by the durable job store.
 // - Invalid JSON or invalid mode must never silently start a workflow.
 
 import { type NextRequest, NextResponse } from 'next/server';

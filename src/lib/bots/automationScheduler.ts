@@ -6,6 +6,7 @@ import { readCollection, writeCollection } from '../storage/adapter';
 import { processReviewQueue, recheckPublishedProducts, scanSourcesToQueue, selectOperationMode, type OperationMode, type PipelineCounters } from './productPipeline';
 import { recoverDueGeminiCredentials } from '../ai/geminiCredentialProbe';
 import { canRunLaunchWave, recordLaunchWave } from './launchAccelerator';
+import { runAutomationSchedulerTick, runProductIntelligenceSchedulerTick } from '../automation/scheduler';
 
 const COLLECTION = 'scheduler-state';
 
@@ -55,6 +56,40 @@ function addCounters(a: Partial<PipelineCounters>, b: Partial<PipelineCounters>)
 }
 
 export async function runSchedulerTick(now = Date.now()): Promise<{ status: 'completed' | 'skipped' | 'failed'; reason?: string; state: SchedulerState; summary?: PipelineCounters }> {
+  const legacyTestExecution = process.env.NODE_ENV === 'test'
+    && process.env.SANDEAL_ENABLE_LEGACY_DIRECT_WORKFLOW === 'true';
+  if (!legacyTestExecution) {
+    // Deprecated compatibility entry point. A scheduler is enqueue-only; all
+    // candidate and product mutations are performed by the durable worker.
+    try {
+      const [automation, intelligence] = await Promise.all([
+        runAutomationSchedulerTick(now),
+        runProductIntelligenceSchedulerTick(now),
+      ]);
+      const state = await getSchedulerState();
+      const inactive = ['paused', 'killed', 'disabled'].includes(automation.status)
+        && ['paused', 'killed', 'disabled'].includes(intelligence.status);
+      return {
+        status: inactive ? 'skipped' : 'completed',
+        reason: inactive ? automation.status : 'durable_jobs_enqueued',
+        state: {
+          ...state,
+          lastTickAt: new Date(now).toISOString(),
+          lastResult: { executionSource: 'durable_jobs', automation, intelligence },
+          updatedAt: new Date().toISOString(),
+        },
+        summary: addCounters({}, {}),
+      };
+    } catch (error) {
+      const state = await getSchedulerState();
+      return {
+        status: 'failed',
+        reason: error instanceof Error ? error.message : 'durable_scheduler_error',
+        state: { ...state, lastError: 'durable_scheduler_error', updatedAt: new Date().toISOString() },
+      };
+    }
+  }
+
   const settings = await getAutomationSettings();
   let state = await getSchedulerState();
   if (!settings.enabled) return { status: 'skipped', reason: 'disabled', state };

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
 import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 import { getJobRegistryDefaults } from './botRegistry';
+import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, listAutomationPolicies } from './policyRegistry';
+import { buildAutoPilotExecutionPlan } from './autoPilotGraph';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -41,7 +43,12 @@ function canCancelWhileRunning(job: AutomationJob): boolean {
 }
 
 export const DEFAULT_CONTROL: AutomationControlState = {
+  schemaVersion: 2,
   id: 'automation-control',
+  mode: 'OBSERVE',
+  effectiveMode: 'OBSERVE',
+  publishPaused: false,
+  ingestionPaused: false,
   workerPaused: false,
   schedulerPaused: true,
   killSwitch: false,
@@ -67,9 +74,10 @@ function vietnamDay(now = Date.now()): string {
   return new Date(now + 7 * 60 * 60_000).toISOString().slice(0, 10);
 }
 
-export async function appendAutomationAudit(input: Omit<AutomationAuditEvent, 'id' | 'createdAt'>): Promise<void> {
+export async function appendAutomationAudit(input: Omit<AutomationAuditEvent, 'schemaVersion' | 'id' | 'createdAt'>): Promise<void> {
   const event: AutomationAuditEvent = {
     ...input,
+    schemaVersion: 2,
     id: generateId(),
     result: sanitizeAutomationData(input.result) as Record<string, unknown> | undefined,
     reasons: input.reasons.map(reason => sanitizeErrorMessage(reason)).slice(0, 20),
@@ -79,11 +87,12 @@ export async function appendAutomationAudit(input: Omit<AutomationAuditEvent, 'i
 }
 
 export async function getAutomationControl(): Promise<AutomationControlState> {
-  return (await readCollection<AutomationControlState>(CONTROL))[0] || { ...DEFAULT_CONTROL };
+  const stored = (await readCollection<Partial<AutomationControlState>>(CONTROL))[0];
+  return stored ? { ...DEFAULT_CONTROL, ...stored, schemaVersion: 2, id: 'automation-control' } : { ...DEFAULT_CONTROL };
 }
 
 export async function updateAutomationControl(
-  updates: Partial<Pick<AutomationControlState, 'workerPaused' | 'schedulerPaused' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt'>>,
+  updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
   actor = 'system',
 ): Promise<AutomationControlState> {
   let previous = await getAutomationControl();
@@ -91,18 +100,18 @@ export async function updateAutomationControl(
   const now = new Date().toISOString();
   await runTransaction<AutomationControlState>(CONTROL, items => {
     previous = items[0] || { ...DEFAULT_CONTROL };
-    next = { ...previous, ...updates, id: 'automation-control', updatedAt: now };
-    if ('killSwitch' in updates || 'workerPaused' in updates || 'schedulerPaused' in updates) {
+    next = { ...previous, ...updates, schemaVersion: 2, id: 'automation-control', updatedAt: now };
+    if ('killSwitch' in updates || 'workerPaused' in updates || 'schedulerPaused' in updates || 'mode' in updates || 'effectiveMode' in updates || 'publishPaused' in updates || 'ingestionPaused' in updates) {
       next.changedAt = now;
       next.changedBy = actor;
     }
     return [next];
   });
-  if ('killSwitch' in updates || 'workerPaused' in updates || 'schedulerPaused' in updates) {
+  if ('killSwitch' in updates || 'workerPaused' in updates || 'schedulerPaused' in updates || 'mode' in updates || 'effectiveMode' in updates || 'publishPaused' in updates || 'ingestionPaused' in updates) {
     await appendAutomationAudit({
       correlationId: generateId(), operationId: generateId(), operationType: 'CONTROL_CHANGED', actor,
-      target: 'automation-control', previousState: JSON.stringify({ workerPaused: previous.workerPaused, schedulerPaused: previous.schedulerPaused, killSwitch: previous.killSwitch }),
-      nextState: JSON.stringify({ workerPaused: next.workerPaused, schedulerPaused: next.schedulerPaused, killSwitch: next.killSwitch }),
+      target: 'automation-control', previousState: JSON.stringify({ mode: previous.mode, effectiveMode: previous.effectiveMode, publishPaused: previous.publishPaused, ingestionPaused: previous.ingestionPaused, workerPaused: previous.workerPaused, schedulerPaused: previous.schedulerPaused, killSwitch: previous.killSwitch }),
+      nextState: JSON.stringify({ mode: next.mode, effectiveMode: next.effectiveMode, publishPaused: next.publishPaused, ingestionPaused: next.ingestionPaused, workerPaused: next.workerPaused, schedulerPaused: next.schedulerPaused, killSwitch: next.killSwitch }),
       risk: updates.killSwitch ? 'HIGH' : 'MEDIUM', reasons: updates.reason ? [updates.reason] : [], dryRun: false, attempts: 0,
     });
   }
@@ -128,14 +137,22 @@ export interface CreateAutomationJobInput {
   executionPlan?: AutomationExecutionPlanStep[];
 }
 
+const RISK_RANK: Record<AutomationRiskLevel, number> = { LOW: 0, MEDIUM: 1, HIGH: 2, BLOCKER: 3 };
+
+function effectiveRisk(defaultRisk: AutomationRiskLevel, requested?: AutomationRiskLevel): AutomationRiskLevel {
+  if (!requested || RISK_RANK[requested] <= RISK_RANK[defaultRisk]) return defaultRisk;
+  return requested;
+}
+
 export async function createAutomationJob(input: CreateAutomationJobInput): Promise<{ job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' }> {
   const key = input.idempotencyKey.trim();
   if (!/^[a-zA-Z0-9:_-]{8,160}$/.test(key)) throw new Error('INVALID_IDEMPOTENCY_KEY');
   const payload = sanitizeAutomationData(input.payload || {}) as Record<string, unknown>;
   if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_PAYLOAD_BYTES) throw new Error('PAYLOAD_TOO_LARGE');
-  const risk = input.riskLevel || 'LOW';
+  const jobPolicy = getAutomationPolicy(input.type);
+  const risk = effectiveRisk(jobPolicy.defaultRisk, input.riskLevel);
   const registryDefaults = getJobRegistryDefaults(input.type, payload);
-  const capability = input.capability || registryDefaults.capability;
+  const capability = input.capability || jobPolicy.capability;
   const now = new Date().toISOString();
   let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
   await runTransaction<AutomationJob>(JOBS, items => {
@@ -144,34 +161,43 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
       return undefined;
     }
-    const approvalStatus: ApprovalStatus = risk === 'HIGH' ? 'PENDING' : 'NOT_REQUIRED';
-    const status: AutomationJobStatus = risk === 'BLOCKER' ? 'BLOCKED' : risk === 'HIGH' ? 'WAITING_APPROVAL' : 'PENDING';
-    const requestedPlan = input.executionPlan?.length ? input.executionPlan : [{
+    const approvalStatus: ApprovalStatus = approvalStatusForPolicy(jobPolicy, risk);
+    const status: AutomationJobStatus = initialStatusForPolicy(jobPolicy, risk);
+    const requestedPlan = input.executionPlan?.length ? input.executionPlan : input.type === 'AUTO_PILOT' ? buildAutoPilotExecutionPlan() : [{
       id: capability.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'execute-job',
       capability,
       dependsOn: [],
       reason: 'Thực thi capability đã đăng ký qua durable worker hiện có.',
       status: 'PENDING' as const,
       risk,
-      approvalRequired: risk === 'HIGH' || risk === 'BLOCKER',
+      approvalRequired: approvalStatus === 'PENDING',
       expectedWrite: registryDefaults.writeScope,
       externalCall: registryDefaults.externalSideEffect,
       fallback: registryDefaults.fallback,
     }];
-    const executionPlan = (sanitizeAutomationData(requestedPlan) as AutomationExecutionPlanStep[]).slice(0, 30);
+    const executionPlan = (sanitizeAutomationData(requestedPlan) as AutomationExecutionPlanStep[]).slice(0, 30).map(step => ({
+      ...step,
+      risk: RISK_RANK[step.risk] > RISK_RANK[risk] ? step.risk : risk,
+      approvalRequired: approvalStatus === 'PENDING',
+      expectedWrite: [...jobPolicy.writeScope],
+      externalCall: jobPolicy.externalSideEffect,
+      fallback: [...jobPolicy.fallbackPolicy],
+    }));
     const inputHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
     const job: AutomationJob = {
+      schemaVersion: 2, policyVersion: jobPolicy.policyVersion, handlerVersion: jobPolicy.handlerVersion,
       id: generateId(), type: input.type, status, payload, priority: Math.max(0, Math.min(100, input.priority ?? 50)),
       idempotencyKey: key, operationId: input.operationId || generateId(), requestedBy: input.requestedBy,
       parentJobId: input.parentJobId,
-      botId: input.botId || registryDefaults.botId,
+      botId: jobPolicy.botId,
       capability,
       requestedExecutionMode: input.requestedExecutionMode || registryDefaults.requestedExecutionMode,
       executionPlan,
       progress: { processed: 0, total: executionPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: now },
       checkpoint: { version: 1, completedSteps: [], pendingSteps: executionPlan.map(step => step.id), outputs: {}, executionModes: [], inputHash, updatedAt: now },
-      approvalStatus, approvalReason: input.approvalReason, approvalExpiresAt: risk === 'HIGH' ? new Date(Date.now() + 24 * 60 * 60_000).toISOString() : undefined,
-      riskLevel: risk, dryRun: input.dryRun === true, attemptCount: 0, maxAttempts: Math.max(1, Math.min(5, input.maxAttempts ?? registryDefaults.maxAttempts)),
+      approvalStatus, approvalReason: input.approvalReason, approvalExpiresAt: approvalStatus === 'PENDING' ? new Date(Date.now() + 24 * 60 * 60_000).toISOString() : undefined,
+      riskLevel: risk, dryRun: input.dryRun === true, attemptCount: 0,
+      maxAttempts: jobPolicy.retryPolicy.maxAttempts,
       scheduledAt: input.scheduledAt && Number.isFinite(Date.parse(input.scheduledAt)) ? input.scheduledAt : now,
       createdAt: now, updatedAt: now,
     };
@@ -221,13 +247,19 @@ export function publicAutomationJob(job: AutomationJob) {
   };
 }
 
-function retryDelayMs(attempt: number): number {
-  const base = Math.min(15 * 60_000, 5_000 * 2 ** Math.max(0, attempt - 1));
+function retryDelayMs(type: AutomationJobType, attempt: number): number {
+  const retry = getAutomationPolicy(type).retryPolicy;
+  const base = Math.min(retry.maximumDelayMs, retry.baseDelayMs * 2 ** Math.max(0, attempt - 1));
   return base + Math.floor(Math.random() * Math.max(250, base * 0.15));
 }
 
-export function isRetryableAutomationError(code: string): boolean {
-  return ['TIMEOUT', 'RATE_LIMITED', 'NETWORK_ERROR', 'PROVIDER_UNAVAILABLE', 'SERVICE_UNAVAILABLE', 'TEMPORARY_ERROR'].includes(code);
+export function isRetryableAutomationError(code: string, type?: AutomationJobType): boolean {
+  if (type) return getAutomationPolicy(type).retryPolicy.retryableCodes.includes(code);
+  return listPolicyRetryCodes().has(code);
+}
+
+function listPolicyRetryCodes(): Set<string> {
+  return new Set(listAutomationPolicies().flatMap(policy => policy.retryPolicy.retryableCodes));
 }
 
 type ExecutionUpdate = Pick<AutomationJob, 'executionMode' | 'outcomeStatus' | 'executionPlan' | 'progress' | 'checkpoint' | 'disclosure' | 'manualTaskId'>;
@@ -297,6 +329,98 @@ export async function waitAutomationJobForManual(
   return waitingJob;
 }
 
+export async function waitAutomationJobForChildren(
+  id: string,
+  workerId: string,
+  result: Record<string, unknown>,
+): Promise<AutomationJob | null> {
+  let waiting: AutomationJob | null = null;
+  const now = new Date().toISOString();
+  await runTransaction<AutomationJob>(JOBS, items => {
+    const job = items.find(item => item.id === id);
+    if (!job || job.status !== 'RUNNING' || job.claimedBy !== workerId || !job.checkpoint?.pendingSteps.length) return undefined;
+    job.status = 'WAITING_CHILDREN';
+    job.result = sanitizeAutomationData(result) as Record<string, unknown>;
+    job.leaseExpiresAt = undefined;
+    job.claimedAt = undefined;
+    job.claimedBy = undefined;
+    job.heartbeatAt = now;
+    job.updatedAt = now;
+    waiting = { ...job };
+    return items;
+  });
+  const waitingJob = waiting as AutomationJob | null;
+  if (waitingJob) await appendAutomationAudit({
+    correlationId: waitingJob.operationId,
+    operationId: waitingJob.operationId,
+    jobId: waitingJob.id,
+    operationType: 'JOB_WAITING_CHILDREN',
+    actor: workerId,
+    previousState: 'RUNNING',
+    nextState: 'WAITING_CHILDREN',
+    risk: waitingJob.riskLevel,
+    reasons: ['Durable child jobs must reach a terminal state before the parent can complete.'],
+    dryRun: waitingJob.dryRun,
+    attempts: waitingJob.attemptCount,
+  });
+  return waitingJob;
+}
+
+export async function completeAutomationParentJob(
+  id: string,
+  actor: string,
+  childSummary: Record<string, unknown>,
+): Promise<AutomationJob | null> {
+  let completed: AutomationJob | null = null;
+  const now = new Date().toISOString();
+  await runTransaction<AutomationJob>(JOBS, items => {
+    const job = items.find(item => item.id === id);
+    if (!job || job.status !== 'WAITING_CHILDREN') return undefined;
+    const completedSteps = (job.executionPlan || []).map(step => step.id);
+    job.status = 'SUCCEEDED';
+    job.outcomeStatus = 'COMPLETED_WITH_LOCAL_RULES';
+    job.executionPlan = (job.executionPlan || []).map(step => ({ ...step, status: 'COMPLETED' }));
+    if (job.checkpoint) {
+      job.checkpoint = {
+        ...job.checkpoint,
+        completedSteps,
+        pendingSteps: [],
+        outputs: { ...job.checkpoint.outputs, childSummary: sanitizeAutomationData(childSummary) },
+        outputHash: createHash('sha256').update(JSON.stringify(childSummary)).digest('hex'),
+        updatedAt: now,
+      };
+    }
+    if (job.progress) {
+      const total = job.progress.total || Math.max(1, completedSteps.length);
+      job.progress = { ...job.progress, processed: total, succeeded: total, percentage: 100, updatedAt: now };
+    }
+    if (job.disclosure) {
+      job.disclosure = { ...job.disclosure, status: 'COMPLETED_WITH_LOCAL_RULES', completedSteps, pendingSteps: [], completedAt: now };
+    }
+    job.result = sanitizeAutomationData({ ...job.result, executionStatus: 'COMPLETED_WITH_LOCAL_RULES', completedSteps, pendingSteps: [], childSummary }) as Record<string, unknown>;
+    job.completedAt = now;
+    job.updatedAt = now;
+    completed = { ...job };
+    return items;
+  });
+  const completedJob = completed as AutomationJob | null;
+  if (completedJob) await appendAutomationAudit({
+    correlationId: completedJob.operationId,
+    operationId: completedJob.operationId,
+    jobId: completedJob.id,
+    operationType: 'PARENT_JOB_COMPLETED',
+    actor,
+    previousState: 'WAITING_CHILDREN',
+    nextState: 'SUCCEEDED',
+    risk: completedJob.riskLevel,
+    result: childSummary,
+    reasons: ['All descendant jobs reached terminal state.'],
+    dryRun: completedJob.dryRun,
+    attempts: completedJob.attemptCount,
+  });
+  return completedJob;
+}
+
 export async function resumeAutomationJobFromManual(id: string, actor: string, taskId: string): Promise<AutomationJob | null> {
   let resumed: AutomationJob | null = null;
   const now = new Date().toISOString();
@@ -331,26 +455,29 @@ export async function resumeAutomationJobFromManual(id: string, actor: string, t
 
 export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs = 60_000, nowMs = Date.now()): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
-  if (control.workerPaused || control.killSwitch) return [];
+  if (control.workerPaused) return [];
   const claimed: AutomationJob[] = [];
   const now = new Date(nowMs).toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
+    let changed = false;
     for (const item of items) {
       if (item.status === 'RUNNING' && item.leaseExpiresAt && Date.parse(item.leaseExpiresAt) <= nowMs) {
         item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
-        item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.attemptCount)).toISOString() : undefined;
+        item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
         item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.'; item.claimedBy = undefined; item.updatedAt = now;
+        changed = true;
       }
-      if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) item.status = 'PENDING';
+      if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) { item.status = 'PENDING'; changed = true; }
     }
-    const due = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs)
+    const due = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN'))
       .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt)).slice(0, Math.max(0, Math.min(limit, 10)));
     for (const item of due) {
       item.status = 'RUNNING'; item.claimedBy = workerId; item.claimedAt = now; item.heartbeatAt = now;
       item.leaseExpiresAt = new Date(nowMs + leaseMs).toISOString(); item.startedAt ||= now; item.attemptCount += 1; item.updatedAt = now;
       claimed.push({ ...item, payload: { ...item.payload } });
+      changed = true;
     }
-    return items;
+    return changed ? items : undefined;
   });
   return claimed;
 }
@@ -386,13 +513,18 @@ export async function completeAutomationJob(id: string, workerId: string, result
   return completedJob;
 }
 
-export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown): Promise<AutomationJob | null> {
+export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string } = {}): Promise<AutomationJob | null> {
   let failed: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'RUNNING' || job.claimedBy !== workerId) return undefined;
-    const retry = isRetryableAutomationError(code) && job.attemptCount < job.maxAttempts;
-    job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED'; job.nextRetryAt = retry ? new Date(Date.now() + retryDelayMs(job.attemptCount)).toISOString() : undefined;
+    const retry = isRetryableAutomationError(code, job.type) && job.attemptCount < Math.min(job.maxAttempts, getAutomationPolicy(job.type).retryPolicy.maxAttempts);
+    const requestedRetryAt = Date.parse(options.nextRetryAt || '');
+    job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED';
+    job.nextRetryAt = retry ? Number.isFinite(requestedRetryAt) && requestedRetryAt > Date.now()
+      ? new Date(requestedRetryAt).toISOString()
+      : new Date(Date.now() + retryDelayMs(job.type, job.attemptCount)).toISOString()
+      : undefined;
     job.lastErrorCode = code; job.lastErrorMessage = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
     job.leaseExpiresAt = undefined; job.updatedAt = now; if (!retry) job.completedAt = now; failed = { ...job }; return items;
   });
@@ -507,6 +639,6 @@ export async function listAutomationAudit(page = 1, pageSize = 20) {
 
 export async function getAutomationQueueStats() {
   const jobs = await readCollection<AutomationJob>(JOBS);
-  const counts = Object.fromEntries(['PENDING','WAITING_APPROVAL','WAITING_FOR_MANUAL_INPUT','RUNNING','RETRY_SCHEDULED','SUCCEEDED','FAILED','CANCELLED','BLOCKED','PAUSED'].map(status => [status, jobs.filter(job => job.status === status).length]));
+  const counts = Object.fromEntries(['PENDING','WAITING_APPROVAL','WAITING_FOR_MANUAL_INPUT','WAITING_CHILDREN','RUNNING','RETRY_SCHEDULED','SUCCEEDED','FAILED','CANCELLED','BLOCKED','PAUSED'].map(status => [status, jobs.filter(job => job.status === status).length]));
   return { total: jobs.length, ...counts } as Record<AutomationJobStatus | 'total', number>;
 }

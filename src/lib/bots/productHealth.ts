@@ -9,9 +9,10 @@
 // ===========================================
 
 import { getAllProducts, updateProduct } from '../storage/products';
-import { checkLinkHealth, checkImageHealth, isRetryableLinkStatus, isRetryableImageStatus } from './productHealthCheck';
+import { checkLinkHealth, isRetryableLinkStatus, isRetryableImageStatus, resolveHealthyImageCandidate } from './productHealthCheck';
 import type { LinkCheckStatus, ImageCheckStatus } from './productHealthCheck';
 import type { Product } from '../types';
+import { getDomainCircuitDecision, recordDomainHealth } from './domainCircuitBreaker';
 
 type ProductRecord = Product & Record<string, unknown>;
 
@@ -25,6 +26,13 @@ export interface HealthCleanupSummary {
   errors: number;
 }
 
+export interface ProductHealthCleanupOptions {
+  fetchImpl?: typeof fetch;
+  resolveDns?: boolean;
+  now?: () => number;
+  random?: () => number;
+}
+
 function getText(value: unknown): string {
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
@@ -36,7 +44,7 @@ function getText(value: unknown): string {
  * Retryable failures (timeout, rate_limited, server_error, etc.)
  * update the status field but do NOT hide or unpublish.
  */
-export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
+export async function runProductHealthCleanup(options: ProductHealthCleanupOptions = {}): Promise<HealthCleanupSummary> {
   const summary: HealthCleanupSummary = {
     checked: 0,
     healthy: 0,
@@ -79,13 +87,23 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
       let isHealthy = true;
       let hasRetryableIssue = false;
       const updates: Record<string, unknown> = {};
+      const nowMs = (options.now || Date.now)();
+      const checkedAt = new Date(nowMs).toISOString();
 
       // Check link health
       if (linkUrl) {
-        const linkResult = await checkLinkHealth(linkUrl);
+        const circuit = await getDomainCircuitDecision(linkUrl, nowMs);
+        const linkResult = circuit.allowed
+          ? await checkLinkHealth(linkUrl, { fetchImpl: options.fetchImpl, resolveDns: options.resolveDns })
+          : { status: 'timeout' as const, ok: false, retryable: true, reason: 'Domain circuit open', retryAfter: circuit.retryAt };
+        const circuitState = circuit.allowed
+          ? await recordDomainHealth(linkUrl, linkResult.status, nowMs, { retryAfter: linkResult.retryAfter, random: options.random })
+          : null;
 
         updates.linkHealthStatus = linkResult.status;
-        updates.linkLastCheckedAt = new Date().toISOString();
+        updates.linkLastCheckedAt = checkedAt;
+        updates.sourceHealthCooldownUntil = linkResult.ok ? undefined : circuit.retryAt || circuitState?.nextRetryAt;
+        updates.sourceHealthReason = linkResult.ok ? undefined : linkResult.status;
 
         if (!linkResult.ok) {
           const linkRetryable = isRetryableLinkStatus(linkResult.status as LinkCheckStatus);
@@ -124,9 +142,20 @@ export async function runProductHealthCleanup(): Promise<HealthCleanupSummary> {
 
       // Check image health
       if (imageUrl) {
-        const imageResult = await checkImageHealth(imageUrl);
+        const rawCandidates = Array.isArray(p.imageCandidates) ? p.imageCandidates.map(getText) : [];
+        const gallery = Array.isArray(product.gallery) ? product.gallery : [];
+        const imageResolution = await resolveHealthyImageCandidate(
+          [imageUrl, ...rawCandidates, ...gallery],
+          { fetchImpl: options.fetchImpl, resolveDns: options.resolveDns },
+        );
+        const imageResult = imageResolution.result;
+        for (const checked of imageResolution.checked) {
+          await recordDomainHealth(checked.url, checked.result.status, nowMs, { random: options.random });
+        }
 
         updates.imageHealthStatus = imageResult.status;
+        updates.imageLastCheckedAt = checkedAt;
+        if (imageResolution.selectedUrl && imageResolution.selectedUrl !== imageUrl) updates.imageUrl = imageResolution.selectedUrl;
 
         if (!imageResult.ok) {
           const imageRetryable = isRetryableImageStatus(imageResult.status as ImageCheckStatus);

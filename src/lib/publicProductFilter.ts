@@ -64,6 +64,12 @@ const SAFE_IMAGE_STATUSES = new Set<string>([
   'passed',
 ]);
 
+const UNCONFIRMED_MONITORING_STATES = new Set<string>([
+  'DEGRADED',
+  'RECHECKING',
+  'RETRY_SCHEDULED',
+]);
+
 const UNSAFE_SOURCE_VALUES = new Set<string>([
   'demo',
   'sample',
@@ -520,6 +526,22 @@ function hasUnsafeImageHealth(product: Product): boolean {
 }
 
 /**
+ * A durable auto-publication remains visible while a monitor confirms a first
+ * failure. This exemption is deliberately limited to health verdicts: every
+ * source, product-kind, duplicate, editorial, and explicit-hide gate remains.
+ */
+function canRetainPublicDuringUnconfirmedMonitoring(product: Product): boolean {
+  return product.schemaVersion === 2
+    && product.autoPublished === true
+    && product.status === 'published'
+    && product.publicHidden === false
+    && product.needsVerification === false
+    && Boolean(product.publicationEffectKey)
+    && Boolean(product.publishedAt && Number.isFinite(Date.parse(product.publishedAt)))
+    && UNCONFIRMED_MONITORING_STATES.has(String(product.lifecycleState || ''));
+}
+
+/**
  * Sản phẩm tự động hoặc sản phẩm AccessTrade phải có kết quả
  * kiểm tra ảnh OK trước khi xuất hiện ngoài public.
  */
@@ -832,9 +854,21 @@ export function getPublicProductBlockReason(
   }
 
   const p = asRecord(product);
+  const retainDuringMonitoring = canRetainPublicDuringUnconfirmedMonitoring(product);
 
   if (!isPublished(product)) {
     return 'Chưa được duyệt hoặc chưa publish.';
+  }
+
+  // A schema-v2 autonomous write is not public until its durable lifecycle
+  // event is finalized. This keeps the storefront fail-closed across a worker
+  // crash after the product write but before PUBLISHING -> PUBLISHED.
+  if (
+      product.schemaVersion === 2 &&
+      product.autoPublished === true &&
+      !['PUBLISHED', 'DEGRADED', 'RECHECKING', 'RETRY_SCHEDULED'].includes(String(product.lifecycleState || ''))
+  ) {
+    return 'Autonomous publication lifecycle is not finalized.';
   }
 
   if (hasUnsafeFlags(product)) {
@@ -949,7 +983,7 @@ export function getPublicProductBlockReason(
     return 'Điểm chất lượng nguồn thấp.';
   }
 
-  if (isBrokenOrUnavailable(product)) {
+  if (!retainDuringMonitoring && isBrokenOrUnavailable(product)) {
     return (
         getDisplayText(
             p.unpublishedReason,
@@ -959,11 +993,11 @@ export function getPublicProductBlockReason(
     );
   }
 
-  if (!hasKnownGoodLinkHealth(product)) {
+  if (!retainDuringMonitoring && !hasKnownGoodLinkHealth(product)) {
     return 'Link sản phẩm chưa được kiểm tra OK.';
   }
 
-  if (hasUnsafeImageHealth(product)) {
+  if (!retainDuringMonitoring && hasUnsafeImageHealth(product)) {
     return (
         getDisplayText(
             p.unpublishedReason,
@@ -973,7 +1007,7 @@ export function getPublicProductBlockReason(
     );
   }
 
-  if (!hasKnownGoodImageHealth(product)) {
+  if (!retainDuringMonitoring && !hasKnownGoodImageHealth(product)) {
     return 'Ảnh sản phẩm chưa được kiểm tra OK.';
   }
 

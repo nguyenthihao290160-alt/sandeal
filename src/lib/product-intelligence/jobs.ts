@@ -2,7 +2,13 @@ import type { AutomationJob } from '@/lib/automation/types';
 import { getAutomationControl, getAutomationJob } from '@/lib/automation/store';
 import type { Product } from '@/lib/types';
 import { getAllProducts, getProductById, saveCanonicalProduct } from '@/lib/storage/products';
-import { checkImageHealth, checkLinkHealth } from '@/lib/bots/productHealthCheck';
+import {
+  checkLinkHealth,
+  resolveHealthyImageCandidate,
+  type ImageCandidateResolution,
+  type LinkCheckResult,
+} from '@/lib/bots/productHealthCheck';
+import { getDomainCircuitDecision, recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import { applyImportBatch, escapeCsvCell, getImportBatch } from './importer';
 import { detectDuplicateGroups, applyDuplicateMerge } from './dedupe';
@@ -110,12 +116,106 @@ async function scoreProducts(job: AutomationJob) {
   return { inspected: products.length, updated, businessDataChanged: updated > 0 };
 }
 
+interface ResilientLinkResult {
+  result: LinkCheckResult;
+  retryAt?: string;
+  circuitSkipped: boolean;
+}
+
+async function checkLinkWithDomainCircuit(url: string, now = Date.now()): Promise<ResilientLinkResult> {
+  const decision = await getDomainCircuitDecision(url, now);
+  if (!decision.allowed && decision.reason === 'circuit_open') {
+    return {
+      result: {
+        status: 'timeout',
+        ok: false,
+        retryable: true,
+        reason: `Domain circuit open until ${decision.retryAt || 'the next retry window'}`,
+      },
+      retryAt: decision.retryAt,
+      circuitSkipped: true,
+    };
+  }
+
+  const result = await checkLinkHealth(url);
+  const state = await recordDomainHealth(url, result.status, now, { retryAfter: result.retryAfter });
+  return {
+    result,
+    retryAt: result.ok ? undefined : state?.nextRetryAt,
+    circuitSkipped: false,
+  };
+}
+
+interface ResilientImageResult {
+  resolution: ImageCandidateResolution;
+  retryAt?: string;
+  circuitSkipped: number;
+}
+
+async function resolveImagesWithDomainCircuits(
+  candidates: Array<string | undefined>,
+  now = Date.now(),
+): Promise<ResilientImageResult> {
+  const urls = [...new Set(candidates.map(value => String(value || '').trim()).filter(Boolean))];
+  const allowed: string[] = [];
+  const skippedRetryTimes: string[] = [];
+  let circuitSkipped = 0;
+
+  for (const url of urls) {
+    const decision = await getDomainCircuitDecision(url, now);
+    if (!decision.allowed && decision.reason === 'circuit_open') {
+      circuitSkipped += 1;
+      if (decision.retryAt) skippedRetryTimes.push(decision.retryAt);
+    } else {
+      allowed.push(url);
+    }
+  }
+
+  if (!allowed.length) {
+    return {
+      resolution: {
+        result: {
+          status: 'timeout',
+          ok: false,
+          retryable: true,
+          reason: urls.length ? 'All image candidate domains have open circuits' : 'No image candidate',
+        },
+        checked: [],
+        attempts: 0,
+      },
+      retryAt: latestTimestamp(skippedRetryTimes),
+      circuitSkipped,
+    };
+  }
+
+  const resolution = await resolveHealthyImageCandidate(allowed);
+  const retryTimes = [...skippedRetryTimes];
+  for (const checked of resolution.checked) {
+    const state = await recordDomainHealth(checked.url, checked.result.status, now);
+    if (!checked.result.ok && checked.result.retryable && state?.nextRetryAt) retryTimes.push(state.nextRetryAt);
+  }
+  return {
+    resolution,
+    retryAt: resolution.result.ok ? undefined : latestTimestamp(retryTimes),
+    circuitSkipped,
+  };
+}
+
+function latestTimestamp(values: Array<string | undefined>): string | undefined {
+  const latest = values.reduce((maximum, value) => {
+    const parsed = Date.parse(value || '');
+    return Number.isFinite(parsed) ? Math.max(maximum, parsed) : maximum;
+  }, 0);
+  return latest > 0 ? new Date(latest).toISOString() : undefined;
+}
+
 async function recheckHealth(job: AutomationJob) {
   const products = await selectedProducts(job.payload);
   const requestedTarget = stringValue(job.payload.healthTarget, 20);
-  const checkLinks = requestedTarget !== 'image' && requestedTarget !== 'affiliate';
-  const checkAffiliate = requestedTarget === 'affiliate';
-  const checkImages = requestedTarget !== 'link' && requestedTarget !== 'affiliate';
+  const narrowedTarget = new Set(['link', 'affiliate', 'image']).has(requestedTarget);
+  const checkLinks = !narrowedTarget || requestedTarget === 'link';
+  const checkAffiliate = !narrowedTarget || requestedTarget === 'affiliate';
+  const checkImages = !narrowedTarget || requestedTarget === 'image';
   if (job.dryRun) return {
     preview: true,
     inspected: products.length,
@@ -126,30 +226,75 @@ async function recheckHealth(job: AutomationJob) {
       + Number(checkImages && Boolean(item.imageUrl)), 0),
     businessDataChanged: false,
   };
-  let checked = 0; let failed = 0;
+  let checked = 0; let failed = 0; let circuitSkipped = 0; let fallbackImages = 0; let retryScheduled = 0; let externalRequests = 0;
   for (const product of products) {
     const updates: Partial<Product> = {};
     try {
       await assertJobMayContinue(job);
+      const retryTimes: string[] = [];
+      const failureReasons: string[] = [];
       if (checkLinks && product.originalUrl) {
-        const result = await checkLinkHealth(product.originalUrl);
+        const checkedLink = await checkLinkWithDomainCircuit(product.originalUrl);
+        const result = checkedLink.result;
         updates.linkHealthStatus = result.status as Product['linkHealthStatus']; updates.linkLastCheckedAt = new Date().toISOString();
-        if (!result.ok) failed += 1;
+        if (!result.ok) {
+          failed += 1;
+          failureReasons.push(`link:${result.status}`);
+          if (result.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
+        }
+        if (checkedLink.circuitSkipped) circuitSkipped += 1;
+        else externalRequests += 1;
         await assertJobMayContinue(job);
       }
       if (checkAffiliate && product.affiliateUrl) {
-        const result = await checkLinkHealth(product.affiliateUrl);
+        const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl);
+        const result = checkedLink.result;
         updates.affiliateHealthStatus = result.status as Product['affiliateHealthStatus'];
         updates.affiliateLastCheckedAt = new Date().toISOString();
         updates.affiliateLinkErrors = result.ok ? undefined : result.reason.slice(0, 500);
-        if (!result.ok) failed += 1;
+        if (!result.ok) {
+          failed += 1;
+          failureReasons.push(`affiliate:${result.status}`);
+          if (result.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
+        }
+        if (checkedLink.circuitSkipped) circuitSkipped += 1;
+        else externalRequests += 1;
         await assertJobMayContinue(job);
       }
       if (checkImages && product.imageUrl) {
-        const result = await checkImageHealth(product.imageUrl);
+        const rawCandidates = Array.isArray((product as Product & { imageCandidates?: unknown[] }).imageCandidates)
+          ? (product as Product & { imageCandidates?: unknown[] }).imageCandidates!.map(value => String(value || ''))
+          : [];
+        const checkedImages = await resolveImagesWithDomainCircuits([
+          product.imageUrl,
+          ...rawCandidates,
+          ...(product.gallery || []),
+        ]);
+        const result = checkedImages.resolution.result;
         updates.imageHealthStatus = (result.ok ? 'ok' : result.status) as Product['imageHealthStatus']; updates.imageLastCheckedAt = new Date().toISOString();
-        if (!result.ok) failed += 1;
+        if (checkedImages.resolution.selectedUrl && checkedImages.resolution.selectedUrl !== product.imageUrl) {
+          updates.imageUrl = checkedImages.resolution.selectedUrl;
+          fallbackImages += 1;
+        }
+        if (!result.ok) {
+          failed += 1;
+          failureReasons.push(`image:${result.status}`);
+          if (result.retryable && checkedImages.retryAt) retryTimes.push(checkedImages.retryAt);
+        }
+        circuitSkipped += checkedImages.circuitSkipped;
+        externalRequests += checkedImages.resolution.attempts;
         await assertJobMayContinue(job);
+      }
+      if (failureReasons.length) {
+        updates.sourceHealthReason = failureReasons.join(',').slice(0, 500);
+        const retryAt = latestTimestamp(retryTimes);
+        if (retryAt) {
+          updates.sourceHealthCooldownUntil = retryAt;
+          retryScheduled += 1;
+        }
+      } else if (Object.keys(updates).length) {
+        updates.sourceHealthReason = undefined;
+        updates.sourceHealthCooldownUntil = undefined;
       }
       if (Object.keys(updates).length) await saveCanonicalProduct(product.id, updates);
       checked += 1;
@@ -158,7 +303,16 @@ async function recheckHealth(job: AutomationJob) {
       failed += 1;
     }
   }
-  return { checked, failed, healthTarget: requestedTarget || 'all', businessDataChanged: checked > 0 };
+  return {
+    checked,
+    failed,
+    circuitSkipped,
+    fallbackImages,
+    retryScheduled,
+    externalRequests,
+    healthTarget: requestedTarget || 'all',
+    businessDataChanged: checked > 0,
+  };
 }
 
 async function capturePrices(job: AutomationJob) {

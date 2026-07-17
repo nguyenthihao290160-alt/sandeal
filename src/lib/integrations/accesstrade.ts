@@ -14,6 +14,7 @@ import { getServerConfig } from '../config';
 import { getRawPrimaryCredentialValue } from '../storage/tokenVault';
 import type { Product, ProductKind, ProductPlatform } from '../types';
 import { classifyProductKind, looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
+import { getDomainCircuitDecision, recordDomainHealth } from '../bots/domainCircuitBreaker';
 
 // ---- Types ----
 
@@ -92,7 +93,7 @@ export interface AccessTradeSearchResult {
 
 export type AccessTradeResultType =
   | 'success_with_results' | 'success_empty' | 'timeout' | 'rate_limited'
-  | 'unauthorized' | 'forbidden' | 'upstream_error' | 'malformed_response' | 'network_error';
+  | 'unauthorized' | 'forbidden' | 'upstream_error' | 'malformed_response' | 'network_error' | 'circuit_open';
 
 export interface AccessTradeRequestLog {
   endpoint: string;
@@ -131,7 +132,7 @@ function toRequestLog(result: AccessTradeFetchResult): AccessTradeRequestLog {
     statusCode: result.status,
     resultType: result.ok ? (result.items.length ? 'success_with_results' : 'success_empty') : 'malformed_response',
     itemCount: result.items.length,
-    attempts: result.attempts || 1,
+    attempts: result.attempts ?? 1,
   };
 }
 
@@ -340,7 +341,7 @@ export async function searchAccessTrade(
         .join(' | ');
 
     const requests = fetchResults.map(toRequestLog);
-    const terminal = requests.find((item) => ['unauthorized', 'forbidden', 'rate_limited'].includes(item.resultType)) || requests[0];
+    const terminal = requests.find((item) => ['unauthorized', 'forbidden', 'rate_limited', 'circuit_open'].includes(item.resultType)) || requests[0];
     throw new AccessTradeRequestError(
         terminal?.resultType || 'network_error',
         requests,
@@ -975,6 +976,23 @@ async function fetchAccessTradeEndpoint(
 ): Promise<AccessTradeFetchResult> {
   const MAX_RETRIES = 1;
   const TIMEOUT_MS = 15_000;
+  const circuit = await getDomainCircuitDecision(url.toString());
+  if (!circuit.allowed) {
+    return {
+      endpoint,
+      ok: false,
+      items: [],
+      error: `Source circuit open until ${circuit.retryAt || 'next probe'}`,
+      request: {
+        endpoint,
+        durationMs: 0,
+        resultType: 'circuit_open',
+        itemCount: 0,
+        retryAfter: circuit.retryAt,
+        attempts: 0,
+      },
+    };
+  }
   
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const startedAt = Date.now();
@@ -995,6 +1013,7 @@ async function fetchAccessTradeEndpoint(
     } catch (err) {
       clearTimeout(timeoutId);
       const isTimeout = err instanceof Error && err.name === 'AbortError';
+      if (attempt >= MAX_RETRIES) await recordDomainHealth(url.toString(), isTimeout ? 'timeout' : 'error');
       
       if (attempt < MAX_RETRIES) {
         await new Promise((resolve) => setTimeout(resolve, 250 + Math.floor(Math.random() * 500)));
@@ -1026,13 +1045,19 @@ async function fetchAccessTradeEndpoint(
       const retryAfterMs = retryAfterHeader
         ? (/^\d+$/.test(retryAfterHeader) ? Date.now() + Number(retryAfterHeader) * 1000 : Date.parse(retryAfterHeader))
         : NaN;
+      const retryAfter = Number.isFinite(retryAfterMs) ? new Date(retryAfterMs).toISOString() : undefined;
+      if (response.status === 429) {
+        await recordDomainHealth(url.toString(), 'rate_limited', Date.now(), { retryAfter });
+      } else if (response.status >= 500) {
+        await recordDomainHealth(url.toString(), 'server_error');
+      }
       return {
         endpoint,
         ok: false,
         items: [],
         status: response.status,
         error: `HTTP ${response.status}`,
-        request: { endpoint, durationMs: Date.now() - startedAt, statusCode: response.status, resultType, itemCount: 0, retryAfter: Number.isFinite(retryAfterMs) ? new Date(retryAfterMs).toISOString() : undefined, attempts: attempt + 1 },
+        request: { endpoint, durationMs: Date.now() - startedAt, statusCode: response.status, resultType, itemCount: 0, retryAfter, attempts: attempt + 1 },
       };
     }
 
@@ -1055,6 +1080,7 @@ async function fetchAccessTradeEndpoint(
       __sandealSourceKind: sourceKind,
       __sandealEndpointUrl: sanitizeEndpointUrl(url),
     }));
+    await recordDomainHealth(url.toString(), 'ok');
 
     return {
       endpoint,

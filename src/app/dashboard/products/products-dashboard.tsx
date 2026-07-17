@@ -31,7 +31,7 @@ type SafeAutomationJob = Omit<AutomationJob, 'payload'>;
 
 function toDashboardOperation(job: SafeAutomationJob): DashboardOperation {
   const statuses: Record<AutomationJob['status'], DashboardOperation['status']> = {
-    PENDING: 'pending', WAITING_APPROVAL: 'waiting_approval', RUNNING: 'running', RETRY_SCHEDULED: 'waiting_retry',
+    PENDING: 'pending', WAITING_APPROVAL: 'waiting_approval', WAITING_CHILDREN: 'pending', RUNNING: 'running', RETRY_SCHEDULED: 'waiting_retry',
     WAITING_FOR_MANUAL_INPUT: 'waiting_manual', SUCCEEDED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled', BLOCKED: 'blocked', PAUSED: 'pending',
   };
   const status = statuses[job.status];

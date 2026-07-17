@@ -2,6 +2,7 @@ import { getAllProducts } from '@/lib/storage/products';
 import { listProductSources } from '@/lib/storage/productSources';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { buildOperationsOnboarding } from '@/lib/operations/onboarding';
+import { AUTOMATION_POLICY_VERSION, listAutomationPolicies } from './policyRegistry';
 import {
   getAiUsage,
   getAllAutomationJobs,
@@ -70,7 +71,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     kpis: {
       productsProcessed: products.length,
       running: queue.RUNNING,
-      waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT,
+      waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT + queue.WAITING_CHILDREN,
       waitingApproval: queue.WAITING_APPROVAL,
       completionRate: terminal.length ? Math.round((completed.length / terminal.length) * 100) : null,
       systemErrors: queue.FAILED,
@@ -92,13 +93,23 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     },
     aiUsage: { ...usage, freeOnly: settings.freeOnly },
     policy: {
+      version: AUTOMATION_POLICY_VERSION,
       safeMode: true,
       freeOnly: settings.freeOnly,
       safePublish: settings.safePublish,
       allowPaidAi: settings.allowPaidAi,
+      capabilities: listAutomationPolicies().map(item => ({
+        capability: item.capability,
+        jobType: item.jobType,
+        autonomousAllowed: item.autonomousAllowed,
+        approvalMode: item.approvalMode,
+        publishPermission: item.publishPermission,
+        budgetClass: item.budgetClass,
+        handlerVersion: item.handlerVersion,
+      })),
     },
     circuits: [autopilotCircuit, geminiCircuit],
-    control: { workerPaused: control.workerPaused, schedulerPaused: control.schedulerPaused, killSwitch: control.killSwitch, reason: control.reason || null },
+    control: { mode: control.mode, effectiveMode: control.effectiveMode, publishPaused: control.publishPaused, ingestionPaused: control.ingestionPaused, workerPaused: control.workerPaused, schedulerPaused: control.schedulerPaused, killSwitch: control.killSwitch, reason: control.reason || null },
     sources: { configured: sources.length, products: products.length },
     zeroData: !onboarding.hasOperationalData,
     onboarding,
@@ -106,7 +117,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       workItems: { waitingApproval: queue.WAITING_APPROVAL, waitingManual: queue.WAITING_FOR_MANUAL_INPUT, failed: queue.FAILED, openAlerts: onboarding.facts.openAlerts },
       dataReadiness: { products: onboarding.facts.products, enabledSources: onboarding.facts.sources, pendingSources: onboarding.facts.pendingSources, unscored: onboarding.facts.unscored },
       qualityContent: { scored: onboarding.facts.scored, drafts: onboarding.facts.drafts, editorialChecked: onboarding.facts.editorialChecked },
-      botOperations: { running: queue.RUNNING, waiting: queue.PENDING + queue.RETRY_SCHEDULED, waitingManual: queue.WAITING_FOR_MANUAL_INPUT },
+      botOperations: { running: queue.RUNNING, waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_CHILDREN, waitingManual: queue.WAITING_FOR_MANUAL_INPUT },
       growth: { published: onboarding.facts.published, outboundEvents: onboarding.facts.outboundEvents, openAlerts: onboarding.facts.openAlerts },
     },
     recentActivity: jobs.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 10).map(job => ({

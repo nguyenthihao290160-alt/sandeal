@@ -19,7 +19,7 @@ const TABS: Array<{ id: Tab; label: string; icon: 'dashboard' | 'queue' | 'task'
 ];
 
 const STATUS_LABELS: Record<AutomationJobStatus, string> = {
-  PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Chờ chạy lại', SUCCEEDED: 'Đã xử lý', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Tạm dừng',
+  PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', WAITING_CHILDREN: 'Chờ tác vụ con', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Chờ chạy lại', SUCCEEDED: 'Đã xử lý', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Tạm dừng',
 };
 
 function jobTone(status: AutomationJobStatus): string {
@@ -90,7 +90,7 @@ export function BotControlCenter() {
   const selectedTask = manualTasks.find(task => task.id === selectedTaskId) || null;
   const jobCounts = useMemo(() => ({
     running: jobs.filter(job => job.status === 'RUNNING').length,
-    waiting: jobs.filter(job => ['PENDING', 'RETRY_SCHEDULED', 'WAITING_FOR_MANUAL_INPUT'].includes(job.status)).length,
+    waiting: jobs.filter(job => ['PENDING', 'RETRY_SCHEDULED', 'WAITING_FOR_MANUAL_INPUT', 'WAITING_CHILDREN'].includes(job.status)).length,
     approval: jobs.filter(job => job.status === 'WAITING_APPROVAL').length,
     failed: jobs.filter(job => ['FAILED', 'BLOCKED'].includes(job.status)).length,
   }), [jobs]);

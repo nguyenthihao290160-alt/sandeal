@@ -1,4 +1,5 @@
 import type { ActualExecutionMode, AutomationJobType, BotRegistryEntry, RequestedExecutionMode } from './types';
+import { applyPolicyToBotEntry, getAutomationPolicy } from './policyRegistry';
 
 const REGISTRY_UPDATED_AT = '2026-07-15T00:00:00.000Z';
 
@@ -28,29 +29,37 @@ const BOT_REGISTRY: readonly BotRegistryEntry[] = [
   entry({ id: 'SCORING_ENGINE', name: 'Máy chấm điểm', description: 'Tính Quality, Opportunity và Deal Score bằng quy tắc phiên bản hóa.', category: 'RULE_BASED_AUTOMATION', capability: 'SCORE_PRODUCTS', jobType: 'SCORE_PRODUCTS', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'MEDIUM', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES'], rulesVersion: 'scoring-v1', writeScope: ['product-scores'], externalSideEffect: false, manualSupported: false }),
   entry({ id: 'PRICE_WATCHER', name: 'Theo dõi giá', description: 'Ghi nhận snapshot và đánh giá thay đổi giá.', category: 'RULE_BASED_AUTOMATION', capability: 'CAPTURE_PRICE_HISTORY', jobType: 'CAPTURE_PRICE_HISTORY', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'MEDIUM', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES', 'MANUAL_INPUT'], rulesVersion: 'price-watcher-v1', writeScope: ['price-history'], externalSideEffect: false }),
   entry({ id: 'ALERT_METRICS_ENGINE', name: 'Cảnh báo và chỉ số', description: 'Đánh giá cảnh báo có cooldown và tổng hợp chỉ số có mẫu số thật.', category: 'RULE_BASED_AUTOMATION', capability: 'EVALUATE_ALERTS', jobType: 'EVALUATE_ALERTS', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'LOW', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES'], rulesVersion: 'alerts-v1', writeScope: ['alerts', 'growth-metrics'], externalSideEffect: false, manualSupported: false }),
+  entry({ id: 'SYSTEM_HEALTH_INSPECTOR', name: 'Sức khỏe hệ thống', description: 'Đọc trạng thái runtime và dữ liệu mà không tạo side effect nghiệp vụ.', category: 'CONTROL_PLANE', capability: 'CHECK_SYSTEM_HEALTH', jobType: 'HEALTH_CHECK', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'LOW', approvalRequired: false, provider: 'system', fallback: ['LOCAL_RULES'], rulesVersion: 'system-health-v1', writeScope: [], externalSideEffect: false, manualSupported: false }),
+  entry({ id: 'GROWTH_METRICS_AGGREGATOR', name: 'Tổng hợp tăng trưởng', description: 'Tổng hợp chỉ số tăng trưởng từ dữ liệu quan sát được.', category: 'RULE_BASED_AUTOMATION', capability: 'AGGREGATE_GROWTH_METRICS', jobType: 'AGGREGATE_GROWTH_METRICS', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'LOW', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES'], rulesVersion: 'growth-metrics-v1', writeScope: ['growth-metrics'], externalSideEffect: false, manualSupported: false }),
+  entry({ id: 'BULK_OPERATION_COORDINATOR', name: 'Thao tác hàng loạt', description: 'Điều phối thao tác hàng loạt trong write scope do policy giới hạn.', category: 'RULE_BASED_AUTOMATION', capability: 'BULK_PRODUCT_OPERATION', jobType: 'BULK_PRODUCT_OPERATION', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'MEDIUM', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES'], rulesVersion: 'bulk-operation-v1', writeScope: ['products'], externalSideEffect: false }),
   entry({ id: 'EDITORIAL_GUARD', name: 'Kiểm tra biên tập', description: 'Chặn claim thiếu bằng chứng và nội dung không đủ điều kiện.', category: 'RULE_BASED_AUTOMATION', capability: 'VALIDATE_EDITORIAL', jobType: 'EDITORIAL_CHECK', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'HIGH', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES', 'MANUAL_INPUT'], rulesVersion: 'editorial-guard-v1', writeScope: ['content-drafts'], externalSideEffect: false }),
 
   entry({ id: 'EVIDENCE_GROUNDED_ANALYST', name: 'Phân tích dựa trên bằng chứng', description: 'Đề xuất phân tích có evidence contract; không ghi fact chuẩn hoặc tự đăng.', category: 'AI_ASSISTED', capability: 'ANALYZE_WITH_EVIDENCE', jobType: 'AI_ANALYSIS', enabled: true, defaultExecutionMode: 'AUTO', risk: 'MEDIUM', approvalRequired: false, provider: 'gemini', modelId: 'configured-at-runtime', promptVersion: 'evidence-analysis-v1', fallback: ['LOCAL_TEMPLATE', 'MANUAL_INPUT'], writeScope: ['analysis-drafts'], externalSideEffect: true }),
   entry({ id: 'CONTENT_DRAFT_ASSISTANT', name: 'Trợ lý bản nháp nội dung', description: 'Tạo bản nháp cục bộ hoặc qua provider từ fact đã xác minh.', category: 'AI_ASSISTED', capability: 'PREPARE_CONTENT_DRAFT', jobType: 'PREPARE_CONTENT_DRAFT', enabled: true, defaultExecutionMode: 'AUTO', risk: 'MEDIUM', approvalRequired: false, provider: 'gemini', modelId: 'configured-at-runtime', promptVersion: 'content-draft-v1', templateVersion: 'content-template-v1', fallback: ['LOCAL_TEMPLATE', 'MANUAL_INPUT'], writeScope: ['content-drafts'], externalSideEffect: true }),
-  entry({ id: 'EDITORIAL_ADJUDICATOR', name: 'Hỗ trợ xét duyệt biên tập', description: 'Đề xuất xử lý cảnh báo biên tập; quyết định vẫn do cổng an toàn.', category: 'AI_ASSISTED', capability: 'ADJUDICATE_EDITORIAL', jobType: 'EDITORIAL_CHECK', enabled: false, defaultExecutionMode: 'MANUAL_ONLY', risk: 'HIGH', approvalRequired: true, provider: 'gemini', modelId: 'configured-at-runtime', promptVersion: 'editorial-adjudication-v1', fallback: ['MANUAL_INPUT'], writeScope: ['editorial-suggestions'], externalSideEffect: true }),
+  entry({ id: 'EDITORIAL_ADJUDICATOR', name: 'Hỗ trợ xét duyệt biên tập', description: 'Đề xuất xử lý cảnh báo biên tập; quyết định vẫn do cổng an toàn.', category: 'AI_ASSISTED', capability: 'ADJUDICATE_EDITORIAL', enabled: false, defaultExecutionMode: 'MANUAL_ONLY', risk: 'HIGH', approvalRequired: true, provider: 'gemini', modelId: 'configured-at-runtime', promptVersion: 'editorial-adjudication-v1', fallback: ['MANUAL_INPUT'], writeScope: ['editorial-suggestions'], externalSideEffect: true }),
   entry({ id: 'MERCHANDISING_ADVISOR', name: 'Cố vấn sắp xếp nội dung', description: 'Chỉ tạo đề xuất; chưa bật vì chưa có model lưu trữ merchandising an toàn.', category: 'AI_ASSISTED', capability: 'ADVISE_MERCHANDISING', enabled: false, defaultExecutionMode: 'MANUAL_ONLY', risk: 'HIGH', approvalRequired: true, provider: 'gemini', modelId: 'configured-at-runtime', promptVersion: 'merchandising-advice-v1', fallback: ['MANUAL_INPUT'], writeScope: ['merchandising-suggestions'], externalSideEffect: false }),
 
-  entry({ id: 'SAFE_PUBLISH_APPROVAL', name: 'Phê duyệt đăng an toàn', description: 'Cổng phê duyệt con người trước SAFE_PUBLISH.', category: 'HUMAN_APPROVAL_GATE', capability: 'APPROVE_SAFE_PUBLISH', jobType: 'SAFE_PUBLISH', enabled: true, defaultExecutionMode: 'MANUAL_ONLY', risk: 'HIGH', approvalRequired: true, provider: 'manual', fallback: ['MANUAL_INPUT'], writeScope: ['automation-jobs', 'automation-audit'], externalSideEffect: false, shadowSupported: false }),
+  entry({ id: 'SAFE_PUBLISH_APPROVAL', name: 'Phê duyệt đăng an toàn', description: 'Cổng phê duyệt con người trước SAFE_PUBLISH.', category: 'HUMAN_APPROVAL_GATE', capability: 'APPROVE_SAFE_PUBLISH', enabled: true, defaultExecutionMode: 'MANUAL_ONLY', risk: 'HIGH', approvalRequired: true, provider: 'manual', fallback: ['MANUAL_INPUT'], writeScope: ['automation-jobs', 'automation-audit'], externalSideEffect: false, shadowSupported: false }),
+  entry({ id: 'PRODUCT_LIFECYCLE_ENGINE', name: 'Vòng đời sản phẩm', description: 'Xử lý một candidate qua durable worker và tạo child job có idempotency.', category: 'RULE_BASED_AUTOMATION', capability: 'PROCESS_CANDIDATE', jobType: 'PROCESS_CANDIDATE', enabled: true, defaultExecutionMode: 'AUTO', risk: 'MEDIUM', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES', 'LOCAL_TEMPLATE'], rulesVersion: 'product-lifecycle-v1', writeScope: ['candidate-queue', 'products', 'evidence-facts', 'automation-jobs'], externalSideEffect: true }),
+  entry({ id: 'AUTONOMOUS_PUBLISH_GUARD', name: 'Đăng tự động an toàn', description: 'Tái tính eligibility phía server và chỉ publish khi mode, policy và budget cho phép.', category: 'CONTROL_PLANE', capability: 'AUTO_SAFE_PUBLISH', jobType: 'AUTO_SAFE_PUBLISH', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'LOW', approvalRequired: false, provider: 'system', fallback: ['LOCAL_RULES'], rulesVersion: 'auto-safe-publish-v1', writeScope: ['products', 'publication-audit', 'automation-jobs'], externalSideEffect: true, shadowSupported: true, manualSupported: false }),
+  entry({ id: 'POST_PUBLISH_GUARDIAN', name: 'Giám sát sau đăng', description: 'Theo dõi public route, link, ảnh và giá; tự ẩn hoặc tạo recheck khi cần.', category: 'RULE_BASED_AUTOMATION', capability: 'POST_PUBLISH_MONITOR', jobType: 'POST_PUBLISH_MONITOR', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'MEDIUM', approvalRequired: false, provider: 'local', fallback: ['LOCAL_RULES'], rulesVersion: 'post-publish-monitor-v1', writeScope: ['products', 'evidence-facts', 'automation-jobs'], externalSideEffect: true }),
+  entry({ id: 'AUTONOMOUS_RECONCILER', name: 'Đối soát tự động', description: 'Phát hiện và sửa orphan, stale state và child job thiếu khi việc sửa là an toàn.', category: 'CONTROL_PLANE', capability: 'RECONCILE_AUTOMATION', jobType: 'RECONCILE_AUTOMATION', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'MEDIUM', approvalRequired: false, provider: 'system', fallback: ['LOCAL_RULES'], rulesVersion: 'reconciler-v1', writeScope: ['automation-jobs', 'candidate-queue', 'products', 'operation-journal'], externalSideEffect: false }),
+  entry({ id: 'RUNTIME_GUARDIAN', name: 'Giám sát runtime', description: 'Đánh giá role heartbeat, queue và storage để pause hoặc degrade publish lane.', category: 'CONTROL_PLANE', capability: 'RUNTIME_GUARDIAN', jobType: 'RUNTIME_GUARDIAN', enabled: true, defaultExecutionMode: 'LOCAL_ONLY', risk: 'MEDIUM', approvalRequired: false, provider: 'system', fallback: ['LOCAL_RULES'], rulesVersion: 'runtime-guardian-v1', writeScope: ['automation-control', 'runtime-health'], externalSideEffect: false }),
 ];
 
 export function listBotRegistry(): BotRegistryEntry[] {
-  return BOT_REGISTRY.map(item => ({ ...item, fallback: [...item.fallback], writeScope: [...item.writeScope] }));
+  return BOT_REGISTRY.map(item => applyPolicyToBotEntry({ ...item, fallback: [...item.fallback], writeScope: [...item.writeScope] }));
 }
 
 export function getBotRegistryEntry(id: string): BotRegistryEntry | null {
   const found = BOT_REGISTRY.find(item => item.id === id);
-  return found ? { ...found, fallback: [...found.fallback], writeScope: [...found.writeScope] } : null;
+  return found ? applyPolicyToBotEntry({ ...found, fallback: [...found.fallback], writeScope: [...found.writeScope] }) : null;
 }
 
 export function findBotForCapability(capability: string): BotRegistryEntry | null {
   const normalized = capability.trim().toUpperCase();
   const found = BOT_REGISTRY.find(item => item.enabled && item.capability === normalized);
-  return found ? { ...found, fallback: [...found.fallback], writeScope: [...found.writeScope] } : null;
+  return found ? applyPolicyToBotEntry({ ...found, fallback: [...found.fallback], writeScope: [...found.writeScope] }) : null;
 }
 
 export interface JobRegistryDefaults {
@@ -63,44 +72,17 @@ export interface JobRegistryDefaults {
   maxAttempts: number;
 }
 
-function bulkDefaults(payload: Record<string, unknown>): Pick<JobRegistryDefaults, 'capability' | 'writeScope' | 'externalSideEffect'> {
-  const action = typeof payload.action === 'string' ? payload.action.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '') : 'OPERATION';
-  if (action === 'RECHECK_LINK' || action === 'RECHECK_IMAGE') {
-    return { capability: `BULK_${action}`, writeScope: ['product-health'], externalSideEffect: true };
-  }
-  if (action === 'RESCORE') return { capability: 'BULK_SCORE_PRODUCTS', writeScope: ['product-scores'], externalSideEffect: false };
-  if (action === 'PRICE_SNAPSHOT') return { capability: 'BULK_CAPTURE_PRICE_HISTORY', writeScope: ['price-history'], externalSideEffect: false };
-  if (action === 'CONTENT_DRAFT') return { capability: 'BULK_PREPARE_CONTENT_DRAFT', writeScope: ['content-drafts'], externalSideEffect: false };
-  if (action === 'EXPORT_CSV') return { capability: 'BULK_EXPORT_CSV', writeScope: [], externalSideEffect: false };
-  if (action === 'MERGE_DUPLICATES') return { capability: 'MERGE_DUPLICATES', writeScope: ['products', 'duplicate-groups'], externalSideEffect: false };
-  return { capability: `BULK_${action}`, writeScope: ['products'], externalSideEffect: false };
-}
-
-export function getJobRegistryDefaults(type: AutomationJobType, payload: Record<string, unknown>): JobRegistryDefaults {
-  const specialBotId = type === 'HEALTH_CHECK'
-    ? 'HEALTH_INSPECTOR'
-    : type === 'AGGREGATE_GROWTH_METRICS'
-      ? 'ALERT_METRICS_ENGINE'
-      : type === 'BULK_PRODUCT_OPERATION'
-        ? 'OPERATIONS_ORCHESTRATOR'
-        : null;
-  const registered = BOT_REGISTRY.find(item => item.enabled && item.jobType === type && item.category !== 'HUMAN_APPROVAL_GATE')
-    || (specialBotId ? BOT_REGISTRY.find(item => item.id === specialBotId) : undefined)
-    || BOT_REGISTRY.find(item => item.id === 'OPERATIONS_ORCHESTRATOR')!;
-  const special = type === 'BULK_PRODUCT_OPERATION'
-    ? bulkDefaults(payload)
-    : type === 'HEALTH_CHECK'
-      ? { capability: 'CHECK_SYSTEM_HEALTH', writeScope: [] as string[], externalSideEffect: false }
-      : type === 'AGGREGATE_GROWTH_METRICS'
-        ? { capability: 'AGGREGATE_GROWTH_METRICS', writeScope: ['growth-metrics'], externalSideEffect: false }
-        : { capability: registered.capability, writeScope: [...registered.writeScope], externalSideEffect: registered.externalSideEffect };
+export function getJobRegistryDefaults(type: AutomationJobType, _payload: Record<string, unknown>): JobRegistryDefaults {
+  const jobPolicy = getAutomationPolicy(type);
+  const registered = BOT_REGISTRY.find(item => item.enabled && item.id === jobPolicy.botId && item.jobType === type);
+  if (!registered) throw new Error(`BOT_POLICY_CONTRACT_MISSING:${type}:${jobPolicy.botId}`);
   return {
-    botId: registered.id,
-    capability: special.capability,
-    requestedExecutionMode: specialBotId ? 'LOCAL_ONLY' : registered.defaultExecutionMode,
-    writeScope: special.writeScope,
-    externalSideEffect: special.externalSideEffect,
-    fallback: [...registered.fallback],
-    maxAttempts: registered.maxAttempts,
+    botId: jobPolicy.botId,
+    capability: jobPolicy.capability,
+    requestedExecutionMode: jobPolicy.defaultExecutionMode,
+    writeScope: [...jobPolicy.writeScope],
+    externalSideEffect: jobPolicy.externalSideEffect,
+    fallback: [...jobPolicy.fallbackPolicy],
+    maxAttempts: jobPolicy.retryPolicy.maxAttempts,
   };
 }

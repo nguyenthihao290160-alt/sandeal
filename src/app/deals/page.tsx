@@ -163,7 +163,7 @@ export default async function DealsPage({ searchParams }: { searchParams: Promis
                   <DealCard product={product} selectedComparisonIds={selectedIds} comparisonEnabled key={product.id} />
                 ))}
               </div>
-            ) : <DealEmptyState filtered={activeFilters} />}
+            ) : <DealEmptyState filtered={activeFilters} suggestions={result.suggestions} />}
 
             <DealPagination
               page={result.pagination.page}

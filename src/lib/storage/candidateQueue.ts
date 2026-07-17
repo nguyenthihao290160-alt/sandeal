@@ -1,4 +1,4 @@
-import { generateId, readCollection, writeCollection } from './adapter';
+import { generateId, readCollection, runTransaction, writeCollection } from './adapter';
 import type { CandidateLane, Product } from '../types';
 import { LANE_PRIORITY } from '../bots/candidateReadiness';
 
@@ -20,12 +20,25 @@ export interface CandidatePayload {
   salePrice?: number;
   currency: 'VND';
   category?: string;
+  brand?: string;
+  model?: string;
+  sku?: string;
+  gtin?: string;
+  mpn?: string;
+  specifications?: Record<string, string | number>;
+  merchant?: string;
+  rawSourceKind?: string;
+  nonProductReason?: string;
+  campaignName?: string;
+  commissionRate?: number;
   verifiedSource: boolean;
   autoPublishEligible: boolean;
   sourceQualityScore?: number;
+  isolatedHealthFixture?: 'healthy' | 'temporary_failure' | 'confirmed_broken';
 }
 
 export interface CandidateQueueItem {
+  schemaVersion?: number;
   id: string;
   source: Product['source'];
   sourceId: string;
@@ -42,6 +55,9 @@ export interface CandidateQueueItem {
   contentHash: string;
   sourceHash: string;
   keyword?: string;
+  durableJobId?: string;
+  durableJobKey?: string;
+  bridgedAt?: string;
   payload: CandidatePayload;
 }
 
@@ -84,15 +100,80 @@ export async function enqueueCandidate(input: Omit<CandidateQueueItem, 'id' | 's
     }
     const now = new Date().toISOString();
     if (existing) {
-      Object.assign(existing, input, { status: 'pending', attempts: 0, updatedAt: now, processingStartedAt: undefined, delayReason: undefined });
+      const sourceChanged = existing.sourceHash !== input.sourceHash;
+      Object.assign(existing, input, { schemaVersion: 2, status: 'pending', attempts: 0, updatedAt: now, processingStartedAt: undefined, delayReason: undefined });
+      if (sourceChanged) {
+        existing.durableJobId = undefined;
+        existing.durableJobKey = undefined;
+        existing.bridgedAt = undefined;
+      }
       await writeCollection(COLLECTION, items);
       return { item: existing, queued: true, unchanged: false };
     }
-    const item: CandidateQueueItem = { ...input, id: generateId(), status: 'pending', attempts: 0, createdAt: now, updatedAt: now };
+    const item: CandidateQueueItem = { ...input, schemaVersion: 2, id: generateId(), status: 'pending', attempts: 0, createdAt: now, updatedAt: now };
     items.push(item);
     await writeCollection(COLLECTION, items);
     return { item, queued: true, unchanged: false };
   });
+}
+
+export async function getCandidateById(id: string): Promise<CandidateQueueItem | null> {
+  return (await listCandidateQueue()).find(item => item.id === id) || null;
+}
+
+export async function markCandidateBridged(id: string, jobId: string, durableJobKey: string): Promise<CandidateQueueItem | null> {
+  let output: CandidateQueueItem | null = null;
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
+    const item = items.find(entry => entry.id === id);
+    if (!item) return undefined;
+    if (item.durableJobId && item.durableJobId !== jobId) throw new Error('CANDIDATE_ALREADY_BRIDGED');
+    item.schemaVersion = 2;
+    item.durableJobId = jobId;
+    item.durableJobKey = durableJobKey;
+    item.bridgedAt ||= new Date().toISOString();
+    item.updatedAt = new Date().toISOString();
+    output = structuredClone(item);
+    return items;
+  });
+  return output;
+}
+
+export async function clearOrphanedCandidateBridge(id: string, missingJobId: string): Promise<boolean> {
+  let cleared = false;
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
+    const item = items.find(entry => entry.id === id);
+    if (!item || item.durableJobId !== missingJobId || item.status === 'processing' || ['completed', 'discarded'].includes(item.status)) return undefined;
+    item.durableJobId = undefined;
+    item.durableJobKey = undefined;
+    item.bridgedAt = undefined;
+    item.status = 'pending';
+    item.nextAttemptAt = undefined;
+    item.delayReason = 'orphaned_durable_job_recovered';
+    item.updatedAt = new Date().toISOString();
+    cleared = true;
+    return items;
+  });
+  return cleared;
+}
+
+export async function claimCandidateForDurableJob(id: string, jobId: string, nowMs = Date.now()): Promise<CandidateQueueItem | null> {
+  let output: CandidateQueueItem | null = null;
+  await recoverStaleProcessing(nowMs);
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
+    const item = items.find(entry => entry.id === id);
+    if (!item || item.durableJobId !== jobId) return undefined;
+    if (['completed', 'discarded'].includes(item.status)) { output = structuredClone(item); return undefined; }
+    if (item.nextAttemptAt && Date.parse(item.nextAttemptAt) > nowMs) return undefined;
+    if (item.status === 'processing' && item.processingStartedAt && nowMs - Date.parse(item.processingStartedAt) <= PROCESSING_TTL_MS) return undefined;
+    if (!['pending', 'delayed', 'needs_review', 'failed'].includes(item.status)) return undefined;
+    item.status = 'processing';
+    item.processingStartedAt = new Date(nowMs).toISOString();
+    item.updatedAt = item.processingStartedAt;
+    item.attempts += 1;
+    output = structuredClone(item);
+    return items;
+  });
+  return output;
 }
 
 export async function claimCandidateBatch(limit: number, now = Date.now()): Promise<CandidateQueueItem[]> {

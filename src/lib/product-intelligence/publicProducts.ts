@@ -5,6 +5,13 @@ import { selectRelatedProducts } from '@/lib/seo/productSeo';
 import { publicTaxonomySlug, type PublicTaxonomyKind } from '@/lib/seo/taxonomySeo';
 import { listPriceHistories, listPriceHistory, calculatePriceStatistics } from './priceHistory';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
+import {
+  buildZeroResultSuggestions,
+  isDiscoverableCommerceProduct,
+  PUBLIC_SEARCH_RANKING_VERSION,
+  rankPublicSearchProducts,
+  type PublicSearchSuggestion,
+} from './searchRanking';
 
 export interface PublicProductCardDto {
   id: string;
@@ -99,6 +106,8 @@ export interface PublicSearchResult {
   pagination: { page: number; requestedPage: number; pageSize: number; totalItems: number; totalPages: number; outOfRange: boolean };
   filters: PublicProductQuery;
   facets: { categories: Array<{ name: string; count: number }>; platforms: Array<{ name: string; count: number }> };
+  suggestions: PublicSearchSuggestion[];
+  rankingVersion: string;
 }
 
 export interface PublicHomepageData {
@@ -302,12 +311,16 @@ function toPublicReviewContentDto(review: NonNullable<Product['reviewContent']>)
   };
 }
 
-function filterProducts(products: Product[], query: PublicProductQuery, movements: Map<string, PublicPriceMovementDto>): Product[] {
-  const q = query.q?.toLocaleLowerCase('vi'); const cutoff = query.updatedWithin ? Date.now() - query.updatedWithin * 86_400_000 : undefined;
+function filterProducts(
+  products: Product[],
+  query: PublicProductQuery,
+  movements: Map<string, PublicPriceMovementDto>,
+  searchMatches?: Set<string>,
+): Product[] {
+  const cutoff = query.updatedWithin ? Date.now() - query.updatedWithin * 86_400_000 : undefined;
   return products.filter(product => {
     const current = price(product);
-    const searchable = `${product.title} ${product.description || ''} ${product.brand || ''} ${product.sku || ''} ${product.category || ''} ${product.source} ${product.platform} ${(product.tags || []).join(' ')} ${Object.values(product.specifications || {}).join(' ')}`.toLocaleLowerCase('vi');
-    if (q && !searchable.includes(q)) return false;
+    if (query.q && !searchMatches?.has(product.id)) return false;
     if (query.platform && product.platform !== query.platform) return false;
     if (query.category && product.category !== query.category) return false;
     if (query.brand && product.brand !== query.brand) return false;
@@ -324,8 +337,16 @@ function filterProducts(products: Product[], query: PublicProductQuery, movement
   });
 }
 
-function sortProducts(products: Product[], sort: PublicProductQuery['sort'], movements: Map<string, PublicPriceMovementDto>): Product[] {
+function sortProducts(
+  products: Product[],
+  sort: PublicProductQuery['sort'],
+  movements: Map<string, PublicPriceMovementDto>,
+  searchScores?: Map<string, number>,
+): Product[] {
   return [...products].sort((a, b) => {
+    if (searchScores) return (searchScores.get(b.id) || 0) - (searchScores.get(a.id) || 0)
+      || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+      || a.id.localeCompare(b.id);
     if (sort === 'deal_desc') return (b.dealScore || 0) - (a.dealScore || 0) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
     if (sort === 'quality_desc') return (b.qualityScore || 0) - (a.qualityScore || 0) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
     if (sort === 'price_asc') return (price(a) || Number.MAX_SAFE_INTEGER) - (price(b) || Number.MAX_SAFE_INTEGER);
@@ -363,7 +384,7 @@ export function summarizePublicTaxonomies(products: Product[], field: 'category'
 }
 
 export async function listPublicTaxonomies(kind: PublicTaxonomyKind): Promise<PublicTaxonomySummary[]> {
-  return summarizePublicTaxonomies(await getPublishedProducts(), kind);
+  return summarizePublicTaxonomies((await getPublishedProducts()).filter(isDiscoverableCommerceProduct), kind);
 }
 
 export async function getPublicTaxonomyLanding(
@@ -372,7 +393,7 @@ export async function getPublicTaxonomyLanding(
   page: number,
   pageSize = 12,
 ): Promise<PublicTaxonomyLanding | null> {
-  const products = await getPublishedProducts();
+  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
   const summaries = summarizePublicTaxonomies(products, kind);
   const taxonomy = summaries.find(item => item.slug === slug);
   if (!taxonomy) return null;
@@ -399,20 +420,27 @@ export async function getPublicTaxonomyLanding(
 
 export async function queryPublicProducts(params: URLSearchParams): Promise<PublicSearchResult> {
   const query = parsePublicProductQuery(params);
-  const products = await getPublishedProducts();
+  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
   const movements = await priceMovements(products);
-  const filtered = sortProducts(filterProducts(products, query, movements), query.sort, movements);
+  const ranked = query.q ? rankPublicSearchProducts(products, query.q) : [];
+  const searchMatches = query.q ? new Set(ranked.map(item => item.product.id)) : undefined;
+  const searchScores = query.q && query.sort === 'updated_desc'
+    ? new Map(ranked.map(item => [item.product.id, item.score.total]))
+    : undefined;
+  const filtered = sortProducts(filterProducts(products, query, movements, searchMatches), query.sort, movements, searchScores);
   const totalItems = filtered.length; const totalPages = Math.max(1, Math.ceil(totalItems / query.pageSize));
   const page = Math.min(query.page, totalPages); const start = (page - 1) * query.pageSize;
   return {
     items: filtered.slice(start, start + query.pageSize).map(product => toPublicProductCardDto(product, movements.get(product.id))),
     pagination: { page, requestedPage: query.page, pageSize: query.pageSize, totalItems, totalPages, outOfRange: query.page > totalPages },
     filters: { ...query, page }, facets: { categories: counts(filtered, 'category'), platforms: counts(filtered, 'platform') },
+    suggestions: query.q && totalItems === 0 ? buildZeroResultSuggestions(products, query.q) : [],
+    rankingVersion: PUBLIC_SEARCH_RANKING_VERSION,
   };
 }
 
 export async function getPublicHomepageData(): Promise<PublicHomepageData> {
-  const products = await getPublishedProducts();
+  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
   const movements = await priceMovements(products);
   const card = (product: Product) => toPublicProductCardDto(product, movements.get(product.id));
   const featured = products.filter(product => (product.qualityScore || 0) >= CONFIG.thresholds.qualityFair && ['featured', 'consider'].includes(String(product.dealBand || '')))
@@ -436,7 +464,7 @@ export async function getPublicHomepageData(): Promise<PublicHomepageData> {
 export async function getPublicProductBySlugSafe(slug: string): Promise<{ product: Product; detail: PublicProductDetailDto } | null> {
   const product = await getProductBySlug(slug);
   if (!product || !isPublicSafeProduct(product)) return null;
-  const all = await getPublishedProducts();
+  const all = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
   const related = selectRelatedProducts(product, all, 4).map(productItem => toPublicProductCardDto(productItem));
   const snapshots = await listPriceHistory(product.id, 365);
   const movement = latestPriceMovement(product.id, snapshots);
@@ -454,7 +482,7 @@ export async function getPublicProductBySlugSafe(slug: string): Promise<{ produc
 
 export async function getPublicComparison(ids: string[]): Promise<PublicComparisonDto[]> {
   const selectedIds = [...new Set(ids.map(String).filter(Boolean))].slice(0, CONFIG.limits.comparisonProducts);
-  const products = await getPublishedProducts();
+  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
   return selectedIds.map(id => products.find(product => product.id === id)).filter((product): product is Product => Boolean(product)).map(product => ({
     ...toPublicProductCardDto(product), brand: product.brand, specifications: product.specifications,
     strengths: product.reviewContent?.strengths.map(item => item.text), limitations: product.reviewContent?.limitations.map(item => item.text), updatedAt: product.updatedAt,

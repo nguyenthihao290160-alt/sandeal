@@ -122,7 +122,7 @@ async function providerReadiness(request: ProviderRouteRequest): Promise<{
 
 export async function routeProviderExecution(request: ProviderRouteRequest): Promise<ProviderRouteDecision> {
   const allowLocal = request.allowLocalFallback !== false;
-  const allowManual = request.allowManualFallback !== false;
+  const allowManual = request.requestedMode !== 'AUTO' && request.allowManualFallback !== false;
   if (request.requestedMode === 'MANUAL_ONLY') return manualDecision(request, 'MANUAL_REQUESTED');
   if (request.requestedMode === 'LOCAL_ONLY') {
     if (request.localMode) return localDecision(request);

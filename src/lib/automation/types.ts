@@ -1,6 +1,11 @@
 export type AutomationJobType =
   | 'PRODUCT_SCAN'
   | 'AUTO_PILOT'
+  | 'PROCESS_CANDIDATE'
+  | 'AUTO_SAFE_PUBLISH'
+  | 'POST_PUBLISH_MONITOR'
+  | 'RECONCILE_AUTOMATION'
+  | 'RUNTIME_GUARDIAN'
   | 'SAFE_PUBLISH'
   | 'AI_ANALYSIS'
   | 'HEALTH_CHECK'
@@ -14,10 +19,11 @@ export type AutomationJobType =
   | 'EVALUATE_ALERTS'
   | 'AGGREGATE_GROWTH_METRICS'
   | 'BULK_PRODUCT_OPERATION';
-export type AutomationJobStatus = 'PENDING' | 'WAITING_APPROVAL' | 'WAITING_FOR_MANUAL_INPUT' | 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'BLOCKED' | 'PAUSED';
+export type AutomationJobStatus = 'PENDING' | 'WAITING_APPROVAL' | 'WAITING_FOR_MANUAL_INPUT' | 'WAITING_CHILDREN' | 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'BLOCKED' | 'PAUSED';
 export type AutomationRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'BLOCKER';
 export type ApprovalStatus = 'NOT_REQUIRED' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+export type AutonomousMode = 'OBSERVE' | 'SHADOW' | 'CANARY' | 'AUTONOMOUS' | 'EMERGENCY_STOP';
 
 export type BotCategory = 'CONTROL_PLANE' | 'RULE_BASED_AUTOMATION' | 'AI_ASSISTED' | 'EXTERNAL_INTEGRATION' | 'HUMAN_APPROVAL_GATE';
 export type RequestedExecutionMode = 'AUTO' | 'API_ONLY' | 'LOCAL_ONLY' | 'MANUAL_ONLY';
@@ -112,6 +118,9 @@ export interface AutomationExecutionDisclosure {
 }
 
 export interface AutomationJob {
+  schemaVersion: number;
+  policyVersion: string;
+  handlerVersion: string;
   id: string;
   type: AutomationJobType;
   status: AutomationJobStatus;
@@ -156,7 +165,12 @@ export interface AutomationJob {
 }
 
 export interface AutomationControlState {
+  schemaVersion: number;
   id: 'automation-control';
+  mode: AutonomousMode;
+  effectiveMode: Exclude<AutonomousMode, 'EMERGENCY_STOP'>;
+  publishPaused: boolean;
+  ingestionPaused: boolean;
   workerPaused: boolean;
   schedulerPaused: boolean;
   killSwitch: boolean;
@@ -169,11 +183,15 @@ export interface AutomationControlState {
   schedulerHeartbeatAt?: string;
   schedulerLastRunAt?: string;
   schedulerNextRunAt?: string;
+  guardianHeartbeatAt?: string;
+  degradedAt?: string;
+  degradedReason?: string;
   timezone: 'Asia/Ho_Chi_Minh';
   updatedAt: string;
 }
 
 export interface AutomationAuditEvent {
+  schemaVersion: number;
   id: string;
   correlationId: string;
   operationId: string;

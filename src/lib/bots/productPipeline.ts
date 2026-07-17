@@ -1,18 +1,26 @@
 import { createHash } from 'crypto';
 import { AccessTradeRequestError, isAccessTradeConfigured, mapAccessTradeToProduct, searchAccessTrade, type AccessTradeResultType, type NormalizedAccessTradeItem } from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
-import { claimCandidateBatch, enqueueCandidate, finishCandidate, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem } from '../storage/candidateQueue';
+import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
 import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
 import { readCollection, writeCollection } from '../storage/adapter';
-import { createAutomationJob } from '../automation/store';
+import { createAutomationJob, getAutomationControl } from '../automation/store';
+import { completeJournalEffect } from '../automation/operationJournal';
 import { checkImageHealth, checkLinkHealth } from './productHealthCheck';
-import type { Product } from '../types';
+import type { Product, ProductLifecycleState, ProductOffer, ReviewContent } from '../types';
 import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
 import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
 import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
 import { scoreCandidateReadiness } from './candidateReadiness';
 import { isDomainCircuitOpen, recordDomainHealth } from './domainCircuitBreaker';
 import { evaluateSafePublish } from '../safePublish';
+import { classifyRecord } from '../autonomous/recordClassification';
+import { calculateProductConfidences } from '../autonomous/confidenceEngine';
+import { captureProductEvidence, validateClaimsAgainstEvidence, type EvidenceFact } from '../autonomous/evidenceGraph';
+import { buildOffer, deriveProductIdentity, identityMatchConfidence, mergeOffers, selectBestPublicOffer } from '../autonomous/productIdentityGraph';
+import { evaluatePriceTruth, offerPriceObservations, priceTruthProductPatch } from '../autonomous/priceTruthEngine';
+import { persistLifecycleTransition } from '../autonomous/lifecycleStore';
+import { readinessSnapshotHash } from '../autonomous/publishPolicy';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
@@ -79,6 +87,8 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
     imageCandidates: item.imageCandidates.filter(Boolean).slice(0, 6),
     price: item.price || undefined, salePrice: item.salePrice || undefined,
     currency: 'VND', category: item.category || undefined,
+    rawSourceKind: item.rawSourceKind, nonProductReason: item.nonProductReason,
+    campaignName: item.campaignName, commissionRate: item.commissionRate,
     verifiedSource: item.verifiedSource, autoPublishEligible: item.autoPublishEligible,
     sourceQualityScore: item.qualityScore,
   };
@@ -127,7 +137,7 @@ export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.
     stat.lastUsedAt = new Date().toISOString();
     try {
       const result = await searchAccessTrade({ keyword: stat.keyword, kind: 'product', limit: Math.min(50, candidateLimit - counters.found) });
-      counters.sourceRequests += result.requests.reduce((total, request) => total + (request.attempts || 1), 0);
+      counters.sourceRequests += result.requests.reduce((total, request) => total + (request.attempts ?? 1), 0);
       for (const request of result.requests) resultTypes[request.resultType] = (resultTypes[request.resultType] || 0) + 1;
       timeoutStreak = 0;
       stat.found += result.items.length;
@@ -135,9 +145,8 @@ export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.
       counters.found += result.items.length;
       for (const item of result.items) {
         const payload = toPayload(item);
-        const reject = fastReject(payload);
-        if (reject) { counters.discarded++; continue; }
-        stat.valid++;
+        const earlyReason = fastReject(payload);
+        if (!earlyReason) stat.valid++;
         const sourceHash = hashPayload(payload);
         const existing = products.find((product) =>
           (product.source === 'accesstrade' && (product.sourceId === item.id || product.externalId === item.id)) ||
@@ -146,18 +155,18 @@ export async function scanSourcesToQueue(mode: OperationMode, deadlineMs = Date.
         if (existing?.sourceHash === sourceHash) { counters.duplicate++; counters.unchanged++; continue; }
         if (existing?.sourceHealthCooldownUntil && Date.parse(existing.sourceHealthCooldownUntil) > Date.now()) { counters.skippedCooldown++; continue; }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.affiliateUrl, payload.imageUrl].filter(Boolean).length;
-        const priority = complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid);
+        const priority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) - (earlyReason ? 25 : 0));
         const readiness = scoreCandidateReadiness(payload);
         const queued = await enqueueCandidate({ source: 'accesstrade', sourceId: item.id, priority, readinessScore: readiness.score, lane: readiness.lane, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
         if (queued.queued) { counters.queued++; counters.reviewQueued++; } else { counters.duplicate++; counters.unchanged++; }
       }
     } catch (error) {
       if (error instanceof AccessTradeRequestError) {
-        counters.sourceRequests += error.requests.reduce((total, request) => total + (request.attempts || 1), 0);
+        counters.sourceRequests += error.requests.reduce((total, request) => total + (request.attempts ?? 1), 0);
         retryAfter = error.requests.map((request) => request.retryAfter).filter((value): value is string => Boolean(value)).sort().at(-1) || retryAfter;
         resultTypes[error.resultType] = (resultTypes[error.resultType] || 0) + 1;
         if (error.resultType === 'timeout') timeoutStreak++; else timeoutStreak = 0;
-        if (['unauthorized', 'forbidden', 'rate_limited'].includes(error.resultType) || timeoutStreak >= 2) break;
+        if (['unauthorized', 'forbidden', 'rate_limited', 'circuit_open'].includes(error.resultType) || timeoutStreak >= 2) break;
       } else counters.failed++;
     }
   }
@@ -174,20 +183,450 @@ function cooldownFor(statuses: string[], attempts = 1): number {
   return 4 * 60 * 60_000;
 }
 
-async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): Promise<void> {
+interface CandidateReviewOutcome { status: CandidateQueueStatus; terminal: boolean; nextRetryAt?: string; reason?: string; productId?: string }
+
+export class CandidateRetryScheduledError extends Error {
+  constructor(public readonly nextRetryAt: string, public readonly candidateStatus: CandidateQueueStatus, reason?: string) {
+    super(`TEMPORARY_ERROR:CANDIDATE_${candidateStatus.toUpperCase()}:${reason || 'retry_scheduled'}`);
+    this.name = 'CandidateRetryScheduledError';
+  }
+}
+
+function attachObservedPriceEvidence(product: Product, offers: ProductOffer[], observedOfferId: string, facts: EvidenceFact[]): ProductOffer[] {
+  const currentFact = facts.find(fact => fact.field === (Number(product.salePrice || 0) > 0 ? 'salePrice' : 'price'));
+  const originalFact = Number(product.salePrice || 0) > 0 && Number(product.price || 0) > Number(product.salePrice || 0)
+    ? facts.find(fact => fact.field === 'price')
+    : undefined;
+  return offers.map(offer => offer.id === observedOfferId ? {
+    ...offer,
+    priceEvidenceFactIds: currentFact ? [currentFact.id] : [],
+    originalPriceEvidenceFactIds: originalFact ? [originalFact.id] : [],
+  } : offer);
+}
+
+function kindForRecordType(recordType: Product['recordType']): Product['kind'] {
+  if (recordType === 'VOUCHER') return 'voucher';
+  if (recordType === 'CAMPAIGN') return 'campaign';
+  if (recordType === 'STORE_PROMOTION') return 'store_offer';
+  return recordType === 'PRODUCT' ? 'product' : 'unknown';
+}
+
+async function transitionCandidateLifecycle(
+  product: Product,
+  to: ProductLifecycleState,
+  item: CandidateQueueItem,
+  workerId: string,
+  phase: string,
+  reasonCodes: string[] = [],
+): Promise<Product> {
+  if (product.lifecycleState === to) return product;
+  if (!item.durableJobId) throw new Error('CANDIDATE_DURABLE_JOB_REQUIRED');
+  const result = await persistLifecycleTransition({
+    productId: product.id,
+    to,
+    actor: { type: 'worker', id: workerId, jobId: item.durableJobId, jobType: 'PROCESS_CANDIDATE' },
+    transitionKey: `${item.durableJobId}:${item.sourceHash}:${phase}`.slice(0, 200),
+    operationId: `candidate-lifecycle:${item.id}:${item.sourceHash}`.slice(0, 160),
+    reasonCodes,
+  });
+  return result.product;
+}
+
+function linkReviewClaimsToEvidence(productId: string, review: ReviewContent, facts: EvidenceFact[]): {
+  review: ReviewContent;
+  validation: ReturnType<typeof validateClaimsAgainstEvidence>;
+} {
+  const factIds = new Set(facts.map(fact => fact.id));
+  const keyFacts = new Map(review.keyFacts.map(fact => [fact.id, fact]));
+  const evidenceForClaim = (ids: string[]): string[] => [...new Set(ids.flatMap(id => {
+    if (factIds.has(id)) return [id];
+    const keyFact = keyFacts.get(id);
+    const fields = keyFact?.sourceField.split(',').map(field => field.trim()).filter(Boolean) || [id];
+    return facts.filter(fact => fields.includes(fact.field)).map(fact => fact.id);
+  }))];
+  const remap = (claims: ReviewContent['factualClaims']) => claims.map(claim => ({ ...claim, evidenceFactIds: evidenceForClaim(claim.evidenceFactIds || []) }));
+  const factualClaims = remap(review.factualClaims);
+  const inferredClaims = remap(review.inferredClaims);
+  const evidenceByClaim = new Map([...factualClaims, ...inferredClaims].map(claim => [claim.id, claim.evidenceFactIds]));
+  const remapShared = (claims: ReviewContent['strengths']) => claims.map(claim => ({ ...claim, evidenceFactIds: evidenceByClaim.get(claim.id) || evidenceForClaim(claim.evidenceFactIds || []) }));
+  const linked: ReviewContent = {
+    ...review,
+    factualClaims,
+    inferredClaims,
+    strengths: remapShared(review.strengths),
+    limitations: remapShared(review.limitations),
+  };
+  const claims = [...factualClaims, ...inferredClaims].map(claim => ({ id: claim.id, evidenceFactIds: claim.evidenceFactIds }));
+  return { review: linked, validation: validateClaimsAgainstEvidence(productId, claims, facts) };
+}
+
+function candidateRisk(payload: CandidatePayload): Product['riskLevel'] {
+  const text = `${payload.title} ${payload.category || ''} ${payload.description || ''}`;
+  if (/(?:thuốc kê đơn|nicotine|vũ khí|chất cấm|cờ bạc|hàng giả|chữa bệnh|điều trị|giảm cân)/i.test(text)) return 'high';
+  return payload.verifiedSource ? 'low' : 'unknown';
+}
+
+async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: PipelineCounters, workerId: string): Promise<CandidateReviewOutcome> {
+  const { payload } = item;
+  const now = new Date().toISOString();
+  const classification = classifyRecord({
+    ...payload,
+    sourceItemKind: payload.kind,
+    rawSourceKind: payload.rawSourceKind,
+    sourceId: item.sourceId,
+  });
+  const allBefore = await getAllProducts();
+  const existingForSource = allBefore.find(product => product.source === item.source && (product.sourceId === item.sourceId || product.externalId === item.sourceId));
+  const classifiedKind = kindForRecordType(classification.recordType);
+  const mapped = mapAccessTradeToProduct({
+    id: item.sourceId,
+    name: payload.title,
+    description: payload.description || '',
+    kind: classifiedKind,
+    sourceItemKind: classifiedKind,
+    platform: payload.platform,
+    imageUrl: payload.imageUrl,
+    imageCandidates: payload.imageCandidates || [payload.imageUrl],
+    originalUrl: payload.originalUrl,
+    canonicalProductUrl: payload.originalUrl,
+    affiliateUrl: payload.affiliateUrl,
+    price: payload.price || 0,
+    salePrice: payload.salePrice || 0,
+    category: payload.category || '',
+    campaignName: payload.campaignName,
+    commissionRate: payload.commissionRate,
+    rawSourceKind: payload.rawSourceKind || String(payload.kind || 'unknown'),
+    nonProductReason: payload.nonProductReason,
+    needsVerification: true,
+    verifiedSource: payload.verifiedSource,
+    publicHidden: true,
+    autoPublishEligible: false,
+    publicDecision: 'needs_review',
+    publicBlockReason: 'autonomous_assessment_pending',
+    qualityScore: payload.sourceQualityScore || 0,
+  });
+  const initialDraft: Partial<Product> = {
+    ...mapped,
+    sourceId: item.sourceId,
+    sourceHash: item.sourceHash,
+    contentHash: item.contentHash,
+    kind: classifiedKind,
+    recordType: classification.recordType,
+    classification: { ...classification, classifiedAt: now },
+    lifecycleState: existingForSource?.lifecycleState || 'DISCOVERED',
+    lifecycleVersion: existingForSource?.lifecycleVersion,
+    brand: payload.brand,
+    sku: payload.sku,
+    gtin: payload.gtin,
+    mpn: payload.mpn || payload.model,
+    specifications: payload.specifications,
+    priceObservedAt: Number(payload.salePrice || payload.price || 0) > 0 ? now : undefined,
+    lastSeenAt: now,
+    riskLevel: candidateRisk(payload),
+    duplicateStatus: existingForSource?.duplicateStatus || 'UNRESOLVED',
+    claimValidationStatus: 'MISSING_EVIDENCE',
+    autoPublishEligible: false,
+    status: 'needs_review',
+    publicHidden: true,
+    needsVerification: true,
+    autoPublished: false,
+  };
+  initialDraft.identity = deriveProductIdentity(initialDraft);
+  const canonical = await upsertCanonicalProduct(initialDraft, { evaluate: false });
+  let product = canonical.product;
+
+  if (product.lifecycleState === 'DISCOVERED') product = await transitionCandidateLifecycle(product, 'STAGED', item, workerId, 'staged');
+
+  const incompleteProduct = classification.recordType === 'PRODUCT' && classification.action !== 'ACCEPT';
+  if (classification.recordType !== 'PRODUCT' || incompleteProduct) {
+    const reasons = classification.recordType !== 'PRODUCT'
+      ? [`record_type_${String(classification.recordType).toLowerCase()}`, ...classification.reasons]
+      : ['classification_cross_check_failed', ...classification.reasons];
+    if (product.lifecycleState === 'STAGED' || product.lifecycleState === 'DISCOVERED') {
+      product = await transitionCandidateLifecycle(product, 'QUARANTINED', item, workerId, 'classification-quarantine', reasons);
+    }
+    const confidences = calculateProductConfidences(product, { classificationConfidence: classification.confidence, evidenceCoverage: 0, now: Date.parse(now) });
+    product = (await saveCanonicalProduct(product.id, {
+      recordType: classification.recordType,
+      classification: { ...classification, classifiedAt: now },
+      confidences,
+      quarantineReasons: [...new Set([...(product.quarantineReasons || []), ...reasons])],
+      nextAutomaticAction: 'RECHECK_QUARANTINED_PRODUCT',
+      claimValidationStatus: 'MISSING_EVIDENCE',
+      duplicateStatus: 'UNRESOLVED',
+      publicHidden: true,
+      publicDecision: 'quarantined',
+      publicBlockReasons: reasons,
+      needsVerification: true,
+      autoPublishEligible: false,
+    })) || product;
+    const evidence = await captureProductEvidence(product, now);
+    await saveCanonicalProduct(product.id, {
+      evidenceFactIds: evidence.facts.map(fact => fact.id),
+      evidenceCoverage: evidence.coverage,
+      evidenceSnapshotAt: evidence.snapshot.createdAt,
+      evidenceSnapshotHash: evidence.snapshot.snapshotHash,
+    });
+    counters.reviewed += 1;
+    counters.needsReview += 1;
+    counters.noindex += 1;
+    if (canonical.created) counters.created += 1; else counters.updated += 1;
+    const status: CandidateQueueStatus = classification.recordType === 'PRODUCT' ? 'needs_review' : 'discarded';
+    await finishCandidate(item.id, { status, delayReason: reasons.join(',') });
+    return { status, terminal: true, reason: reasons.join(','), productId: product.id };
+  }
+
+  if (product.lifecycleState === 'STAGED') product = await transitionCandidateLifecycle(product, 'CLASSIFIED', item, workerId, 'classified');
+  if (product.lifecycleState === 'CLASSIFIED') product = await transitionCandidateLifecycle(product, 'NORMALIZED', item, workerId, 'normalized');
+
+  const otherProducts = (await getAllProducts()).filter(other => other.id !== product.id);
+  const identity = deriveProductIdentity({ ...product, ...initialDraft });
+  const closestIdentity = otherProducts
+    .map(other => ({ product: other, confidence: identityMatchConfidence(identity, other.identity || deriveProductIdentity(other)) }))
+    .sort((left, right) => right.confidence - left.confidence)[0];
+  const strongDuplicate = closestIdentity && closestIdentity.confidence >= 0.95 ? closestIdentity : undefined;
+  if (closestIdentity && closestIdentity.confidence >= 0.55 && closestIdentity.confidence < 0.95) {
+    const reasons = ['duplicate_identity_unresolved', `identity_confidence_${closestIdentity.confidence.toFixed(2)}`];
+    product = (await saveCanonicalProduct(product.id, { identity, duplicateStatus: 'UNRESOLVED', duplicateConfidence: closestIdentity.confidence })) || product;
+    if (['NORMALIZED', 'VERIFYING'].includes(String(product.lifecycleState))) {
+      product = await transitionCandidateLifecycle(product, 'QUARANTINED', item, workerId, 'duplicate-quarantine', reasons);
+    }
+    await saveCanonicalProduct(product.id, { quarantineReasons: reasons, nextAutomaticAction: 'RECHECK_DUPLICATE', publicBlockReasons: reasons, publicHidden: true });
+    await finishCandidate(item.id, { status: 'needs_review', delayReason: reasons.join(',') });
+    counters.reviewed += 1;
+    counters.needsReview += 1;
+    counters.noindex += 1;
+    if (canonical.created) counters.created += 1; else counters.updated += 1;
+    return { status: 'needs_review', terminal: true, reason: reasons.join(','), productId: product.id };
+  }
+  product = (await saveCanonicalProduct(product.id, {
+    identity,
+    duplicateStatus: strongDuplicate ? 'MERGED' : 'CLEAR',
+    duplicateConfidence: closestIdentity?.confidence || 0,
+    duplicateGroupId: strongDuplicate?.product.id,
+  })) || product;
+
+  if (product.lifecycleState === 'RETRY_SCHEDULED' || product.lifecycleState === 'QUARANTINED' || product.lifecycleState === 'READY_FOR_PUBLISH') {
+    product = await transitionCandidateLifecycle(product, 'VERIFYING', item, workerId, `verification-resume-${item.attempts}`);
+  } else if (product.lifecycleState === 'NORMALIZED') {
+    product = await transitionCandidateLifecycle(product, 'VERIFYING', item, workerId, 'verifying');
+  }
+
+  if (await isDomainCircuitOpen(payload.originalUrl) || await isDomainCircuitOpen(payload.affiliateUrl) || await isDomainCircuitOpen(payload.imageUrl)) {
+    const nextRetryAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    if (product.lifecycleState === 'VERIFYING') product = await transitionCandidateLifecycle(product, 'RETRY_SCHEDULED', item, workerId, `domain-retry-${item.attempts}`, ['domain_circuit_open']);
+    await saveCanonicalProduct(product.id, { sourceHealthCooldownUntil: nextRetryAt, sourceHealthReason: 'domain_circuit_open', nextRetryAt, nextAutomaticAction: 'VERIFY_PRODUCT_HEALTH' });
+    await finishCandidate(item.id, { status: 'delayed', delayReason: 'domain_circuit_open', nextAttemptAt: nextRetryAt });
+    return { status: 'delayed', terminal: false, nextRetryAt, reason: 'domain_circuit_open', productId: product.id };
+  }
+
+  const fixture = process.env.NODE_ENV === 'test' ? payload.isolatedHealthFixture : undefined;
+  const fixtureLink = fixture === 'healthy'
+    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture' }
+    : fixture === 'confirmed_broken'
+      ? { status: 'broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
+      : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
+  const fixtureImage = fixture === 'healthy'
+    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', contentType: 'image/jpeg' }
+    : fixture === 'confirmed_broken'
+      ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
+      : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
+  const productHealth = fixture ? fixtureLink : await checkLinkHealth(payload.originalUrl); counters.networkChecks += 1;
+  const affiliateHealth = fixture ? fixtureLink : await checkLinkHealth(payload.affiliateUrl); counters.networkChecks += 1;
+  let imageUrl = payload.imageUrl;
+  let imageHealth = fixture ? fixtureImage : await checkImageHealth(imageUrl); counters.networkChecks += 1;
+  if (!imageHealth.ok) {
+    for (const candidate of payload.imageCandidates || []) {
+      if (candidate === imageUrl) continue;
+      const fallback = fixture ? fixtureImage : await checkImageHealth(candidate); counters.networkChecks += 1;
+      if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
+    }
+  }
+  const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+  await recordDomainHealth(payload.originalUrl, productHealth.status);
+  await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status);
+  await recordDomainHealth(imageUrl, imageHealth.status);
+  const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
+  const confirmedBroken = statuses.some(status => ['broken', 'image_broken', 'invalid_image', 'not_found'].includes(status));
+  const healthPatch: Partial<Product> = {
+    imageUrl,
+    linkHealthStatus: productHealth.status === 'ok' ? 'ok' : productHealth.status,
+    productHealthStatus: productHealth.status,
+    affiliateHealthStatus: affiliateHealth.status,
+    imageHealthStatus: imageHealth.status === 'ok' ? 'ok' : imageHealth.status,
+    linkLastCheckedAt: now,
+    affiliateLastCheckedAt: now,
+    imageLastCheckedAt: now,
+    imageContentType: imageHealth.contentType,
+    sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses, item.attempts)).toISOString(),
+    sourceHealthReason: healthy ? undefined : statuses.join(','),
+    publicBlockReason: healthy ? '' : statuses.join(','),
+  };
+  product = (await saveCanonicalProduct(product.id, healthPatch)) || product;
+  if (!healthy) {
+    const retryExhausted = item.attempts >= 6;
+    const reasons = [confirmedBroken ? 'confirmed_broken' : retryExhausted ? 'retry_budget_exhausted' : 'health_check_temporary_failure', ...statuses];
+    if (product.lifecycleState === 'VERIFYING') {
+      product = await transitionCandidateLifecycle(product, confirmedBroken || retryExhausted ? 'QUARANTINED' : 'RETRY_SCHEDULED', item, workerId, `${confirmedBroken || retryExhausted ? 'health-quarantine' : 'health-retry'}-${item.attempts}`, reasons);
+    }
+    const nextRetryAt = confirmedBroken || retryExhausted ? undefined : product.sourceHealthCooldownUntil;
+    await saveCanonicalProduct(product.id, { quarantineReasons: confirmedBroken || retryExhausted ? reasons : product.quarantineReasons, nextRetryAt, nextAutomaticAction: confirmedBroken || retryExhausted ? 'RECHECK_QUARANTINED_PRODUCT' : 'VERIFY_PRODUCT_HEALTH', publicHidden: true });
+    const status: CandidateQueueStatus = confirmedBroken ? 'discarded' : retryExhausted ? 'needs_review' : 'delayed';
+    await finishCandidate(item.id, { status, delayReason: reasons.join(','), nextAttemptAt: nextRetryAt });
+    return { status, terminal: status !== 'delayed', nextRetryAt, reason: reasons.join(','), productId: product.id };
+  }
+
+  const observedOffer = buildOffer(product, now);
+  if (strongDuplicate) {
+    const mergedSelection = selectBestPublicOffer(mergeOffers(strongDuplicate.product.offers, [observedOffer]), Date.parse(now));
+    const mergedPriceTruth = evaluatePriceTruth(strongDuplicate.product, offerPriceObservations(mergedSelection.offers), Date.parse(now));
+    const mergedTarget = (await saveCanonicalProduct(strongDuplicate.product.id, {
+      offers: mergedSelection.offers,
+      bestOfferId: mergedSelection.bestOffer?.id,
+      ...priceTruthProductPatch(mergedPriceTruth),
+      nextAutomaticAction: strongDuplicate.product.nextAutomaticAction || 'MONITOR_OFFERS',
+    })) || strongDuplicate.product;
+    if (product.lifecycleState === 'VERIFYING') {
+      product = await transitionCandidateLifecycle(product, 'QUARANTINED', item, workerId, 'identity-merged', ['strong_identity_merged_into_canonical']);
+    }
+    await saveCanonicalProduct(product.id, {
+      duplicateStatus: 'MERGED',
+      duplicateGroupId: mergedTarget.id,
+      publicHidden: true,
+      publicBlockReasons: ['merged_duplicate_entity'],
+      quarantineReasons: ['merged_duplicate_entity'],
+      nextAutomaticAction: 'USE_CANONICAL_PRODUCT',
+    });
+    await finishCandidate(item.id, { status: 'completed', delayReason: 'strong_identity_merged_into_canonical' });
+    counters.reviewed += 1;
+    counters.updated += 1;
+    return { status: 'completed', terminal: true, reason: 'strong_identity_merged_into_canonical', productId: mergedTarget.id };
+  }
+  let selectedOffer = selectBestPublicOffer(mergeOffers(product.offers, [observedOffer]), Date.parse(now));
+  product = (await saveCanonicalProduct(product.id, {
+    offers: selectedOffer.offers,
+    bestOfferId: selectedOffer.bestOffer?.id,
+    duplicateStatus: 'CLEAR',
+    lastHealthyAt: now,
+  })) || product;
+  const evidence = await captureProductEvidence(product, now);
+  selectedOffer = selectBestPublicOffer(
+    attachObservedPriceEvidence(product, selectedOffer.offers, observedOffer.id, evidence.facts),
+    Date.parse(now),
+  );
+  const priceTruth = evaluatePriceTruth(product, offerPriceObservations(selectedOffer.offers), Date.parse(now));
+  product = (await saveCanonicalProduct(product.id, {
+    evidenceFactIds: evidence.facts.map(fact => fact.id),
+    evidenceCoverage: evidence.coverage,
+    evidenceSnapshotAt: evidence.snapshot.createdAt,
+    evidenceSnapshotHash: evidence.snapshot.snapshotHash,
+    offers: selectedOffer.offers,
+    bestOfferId: selectedOffer.bestOffer?.id,
+    ...priceTruthProductPatch(priceTruth),
+  })) || product;
+  if (product.lifecycleState === 'VERIFYING') product = await transitionCandidateLifecycle(product, 'CONTENT_PREPARING', item, workerId, 'content-preparing');
+
+  const comparisonProducts = (await getAllProducts()).filter(other => other.id !== product.id);
+  const localReview = generateEditorialReview(product, comparisonProducts);
+  const factCount = localReview.keyFacts.length;
+  const profile = { taskType: 'editorial_review' as const, riskLevel: product.riskLevel === 'high' ? 'high' as const : product.riskLevel === 'medium' ? 'medium' as const : 'low' as const, complexityScore: Math.max(31, Math.min(75, 30 + factCount * 5)), factCount, inputTokenEstimate: Math.ceil(JSON.stringify(product).length / 4), candidateLane: item.lane || 'NORMAL_LANE', priority: item.priority, previousFailures: Math.max(0, item.attempts - 1), requiredQuality: 80 };
+  const gemini = await generateGeminiEditorialReview(product, profile, await listAvailableGeminiModels(), () => localReview);
+  const generatedValidation = gemini ? validateReviewClaims(gemini.review, product) : null;
+  const duplicateGenerated = gemini ? comparisonProducts.some(other => other.reviewContent && textSimilarity(`${gemini.review.reviewTitle} ${gemini.review.reviewSummary} ${gemini.review.reviewVerdict}`, `${other.reviewContent.reviewTitle} ${other.reviewContent.reviewSummary} ${other.reviewContent.reviewVerdict}`) >= 0.8) : false;
+  const useGemini = Boolean(gemini && generatedValidation?.valid && !duplicateGenerated);
+  const linked = linkReviewClaimsToEvidence(product.id, useGemini ? gemini!.review : localReview, evidence.facts);
+  const review = linked.review;
+  counters.reviewGenerated += 1;
+  if (review.reviewStatus === 'approved') counters.reviewApproved += 1; else if (review.reviewStatus === 'rejected') counters.reviewRejected += 1; else counters.reviewNeedsReview += 1;
+  if (review.reviewBlockReasons.includes('claim_validation_failed') || review.reviewBlockReasons.includes('unsafe_claim') || !linked.validation.valid) counters.claimValidationFailed += 1;
+  if (review.reviewBlockReasons.includes('low_originality')) counters.duplicateContentSkipped += 1;
+  const withReview = (await saveCanonicalProduct(product.id, {
+    reviewContent: review,
+    reviewGeneration: useGemini ? {
+      provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion,
+      generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash,
+      generatedAt: gemini!.generatedAt, validationResult: 'approved',
+    } : {
+      provider: 'local', promptVersion: 'local-review-v2', generationFingerprint: product.sourceHash || product.id,
+      generatedAt: now, validationResult: 'fallback_local',
+    },
+    claimValidationStatus: linked.validation.status,
+  })) || product;
+  const confidences = calculateProductConfidences(withReview, { classificationConfidence: classification.confidence, evidenceCoverage: evidence.coverage, now: Date.parse(now) });
+  const readinessReasons: string[] = [];
+  if (!isReviewIndexable(withReview)) readinessReasons.push('review_not_indexable');
+  if (!linked.validation.valid) readinessReasons.push('claim_evidence_unverified');
+  if (confidences.publish < 0.85) readinessReasons.push('publish_confidence_low');
+  if (withReview.duplicateStatus !== 'CLEAR') readinessReasons.push('duplicate_unresolved');
+  if (withReview.riskLevel !== 'low') readinessReasons.push('risk_not_low');
+  if (!withReview.verifiedSource) readinessReasons.push('source_not_verified');
+  if (evidence.coverage < 0.8) readinessReasons.push('evidence_coverage_low');
+  if (!selectedOffer.bestOffer) readinessReasons.push('healthy_offer_missing');
+  if (!['FRESH', 'AGING'].includes(priceTruth.state)) readinessReasons.push('price_truth_unsafe');
+  const ready = readinessReasons.length === 0;
+  product = (await saveCanonicalProduct(product.id, {
+    confidences,
+    claimValidationStatus: linked.validation.status,
+    autoPublishEligible: ready,
+    needsVerification: !ready,
+    publicHidden: true,
+    publicDecision: ready ? 'ready_for_publish' : 'quarantined',
+    publicBlockReasons: readinessReasons,
+    quarantineReasons: ready ? [] : readinessReasons,
+    nextAutomaticAction: ready ? 'AUTO_SAFE_PUBLISH' : 'RECHECK_QUARANTINED_PRODUCT',
+    nextRetryAt: ready ? undefined : new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+  })) || withReview;
+  product = await transitionCandidateLifecycle(product, ready ? 'READY_FOR_PUBLISH' : 'QUARANTINED', item, workerId, ready ? 'ready-for-publish' : 'readiness-quarantine', readinessReasons);
+  if (ready) counters.seoReady += 1; else { counters.seoBlocked += 1; counters.needsReview += 1; counters.noindex += 1; }
+
+  const publishSettings = await getAutomationSettings();
+  const control = await getAutomationControl();
+  if (ready && publishSettings.safePublish && ['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode)) {
+    const snapshotHash = readinessSnapshotHash(product);
+    const child = await createAutomationJob({
+      type: 'AUTO_SAFE_PUBLISH',
+      payload: { productId: product.id, candidateId: item.id, readinessSnapshotHash: snapshotHash },
+      idempotencyKey: `auto-safe-publish:${product.id}:${snapshotHash}`.slice(0, 160),
+      operationId: `pipeline:${item.id}:${snapshotHash}`.slice(0, 160),
+      requestedBy: 'autopilot-worker',
+      parentJobId: item.durableJobId,
+      dryRun: false,
+    });
+    product = (await saveCanonicalProduct(product.id, { relatedJobId: child.job.id, nextAutomaticAction: 'AUTO_SAFE_PUBLISH' })) || product;
+  }
+  counters.reviewed += 1;
+  if (canonical.created) counters.created += 1; else if (canonical.unchanged) counters.unchanged += 1; else counters.updated += 1;
+  await finishCandidate(item.id, { status: 'completed', delayReason: ready ? undefined : readinessReasons.join(',') });
+  return { status: 'completed', terminal: true, reason: ready ? undefined : readinessReasons.join(','), productId: product.id };
+}
+
+async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): Promise<CandidateReviewOutcome> {
   const { payload } = item;
   try {
     if (await isDomainCircuitOpen(payload.originalUrl) || await isDomainCircuitOpen(payload.affiliateUrl) || await isDomainCircuitOpen(payload.imageUrl)) {
-      await finishCandidate(item.id, { status: 'delayed', delayReason: 'domain_circuit_open', nextAttemptAt: new Date(Date.now() + 30 * 60_000).toISOString() }); return;
+      const nextRetryAt = new Date(Date.now() + 30 * 60_000).toISOString();
+      await finishCandidate(item.id, { status: 'delayed', delayReason: 'domain_circuit_open', nextAttemptAt: nextRetryAt });
+      return { status: 'delayed', terminal: false, nextRetryAt, reason: 'domain_circuit_open' };
     }
-    const productHealth = await checkLinkHealth(payload.originalUrl); counters.networkChecks++;
-    const affiliateHealth = await checkLinkHealth(payload.affiliateUrl); counters.networkChecks++;
+    const fixture = process.env.NODE_ENV === 'test' ? payload.isolatedHealthFixture : undefined;
+    const fixtureLink = fixture === 'healthy'
+      ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture' }
+      : fixture === 'confirmed_broken'
+        ? { status: 'broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
+        : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
+    const fixtureImage = fixture === 'healthy'
+      ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', contentType: 'image/jpeg' }
+      : fixture === 'confirmed_broken'
+        ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
+        : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
+    const productHealth = fixture ? fixtureLink : await checkLinkHealth(payload.originalUrl); counters.networkChecks++;
+    const affiliateHealth = fixture ? fixtureLink : await checkLinkHealth(payload.affiliateUrl); counters.networkChecks++;
     let imageUrl = payload.imageUrl;
-    let imageHealth = await checkImageHealth(imageUrl); counters.networkChecks++;
+    let imageHealth = fixture ? fixtureImage : await checkImageHealth(imageUrl); counters.networkChecks++;
     if (!imageHealth.ok) {
       for (const candidate of payload.imageCandidates || []) {
         if (candidate === imageUrl) continue;
-        const fallback = await checkImageHealth(candidate); counters.networkChecks++;
+        const fallback = fixture ? fixtureImage : await checkImageHealth(candidate); counters.networkChecks++;
         if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
       }
     }
@@ -248,18 +687,19 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
         },
         status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
       })) || canonical.product;
-      if (publishSettings.safePublish && evaluateSafePublish(finalProduct).eligible) {
-        await createAutomationJob({
-          type: 'SAFE_PUBLISH',
+      const control = await getAutomationControl();
+      if (publishSettings.safePublish && ['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode) && evaluateSafePublish(finalProduct).eligible) {
+        const publishSnapshotKey = publicationIdempotencyKey(finalProduct);
+        const child = await createAutomationJob({
+          type: 'AUTO_SAFE_PUBLISH',
           payload: { productId: finalProduct.id, candidateId: item.id },
-          idempotencyKey: `safe-publish:${publicationIdempotencyKey(finalProduct)}`,
-          operationId: `pipeline:${item.id}`,
+          idempotencyKey: `auto-safe-publish:${publishSnapshotKey}`,
+          operationId: `pipeline:${item.id}:${publishSnapshotKey}`.slice(0, 160),
           requestedBy: 'scheduler',
-          riskLevel: 'HIGH',
+          parentJobId: item.durableJobId,
           dryRun: false,
-          maxAttempts: 2,
-          approvalReason: 'Sản phẩm đã qua kiểm tra tự động nhưng chỉ được public sau phê duyệt Safe Publish.',
         });
+        finalProduct = (await saveCanonicalProduct(finalProduct.id, { lifecycleState: 'READY_FOR_PUBLISH', relatedJobId: child.job.id, nextAutomaticAction: 'AUTO_SAFE_PUBLISH' })) || finalProduct;
       }
     } else {
       counters.unchanged++;
@@ -272,20 +712,52 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       const keywordStats = await loadKeywordStats((await getAutomationSettings()).sourceKeywords);
       const stat = keywordStats.find((entry) => entry.keyword === item.keyword); if (stat) stat.published++;
       await writeCollection(KEYWORD_COLLECTION, keywordStats);
+      return { status: 'completed', terminal: true };
     } else {
       counters.needsReview++; counters.noindex++;
       const confirmedBroken = statuses.some((status) => ['broken', 'image_broken', 'invalid_image', 'not_found'].includes(status));
       const retryExhausted = !healthy && item.attempts >= 6;
-      await finishCandidate(item.id, {
-        status: confirmedBroken ? 'discarded' : healthy || retryExhausted ? 'needs_review' : 'delayed',
-        delayReason: confirmedBroken ? 'confirmed_broken' : retryExhausted ? 'retry_budget_exhausted' : finalProduct.publicBlockReason,
-        nextAttemptAt: confirmedBroken || retryExhausted ? undefined : finalProduct.sourceHealthCooldownUntil,
-      });
+      const status: CandidateQueueStatus = confirmedBroken ? 'discarded' : healthy || retryExhausted ? 'needs_review' : 'delayed';
+      const reason = confirmedBroken ? 'confirmed_broken' : retryExhausted ? 'retry_budget_exhausted' : finalProduct.publicBlockReason;
+      const nextRetryAt = confirmedBroken || retryExhausted ? undefined : finalProduct.sourceHealthCooldownUntil;
+      await finishCandidate(item.id, { status, delayReason: reason, nextAttemptAt: nextRetryAt });
+      return { status, terminal: status !== 'delayed', nextRetryAt, reason };
     }
   } catch (error) {
     counters.failed++;
-    await finishCandidate(item.id, { status: item.attempts >= 3 ? 'failed' : 'delayed', delayReason: error instanceof Error ? error.message : 'review_error', nextAttemptAt: new Date(Date.now() + 6 * 60 * 60_000).toISOString() });
+    const status: CandidateQueueStatus = item.attempts >= 3 ? 'failed' : 'delayed';
+    const reason = error instanceof Error ? error.message : 'review_error';
+    const nextRetryAt = status === 'delayed' ? new Date(Date.now() + 6 * 60 * 60_000).toISOString() : undefined;
+    await finishCandidate(item.id, { status, delayReason: reason, nextAttemptAt: nextRetryAt });
+    return { status, terminal: status === 'failed', nextRetryAt, reason };
   }
+}
+
+export async function processCandidateFromDurableJob(input: {
+  candidateId: string;
+  jobId: string;
+  operationId: string;
+  workerId: string;
+}): Promise<PipelineCounters & { candidateStatus: string; productId?: string }> {
+  const existing = await getCandidateById(input.candidateId);
+  if (!existing) throw new Error('CANDIDATE_NOT_FOUND');
+  if (existing.durableJobId !== input.jobId) throw new Error('CANDIDATE_JOB_MISMATCH');
+  const item = await claimCandidateForDurableJob(input.candidateId, input.jobId);
+  if (!item) throw new Error('CANDIDATE_CLAIM_CONFLICT');
+  const counters = emptyCounters();
+  const outcome = await reviewAutonomousCandidate(item, counters, input.workerId);
+  const finalCandidate = await getCandidateById(input.candidateId);
+  const product = outcome.productId
+    ? (await getAllProducts()).find(entry => entry.id === outcome.productId)
+    : (await getAllProducts()).find(entry => entry.source === item.source && (entry.sourceId === item.sourceId || entry.externalId === item.sourceId));
+  if (!outcome.terminal && outcome.nextRetryAt) throw new CandidateRetryScheduledError(outcome.nextRetryAt, outcome.status, outcome.reason);
+  if (outcome.status === 'failed') throw new Error(`CANDIDATE_TERMINAL_FAILURE:${outcome.reason || 'review_failed'}`);
+  await completeJournalEffect(input.operationId, 'canonical-product', product ? { id: product.id, sourceHash: product.sourceHash, status: product.status } : { candidateId: item.id, status: finalCandidate?.status });
+  await completeJournalEffect(input.operationId, 'evidence-snapshot', { productId: product?.id, evidenceFactIds: product?.evidenceFactIds || [] });
+  const child = product?.relatedJobId ? { jobId: product.relatedJobId } : { skipped: true, mode: (await getAutomationControl()).effectiveMode };
+  await completeJournalEffect(input.operationId, 'publish-child', child);
+  counters.queueSize = (await getQueueStats()).total;
+  return { ...counters, candidateStatus: finalCandidate?.status || 'missing', productId: product?.id };
 }
 
 export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.now() + 240_000, batchOverride?: number): Promise<PipelineCounters & { currentConcurrency: number }> {

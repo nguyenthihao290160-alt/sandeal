@@ -1,9 +1,10 @@
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { createAutomationJob, getAutomationControl, updateAutomationControl } from './store';
+import { getAutomationPolicy } from './policyRegistry';
 import type { AutomationJobType } from './types';
 
 export interface SchedulerTickResult {
-  status: 'paused' | 'killed' | 'disabled' | 'scheduled' | 'duplicate' | 'not_due';
+  status: 'paused' | 'killed' | 'disabled' | 'ingestion_paused' | 'worker_stale' | 'scheduled' | 'duplicate' | 'not_due';
   jobId?: string;
   nextRunAt?: string;
 }
@@ -23,7 +24,7 @@ type ScheduledProductIntelligenceJobType = Extract<
 >;
 
 export interface ProductIntelligenceSchedulerTickResult {
-  status: 'paused' | 'killed' | 'disabled' | 'scheduled' | 'duplicate';
+  status: 'paused' | 'killed' | 'disabled' | 'worker_stale' | 'scheduled' | 'duplicate';
   scheduled: number;
   duplicates: number;
   jobs: Array<{
@@ -48,23 +49,26 @@ const PRODUCT_INTELLIGENCE_SCHEDULES: ReadonlyArray<{
 export async function runProductIntelligenceSchedulerTick(
   now = Date.now(),
 ): Promise<ProductIntelligenceSchedulerTickResult> {
-  const emptyResult = (status: 'paused' | 'killed' | 'disabled'): ProductIntelligenceSchedulerTickResult => ({
+  const emptyResult = (status: 'paused' | 'killed' | 'disabled' | 'worker_stale'): ProductIntelligenceSchedulerTickResult => ({
     status,
     scheduled: 0,
     duplicates: 0,
     jobs: [],
   });
+  const timestamp = new Date(now).toISOString();
+  await updateAutomationControl({ schedulerHeartbeatAt: timestamp }, 'scheduler');
   const control = await getAutomationControl();
   if (control.killSwitch) return emptyResult('killed');
   if (control.schedulerPaused) return emptyResult('paused');
   const settings = await getAutomationSettings();
   if (!settings.enabled) return emptyResult('disabled');
+  const workerHeartbeat = Date.parse(control.workerHeartbeatAt || '');
+  if (!Number.isFinite(workerHeartbeat) || now - workerHeartbeat > 90_000) return emptyResult('worker_stale');
 
-  const timestamp = new Date(now).toISOString();
-  await updateAutomationControl({ schedulerHeartbeatAt: timestamp }, 'scheduler');
   const jobs: ProductIntelligenceSchedulerTickResult['jobs'] = [];
 
   for (const schedule of PRODUCT_INTELLIGENCE_SCHEDULES) {
+    const policy = getAutomationPolicy(schedule.type);
     const bucket = bucketKey(now, schedule.intervalHours);
     const created = await createAutomationJob({
       type: schedule.type,
@@ -76,9 +80,9 @@ export async function runProductIntelligenceSchedulerTick(
       priority: schedule.priority,
       idempotencyKey: `scheduler:intelligence:${schedule.type.toLowerCase()}:${bucket}`,
       requestedBy: 'scheduler',
-      riskLevel: 'MEDIUM',
+      riskLevel: policy.defaultRisk,
       dryRun: false,
-      maxAttempts: 3,
+      maxAttempts: policy.retryPolicy.maxAttempts,
     });
     jobs.push({ type: schedule.type, jobId: created.job.id, created: created.created });
   }
@@ -95,27 +99,53 @@ export async function runProductIntelligenceSchedulerTick(
 }
 
 export async function runAutomationSchedulerTick(now = Date.now()): Promise<SchedulerTickResult> {
+  await updateAutomationControl({ schedulerHeartbeatAt: new Date(now).toISOString() }, 'scheduler');
   const control = await getAutomationControl();
   if (control.killSwitch) return { status: 'killed' };
   if (control.schedulerPaused) return { status: 'paused' };
+  if (control.ingestionPaused) return { status: 'ingestion_paused' };
   const settings = await getAutomationSettings();
   if (!settings.enabled) return { status: 'disabled' };
-  await updateAutomationControl({ schedulerHeartbeatAt: new Date(now).toISOString() }, 'scheduler');
+  const workerHeartbeat = Date.parse(control.workerHeartbeatAt || '');
+  if (!Number.isFinite(workerHeartbeat) || now - workerHeartbeat > 90_000) return { status: 'worker_stale' };
   const intervalMs = settings.intervalHours * 60 * 60_000;
   if (control.schedulerNextRunAt && Date.parse(control.schedulerNextRunAt) > now) return { status: 'not_due', nextRunAt: control.schedulerNextRunAt };
 
   const nextRunAt = new Date(now + intervalMs).toISOString();
+  const policy = getAutomationPolicy('AUTO_PILOT');
   const created = await createAutomationJob({
     type: 'AUTO_PILOT',
-    payload: { mode: settings.mode, source: settings.source, limit: settings.maxItemsPerRun },
+    payload: { mode: settings.mode, autonomousMode: control.effectiveMode, source: settings.source, limit: settings.maxItemsPerRun },
     priority: 60,
     idempotencyKey: `scheduler:auto:${bucketKey(now, settings.intervalHours)}`,
     requestedBy: 'scheduler',
-    riskLevel: 'HIGH',
-    dryRun: false,
-    maxAttempts: 3,
-    approvalReason: 'Tác vụ tự động có thể thay đổi dữ liệu và cần phê duyệt quản trị.',
+    riskLevel: policy.defaultRisk,
+    dryRun: control.effectiveMode === 'OBSERVE',
+    maxAttempts: policy.retryPolicy.maxAttempts,
   });
   await updateAutomationControl({ schedulerHeartbeatAt: new Date(now).toISOString(), schedulerLastRunAt: new Date(now).toISOString(), schedulerNextRunAt: nextRunAt }, 'scheduler');
   return { status: created.created ? 'scheduled' : 'duplicate', jobId: created.job.id, nextRunAt };
+}
+
+export interface RuntimeControlSchedulerTickResult {
+  status: 'scheduled' | 'duplicate';
+  jobId: string;
+}
+
+export async function runRuntimeControlSchedulerTick(now = Date.now()): Promise<RuntimeControlSchedulerTickResult> {
+  const timestamp = new Date(now).toISOString();
+  await updateAutomationControl({ schedulerHeartbeatAt: timestamp }, 'scheduler');
+  const policy = getAutomationPolicy('RUNTIME_GUARDIAN');
+  const bucket = Math.floor(now / 60_000);
+  const created = await createAutomationJob({
+    type: 'RUNTIME_GUARDIAN',
+    payload: { scheduleBucket: bucket },
+    priority: 100,
+    idempotencyKey: `scheduler:runtime-guardian:${bucket}`,
+    requestedBy: 'scheduler',
+    riskLevel: policy.defaultRisk,
+    dryRun: false,
+    maxAttempts: policy.retryPolicy.maxAttempts,
+  });
+  return { status: created.created ? 'scheduled' : 'duplicate', jobId: created.job.id };
 }

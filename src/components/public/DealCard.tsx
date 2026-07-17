@@ -186,7 +186,13 @@ export function DealCardSkeleton() {
   );
 }
 
-export function DealEmptyState({ filtered = false }: { filtered?: boolean }) {
+export function DealEmptyState({
+  filtered = false,
+  suggestions = [],
+}: {
+  filtered?: boolean;
+  suggestions?: Array<{ label: string; query: string; matchingProducts: number }>;
+}) {
   return (
     <div className={styles.emptyState}>
       <span className={styles.emptyIcon}><PublicIcon name={filtered ? 'filter' : 'shield'} size={24} /></span>
@@ -196,6 +202,19 @@ export function DealEmptyState({ filtered = false }: { filtered?: boolean }) {
           ? 'Hãy xóa một vài điều kiện hoặc quay lại danh sách mới cập nhật.'
           : 'SanDeal chưa có sản phẩm vượt qua đầy đủ cổng nguồn, link, ảnh và nội dung. Không có card giả được tạo để lấp chỗ trống.'}
       </p>
+      {suggestions.length > 0 ? (
+        <div className={styles.emptyActions} aria-label="Goi y tim kiem co san pham">
+          {suggestions.map(suggestion => (
+            <Link
+              className={styles.secondaryButton}
+              href={`/deals?q=${encodeURIComponent(suggestion.query)}`}
+              key={`${suggestion.query}:${suggestion.label}`}
+            >
+              {suggestion.label} ({suggestion.matchingProducts})
+            </Link>
+          ))}
+        </div>
+      ) : null}
       <div className={styles.emptyActions}>
         {filtered ? <Link className={styles.secondaryButton} href="/deals">Xóa bộ lọc</Link> : null}
         <Link className={styles.primaryButton} href="/review-methodology">Xem cách kiểm tra</Link>

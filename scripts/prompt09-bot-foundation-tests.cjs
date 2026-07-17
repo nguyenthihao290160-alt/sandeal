@@ -84,6 +84,7 @@ async function main() {
   const store = require('../src/lib/automation/store.ts');
   const manualTasks = require('../src/lib/automation/manualTasks.ts');
   const worker = require('../src/lib/automation/worker.ts');
+  const reconciler = require('../src/lib/automation/reconciler.ts');
   const productsStore = require('../src/lib/storage/products.ts');
   const editorial = require('../src/lib/editorialReview.ts');
   const aiBotsRoute = require('../src/app/api/ai-bots/route.ts');
@@ -165,9 +166,14 @@ async function main() {
     const resumed = await store.getAutomationJob(submitted.jobId);
     assert.equal(resumed.status, 'PENDING'); assert.equal(resumed.operationId, task.operationId); assert.equal((await store.getAllAutomationJobs()).length, 1);
     const run = await worker.processAutomationBatch('prompt09-manual-resume-worker', 1);
-    assert.equal(run.succeeded, 1);
+    assert.equal(run.waitingChildren, 1);
+    assert.equal((await store.getAutomationJob(submitted.jobId)).status, 'WAITING_CHILDREN');
+    const child = (await store.getAllAutomationJobs()).find(job => job.parentJobId === submitted.jobId);
+    assert.equal(child.type, 'EDITORIAL_CHECK');
+    await worker.processAutomationBatch('prompt09-editorial-child-worker', 1);
+    assert.equal((await reconciler.runAutonomousReconciler()).parentJobsCompleted, 1);
     const completed = await store.getAutomationJob(submitted.jobId);
-    assert.equal(completed.status, 'SUCCEEDED'); assert.equal(completed.outcomeStatus, 'PARTIALLY_COMPLETED'); assert.equal(completed.result.executionMode, 'MANUAL_INPUT'); assert.equal(completed.result.aiRequests, 0); assert.equal(completed.result.validationStatus, 'UNVERIFIED'); assert.equal(completed.result.published, false);
+    assert.equal(completed.status, 'SUCCEEDED'); assert.equal(completed.outcomeStatus, 'COMPLETED_WITH_LOCAL_RULES'); assert.equal(completed.result.executionMode, 'MANUAL_INPUT'); assert.equal(completed.result.aiRequests, 0); assert.equal(completed.result.validationStatus, 'UNVERIFIED'); assert.equal(completed.result.published, false);
     assert.equal((await manualTasks.getManualTask(task.id)).status, 'COMPLETED');
   });
 

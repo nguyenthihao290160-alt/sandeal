@@ -49,6 +49,101 @@ export type ProductKind =
   | "store_offer"
   | "unknown";
 
+export type ProductRecordType =
+  | 'PRODUCT'
+  | 'STORE_PROMOTION'
+  | 'VOUCHER'
+  | 'CAMPAIGN'
+  | 'CONTENT_ONLY'
+  | 'UNKNOWN';
+
+export type ProductLifecycleState =
+  | 'DISCOVERED'
+  | 'STAGED'
+  | 'CLASSIFIED'
+  | 'NORMALIZED'
+  | 'VERIFYING'
+  | 'CONTENT_PREPARING'
+  | 'READY_FOR_PUBLISH'
+  | 'PUBLISHING'
+  | 'PUBLISHED'
+  | 'RETRY_SCHEDULED'
+  | 'QUARANTINED'
+  | 'DEGRADED'
+  | 'RECHECKING'
+  | 'CONFIRMED_BROKEN'
+  | 'HIDDEN';
+
+export type PriceTruthState = 'FRESH' | 'AGING' | 'STALE' | 'CONFLICTED' | 'ANOMALOUS' | 'UNAVAILABLE';
+
+export interface ProductClassificationSnapshot {
+  schemaVersion: number;
+  decisionId: string;
+  recordType: ProductRecordType;
+  confidence: number;
+  reasons: string[];
+  signals: string[];
+  action: 'ACCEPT' | 'CROSS_CHECK' | 'QUARANTINE';
+  ruleVersion: string;
+  classifiedAt: string;
+}
+
+export interface ProductConfidenceSet {
+  classification: number;
+  source: number;
+  price: number;
+  image: number;
+  health: number;
+  duplicate: number;
+  contentEvidenceCoverage: number;
+  editorial: number;
+  publish: number;
+  calculatedAt: string;
+  ruleVersion: string;
+}
+
+export interface ProductIdentity {
+  sourceId?: string;
+  externalId?: string;
+  canonicalUrl?: string;
+  affiliateUrl?: string;
+  sku?: string;
+  brand?: string;
+  model?: string;
+  gtin?: string;
+  normalizedTitle: string;
+  merchant?: string;
+  imageFingerprint?: string;
+  identityHash: string;
+  ruleVersion: string;
+}
+
+export interface ProductOffer {
+  id: string;
+  source: string;
+  merchant: string;
+  price?: number;
+  originalPrice?: number;
+  previousPrice?: number;
+  previousPriceObservedAt?: string;
+  voucher?: string;
+  affiliateUrl: string;
+  health: 'HEALTHY' | 'DEGRADED' | 'BROKEN' | 'UNKNOWN';
+  productLinkHealth?: 'HEALTHY' | 'DEGRADED' | 'BROKEN' | 'UNKNOWN';
+  affiliateHealth?: 'HEALTHY' | 'DEGRADED' | 'BROKEN' | 'UNKNOWN';
+  sourceVerified?: boolean;
+  sourceConfidence?: number;
+  merchantQuality?: number;
+  priceConfidence?: number;
+  currency?: 'VND';
+  priceEvidenceFactIds?: string[];
+  originalPriceEvidenceFactIds?: string[];
+  observedAt: string;
+  expiresAt?: string;
+  confidence: number;
+  primary: boolean;
+}
+
 export type ReviewStatus = 'pending' | 'generated' | 'needs_review' | 'approved' | 'rejected' | 'stale';
 export type ReviewerType = 'automated_editorial' | 'human_editorial' | 'mixed';
 export type ReviewMethod = 'source_data_analysis' | 'technical_verification' | 'comparative_data_analysis' | 'hands_on_test';
@@ -116,6 +211,7 @@ export type ProductScoreLabel =
   | "Ưu tiên cao";
 
 export interface Product {
+  schemaVersion?: number;
   id: string;
   title: string;
   slug: string;
@@ -243,6 +339,43 @@ export interface Product {
   specifications?: Record<string, string | number>;
   reviewContent?: ReviewContent;
   reviewGeneration?: { provider: 'gemini' | 'local'; modelId?: string; promptVersion: string; generationFingerprint: string; responseHash?: string; generatedAt: string; validationResult: 'approved' | 'fallback_local' };
+
+  // Prompt 10 migration-safe autonomous commerce fields.
+  recordType?: ProductRecordType;
+  classification?: ProductClassificationSnapshot;
+  lifecycleState?: ProductLifecycleState;
+  lifecycleVersion?: string;
+  lifecycleUpdatedAt?: string;
+  quarantineReasons?: string[];
+  nextAutomaticAction?: string;
+  nextRetryAt?: string;
+  relatedJobId?: string;
+  evidenceFactIds?: string[];
+  evidenceCoverage?: number;
+  evidenceSnapshotAt?: string;
+  evidenceSnapshotHash?: string;
+  confidences?: ProductConfidenceSet;
+  identity?: ProductIdentity;
+  offers?: ProductOffer[];
+  bestOfferId?: string;
+  priceTruthState?: PriceTruthState;
+  priceObservedAt?: string;
+  priceTruthConfidence?: number;
+  priceTruthEffectivePrice?: number;
+  priceTruthDiscountPercent?: number;
+  priceTruthEvidenceFactIds?: string[];
+  priceTruthReasons?: string[];
+  priceTruthRuleVersion?: string;
+  priceTruthRequiresCrossCheck?: boolean;
+  duplicateStatus?: 'CLEAR' | 'POSSIBLE' | 'UNRESOLVED' | 'MERGED';
+  claimValidationStatus?: 'VERIFIED' | 'PARTIAL' | 'UNSAFE' | 'MISSING_EVIDENCE';
+  publicationEffectKey?: string;
+  publicationJobId?: string;
+  monitoringScheduledAt?: string;
+  consecutiveHealthFailures?: number;
+  lastHealthyAt?: string;
+  hiddenAt?: string;
+  hiddenReason?: string;
 
   createdAt: string;
   updatedAt: string;

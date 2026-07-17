@@ -10,6 +10,11 @@ type SafeJob = Omit<AutomationJob, 'payload'>;
 const TYPES: Record<AutomationJobType, string> = {
   PRODUCT_SCAN: 'Quét sản phẩm',
   AUTO_PILOT: 'Chế độ tự động',
+  PROCESS_CANDIDATE: 'Xử lý ứng viên',
+  AUTO_SAFE_PUBLISH: 'Đăng tự động an toàn',
+  POST_PUBLISH_MONITOR: 'Giám sát sau đăng',
+  RECONCILE_AUTOMATION: 'Đối soát tự động',
+  RUNTIME_GUARDIAN: 'Giám sát runtime',
   SAFE_PUBLISH: 'Đăng an toàn',
   AI_ANALYSIS: 'Phân tích AI',
   HEALTH_CHECK: 'Kiểm tra hệ thống',

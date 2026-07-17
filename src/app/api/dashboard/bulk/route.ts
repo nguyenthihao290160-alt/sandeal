@@ -30,6 +30,7 @@ export async function POST(request: NextRequest) {
     const payload = Object.fromEntries(Object.entries(body).filter(([key]) => PAYLOAD_KEYS.has(key)));
     const result = await createAutomationJob({
       type: 'BULK_PRODUCT_OPERATION', payload,
+      capability: typeof body.action === 'string' ? `BULK_${body.action.toUpperCase()}` : undefined,
       idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `bulk:${generateId()}`,
       operationId: typeof body.operationId === 'string' ? body.operationId : undefined,
       requestedBy: getServerActor(),

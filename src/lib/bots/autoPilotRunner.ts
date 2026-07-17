@@ -9,6 +9,7 @@ import { runProductHealthCleanup } from './productHealth';
 import { getAutomationSettings } from '../storage/automationSettings';
 import type { BotRunMode, Product } from '../types';
 import type { ScanCounters } from './sourceScout';
+import { enqueueBotExecution } from '../automation/enqueue';
 
 // Re-export for convenience
 export type { RunSummary } from './runLogs';
@@ -37,6 +38,10 @@ export interface AutoPilotResult {
   summary: RunSummary;
   message?: string;
   error?: string;
+  jobId?: string;
+  operationId?: string;
+  trackingRoute?: string;
+  durableJobCreated?: boolean;
 }
 
 // Map our modes to BotRunMode values used by existing POST /api/ai-bots
@@ -69,6 +74,34 @@ export async function runAutoPilot(options: AutoPilotOptions): Promise<AutoPilot
   const { mode, trigger } = options;
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
+
+  const legacyTestExecution = process.env.NODE_ENV === 'test'
+    && process.env.SANDEAL_ENABLE_LEGACY_DIRECT_WORKFLOW === 'true';
+  if (!legacyTestExecution) {
+    // Deprecated compatibility entry point. Execution belongs exclusively to the
+    // durable worker; callers receive a tracking handle and never run a workflow here.
+    const queued = await enqueueBotExecution({
+      actor: `legacy-autopilot:${trigger}`,
+      mode,
+      trigger: trigger === 'api' ? 'system' : trigger,
+      requestedExecutionMode: 'AUTO',
+    });
+    return {
+      runId: queued.job.id,
+      jobId: queued.job.id,
+      operationId: queued.job.operationId,
+      trackingRoute: `/api/automation/jobs/${queued.job.id}`,
+      durableJobCreated: queued.created,
+      mode,
+      trigger,
+      status: 'running',
+      startedAt,
+      summary: {},
+      message: queued.created
+        ? 'Da dua tac vu vao durable queue; worker se thuc thi bat dong bo.'
+        : 'Tac vu durable tuong duong da ton tai; khong chay workflow lan hai.',
+    };
+  }
 
   // Step 0: Check Daily Quota and settings
   const settings = await getAutomationSettings();

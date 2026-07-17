@@ -1,15 +1,22 @@
 import { createHash } from 'node:crypto';
-import { processReviewQueue, scanSourcesToQueue, selectOperationMode } from '@/lib/bots/productPipeline';
+import { CandidateRetryScheduledError, processCandidateFromDurableJob, scanSourcesToQueue, selectOperationMode } from '@/lib/bots/productPipeline';
 import { buildDashboardProducts } from '@/lib/dashboard/products';
 import { executeProductIntelligenceJob } from '@/lib/product-intelligence/jobs';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
+import { bridgeCandidatesToDurableJobs } from './candidateBridge';
+import { executeAutoSafePublish } from './autoPublish';
+import { runAutonomousReconciler } from './reconciler';
+import { executePostPublishMonitor } from './postPublishMonitor';
+import { runRuntimeGuardian } from './runtimeGuardian';
 import { getProductById, getAllProducts, getPublicProducts, publishCanonicalProductTransaction } from '@/lib/storage/products';
 import { completeManualTask, createManualTask, getManualTask } from './manualTasks';
 import { routeProviderExecution } from './providerRouter';
+import { approvalStatusForPolicy, getAutomationPolicy } from './policyRegistry';
 import {
   canUseCircuit,
   claimAutomationJobs,
   completeAutomationJob,
+  createAutomationJob,
   failAutomationJob,
   getAutomationControl,
   getAutomationJob,
@@ -17,6 +24,7 @@ import {
   recordCircuitResult,
   updateAutomationControl,
   updateAutomationJobExecution,
+  waitAutomationJobForChildren,
   waitAutomationJobForManual,
 } from './store';
 import type { AutomationCheckpoint, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
@@ -32,10 +40,31 @@ export interface WorkerRunResult {
   failed: number;
   skipped: number;
   waitingManual: number;
+  waitingChildren: number;
 }
 
 function hashValue(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function assertWorkerPolicy(job: AutomationJob): void {
+  const policy = getAutomationPolicy(job.type);
+  const riskRank = { LOW: 0, MEDIUM: 1, HIGH: 2, BLOCKER: 3 } as const;
+  if (job.schemaVersion !== 2) throw new Error('AUTOMATION_JOB_SCHEMA_UNSUPPORTED');
+  if (!job.policyVersion || job.policyVersion !== policy.policyVersion) throw new Error('STALE_POLICY_SNAPSHOT');
+  if (!job.handlerVersion || job.handlerVersion !== policy.handlerVersion) throw new Error('STALE_HANDLER_VERSION');
+  if (!job.botId || job.botId !== policy.botId) throw new Error('POLICY_BOT_MISMATCH');
+  if (!job.capability || job.capability !== policy.capability) throw new Error('POLICY_CAPABILITY_MISMATCH');
+  if (riskRank[job.riskLevel] < riskRank[policy.defaultRisk]) throw new Error('POLICY_RISK_UNDERSTATED');
+  if (job.maxAttempts !== policy.retryPolicy.maxAttempts) throw new Error('POLICY_RETRY_MISMATCH');
+  const expectedApproval = approvalStatusForPolicy(policy, job.riskLevel);
+  if (expectedApproval === 'PENDING' && job.approvalStatus !== 'APPROVED') throw new Error('APPROVAL_REQUIRED');
+  if (expectedApproval === 'NOT_REQUIRED' && job.approvalStatus !== 'NOT_REQUIRED') throw new Error('POLICY_APPROVAL_MISMATCH');
+  if ((job.executionPlan || []).some(step => step.approvalRequired !== (expectedApproval === 'PENDING'))) throw new Error('POLICY_PLAN_APPROVAL_MISMATCH');
+  if ((job.executionPlan || []).some(step => step.externalCall !== policy.externalSideEffect)) throw new Error('POLICY_PLAN_SIDE_EFFECT_MISMATCH');
+  if ((job.executionPlan || []).some(step => JSON.stringify(step.expectedWrite) !== JSON.stringify(policy.writeScope))) throw new Error('POLICY_PLAN_WRITE_SCOPE_MISMATCH');
+  if (job.requestedBy === 'scheduler' && !policy.autonomousAllowed) throw new Error('POLICY_AUTONOMY_BLOCKED');
+  if (policy.externalSideEffect && job.dryRun && job.executionMode === 'API') throw new Error('DRY_RUN_EXTERNAL_SIDE_EFFECT_BLOCKED');
 }
 
 function disclosure(
@@ -68,6 +97,7 @@ function disclosure(
 
 function errorCode(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (/TEMPORARY_ERROR/i.test(message)) return 'TEMPORARY_ERROR';
   if (/not.?implemented|handler.?unavailable/i.test(message)) return 'PROVIDER_NOT_IMPLEMENTED';
   if (/invalid.?credential|401/i.test(message)) return 'INVALID_CREDENTIAL';
   if (/credential.?expired|403/i.test(message)) return 'CREDENTIAL_EXPIRED';
@@ -121,28 +151,34 @@ async function executeAutoPilotJob(
     const deadline = Date.now() + settings.maxRunDurationMs;
     const scan = await scanSourcesToQueue(operationMode, deadline);
     await assertKillSwitchInactive();
-    const review = mode === 'full_safe_run' && Date.now() < deadline
-      ? await processReviewQueue(operationMode, deadline)
+    const bridge = mode === 'full_safe_run' && Date.now() < deadline
+      ? await bridgeCandidatesToDurableJobs({ parentJobId: job.id, requestedBy: 'autopilot-worker', limit: settings.maxItemsPerRun })
       : null;
-    const failed = scan.failed + (review?.failed || 0);
+    const failed = scan.failed;
+    const completedSteps = ['runtime-preflight', 'source-budget-check', 'source-discovery', 'candidate-ingestion'];
+    const pendingSteps = bridge?.jobs.length
+      ? ['classification', 'normalization', 'evidence-capture', 'health-validation', 'duplicate-resolution', 'price-verification', 'scoring', 'content-preparation', 'editorial-validation', 'readiness-evaluation', 'autonomous-publish-or-quarantine', 'monitoring-schedule', 'cycle-summary']
+      : [];
     const result = {
-      executionStatus: failed > 0 ? 'PARTIALLY_COMPLETED' : 'COMPLETED_WITH_LOCAL_RULES',
+      executionStatus: failed > 0 || pendingSteps.length ? 'PARTIALLY_COMPLETED' : 'COMPLETED_WITH_LOCAL_RULES',
       executionMode: 'LOCAL_RULES',
       provider: 'local',
       rulesVersion: 'product-pipeline-v2',
       aiRequests: 0,
-      externalRequests: scan.sourceRequests + (review?.networkChecks || 0),
+      externalRequests: scan.sourceRequests,
       fallbackReason: null,
-      limitations: ['Safe Publish được tạo thành tác vụ riêng và luôn cần phê duyệt.'],
+      limitations: ['Candidate được xử lý bởi durable child job; publish chỉ chạy qua policy AUTO_SAFE_PUBLISH.'],
+      completedSteps: pendingSteps.length ? completedSteps : [...completedSteps, 'cycle-summary'],
+      pendingSteps,
       operationMode,
       summary: {
         sourceRequests: scan.sourceRequests,
         found: scan.found,
         queued: scan.queued,
-        reviewed: review?.reviewed || 0,
-        created: review?.created || 0,
-        updated: review?.updated || 0,
-        needsReview: review?.needsReview || 0,
+        reviewed: 0,
+        created: bridge?.created || 0,
+        updated: bridge?.existing || 0,
+        needsReview: 0,
         published: 0,
         failed,
       },
@@ -198,7 +234,7 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
 
   if (job.manualTaskId) {
     const task = await getManualTask(job.manualTaskId);
-    if (!task || task.jobId !== job.id || task.status !== 'SUBMITTED' || !task.submittedInput) throw new Error('MANUAL_INPUT_NOT_READY');
+    if (!task || task.jobId !== job.id || !['SUBMITTED', 'COMPLETED'].includes(task.status) || !task.submittedInput) throw new Error('MANUAL_INPUT_NOT_READY');
     const completedAt = new Date().toISOString();
     const completedDisclosure = disclosure(job, 'MANUAL_INPUT', {
       provider: 'manual',
@@ -223,6 +259,15 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
       outputHash: hashValue(task.submittedInput),
       updatedAt: completedAt,
     };
+    const editorialChild = await createAutomationJob({
+      type: 'EDITORIAL_CHECK',
+      payload: { analysisJobId: job.id, manualTaskId: task.id, limit: Number(job.payload.limit) || 1 },
+      idempotencyKey: `editorial-after-analysis:${job.id}:${hashValue(task.submittedInput)}`.slice(0, 160),
+      operationId: `editorial-after-analysis:${job.operationId}`.slice(0, 160),
+      requestedBy: workerId,
+      parentJobId: job.id,
+      priority: Math.max(1, job.priority - 1),
+    });
     await updateAutomationJobExecution(job.id, workerId, { executionMode: 'MANUAL_INPUT', outcomeStatus: 'PARTIALLY_COMPLETED', checkpoint, disclosure: completedDisclosure });
     await completeManualTask(task.id, job.id, workerId);
     return {
@@ -237,6 +282,7 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
       externalRequests: 0,
       canonicalDataChanged: false,
       published: false,
+      childJobId: editorialChild.job.id,
       warnings: completedDisclosure.warnings,
       limitations: completedDisclosure.limitations,
     };
@@ -313,6 +359,27 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
 
 async function executeJob(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
   switch (job.type) {
+    case 'PROCESS_CANDIDATE': {
+      if (job.dryRun) return dryRunPreview(job);
+      await assertKillSwitchInactive();
+      const candidateId = typeof job.payload.candidateId === 'string' ? job.payload.candidateId : '';
+      if (!candidateId) throw new Error('VALIDATION_CANDIDATE_ID_REQUIRED');
+      return { ...(await processCandidateFromDurableJob({ candidateId, jobId: job.id, operationId: job.operationId, workerId })) };
+    }
+    case 'AUTO_SAFE_PUBLISH':
+      if (job.dryRun) return dryRunPreview(job);
+      await assertKillSwitchInactive();
+      return executeAutoSafePublish(job, workerId);
+    case 'RECONCILE_AUTOMATION':
+      if (job.dryRun) return dryRunPreview(job);
+      return { ...(await runAutonomousReconciler()), executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local', rulesVersion: 'reconciler-v1', aiRequests: 0, externalRequests: 0 };
+    case 'POST_PUBLISH_MONITOR':
+      if (job.dryRun) return dryRunPreview(job);
+      await assertKillSwitchInactive();
+      return executePostPublishMonitor(job, workerId);
+    case 'RUNTIME_GUARDIAN':
+      if (job.dryRun) return dryRunPreview(job);
+      return { ...(await runRuntimeGuardian({ apply: true })), executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'system', rulesVersion: 'runtime-guardian-v1', aiRequests: 0, externalRequests: 0 };
     case 'IMPORT_PRODUCTS':
     case 'RECHECK_PRODUCT_HEALTH':
     case 'DETECT_DUPLICATES':
@@ -332,7 +399,6 @@ async function executeJob(job: AutomationJob, workerId: string): Promise<Record<
       return executeAutoPilotJob(job, 'full_safe_run');
     case 'HEALTH_CHECK': {
       if (job.dryRun) return dryRunPreview(job);
-      await assertKillSwitchInactive();
       const products = await getAllProducts();
       return { checkedAt: new Date().toISOString(), productCount: products.length, businessDataChanged: false };
     }
@@ -365,21 +431,31 @@ async function executeJob(job: AutomationJob, workerId: string): Promise<Record<
 }
 
 export async function processAutomationBatch(workerId: string, limit = 2): Promise<WorkerRunResult> {
-  const result: WorkerRunResult = { workerId, claimed: 0, succeeded: 0, failed: 0, skipped: 0, waitingManual: 0 };
-  await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
+  const result: WorkerRunResult = { workerId, claimed: 0, succeeded: 0, failed: 0, skipped: 0, waitingManual: 0, waitingChildren: 0 };
+  const initialControl = await getAutomationControl();
+  const lastHeartbeat = Date.parse(initialControl.workerHeartbeatAt || '');
+  if (initialControl.workerId !== workerId || !Number.isFinite(lastHeartbeat) || Date.now() - lastHeartbeat >= 15_000) {
+    await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
+  }
   const claimed = await claimAutomationJobs(workerId, limit);
   result.claimed = claimed.length;
 
   for (const job of claimed) {
     const freshControl = await getAutomationControl();
-    if (freshControl.killSwitch) {
+    if (freshControl.killSwitch && job.type !== 'RUNTIME_GUARDIAN') {
       await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.');
       result.skipped += 1;
       continue;
     }
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
-    const heartbeat = setInterval(() => { void heartbeatAutomationJob(job.id, workerId); }, 20_000);
+    const heartbeat = setInterval(() => {
+      void Promise.all([
+        heartbeatAutomationJob(job.id, workerId),
+        updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId),
+      ]);
+    }, 20_000);
     try {
+      assertWorkerPolicy(job);
       const startedPlan = (job.executionPlan || []).map((step, index) => index === 0 && step.status === 'PENDING' ? { ...step, status: 'RUNNING' as const } : step);
       await updateAutomationJobExecution(job.id, workerId, {
         executionPlan: startedPlan,
@@ -406,11 +482,21 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
               ? 'COMPLETED_WITH_MANUAL_INPUT' as const
               : 'COMPLETED_WITH_LOCAL_RULES' as const;
       const completedAt = new Date().toISOString();
-      const completedPlan = (latest?.executionPlan || startedPlan).map(step => ({ ...step, status: step.status === 'SKIPPED' ? 'SKIPPED' as const : 'COMPLETED' as const }));
+      const reportedCompletedSteps = Array.isArray(output.completedSteps) ? output.completedSteps.filter((item): item is string => typeof item === 'string') : null;
+      const reportedPendingSteps = Array.isArray(output.pendingSteps) ? output.pendingSteps.filter((item): item is string => typeof item === 'string') : null;
+      const completedPlan = (latest?.executionPlan || startedPlan).map(step => ({
+        ...step,
+        status: reportedPendingSteps?.includes(step.id)
+          ? 'PENDING' as const
+          : reportedCompletedSteps
+            ? reportedCompletedSteps.includes(step.id) ? 'COMPLETED' as const : 'SKIPPED' as const
+            : step.status === 'SKIPPED' ? 'SKIPPED' as const : 'COMPLETED' as const,
+      }));
       const completedSteps = completedPlan.filter(step => step.status === 'COMPLETED').map(step => step.id);
-      const pendingSteps = outcomeStatus === 'PARTIALLY_COMPLETED' && latest?.checkpoint?.pendingSteps.length
-        ? latest.checkpoint.pendingSteps
-        : [];
+      const pendingSteps = reportedPendingSteps
+        || (outcomeStatus === 'PARTIALLY_COMPLETED' && latest?.checkpoint?.pendingSteps.length
+          ? latest.checkpoint.pendingSteps
+          : []);
       const progressTotal = Math.max(1, completedSteps.length + pendingSteps.length);
       const progressPercentage = Math.floor((completedSteps.length / progressTotal) * 100);
       await updateAutomationJobExecution(job.id, workerId, {
@@ -444,6 +530,11 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
           completedAt,
         }),
       });
+      if (outcomeStatus === 'PARTIALLY_COMPLETED' && pendingSteps.length) {
+        const waiting = await waitAutomationJobForChildren(job.id, workerId, output);
+        if (waiting) result.waitingChildren += 1; else result.skipped += 1;
+        continue;
+      }
       const completed = await completeAutomationJob(job.id, workerId, output);
       if (completed) result.succeeded += 1; else result.skipped += 1;
     } catch (error) {
@@ -452,7 +543,9 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
         result.skipped += 1;
         continue;
       }
-      await failAutomationJob(job.id, workerId, errorCode(error), error);
+      await failAutomationJob(job.id, workerId, errorCode(error), error, {
+        nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
+      });
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);

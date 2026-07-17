@@ -4,6 +4,7 @@ import { config } from '../config';
 import { isPublicSafeProduct } from '../publicProductFilter';
 import { isReviewIndexable } from '../editorialReview';
 import { PRODUCT_INTELLIGENCE_CONFIG } from '../product-intelligence/config';
+import { commerceQualityScore, isDiscoverableCommerceProduct } from '../product-intelligence/searchRanking';
 import { publicTaxonomySlug, taxonomyPath } from './taxonomySeo';
 
 export function canonicalProductUrl(product: Pick<Product, 'slug'>): string {
@@ -18,6 +19,14 @@ export function getProductIndexingDecision(product?: Product | null): { indexabl
   if (!isReviewIndexable(product)) reasons.push(...(product.reviewContent?.reviewBlockReasons || ['review_not_ready']));
   if (!product.imageUrl || product.imageHealthStatus !== 'ok') reasons.push('broken_image');
   if (product.status !== 'published' || product.publicHidden !== false) reasons.push('not_public');
+  if (!isDiscoverableCommerceProduct(product)) reasons.push(`price_or_lifecycle_not_discoverable:${product.priceTruthState || product.lifecycleState || 'unknown'}`);
+  if (product.schemaVersion === 2 && product.autoPublished === true) {
+    if (!String(product.category || '').trim()) reasons.push('category_missing');
+    if (!String(product.brand || '').trim()) reasons.push('brand_missing');
+    if (product.evidenceCoverage !== undefined && Number(product.evidenceCoverage) < 0.8) reasons.push('evidence_coverage_low');
+    const verifiedAt = Date.parse(product.priceObservedAt || product.linkLastCheckedAt || '');
+    if (Number.isFinite(verifiedAt) && Date.now() - verifiedAt > 7 * 24 * 60 * 60_000) reasons.push('verification_stale');
+  }
   return { indexable: reasons.length === 0, reasons: [...new Set(reasons)] };
 }
 
@@ -86,8 +95,32 @@ export function selectRelatedProducts(product: Product, candidates: Product[], l
       if (product.brand && item.brand === product.brand) score += 4;
       if (price && itemPrice && Math.abs(price - itemPrice) / Math.max(price, itemPrice) <= 0.3) score += 3;
       if (product.tags?.some((tag) => item.tags?.includes(tag))) score += 2;
+      score += commerceQualityScore(item) * 5;
       return { item, score };
-    }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map(({ item }) => item);
+    }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score
+      || Date.parse(b.item.updatedAt) - Date.parse(a.item.updatedAt)
+      || a.item.id.localeCompare(b.item.id)).slice(0, limit).map(({ item }) => item);
+}
+
+export function buildProductFactFaq(product: Product): Array<{ question: string; answer: string; evidenceFields: string[] }> {
+  if (!getProductIndexingDecision(product).indexable) return [];
+  const items: Array<{ question: string; answer: string; evidenceFields: string[] }> = [];
+  if (product.brand && product.category) {
+    items.push({
+      question: `${product.title} thuoc thuong hieu va danh muc nao?`,
+      answer: `${product.title} duoc nguon xac minh ghi nhan thuoc thuong hieu ${product.brand}, danh muc ${product.category}.`,
+      evidenceFields: ['title', 'brand', 'category'],
+    });
+  }
+  const currentPrice = Number(product.salePrice || product.price || 0);
+  if (currentPrice > 0 && product.priceObservedAt && !['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(String(product.priceTruthState || ''))) {
+    items.push({
+      question: `Gia quan sat gan nhat cua ${product.title} la bao nhieu?`,
+      answer: `Gia duoc ghi nhan la ${Math.round(currentPrice).toLocaleString('vi-VN')} ${product.currency} vao ${product.priceObservedAt}. Gia cuoi cung do nha ban xac nhan.`,
+      evidenceFields: ['price', 'currency', 'priceObservedAt'],
+    });
+  }
+  return items;
 }
 
 export function stableLastModified(product: Product): string {

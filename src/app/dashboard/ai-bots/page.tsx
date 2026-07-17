@@ -7,10 +7,15 @@ import { BotControlCenter } from './bot-control-center';
 
 type SafeJob = Omit<AutomationJob, 'payload'>;
 type JobsResponse = { ok: boolean; message: string; data?: { items: SafeJob[]; pagination: { page: number; totalItems: number; totalPages: number } } };
-const STATUS_LABELS: Record<AutomationJobStatus, string> = { PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ chạy lại', SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng' };
+const STATUS_LABELS: Record<AutomationJobStatus, string> = { PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', WAITING_CHILDREN: 'Chờ tác vụ con', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ chạy lại', SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng' };
 const TYPE_LABELS: Record<AutomationJobType, string> = {
   PRODUCT_SCAN: 'Quét sản phẩm',
   AUTO_PILOT: 'Chế độ tự động',
+  PROCESS_CANDIDATE: 'Xử lý ứng viên',
+  AUTO_SAFE_PUBLISH: 'Đăng tự động an toàn',
+  POST_PUBLISH_MONITOR: 'Giám sát sau đăng',
+  RECONCILE_AUTOMATION: 'Đối soát tự động',
+  RUNTIME_GUARDIAN: 'Giám sát runtime',
   SAFE_PUBLISH: 'Đăng an toàn',
   AI_ANALYSIS: 'Phân tích AI',
   HEALTH_CHECK: 'Kiểm tra hệ thống',
@@ -61,7 +66,7 @@ function LegacyAutomationJobsPage() {
 
   useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
   useEffect(() => { if (!action) return; const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) setAction(null); }; window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close); }, [action, busy]);
-  const counts = useMemo(() => ({ running: jobs.filter(job => job.status === 'RUNNING').length, waiting: jobs.filter(job => ['PENDING','WAITING_FOR_MANUAL_INPUT','RETRY_SCHEDULED'].includes(job.status)).length, approval: jobs.filter(job => job.status === 'WAITING_APPROVAL').length, failed: jobs.filter(job => ['FAILED','BLOCKED'].includes(job.status)).length }), [jobs]);
+  const counts = useMemo(() => ({ running: jobs.filter(job => job.status === 'RUNNING').length, waiting: jobs.filter(job => ['PENDING','WAITING_FOR_MANUAL_INPUT','WAITING_CHILDREN','RETRY_SCHEDULED'].includes(job.status)).length, approval: jobs.filter(job => job.status === 'WAITING_APPROVAL').length, failed: jobs.filter(job => ['FAILED','BLOCKED'].includes(job.status)).length }), [jobs]);
 
   async function createDryRun() {
     setBusy('create'); setError('');

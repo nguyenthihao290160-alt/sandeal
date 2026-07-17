@@ -114,9 +114,10 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
     await store.updateAutomationControl({ workerPaused: false, killSwitch: true, reason: 'Dừng khẩn cấp thử nghiệm' }, 'admin'); equal((await store.claimAutomationJobs('worker-a', 1)).length, 0);
   });
 
-  await test('scheduler tạm dừng, tạo tác vụ duy nhất và yêu cầu phê duyệt', async () => {
+  await test('scheduler tạm dừng, chặn khi worker thiếu và tạo một tác vụ không approval', async () => {
     await reset(); await settingsStore.updateAutomationSettings({ enabled: true, intervalHours: 6 }); equal((await scheduler.runAutomationSchedulerTick()).status, 'paused');
-    await store.updateAutomationControl({ schedulerPaused: false, schedulerNextRunAt: undefined, reason: 'Bật lịch kiểm thử' }, 'admin'); const now = Date.now(); const first = await scheduler.runAutomationSchedulerTick(now); equal(first.status, 'scheduled'); equal((await store.getAutomationJob(first.jobId)).status, 'WAITING_APPROVAL');
+    await store.updateAutomationControl({ schedulerPaused: false, schedulerNextRunAt: undefined, reason: 'Bật lịch kiểm thử' }, 'admin'); const now = Date.now(); equal((await scheduler.runAutomationSchedulerTick(now)).status, 'worker_stale');
+    await store.updateAutomationControl({ workerHeartbeatAt: new Date(now).toISOString() }, 'worker-fixture'); const first = await scheduler.runAutomationSchedulerTick(now); equal(first.status, 'scheduled'); equal((await store.getAutomationJob(first.jobId)).status, 'PENDING'); equal((await store.getAutomationJob(first.jobId)).approvalStatus, 'NOT_REQUIRED');
     const second = await scheduler.runAutomationSchedulerTick(now); equal(second.status, 'not_due'); equal((await store.getAllAutomationJobs()).length, 1);
   });
 

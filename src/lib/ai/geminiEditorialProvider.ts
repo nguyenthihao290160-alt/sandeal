@@ -21,10 +21,15 @@ export async function generateGeminiEditorialReview(product: Product, profile: T
   const model = routeModel(profile, availableModels); if (!model) return null;
   const publicInput = sanitizeProductForGemini(product);
   const fingerprint = createHash('sha256').update(JSON.stringify({ sourceHash: product.sourceHash, promptVersion: PROMPT_VERSION, policyVersion: 'product-policy-v2', modelId: model.modelId, reviewVersion: 2 })).digest('hex');
-  const response = await executeGeminiRequest({ modelId: model.modelId, taskType: profile.taskType, idempotencyKey: fingerprint, timeoutMs: model.timeoutMs, inputTokenEstimate: profile.inputTokenEstimate, body: {
-    contents: [{ role: 'user', parts: [{ text: JSON.stringify({ instruction: 'Write an evidence-bound Vietnamese editorial product review. Return only schema JSON. Never claim hands-on use, ratings, sales, stock, warranty, certification, ingredients or effects without evidence.', product: publicInput }) }] }],
-    generationConfig: { responseMimeType: 'application/json', responseSchema: reviewSchema(), maxOutputTokens: model.maxOutputTokens, temperature: 0.2 },
-  } });
+  let response: Awaited<ReturnType<typeof executeGeminiRequest>>;
+  try {
+    response = await executeGeminiRequest({ modelId: model.modelId, taskType: profile.taskType, idempotencyKey: fingerprint, timeoutMs: model.timeoutMs, inputTokenEstimate: profile.inputTokenEstimate, maxFailoverGroups: 2, body: {
+      contents: [{ role: 'user', parts: [{ text: JSON.stringify({ instruction: 'Write an evidence-bound Vietnamese editorial product review. Return only schema JSON. Never claim hands-on use, ratings, sales, stock, warranty, certification, ingredients or effects without evidence.', product: publicInput }) }] }],
+      generationConfig: { responseMimeType: 'application/json', responseSchema: reviewSchema(), maxOutputTokens: model.maxOutputTokens, temperature: 0.2 },
+    } });
+  } catch {
+    return null;
+  }
   if (!response.ok) return null;
   const parsed = parseReviewResponse(response.data); if (!parsed) return null;
   const fallback = localFallback();

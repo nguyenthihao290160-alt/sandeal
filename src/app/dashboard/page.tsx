@@ -35,7 +35,7 @@ type DashboardData = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ thử lại',
+  PENDING: 'Chờ xử lý', WAITING_APPROVAL: 'Chờ phê duyệt', WAITING_FOR_MANUAL_INPUT: 'Chờ thông tin thủ công', WAITING_CHILDREN: 'Chờ tác vụ con', RUNNING: 'Đang xử lý', RETRY_SCHEDULED: 'Đang chờ thử lại',
   SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', CANCELLED: 'Đã hủy', BLOCKED: 'Bị chặn', PAUSED: 'Đã tạm dừng',
   active: 'Đang hoạt động', paused: 'Đã tạm dừng', stale: 'Mất tín hiệu', unverified: 'Không thể xác minh', not_configured: 'Chưa cấu hình',
 };

@@ -34,6 +34,7 @@ export interface LinkCheckResult {
   statusCode?: number;
   finalUrl?: string;
   retryable?: boolean;
+  retryAfter?: string;
 }
 
 // ---- Image Health Check ----
@@ -57,12 +58,41 @@ export interface ImageCheckResult {
   reason: string;
   statusCode?: number;
   contentType?: string;
+  contentLength?: number;
   retryable?: boolean;
+}
+
+export interface ImageCandidateResolution {
+  selectedUrl?: string;
+  result: ImageCheckResult;
+  checked: Array<{ url: string; result: ImageCheckResult }>;
+  attempts: number;
 }
 
 export interface HealthCheckRequestOptions {
   fetchImpl?: typeof fetch;
   resolveDns?: boolean;
+}
+
+/** Try source candidates in order and retain a retryable verdict over a false permanent failure. */
+export async function resolveHealthyImageCandidate(
+  candidates: Array<string | undefined>,
+  options: HealthCheckRequestOptions = {},
+): Promise<ImageCandidateResolution> {
+  const urls = [...new Set(candidates.map(value => String(value || '').trim()).filter(Boolean))];
+  const checked: ImageCandidateResolution['checked'] = [];
+  for (const url of urls) {
+    const result = await checkImageHealth(url, options);
+    checked.push({ url, result });
+    if (result.ok) return { selectedUrl: url, result, checked, attempts: checked.length };
+  }
+  const retryable = checked.find(item => item.result.retryable === true);
+  const fallback = retryable || checked[0];
+  return {
+    result: fallback?.result || { status: 'error', ok: false, retryable: false, reason: 'No image candidate' },
+    checked,
+    attempts: checked.length,
+  };
 }
 
 // ---- Source Preflight Check ----
@@ -89,6 +119,8 @@ export interface SourcePreflightResult {
 
 const LINK_CHECK_TIMEOUT_MS = 10_000;
 const IMAGE_CHECK_TIMEOUT_MS = 8_000;
+const MIN_PRODUCT_IMAGE_BYTES = 128;
+const MAX_PRODUCT_IMAGE_BYTES = 25 * 1024 * 1024;
 const INITIAL_FETCH = globalThis.fetch;
 const MAX_BODY_BYTES = 8_192; // 8KB — enough to detect error text, not download large files
 
@@ -266,6 +298,18 @@ function isValidHttpUrl(url: string): boolean {
   }
 }
 
+function responseContentLength(response: Response): number | undefined {
+  const parsed = Number(response.headers.get('content-length'));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function invalidImageSize(length: number | undefined): string | undefined {
+  if (length === undefined) return undefined;
+  if (length < MIN_PRODUCT_IMAGE_BYTES) return `Image payload too small: ${length} bytes`;
+  if (length > MAX_PRODUCT_IMAGE_BYTES) return `Image payload too large: ${length} bytes`;
+  return undefined;
+}
+
 function shouldForceGet(url: string): boolean {
   try {
     const hostname = new URL(url).hostname.toLowerCase();
@@ -349,7 +393,14 @@ function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: 
 /**
  * Map HTTP status code to LinkCheckResult for GET responses.
  */
-function classifyGetResponse(status: number): LinkCheckResult | null {
+function retryAfterIso(value: string | null, now = Date.now()): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  const timestamp = /^\d+$/.test(trimmed) ? now + Number(trimmed) * 1000 : Date.parse(trimmed);
+  return Number.isFinite(timestamp) && timestamp > now ? new Date(timestamp).toISOString() : undefined;
+}
+
+function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResult | null {
   if (PERMANENTLY_DEAD_CODES.has(status)) {
     return {
       status: 'broken', ok: false, retryable: false,
@@ -383,6 +434,7 @@ function classifyGetResponse(status: number): LinkCheckResult | null {
       status: 'rate_limited', ok: false, retryable: true,
       reason: 'HTTP 429 — Rate limit, cần thử lại sau 1 giờ',
       statusCode: status,
+      retryAfter,
     };
   }
   if (status >= 500) {
@@ -476,7 +528,7 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
     const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('GET'), options);
 
     // Check HTTP status
-    const statusResult = classifyGetResponse(getResponse.status);
+    const statusResult = classifyGetResponse(getResponse.status, retryAfterIso(getResponse.headers.get('retry-after')));
     if (statusResult) return statusResult;
 
     // Response is 2xx or 3xx — read limited body to check for error content
@@ -564,6 +616,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
       } else {
         headOk = true;
         headContentType = headResponse.headers.get('content-type');
+        const headContentLength = responseContentLength(headResponse);
 
         // Check content-type from HEAD
         if (headContentType && !headContentType.toLowerCase().startsWith('image/')) {
@@ -576,10 +629,21 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
         }
 
         if (headContentType && headContentType.toLowerCase().startsWith('image/')) {
+          const sizeError = invalidImageSize(headContentLength);
+          if (sizeError) {
+            return {
+              status: 'invalid_image', ok: false, retryable: false,
+              reason: sizeError,
+              contentType: headContentType,
+              contentLength: headContentLength,
+              statusCode: headResponse.status,
+            };
+          }
           return {
             status: 'ok', ok: true, retryable: false,
             reason: 'Image OK',
             contentType: headContentType,
+            contentLength: headContentLength,
             statusCode: headResponse.status,
           };
         }
@@ -651,6 +715,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
       }
 
       const contentType = getResponse.headers.get('content-type') ?? '';
+      const getContentLength = responseContentLength(getResponse);
 
       // Cancel body download — we only need headers
       try { getResponse.body?.cancel(); } catch { /* ignore */ }
@@ -666,10 +731,22 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
         };
       }
 
+      const sizeError = invalidImageSize(getContentLength);
+      if (sizeError) {
+        return {
+          status: 'invalid_image', ok: false, retryable: false,
+          reason: sizeError,
+          contentType,
+          contentLength: getContentLength,
+          statusCode: getResponse.status,
+        };
+      }
+
       return {
         status: 'ok', ok: true, retryable: false,
         reason: 'Image OK (GET)',
         contentType,
+        contentLength: getContentLength,
         statusCode: getResponse.status,
       };
     }

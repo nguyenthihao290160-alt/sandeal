@@ -1,4 +1,6 @@
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import { getAllProducts } from '@/lib/storage/products';
+import { summarizeRevenueIntegrity } from '@/lib/autonomous/revenueIntegrity';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import type { GrowthDaily, OutboundEvent } from './types';
 
@@ -88,8 +90,15 @@ function totals(recordMaps: Array<Record<string, number>>): Array<{ key: string;
 
 export async function getGrowthSummary(days = 30) {
   const safeDays = Math.max(1, Math.min(days, 365));
-  const cutoff = dayInVietnam(Date.now() - (safeDays - 1) * 86_400_000);
-  const daily = (await readCollection<GrowthDaily>(DAILY)).filter(item => item.day >= cutoff).sort((a, b) => a.day.localeCompare(b.day));
+  const now = Date.now();
+  const cutoffTime = now - safeDays * 86_400_000;
+  const cutoff = dayInVietnam(now - (safeDays - 1) * 86_400_000);
+  const [storedDaily, events, products] = await Promise.all([
+    readCollection<GrowthDaily>(DAILY),
+    listOutboundEvents(),
+    getAllProducts(),
+  ]);
+  const daily = storedDaily.filter(item => item.day >= cutoff).sort((a, b) => a.day.localeCompare(b.day));
   const views = daily.reduce((sum, item) => sum + item.views, 0);
   const clicks = daily.reduce((sum, item) => sum + item.clicks, 0);
   const listViews = daily.reduce((sum, item) => sum + (item.listViews || 0), 0);
@@ -111,6 +120,7 @@ export async function getGrowthSummary(days = 30) {
     topProducts: totals(daily.map(item => item.productClicks)).slice(0, 10),
     topSources: totals(daily.map(item => item.sourceClicks)).slice(0, 10),
     topContent: totals(daily.map(item => item.contentClicks)).slice(0, 10),
+    revenueIntegrity: summarizeRevenueIntegrity({ products, events, cutoff: cutoffTime, now }),
     revenueAvailable: false,
   };
 }
