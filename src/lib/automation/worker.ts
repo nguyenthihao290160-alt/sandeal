@@ -176,10 +176,24 @@ async function executeAutoPilotJob(
       completedSteps: pendingSteps.length ? completedSteps : [...completedSteps, 'cycle-summary'],
       pendingSteps,
       operationMode,
+      sourceStatus: scan.sourceStatus,
+      sourceReason: scan.reason,
+      sourceCheckedAt: new Date().toISOString(),
+      nextEligibleAt: scan.nextEligibleAt || null,
+      retryAfter: scan.retryAfter || null,
+      sourceMetrics: {
+        normalized: scan.normalized,
+        fastRejected: scan.rejected,
+        timeout: scan.timeout,
+        rateLimited: scan.rateLimited,
+        durationMs: scan.durationMs,
+      },
       summary: {
         sourceRequests: scan.sourceRequests,
         found: scan.found,
         queued: scan.queued,
+        normalized: scan.normalized,
+        rejected: scan.rejected,
         reviewed: 0,
         created: bridge?.created || 0,
         updated: bridge?.existing || 0,
@@ -207,7 +221,9 @@ async function executeLocalIntelligenceJob(job: AutomationJob): Promise<Record<s
       : 'LOCAL_RULES';
   return {
     ...output,
-    executionStatus: job.dryRun
+    executionStatus: output.executionStatus === 'PARTIALLY_COMPLETED'
+      ? 'PARTIALLY_COMPLETED'
+      : job.dryRun
       ? 'COMPLETED_WITH_LOCAL_RULES'
       : executionMode === 'LOCAL_TEMPLATE'
         ? 'COMPLETED_WITH_LOCAL_TEMPLATE'
@@ -450,12 +466,12 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
   const claimed = await claimAutomationJobs(workerId, limit);
   result.claimed = claimed.length;
 
-  for (const job of claimed) {
+  const processJob = async (job: AutomationJob): Promise<void> => {
     const freshControl = await getAutomationControl();
     if (freshControl.killSwitch && job.type !== 'RUNTIME_GUARDIAN') {
       await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.');
       result.skipped += 1;
-      continue;
+      return;
     }
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
     const heartbeat = setInterval(() => {
@@ -473,8 +489,8 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       });
       const output = await executeJob(job, workerId);
       const latest = await getAutomationJob(job.id);
-      if (latest?.status === 'CANCELLED') { result.skipped += 1; continue; }
-      if (latest?.status === 'WAITING_FOR_MANUAL_INPUT') { result.waitingManual += 1; continue; }
+      if (latest?.status === 'CANCELLED') { result.skipped += 1; return; }
+      if (latest?.status === 'WAITING_FOR_MANUAL_INPUT') { result.waitingManual += 1; return; }
       const rawMode = output.executionMode;
       const executionMode: ActualExecutionMode = ['API', 'LOCAL_RULES', 'LOCAL_TEMPLATE', 'MANUAL_INPUT', 'SHADOW_MODE'].includes(String(rawMode))
         ? rawMode as ActualExecutionMode
@@ -543,7 +559,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       if (outcomeStatus === 'PARTIALLY_COMPLETED' && pendingSteps.length) {
         const waiting = await waitAutomationJobForChildren(job.id, workerId, output);
         if (waiting) result.waitingChildren += 1; else result.skipped += 1;
-        continue;
+        return;
       }
       const completed = await completeAutomationJob(job.id, workerId, output);
       if (completed) result.succeeded += 1; else result.skipped += 1;
@@ -551,7 +567,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       const latest = await getAutomationJob(job.id);
       if (latest?.status === 'CANCELLED') {
         result.skipped += 1;
-        continue;
+        return;
       }
       await failAutomationJob(job.id, workerId, errorCode(error), error, {
         nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
@@ -561,6 +577,11 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       clearInterval(heartbeat);
       await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: undefined }, workerId);
     }
+  };
+  if (claimed.every(job => job.type === 'PROCESS_CANDIDATE')) {
+    await Promise.all(claimed.map(processJob));
+  } else {
+    for (const job of claimed) await processJob(job);
   }
   return result;
 }

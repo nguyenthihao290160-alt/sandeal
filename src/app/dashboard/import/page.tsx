@@ -28,7 +28,10 @@ const MAPPING_FIELDS = [
   ['category', 'Danh mục'],
   ['brand', 'Thương hiệu'],
   ['sku', 'SKU'],
+  ['sourceId', 'Mã nguồn'],
   ['externalId', 'Mã ngoài'],
+  ['merchant', 'Merchant / shop'],
+  ['observedAt', 'Thời điểm quan sát'],
 ] as const;
 
 type MappingField = (typeof MAPPING_FIELDS)[number][0];
@@ -105,7 +108,10 @@ function automaticMapping(headers: string[]): Partial<Record<MappingField, strin
     category: ['category', 'category_name'],
     brand: ['brand', 'manufacturer'],
     sku: ['sku', 'model'],
+    sourceId: ['sourceid', 'source_id'],
     externalId: ['externalid', 'external_id', 'product_id'],
+    merchant: ['merchant', 'merchant_name', 'shop_name'],
+    observedAt: ['observedat', 'observed_at', 'updated_at'],
   };
   const normalized = headers.map((header) => header.toLowerCase().replace(/[^a-z0-9_]/g, ''));
   return Object.fromEntries(MAPPING_FIELDS.flatMap(([field]) => {
@@ -121,6 +127,8 @@ function normalizePreview(value: ImportPreview | { preview?: ImportPreview }): I
 export default function ImportProductsPage() {
   const [activeTab, setActiveTab] = useState<'csv' | 'manual' | 'accesstrade'>('csv');
   const [fileName, setFileName] = useState('');
+  const [format, setFormat] = useState<'csv' | 'json'>('csv');
+  const [sourceApproved, setSourceApproved] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [csv, setCsv] = useState('');
   const [headers, setHeaders] = useState<string[]>([]);
@@ -144,8 +152,9 @@ export default function ImportProductsPage() {
     setPreview(null);
     setApplyResult(null);
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      setError('Vui lòng chọn tệp có phần mở rộng .csv.');
+    const nextFormat = file.name.toLowerCase().endsWith('.json') ? 'json' : file.name.toLowerCase().endsWith('.csv') ? 'csv' : null;
+    if (!nextFormat) {
+      setError('Vui lòng chọn tệp .csv hoặc .json.');
       return;
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -155,9 +164,12 @@ export default function ImportProductsPage() {
     setBusy('reading');
     try {
       const text = await file.text();
-      const nextHeaders = readHeader(text.replace(/^\uFEFF/, ''));
-      if (!nextHeaders.length) throw new Error('Tệp không có hàng tiêu đề hợp lệ.');
+      const nextHeaders = nextFormat === 'csv' ? readHeader(text.replace(/^\uFEFF/, '')) : [];
+      if (nextFormat === 'csv' && !nextHeaders.length) throw new Error('Tệp không có hàng tiêu đề hợp lệ.');
+      if (nextFormat === 'json') JSON.parse(text.replace(/^\uFEFF/, ''));
       setFileName(file.name);
+      setFormat(nextFormat);
+      setSourceApproved(false);
       setCsv(text.replace(/^\uFEFF/, ''));
       setHeaders(nextHeaders);
       setMapping(automaticMapping(nextHeaders));
@@ -196,7 +208,7 @@ export default function ImportProductsPage() {
       const result = await dashboardRequest<ImportPreview | { preview?: ImportPreview }>('/api/dashboard/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'preview', csv, mapping }),
+        body: JSON.stringify({ mode: 'preview', format, content: csv, mapping }),
       });
       setPreview(normalizePreview(result));
     } catch (issue) {
@@ -219,6 +231,8 @@ export default function ImportProductsPage() {
           mode: 'apply',
           previewId: preview.previewId,
           idempotencyKey: `csv-import:${crypto.randomUUID()}`,
+          approvedSource: sourceApproved,
+          ownerConfirmed: sourceApproved,
         }),
       });
       setApplyResult(result);
@@ -274,12 +288,12 @@ export default function ImportProductsPage() {
         icon="import"
         eyebrow="Sản phẩm"
         title="Nhập sản phẩm"
-        description="Kiểm tra tệp CSV theo từng dòng trước khi đưa các dòng hợp lệ vào hàng chờ bền vững. Dữ liệu nhập không được tự động công khai."
+        description="Kiểm tra datafeed CSV/JSON theo từng dòng trước khi đưa các dòng hợp lệ vào candidate queue và durable worker. Dữ liệu nhập không được tự động công khai."
         meta={<><StatusBadge tone="success">UTF-8</StatusBadge><StatusBadge tone="info">Xem trước trước khi áp dụng</StatusBadge><StatusBadge tone="warning">Không tự đăng</StatusBadge></>}
       />
 
       <div className={styles.tabs} role="group" aria-label="Phương thức nhập sản phẩm">
-        <button type="button" className={styles.tab} aria-pressed={activeTab === 'csv'} onClick={() => setActiveTab('csv')}><DashboardIcon name="import" size={16} />CSV</button>
+        <button type="button" className={styles.tab} aria-pressed={activeTab === 'csv'} onClick={() => setActiveTab('csv')}><DashboardIcon name="import" size={16} />CSV / JSON</button>
         <button type="button" className={styles.tab} aria-pressed={activeTab === 'manual'} onClick={() => setActiveTab('manual')}><DashboardIcon name="external" size={16} />URL thủ công</button>
         <button type="button" className={styles.tab} aria-pressed={activeTab === 'accesstrade'} onClick={() => setActiveTab('accesstrade')}><DashboardIcon name="source" size={16} />AccessTrade</button>
       </div>
@@ -288,13 +302,13 @@ export default function ImportProductsPage() {
         {error && <DashboardState kind="error" title="Không thể xử lý tệp" description={error} />}
 
       <div className={styles.twoColumns}>
-        <Panel title="1. Chọn tệp CSV" icon="import" description="Tệp chỉ được đọc trong trình duyệt và gửi để kiểm tra; SanDeal không lưu tệp upload lâu dài.">
+        <Panel title="1. Chọn datafeed đã được phép" icon="import" description="Tệp chỉ được đọc trong trình duyệt và gửi để kiểm tra; SanDeal không lưu raw upload lâu dài.">
           <div className={styles.panelBody}>
             <label className={`${styles.fileInput} ${dragActive ? styles.fileInputActive : ''}`} onDragOver={(event) => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={handleDrop}>
               <DashboardIcon name="import" size={28} />
               <strong>{fileName || 'Kéo thả hoặc chọn tệp dữ liệu UTF-8'}</strong>
               <span>Tối đa 2 MB. Một dòng lỗi không làm dừng toàn bộ tệp.</span>
-              <input type="file" accept=".csv,text/csv" disabled={Boolean(busy)} onChange={(event) => void chooseFile(event.target.files?.[0])} />
+              <input type="file" accept=".csv,.json,text/csv,application/json" disabled={Boolean(busy)} onChange={(event) => void chooseFile(event.target.files?.[0])} />
             </label>
             <div className={styles.buttonRow}><button type="button" className={styles.secondaryButton} onClick={downloadTemplate}><DashboardIcon name="import" size={16} />Tải mẫu CSV</button></div>
             <details><summary>Hướng dẫn cột</summary><dl>{MAPPING_FIELDS.map(([field, label]) => <div key={field}><dt>{field}</dt><dd>{label}</dd></div>)}</dl></details>
@@ -303,7 +317,7 @@ export default function ImportProductsPage() {
         </Panel>
 
         <Panel title="2. Ánh xạ cột" icon="compare" description="SanDeal tự nhận diện tên cột phổ biến; bạn có thể sửa trước khi xem trước.">
-          {headers.length === 0 ? <div className={styles.panelBody}><DashboardState kind="empty" title="Chưa có cột để ánh xạ" description="Chọn tệp CSV hợp lệ để đọc hàng tiêu đề." /></div> : (
+          {format === 'json' && csv ? <div className={styles.panelBody}><div className={styles.notice}><DashboardIcon name="check" size={18} /><span>JSON dùng alias field chuẩn và không cần ánh xạ cột thủ công.</span></div><div className={styles.buttonRow}><button type="button" className={styles.primaryButton} disabled={!csv || Boolean(busy)} onClick={() => void runPreview()}><DashboardIcon name="search" size={16} />{busy === 'preview' ? 'Đang kiểm tra' : 'Xem trước và kiểm tra'}</button></div></div> : headers.length === 0 ? <div className={styles.panelBody}><DashboardState kind="empty" title="Chưa có cột để ánh xạ" description="Chọn tệp CSV hợp lệ để đọc hàng tiêu đề." /></div> : (
             <div className={styles.formGrid}>
               {MAPPING_FIELDS.map(([field, label]) => (
                 <label className={styles.formField} key={field}>
@@ -339,9 +353,11 @@ export default function ImportProductsPage() {
             title="3. Kết quả kiểm tra từng dòng"
             icon="list"
             description={`Hiển thị tối đa ${Math.min(50, visibleRows.length)} dòng trong bản xem trước.`}
-            actions={<button type="button" className={styles.primaryButton} disabled={!preview.validRows || Boolean(busy) || Boolean(applyResult)} onClick={() => void applyImport()}>{busy === 'apply' ? 'Đang tạo tác vụ' : 'Nhập các dòng hợp lệ'}</button>}
+            actions={<button type="button" className={styles.primaryButton} disabled={!preview.validRows || !sourceApproved || Boolean(busy) || Boolean(applyResult)} onClick={() => void applyImport()}>{busy === 'apply' ? 'Đang tạo tác vụ' : 'Nhập các dòng hợp lệ'}</button>}
           >
             <div className={`${styles.notice} ${styles.noticeWarning}`}><DashboardIcon name="warning" size={17} /><span>Áp dụng chỉ tạo tác vụ nền. Không có sản phẩm nào được public hoặc bulk publish từ màn hình này.</span></div>
+            <label className={styles.formField}><span><input type="checkbox" checked={sourceApproved} onChange={event => setSourceApproved(event.target.checked)} /> Tôi xác nhận file này đến từ nguồn đối tác được phép và có quyền sử dụng dữ liệu.</span></label>
+            {preview.rejectionReportUrl && <div className={styles.buttonRow}><a className={styles.secondaryButton} href={preview.rejectionReportUrl}>Tải rejection report</a></div>}
             <div className={styles.tableWrap}>
               <table className={styles.table}>
                 <thead><tr><th>Dòng</th><th>Kết quả</th><th>Hành động</th><th>Dữ liệu nhận diện</th><th>Lỗi / cảnh báo</th></tr></thead>

@@ -67,6 +67,16 @@ export interface AccessTradeAdapterDependencies {
   getBudget?: () => Promise<SourceBudget>;
 }
 
+function assertLoopbackMockUrl(value: string): URL {
+  if (process.env.NODE_ENV !== 'test') throw new Error('MOCK_SOURCE_TEST_ONLY');
+  const url = new URL(value);
+  const hostname = url.hostname.toLowerCase();
+  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname) || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('MOCK_SOURCE_LOOPBACK_REQUIRED');
+  }
+  return url;
+}
+
 export interface SourceAdapterPlatformDisclosure {
   id: string;
   version: string;
@@ -232,8 +242,48 @@ export function createAccessTradeSourceAdapter(dependencies: AccessTradeAdapterD
   };
 }
 
+/** Test-only adapter used by the full-stack smoke. It cannot target a remote host. */
+export function createLoopbackMockSourceAdapter(endpoint: string): ProductSourceAdapter<NormalizedAccessTradeItem, NormalizedAccessTradeItem> {
+  const baseUrl = assertLoopbackMockUrl(endpoint);
+  return {
+    id: 'accesstrade',
+    version: 'loopback-mock-source-v1',
+    async isConfigured() { return true; },
+    async healthCheck() {
+      return { status: 'ready', configured: true, ready: true, checkedAt: new Date().toISOString(), reason: 'loopback_mock_source' };
+    },
+    async discover(input) {
+      const url = new URL(baseUrl);
+      url.searchParams.set('keyword', input.keyword.slice(0, 160));
+      url.searchParams.set('limit', String(Math.max(1, Math.min(50, Math.floor(input.limit || 1)))));
+      const response = await fetch(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(2_000) });
+      if (!response.ok) throw new Error(`MOCK_SOURCE_HTTP_${response.status}`);
+      const body = await response.json() as { items?: unknown };
+      if (!Array.isArray(body.items)) throw new Error('MOCK_SOURCE_INVALID_RESPONSE');
+      const items = body.items.filter((item): item is NormalizedAccessTradeItem => Boolean(item && typeof item === 'object'));
+      return { items, requests: 0, outcomes: { [items.length ? 'success_with_results' : 'success_empty']: 1 } };
+    },
+    normalize(item) {
+      const safe = { ...item };
+      delete safe.rawData;
+      return safe;
+    },
+    async budget() { return { maximumRequests: 2_000, usedRequests: 0, remainingRequests: 2_000 }; },
+    classifyError(error) {
+      return /timeout|abort/i.test(error instanceof Error ? `${error.name}:${error.message}` : String(error)) ? 'degraded' : 'last_check_failed';
+    },
+    retryAfter() { return undefined; },
+    disclosure() {
+      return { id: 'accesstrade', version: 'loopback-mock-source-v1', providerType: 'test-fixture', credentialExposed: false, loopbackOnly: true };
+    },
+  };
+}
+
 export function createDefaultSourceAdapterRegistry(dependencies: { accessTrade?: AccessTradeAdapterDependencies } = {}): SourceAdapterRegistry {
   const registry = new SourceAdapterRegistry();
-  registry.register(createAccessTradeSourceAdapter(dependencies.accessTrade));
+  const mockEndpoint = process.env.NODE_ENV === 'test' ? process.env.SANDEAL_MOCK_SOURCE_URL?.trim() : '';
+  registry.register(mockEndpoint && !dependencies.accessTrade
+    ? createLoopbackMockSourceAdapter(mockEndpoint)
+    : createAccessTradeSourceAdapter(dependencies.accessTrade));
   return registry;
 }

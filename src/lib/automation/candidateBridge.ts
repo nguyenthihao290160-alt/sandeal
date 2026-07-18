@@ -18,10 +18,12 @@ export async function bridgeCandidatesToDurableJobs(input: {
   parentJobId?: string;
   requestedBy?: string;
   limit?: number;
+  candidateIds?: string[];
 } = {}): Promise<CandidateBridgeResult> {
   const limit = Math.max(1, Math.min(100, Math.floor(input.limit || 25)));
+  const requestedIds = input.candidateIds?.length ? new Set(input.candidateIds.slice(0, 100)) : null;
   const candidates = (await listCandidateQueue())
-    .filter(item => ['pending', 'delayed', 'needs_review', 'failed'].includes(item.status))
+    .filter(item => ['pending', 'delayed', 'needs_review', 'failed'].includes(item.status) && (!requestedIds || requestedIds.has(item.id)))
     .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
     .slice(0, limit);
   const result: CandidateBridgeResult = { inspected: candidates.length, created: 0, existing: 0, skipped: 0, jobs: [] };

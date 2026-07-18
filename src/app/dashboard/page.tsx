@@ -13,6 +13,7 @@ type OnboardingStep = { id: string; title: string; status: 'NOT_STARTED' | 'IN_P
 type OnboardingRecommendation = Pick<OnboardingStep, 'id' | 'title' | 'reason' | 'route' | 'cta' | 'status'>;
 type JobDiagnostic = { id: string; type: string; status: string; outcomeStatus: string | null; updatedAt: string; nextRetryAt: string | null; lastErrorCode: string | null; lastErrorMessage: string | null; reasons: string[]; schemaVersion: number; policyVersion: string; handlerVersion: string };
 type RoleDiagnostic = { processStatus: string; activeRole: boolean; roleState: string; owner: string | null; instanceId: string | null; heartbeatAt: string | null; acquiredAt: string | null; leaseAgeMs: number | null; expiresAt: string | null; fencingToken: number | null; takeoverCount: number };
+type KeywordYield = { keyword: string; requests: number; found: number; valid: number; ready: number; published: number; noResult: number; timeout: number; rateLimited: number; costPerValidCandidate: number | null; lastUsedAt?: string; nextEligibleAt?: string };
 type DashboardData = {
   updatedAt: string; range: Range;
   kpis: { productsProcessed: number; running: number; waiting: number; waitingApproval: number; completionRate: number | null; systemErrors: number };
@@ -34,6 +35,13 @@ type DashboardData = {
   jobs: { productScan: JobDiagnostic | null; autoPilot: JobDiagnostic | null; runtimeGuardian: JobDiagnostic | null; latestError: JobDiagnostic | null };
   providers: Array<{ id: string; status: string; configured: boolean | null; ready: boolean; degraded: boolean; checkedAt: string | null }>;
   business: { publicProducts: number; freshPrice: number; stalePrice: number; healthyAffiliateLinks: number; brokenLinks: number; outboundClicks: number; degradedProviders: string[] };
+  inventory: {
+    diagnostic: { primaryBlocker: string; secondaryBlockers: string[]; sourceStatus: string; sourceReason: string; publicProductCount: number; totalProductRecords: number; readyForLaunchCount: number; publishBlockedCount: number; quarantineCount: number; duplicateCount: number; invalidCount: number; nextAutomaticAction: string; recommendedOperatorAction: string };
+    launchReady: { totalReady: number; readyByCategory: Record<string, number>; readyByMerchant: Record<string, number>; readyByKeyword: Record<string, number>; blockedByReason: Record<string, number>; oldestReady: string | null; newestReady: string | null; estimatedWaveCount: number; targetPublicCount: number; targetReadyProducts: number; progressToTarget: number | null; currentPublicCount: number };
+    bootstrap: { profile: 'BOOTSTRAP_LAUNCH'; changes: Array<{ field: string; current: unknown; proposed: unknown }>; estimatedThroughput: { scheduledCyclesPerDay: number; maximumCandidatesPerRun: number; maximumCandidatesPerDay: number; bootstrapCandidatePoolPerScan: number; reviewBatchPerCycle: number; targetReadyProducts: number; firstPublicTarget: number; estimateOnly: true }; warnings: string[] };
+    keywords: { top: KeywordYield[]; poor: KeywordYield[]; total: number };
+    processing: { processingRatePerMinute: number | null; averageCandidateDurationMs: number | null; queueWaitP50: number | null; queueWaitP95: number | null; networkFailureRate: number | null; validToReadyRate: number | null; readyToPublishedRate: number | null; topBlockReasons: Record<string, number>; sampleSize: number };
+  };
   recentActivity: Array<{ id: string; operationId: string; type: string; status: string; requestedBy: string; riskLevel: string; updatedAt: string; durationMs: number | null }>;
   zeroData: boolean;
   onboarding: { compact: boolean; summary: { completed: number; total: number; blocked: number; inProgress: number }; steps: OnboardingStep[]; recommendations: OnboardingRecommendation[]; updatedAt: string };
@@ -88,7 +96,7 @@ function JobDiagnosticCard({ title, job }: { title: string; job: JobDiagnostic |
 
 function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, runDry, submitting }: {
   data: DashboardData; selectedMode: string; setSelectedMode: (mode: string) => void;
-  openControl: (input: { action: string; title: string; danger?: boolean; mode?: string }) => void;
+  openControl: (input: { action: string; title: string; danger?: boolean; mode?: string; profile?: string }) => void;
   runDry: () => void; submitting: boolean;
 }) {
   const pipelineMetrics: Array<[string, string | number]> = [
@@ -103,7 +111,37 @@ function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, ru
     ['Provider suy giảm', data.business.degradedProviders.length],
   ];
   const paused = data.control.schedulerPaused || data.control.publishPaused;
+  const topBlockers = Object.entries(data.inventory.launchReady.blockedByReason).slice(0, 5);
   return <>
+    <section className={styles.metricGroups} aria-label="Chẩn đoán kho sản phẩm ra mắt">
+      <article className={styles.panel}>
+        <div className={styles.panelHeader}><div><h2><DashboardIcon name="warning" size={19} />Vì sao website chưa có sản phẩm?</h2><p>Chẩn đoán server-side từ source, queue, worker, sản phẩm và cổng publish.</p></div></div>
+        <dl className={styles.details}>
+          <div><dt>Chặn chính</dt><dd>{data.inventory.diagnostic.primaryBlocker}</dd></div>
+          <div><dt>Nguồn</dt><dd>{data.inventory.diagnostic.sourceStatus}</dd></div>
+          <div><dt>Public / tổng record</dt><dd>{data.inventory.diagnostic.publicProductCount} / {data.inventory.diagnostic.totalProductRecords}</dd></div>
+          <div><dt>Sẵn sàng / bị chặn</dt><dd>{data.inventory.diagnostic.readyForLaunchCount} / {data.inventory.diagnostic.publishBlockedCount}</dd></div>
+          <div><dt>Quarantine / trùng / lỗi</dt><dd>{data.inventory.diagnostic.quarantineCount} / {data.inventory.diagnostic.duplicateCount} / {data.inventory.diagnostic.invalidCount}</dd></div>
+        </dl>
+        {data.inventory.diagnostic.secondaryBlockers.length > 0 && <p className={styles.reasonText}>Chặn phụ: {data.inventory.diagnostic.secondaryBlockers.join(' · ')}</p>}
+        <p className={styles.degradedNotice}>{data.inventory.diagnostic.recommendedOperatorAction}</p>
+      </article>
+      <article className={styles.panel}>
+        <div className={styles.panelHeader}><div><h2><DashboardIcon name="product" size={19} />Kho sản phẩm sẵn sàng ra mắt</h2><p>Target là mục tiêu vận hành, không phải số liệu đã đạt.</p></div></div>
+        <dl className={styles.details}>
+          <div><dt>Sẵn sàng / target</dt><dd>{data.inventory.launchReady.totalReady} / {data.inventory.launchReady.targetReadyProducts}</dd></div>
+          <div><dt>Tiến độ</dt><dd>{data.inventory.launchReady.progressToTarget === null ? 'Chưa có dữ liệu' : `${data.inventory.launchReady.progressToTarget}%`}</dd></div>
+          <div><dt>Public target đầu</dt><dd>{data.inventory.launchReady.targetPublicCount}</dd></div>
+          <div><dt>Số wave ước tính</dt><dd>{data.inventory.launchReady.estimatedWaveCount}</dd></div>
+        </dl>
+        {topBlockers.length ? <p className={styles.reasonText}>Blocker nhiều nhất: {topBlockers.map(([reason, count]) => `${reason} (${count})`).join(' · ')}</p> : <p className={styles.mutedText}>Chưa có blocker sản phẩm được ghi nhận.</p>}
+        <div className={styles.advancedActions}><button type="button" onClick={() => openControl({ action: 'apply_bootstrap_profile', profile: 'BOOTSTRAP_LAUNCH', title: 'Áp dụng BOOTSTRAP_LAUNCH', danger: true })}>Xem và xác nhận profile bootstrap</button></div>
+      </article>
+    </section>
+    <section className={styles.metricGroups} aria-label="Hiệu suất từ khóa">
+      <article className={styles.panel}><div className={styles.panelHeader}><div><h2>Top keyword</h2><p>Ưu tiên theo valid rate, launch-ready rate và chi phí request/candidate.</p></div></div>{data.inventory.keywords.top.length ? <div className={styles.metricList}>{data.inventory.keywords.top.map(item => <div key={item.keyword}><span>{item.keyword}</span><strong>{item.ready}/{item.valid} ready</strong></div>)}</div> : <p className={styles.mutedText}>Chưa đủ dữ liệu keyword để xếp hạng.</p>}</article>
+      <article className={styles.panel}><div className={styles.panelHeader}><div><h2>Keyword kém hiệu quả</h2><p>Không suy diễn khi chưa có request thực tế.</p></div></div>{data.inventory.keywords.poor.length ? <div className={styles.metricList}>{data.inventory.keywords.poor.map(item => <div key={item.keyword}><span>{item.keyword}</span><strong>{item.noResult} lần 0 kết quả</strong></div>)}</div> : <p className={styles.mutedText}>Chưa đủ dữ liệu keyword để đánh giá.</p>}</article>
+    </section>
     <section className={styles.operationsGrid} aria-label="Trạng thái vận hành thực tế">
       <article className={styles.panel}>
         <div className={styles.panelHeader}><div><h2><DashboardIcon name="health" size={19} />Runtime</h2><p>Trạng thái tiến trình và vai trò chủ động là hai tín hiệu riêng.</p></div></div>
@@ -190,7 +228,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
-  const [pendingControl, setPendingControl] = useState<{ action: string; title: string; danger?: boolean; mode?: string } | null>(null);
+  const [pendingControl, setPendingControl] = useState<{ action: string; title: string; danger?: boolean; mode?: string; profile?: string } | null>(null);
   const [selectedMode, setSelectedMode] = useState('SHADOW');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -231,7 +269,7 @@ export default function DashboardPage() {
     if (!pendingControl || reason.trim().length < 8) return;
     setSubmitting(true);
     try {
-      const response = await fetch('/api/automation/control', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: pendingControl.action, mode: pendingControl.mode, reason: reason.trim(), confirmed: pendingControl.danger === true }) });
+      const response = await fetch('/api/automation/control', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: pendingControl.action, mode: pendingControl.mode, profile: pendingControl.profile, reason: reason.trim(), confirmed: pendingControl.danger === true, confirmedAt: pendingControl.danger === true ? new Date().toISOString() : undefined }) });
       const body = await response.json() as Envelope<unknown>; if (!response.ok || !body.ok) throw new Error(body.message);
       notify(body.message); setPendingControl(null); setReason(''); await load();
     } catch (issue) { notify(issue instanceof Error ? issue.message : 'Không thể cập nhật trạng thái vận hành.'); } finally { setSubmitting(false); }

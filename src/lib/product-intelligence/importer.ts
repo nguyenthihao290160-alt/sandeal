@@ -1,4 +1,6 @@
 import { createHash } from 'crypto';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import type { Product, ProductPlatform, ProductSource } from '@/lib/types';
 import { getAllProducts, upsertCanonicalProduct } from '@/lib/storage/products';
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
@@ -6,6 +8,9 @@ import { normalizePlatformFromUrl } from '@/lib/productScoring';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import type { ImportPreview, ImportRowResult, ManualUrlPreview, PendingManualSource } from './types';
 import { validateExternalUrl } from './urlSafety';
+import { enqueueCandidate, type CandidatePayload, type CandidateQueueItem } from '@/lib/storage/candidateQueue';
+import { scoreCandidateReadiness } from '@/lib/bots/candidateReadiness';
+import { bridgeCandidatesToDurableJobs } from '@/lib/automation/candidateBridge';
 
 const STAGING_COLLECTION = 'import-batches';
 const PENDING_MANUAL_COLLECTION = 'pending-manual-sources';
@@ -13,16 +18,23 @@ const STAGING_TTL_MS = 2 * 60 * 60_000;
 const MAX_PENDING_MANUAL_SOURCES = 1_000;
 const FIELDS = [
   'title', 'originalUrl', 'affiliateUrl', 'imageUrl', 'price', 'salePrice', 'platform',
-  'source', 'category', 'brand', 'sku', 'externalId',
+  'source', 'category', 'brand', 'sku', 'sourceId', 'externalId', 'merchant', 'observedAt',
 ] as const;
 type ImportField = typeof FIELDS[number];
 
 interface ImportBatch {
   id: string;
   rows: Array<{ row: number; action: 'create' | 'update'; normalized: Partial<Product> }>;
+  format?: 'csv' | 'json';
   createdAt: string;
   expiresAt: string;
   digest: string;
+}
+
+export interface ImportApplyContext {
+  parentJobId?: string;
+  requestedBy?: string;
+  approvedSource?: boolean;
 }
 
 const PLATFORMS = new Set<ProductPlatform>(['shopee', 'tiktok_shop', 'lazada', 'accesstrade', 'website', 'other']);
@@ -116,7 +128,7 @@ function likelyDuplicate(normalized: Partial<Product>, products: Product[]): Pro
   return undefined;
 }
 
-function normalizeRow(row: string[], rowNumber: number, indexes: Record<ImportField, number>, products: Product[]): ImportRowResult {
+function normalizeRow(row: string[], rowNumber: number, indexes: Record<ImportField, number>, products: Product[], strictDatafeed = false): ImportRowResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   const title = neutralizeCsvFormula(valueAt(row, indexes, 'title')).slice(0, 240);
@@ -140,6 +152,19 @@ function normalizeRow(row: string[], rowNumber: number, indexes: Record<ImportFi
   if (salePriceRaw && salePrice === undefined) errors.push('sale_price_invalid');
   if (price !== undefined && salePrice !== undefined && salePrice > price) warnings.push('sale_price_above_original');
 
+  const sourceId = neutralizeCsvFormula(valueAt(row, indexes, 'sourceId')).slice(0, 160);
+  const externalId = neutralizeCsvFormula(valueAt(row, indexes, 'externalId')).slice(0, 160);
+  const observedAtRaw = valueAt(row, indexes, 'observedAt');
+  const observedAt = observedAtRaw && Number.isFinite(Date.parse(observedAtRaw)) ? new Date(observedAtRaw).toISOString() : undefined;
+  if (observedAtRaw && !observedAt) errors.push('observed_at_invalid');
+  if (strictDatafeed) {
+    if (title.length < 8) errors.push('title_not_specific');
+    if (!rawOriginalUrl) errors.push('product_url_required');
+    if (!rawImageUrl) errors.push('image_url_required');
+    if (!(Number(salePrice || price) > 0)) errors.push('price_required');
+    if (!sourceId && !externalId) errors.push('source_id_required');
+  }
+
   const platformRaw = valueAt(row, indexes, 'platform').toLowerCase() as ProductPlatform;
   const sourceRaw = valueAt(row, indexes, 'source').toLowerCase() as ProductSource;
   if (platformRaw && !PLATFORMS.has(platformRaw)) errors.push('platform_invalid');
@@ -159,7 +184,10 @@ function normalizeRow(row: string[], rowNumber: number, indexes: Record<ImportFi
     category: neutralizeCsvFormula(valueAt(row, indexes, 'category')).slice(0, 120) || undefined,
     brand: neutralizeCsvFormula(valueAt(row, indexes, 'brand')).slice(0, 120) || undefined,
     sku: neutralizeCsvFormula(valueAt(row, indexes, 'sku')).slice(0, 120) || undefined,
-    externalId: neutralizeCsvFormula(valueAt(row, indexes, 'externalId')).slice(0, 160) || undefined,
+    sourceId: sourceId || externalId || undefined,
+    externalId: externalId || sourceId || undefined,
+    lastSeenAt: observedAt,
+    priceObservedAt: observedAt && Number(salePrice || price) > 0 ? observedAt : undefined,
     tags: [],
     benefits: [],
     warnings: [],
@@ -185,7 +213,7 @@ function normalizeRow(row: string[], rowNumber: number, indexes: Record<ImportFi
   };
 }
 
-async function storeBatch(rows: ImportRowResult[], digest: string): Promise<ImportBatch> {
+async function storeBatch(rows: ImportRowResult[], digest: string, format: 'csv' | 'json' = 'csv'): Promise<ImportBatch> {
   const now = Date.now();
   const batch: ImportBatch = {
     id: generateId(),
@@ -195,6 +223,7 @@ async function storeBatch(rows: ImportRowResult[], digest: string): Promise<Impo
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + STAGING_TTL_MS).toISOString(),
     digest,
+    format,
   };
   await runTransaction<ImportBatch>(STAGING_COLLECTION, items => [
     ...items.filter(item => Date.parse(item.expiresAt) > now && item.digest !== digest).slice(-19),
@@ -203,18 +232,51 @@ async function storeBatch(rows: ImportRowResult[], digest: string): Promise<Impo
   return batch;
 }
 
-export async function previewCsvImport(
-  csv: string,
-  mapping: Partial<Record<ImportField, string>> = {},
+function rejectionDirectory(): string {
+  return path.resolve(process.cwd(), '.test-tmp', 'import-rejections');
+}
+
+async function writeRejectionReport(previewId: string, rows: ImportRowResult[]): Promise<string | null> {
+  const rejected = rows.filter(row => !row.valid || row.action === 'duplicate');
+  if (!rejected.length) return null;
+  const directory = rejectionDirectory();
+  await fs.mkdir(directory, { recursive: true });
+  const file = path.join(directory, `${previewId}.csv`);
+  const output = [
+    'row,action,errors,warnings',
+    ...rejected.map(row => [row.row, row.action, row.errors.join('|'), row.warnings.join('|')].map(escapeCsvCell).join(',')),
+  ].join('\r\n');
+  await fs.writeFile(file, `\uFEFF${output}\r\n`, { encoding: 'utf8', flag: 'wx' }).catch(async error => {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  });
+  return `/api/dashboard/import?report=${encodeURIComponent(previewId)}`;
+}
+
+export function getImportRejectionReportPath(previewId: string): string | null {
+  if (!/^[a-z0-9-]{8,160}$/i.test(previewId)) return null;
+  const directory = rejectionDirectory();
+  const file = path.resolve(directory, `${previewId}.csv`);
+  return file.startsWith(`${directory}${path.sep}`) ? file : null;
+}
+
+async function previewParsedRows(
+  parsed: string[][],
+  mapping: Partial<Record<ImportField, string>>,
+  format: 'csv' | 'json',
+  strictDatafeed: boolean,
 ): Promise<ImportPreview> {
-  const parsed = parseCsv(csv);
-  if (parsed.length < 2) throw new Error('CSV_HAS_NO_DATA');
+  if (parsed.length < 2) throw new Error(`${format.toUpperCase()}_HAS_NO_DATA`);
   const products = await getAllProducts();
   const indexes = headerIndexes(parsed[0], mapping);
-  if (indexes.title < 0) throw new Error('CSV_TITLE_COLUMN_REQUIRED');
-  const rows = parsed.slice(1).map((row, index) => normalizeRow(row, index + 2, indexes, products));
+  if (indexes.title < 0) throw new Error(`${format.toUpperCase()}_TITLE_COLUMN_REQUIRED`);
+  const rows = parsed.slice(1).map((row, index) => normalizeRow(row, index + 2, indexes, products, strictDatafeed));
+  return finalizePreview(rows, format);
+}
+
+async function finalizePreview(rows: ImportRowResult[], format: 'csv' | 'json'): Promise<ImportPreview> {
   const digest = createHash('sha256').update(JSON.stringify(rows.map(row => row.normalized || row.errors))).digest('hex');
-  const batch = await storeBatch(rows, digest);
+  const batch = await storeBatch(rows, digest, format);
+  const rejectionReportUrl = await writeRejectionReport(batch.id, rows);
   return {
     previewId: batch.id,
     expiresAt: batch.expiresAt,
@@ -226,8 +288,78 @@ export async function previewCsvImport(
     updates: rows.filter(row => row.action === 'update').length,
     suspectedDuplicates: rows.filter(row => row.action === 'duplicate').length,
     truncated: rows.length > CONFIG.limits.csvPreviewRows,
+    format,
+    rejectionReportUrl,
     publicSideEffect: false,
   };
+}
+
+export async function previewCsvImport(
+  csv: string,
+  mapping: Partial<Record<ImportField, string>> = {},
+): Promise<ImportPreview> {
+  const parsed = parseCsv(csv);
+  return previewParsedRows(parsed, mapping, 'csv', false);
+}
+
+const JSON_ALIASES: Record<ImportField, string[]> = {
+  title: ['title', 'name', 'productName', 'product_name'],
+  originalUrl: ['originalUrl', 'original_url', 'productUrl', 'product_url', 'url'],
+  affiliateUrl: ['affiliateUrl', 'affiliate_url', 'trackingUrl', 'tracking_url'],
+  imageUrl: ['imageUrl', 'image_url', 'image', 'thumbnail'],
+  price: ['price', 'originalPrice', 'original_price'], salePrice: ['salePrice', 'sale_price', 'currentPrice', 'current_price'],
+  platform: ['platform', 'marketplace'], source: ['source', 'provider'], category: ['category', 'categoryName', 'category_name'],
+  brand: ['brand', 'manufacturer'], sku: ['sku', 'model'], sourceId: ['sourceId', 'source_id'], externalId: ['externalId', 'external_id', 'productId', 'product_id'],
+  merchant: ['merchant', 'merchantName', 'merchant_name', 'shopName', 'shop_name'], observedAt: ['observedAt', 'observed_at', 'updatedAt', 'updated_at'],
+};
+
+function jsonRows(content: string): Array<{ row: number; values?: string[]; error?: 'json_row_invalid' | 'json_field_type_invalid' }> {
+  if (Buffer.byteLength(content, 'utf8') > CONFIG.limits.csvBytes) throw new Error('JSON_TOO_LARGE');
+  let parsed: unknown;
+  try { parsed = JSON.parse(content.replace(/^\uFEFF/, '')); } catch { throw new Error('JSON_INVALID'); }
+  const root = objectRecord(parsed);
+  const records = Array.isArray(parsed) ? parsed : root.products;
+  if (!Array.isArray(parsed) && (!Object.keys(root).length || !Array.isArray(root.products))) throw new Error('JSON_ROOT_INVALID');
+  if (!Array.isArray(records) || !records.length) throw new Error('JSON_HAS_NO_DATA');
+  if (records.length > CONFIG.limits.csvRows) throw new Error('JSON_TOO_MANY_ROWS');
+  return records.map((value, index) => {
+    const record = objectRecord(value);
+    if (!Object.keys(record).length || ['__proto__', 'prototype', 'constructor'].some(key => Object.prototype.hasOwnProperty.call(record, key))) {
+      return { row: index + 1, error: 'json_row_invalid' };
+    }
+    let invalidFieldType = false;
+    const values = FIELDS.map(field => {
+      const alias = JSON_ALIASES[field].find(key => record[key] !== undefined && record[key] !== null);
+      const item = alias ? record[alias] : '';
+      if (item !== '' && !['string', 'number'].includes(typeof item)) { invalidFieldType = true; return ''; }
+      return String(item ?? '').slice(0, 2_048);
+    });
+    return invalidFieldType ? { row: index + 1, error: 'json_field_type_invalid' } : { row: index + 1, values };
+  });
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+export async function previewApprovedDatafeed(
+  content: string,
+  format: 'csv' | 'json',
+  mapping: Partial<Record<ImportField, string>> = {},
+): Promise<ImportPreview> {
+  if (!['csv', 'json'].includes(format)) throw new Error('IMPORT_FORMAT_UNSUPPORTED');
+  if (format === 'csv') return previewParsedRows(parseCsv(content), mapping, format, true);
+  const parsed = jsonRows(content);
+  const products = await getAllProducts();
+  const indexes = headerIndexes(FIELDS.map(String), {});
+  const rows: ImportRowResult[] = parsed.map(item => item.error ? {
+    row: item.row,
+    valid: false,
+    errors: [item.error],
+    warnings: [],
+    action: 'skip',
+  } : normalizeRow(item.values || [], item.row, indexes, products, true));
+  return finalizePreview(rows, format);
 }
 
 export async function getImportBatch(id: string): Promise<ImportBatch | null> {
@@ -235,9 +367,57 @@ export async function getImportBatch(id: string): Promise<ImportBatch | null> {
   return batch && Date.parse(batch.expiresAt) > Date.now() ? batch : null;
 }
 
-export async function applyImportBatch(previewId: string, operationId: string): Promise<Record<string, unknown>> {
+export async function applyImportBatch(previewId: string, operationId: string, context: ImportApplyContext = {}): Promise<Record<string, unknown>> {
   const batch = await getImportBatch(previewId);
   if (!batch) throw new Error('IMPORT_PREVIEW_EXPIRED');
+  if (context.parentJobId) {
+    let accepted = 0; let duplicate = 0; const candidateIds: string[] = []; const errors: Array<{ row: number; code: string }> = [];
+    for (const row of batch.rows.slice(0, CONFIG.limits.csvRows)) {
+      try {
+        const normalized = row.normalized;
+        const originalUrl = String(normalized.originalUrl || '');
+        const affiliateUrl = String(normalized.affiliateUrl || normalized.originalUrl || '');
+        const imageUrl = String(normalized.imageUrl || '');
+        const sourceId = String(normalized.sourceId || normalized.externalId || createHash('sha256').update(originalUrl).digest('hex'));
+        const sourceHash = createHash('sha256').update(JSON.stringify({ digest: batch.digest, row: row.row, normalized })).digest('hex');
+        const payload: CandidatePayload = {
+          title: String(normalized.title || ''), description: normalized.description,
+          kind: 'product', platform: normalized.platform || 'website', originalUrl, affiliateUrl, imageUrl,
+          imageCandidates: imageUrl ? [imageUrl] : [], price: normalized.price, salePrice: normalized.salePrice,
+          currency: 'VND', category: normalized.category, brand: normalized.brand, sku: normalized.sku,
+          merchant: (() => { try { return new URL(originalUrl).hostname.toLowerCase(); } catch { return undefined; } })(),
+          rawSourceKind: batch.format === 'json' ? 'approved_json_datafeed' : 'approved_csv_datafeed',
+          verifiedSource: context.approvedSource === true,
+          autoPublishEligible: false,
+        };
+        const readiness = scoreCandidateReadiness(payload);
+        const queued = await enqueueCandidate({
+          source: (normalized.source || 'csv') as CandidateQueueItem['source'], sourceId,
+          priority: Math.max(1, Math.min(100, 70 + readiness.score / 5 + (payload.verifiedSource ? 10 : 0))),
+          readinessScore: readiness.score, lane: readiness.lane,
+          contentHash: sourceHash, sourceHash, keyword: `datafeed:${batch.format || 'csv'}`, payload,
+        });
+        if (queued.queued) { accepted += 1; candidateIds.push(queued.item.id); }
+        else duplicate += 1;
+      } catch (error) {
+        errors.push({ row: row.row, code: error instanceof Error ? error.message.slice(0, 80) : 'IMPORT_ROW_ERROR' });
+      }
+    }
+    const bridge = candidateIds.length ? await bridgeCandidatesToDurableJobs({
+      parentJobId: context.parentJobId, requestedBy: context.requestedBy || 'import-worker',
+      limit: candidateIds.length, candidateIds,
+    }) : { inspected: 0, created: 0, existing: 0, skipped: 0, jobs: [] };
+    return {
+      operationId, accepted, rejected: errors.length, duplicate, candidateQueued: accepted,
+      processCandidateJobs: bridge.jobs.length, failed: errors.length, errors: errors.slice(0, 50),
+      executionStatus: bridge.jobs.length ? 'PARTIALLY_COMPLETED' : 'COMPLETED_WITH_LOCAL_RULES',
+      completedSteps: ['parse', 'normalize', 'fast-validation', 'candidate-ingestion'],
+      pendingSteps: bridge.jobs.length ? ['candidate-processing', 'health-evidence-dedupe', 'launch-readiness'] : [],
+      publicSideEffect: false, businessDataChanged: accepted > 0,
+    };
+  }
+
+  // Compatibility for internal Prompt 08 callers. Production IMPORT_PRODUCTS jobs always pass parentJobId above.
   let created = 0; let updated = 0; let unchanged = 0; const errors: Array<{ row: number; code: string }> = [];
   for (const row of batch.rows.slice(0, CONFIG.limits.csvRows)) {
     try {

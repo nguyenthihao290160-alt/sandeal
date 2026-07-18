@@ -261,7 +261,20 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
       { id: 'monitor-job', description: 'Create one post-publish monitoring chain.', idempotencyKey: `${effectKey}:monitor` },
     ],
   });
-  if (!(await reserveCanaryEffect(control.effectiveMode, effectKey))) throw new Error('TEMPORARY_ERROR:CANARY_RESERVATION_FAILED');
+  if (!(await reserveCanaryEffect(control.effectiveMode, effectKey))) {
+    return {
+      executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
+      executionMode: 'LOCAL_RULES',
+      provider: 'local',
+      published: false,
+      quarantined: false,
+      reasons: ['canary_wave_capacity_reached_concurrently'],
+      rulesVersion: decision.ruleVersion,
+      evidenceVerified: decision.evidenceVerified,
+      aiRequests: 0,
+      externalRequests: 0,
+    };
+  }
 
   const effectOwnerId = `auto-safe-publish:${job.id}`;
   let activeEffectId: string | undefined;

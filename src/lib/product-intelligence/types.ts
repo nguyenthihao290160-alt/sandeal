@@ -132,6 +132,8 @@ export interface ImportPreview {
   updates: number;
   suspectedDuplicates: number;
   truncated: boolean;
+  format?: 'csv' | 'json';
+  rejectionReportUrl?: string | null;
   publicSideEffect: false;
 }
 

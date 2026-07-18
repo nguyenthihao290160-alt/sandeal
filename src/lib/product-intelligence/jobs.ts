@@ -426,7 +426,11 @@ export async function executeProductIntelligenceJob(job: AutomationJob): Promise
     const batch = await getImportBatch(previewId); if (!batch) throw new Error('IMPORT_PREVIEW_EXPIRED');
     if (job.dryRun) return { preview: true, rows: batch.rows.length, publicSideEffect: false, businessDataChanged: false };
     await assertJobMayContinue(job);
-    return applyImportBatch(previewId, job.operationId);
+    return applyImportBatch(previewId, job.operationId, {
+      parentJobId: job.id,
+      requestedBy: job.requestedBy,
+      approvedSource: job.payload.approvedSource === true && job.payload.ownerConfirmed === true,
+    });
   }
   if (job.type === 'RECHECK_PRODUCT_HEALTH') return recheckHealth(job);
   if (job.type === 'DETECT_DUPLICATES') {

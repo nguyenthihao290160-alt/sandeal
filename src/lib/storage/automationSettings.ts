@@ -68,7 +68,12 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   autoCheckImage: true,
   autoScore: true,
   duplicateProtection: true,
-  sourceKeywords: ['chăm sóc da', 'serum', 'sữa tắm', 'dầu gội', 'đồ gia dụng', 'máy hút bụi', 'máy xay', 'bàn phím', 'chuột không dây', 'sạc dự phòng', 'phụ kiện điện thoại', 'thời trang', 'đồng hồ', 'đồ dùng mẹ và bé'],
+  sourceKeywords: [
+    'điện thoại', 'phụ kiện điện thoại', 'laptop', 'bàn phím', 'chuột', 'tai nghe',
+    'sạc dự phòng', 'gia dụng', 'nồi chiên', 'máy hút bụi', 'máy lọc không khí',
+    'làm đẹp', 'skincare', 'serum', 'kem chống nắng', 'mẹ và bé', 'tã bỉm',
+    'thời trang', 'đồng hồ', 'giày dép',
+  ],
   bootstrapKeywordCount: 10,
   steadyKeywordCount: 5,
   bootstrapCandidateLimit: 80,
@@ -104,7 +109,7 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
 /**
  * Ensures limits are within safe bounds and immutables are enforced.
  */
-function sanitizeSettings(settings: Record<string, unknown>): AutomationSettings {
+export function sanitizeAutomationSettings(settings: Record<string, unknown>): AutomationSettings {
   const sanitized = {
     ...DEFAULT_SETTINGS,
     ...settings,
@@ -163,7 +168,7 @@ export async function getAutomationSettings(): Promise<AutomationSettings> {
     if (!parsed || typeof parsed !== 'object') {
       return DEFAULT_SETTINGS;
     }
-    return sanitizeSettings(parsed);
+    return sanitizeAutomationSettings(parsed);
   } catch {
     // If file doesn't exist or is corrupt, return defaults
     return DEFAULT_SETTINGS;
@@ -186,7 +191,7 @@ export async function updateAutomationSettings(
   }
 
   const current = await getAutomationSettings();
-  const next = sanitizeSettings({
+  const next = sanitizeAutomationSettings({
     ...current,
     ...updates,
     updatedAt: new Date().toISOString(),

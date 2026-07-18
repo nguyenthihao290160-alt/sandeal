@@ -1,10 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { promises as fs } from 'node:fs';
 import { getServerActor, requirePermission } from '@/lib/auth';
-import { previewCsvImport, previewManualUrl, submitPendingManualSource } from '@/lib/product-intelligence/importer';
+import { getImportRejectionReportPath, previewApprovedDatafeed, previewCsvImport, previewManualUrl, submitPendingManualSource } from '@/lib/product-intelligence/importer';
 import { appendAutomationAudit, createAutomationJob } from '@/lib/automation/store';
 import { generateId } from '@/lib/storage/adapter';
 
 export const dynamic = 'force-dynamic';
+
+export async function GET(request: NextRequest) {
+  const denied = await requirePermission(request, 'IMPORT_PRODUCTS'); if (denied) return denied;
+  const report = request.nextUrl.searchParams.get('report') || '';
+  const file = getImportRejectionReportPath(report);
+  if (!file) return NextResponse.json({ ok: false, code: 'REPORT_INVALID', message: 'Mã rejection report không hợp lệ.' }, { status: 400 });
+  try {
+    const body = await fs.readFile(file);
+    return new NextResponse(body, { headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="sandeal-import-rejections-${report}.csv"`,
+      'Cache-Control': 'no-store',
+    } });
+  } catch {
+    return NextResponse.json({ ok: false, code: 'REPORT_NOT_FOUND', message: 'Rejection report không còn khả dụng.' }, { status: 404 });
+  }
+}
 
 export async function POST(request: NextRequest) {
   const denied = await requirePermission(request, 'IMPORT_PRODUCTS'); if (denied) return denied;
@@ -12,9 +30,15 @@ export async function POST(request: NextRequest) {
   const mode = String(body.mode || '');
   try {
     if (mode === 'preview') {
-      if (typeof body.csv !== 'string') throw new Error('CSV_REQUIRED');
+      const format = body.format === 'json' ? 'json' : 'csv';
+      const content = typeof body.content === 'string' ? body.content : typeof body.csv === 'string' ? body.csv : '';
+      if (!content) throw new Error('IMPORT_CONTENT_REQUIRED');
       const mapping = body.mapping && typeof body.mapping === 'object' ? body.mapping as Record<string, string> : {};
-      return NextResponse.json({ ok: true, code: 'PREVIEW', message: 'Đã kiểm tra CSV; chưa thay đổi sản phẩm và chưa public.', data: await previewCsvImport(body.csv, mapping) });
+      const explicitDatafeed = typeof body.content === 'string' || body.format === 'json' || body.format === 'csv';
+      if (!explicitDatafeed) {
+        return NextResponse.json({ ok: true, code: 'PREVIEW', message: 'Legacy CSV preview completed; no product was changed or published.', data: await previewCsvImport(content, mapping) });
+      }
+      return NextResponse.json({ ok: true, code: 'PREVIEW', message: 'Đã kiểm tra datafeed; chưa thay đổi sản phẩm và chưa public.', data: await previewApprovedDatafeed(content, format, mapping) });
     }
     if (mode === 'manual') {
       const data = previewManualUrl(String(body.url || ''));
@@ -67,8 +91,11 @@ export async function POST(request: NextRequest) {
     }
     if (mode === 'apply') {
       const previewId = String(body.previewId || ''); if (!previewId) throw new Error('PREVIEW_REQUIRED');
+      if (body.approvedSource === true && body.ownerConfirmed !== true) {
+        return NextResponse.json({ ok: false, code: 'SOURCE_APPROVAL_CONFIRMATION_REQUIRED', message: 'Owner phải xác nhận quyền sử dụng datafeed trước khi đánh dấu nguồn đã xác minh.' }, { status: 409 });
+      }
       const result = await createAutomationJob({
-        type: 'IMPORT_PRODUCTS', payload: { previewId }, idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `import:${previewId}`,
+        type: 'IMPORT_PRODUCTS', payload: { previewId, approvedSource: body.approvedSource === true, ownerConfirmed: body.ownerConfirmed === true }, idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : `import:${previewId}`,
         operationId: typeof body.operationId === 'string' ? body.operationId : undefined, requestedBy: getServerActor(), riskLevel: 'MEDIUM', dryRun: body.dryRun === true,
       });
       return NextResponse.json({ ok: true, code: result.code, message: 'Đã đưa import vào hàng chờ; sản phẩm sẽ không tự public.', data: { jobId: result.job.id, operationId: result.job.operationId, status: result.job.status } }, { status: result.created ? 201 : 200 });

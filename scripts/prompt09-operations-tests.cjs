@@ -81,6 +81,7 @@ async function main() {
   const store = require('../src/lib/automation/store.ts');
   const worker = require('../src/lib/automation/worker.ts');
   const products = require('../src/lib/storage/products.ts');
+  const candidateQueue = require('../src/lib/storage/candidateQueue.ts');
   const contentStudio = require('../src/lib/product-intelligence/contentStudio.ts');
   const alerts = require('../src/lib/product-intelligence/alerts.ts');
   const onboardingRoute = require('../src/app/api/automation/onboarding/route.ts');
@@ -163,12 +164,14 @@ async function main() {
     assert.ok(job.executionPlan.length > 0);
     assert.equal((await products.getAllProducts()).length, 0);
     const run = await worker.processAutomationBatch('prompt09-import-worker', 1);
-    assert.equal(run.succeeded, 1);
-    const imported = await products.getAllProducts();
-    assert.equal(imported.length, 1);
-    assert.equal(imported[0].status, 'needs_review');
-    assert.equal(imported[0].publicHidden, true);
-    assert.notEqual(imported[0].status, 'published');
+    assert.equal(run.waitingChildren, 1);
+    const queuedCandidates = await candidateQueue.listCandidateQueue();
+    assert.equal(queuedCandidates.length, 1);
+    assert.equal(queuedCandidates[0].durableJobId.length > 0, true);
+    const child = (await store.getAllAutomationJobs()).find(item => item.type === 'PROCESS_CANDIDATE');
+    assert.equal(child.parentJobId, job.id);
+    assert.equal(child.status, 'PENDING');
+    assert.equal((await products.getAllProducts()).length, 0);
   });
 
   await test('manual URL SSRF is blocked without network or fake success', async () => {

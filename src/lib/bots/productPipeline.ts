@@ -3,7 +3,7 @@ import { AccessTradeRequestError, mapAccessTradeToProduct, type AccessTradeResul
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
 import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
-import { readCollection, writeCollection } from '../storage/adapter';
+import { readCollection, runTransaction, writeCollection } from '../storage/adapter';
 import { createAutomationJob, getAutomationControl } from '../automation/store';
 import { completeJournalEffect } from '../automation/operationJournal';
 import { checkImageHealth, checkLinkHealth } from './productHealthCheck';
@@ -40,7 +40,26 @@ export interface PipelineCounters {
   indexable: number; noindex: number; sitemapIncluded: number;
 }
 
-interface KeywordStat { keyword: string; found: number; valid: number; published: number; empty: number; cursor: number; lastUsedAt?: string; }
+export interface KeywordYieldStat {
+  keyword: string;
+  requests: number;
+  found: number;
+  normalized: number;
+  fastRejected: number;
+  valid: number;
+  duplicate: number;
+  quarantined: number;
+  ready: number;
+  published: number;
+  noResult: number;
+  timeout: number;
+  rateLimited: number;
+  costPerValidCandidate: number | null;
+  cursor: number;
+  lastUsedAt?: string;
+  nextEligibleAt?: string;
+  outcomeKeys?: string[];
+}
 interface RuntimeState { id: string; currentConcurrency: number; rateLimitUntil?: string; timeoutStreak: number; updatedAt: string; }
 export interface DailyPipelineUsage { id: string; sourceRequests: number; candidatesFound: number; candidatesQueued: number; networkChecks: number; productsReviewed: number; productsPublished: number; updatedAt: string; }
 
@@ -97,6 +116,48 @@ function validHttpUrl(value: string): boolean {
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol); } catch { return false; }
 }
 
+function merchantFromUrl(value: string): string {
+  try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return 'unknown'; }
+}
+
+const activeDomainChecks = new Map<string, number>();
+const domainWaiters = new Map<string, Array<() => void>>();
+
+async function withDomainConcurrency<T>(value: string, work: () => Promise<T>, limit = 2): Promise<T> {
+  const domain = merchantFromUrl(value);
+  if ((activeDomainChecks.get(domain) || 0) >= limit) {
+    await new Promise<void>(resolve => {
+      const waiters = domainWaiters.get(domain) || [];
+      waiters.push(resolve);
+      domainWaiters.set(domain, waiters);
+    });
+  }
+  activeDomainChecks.set(domain, (activeDomainChecks.get(domain) || 0) + 1);
+  try {
+    return await work();
+  } finally {
+    activeDomainChecks.set(domain, Math.max(0, (activeDomainChecks.get(domain) || 1) - 1));
+    const next = domainWaiters.get(domain)?.shift();
+    if (next) next();
+    if (!domainWaiters.get(domain)?.length) domainWaiters.delete(domain);
+  }
+}
+
+function isLoopbackSmokeUrl(value: string): boolean {
+  if (process.env.NODE_ENV !== 'test' || !process.env.SANDEAL_MOCK_SOURCE_URL) return false;
+  try { return ['127.0.0.1', 'localhost', '::1'].includes(new URL(value).hostname); }
+  catch { return false; }
+}
+
+function checkCandidateLink(url: string) {
+  if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, finalUrl: url });
+  return withDomainConcurrency(url, () => checkLinkHealth(url));
+}
+function checkCandidateImage(url: string) {
+  if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, contentType: 'image/png' });
+  return withDomainConcurrency(url, () => checkImageHealth(url));
+}
+
 function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
   return {
     title: item.name, description: item.description || undefined, kind: item.kind,
@@ -107,6 +168,7 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
     currency: 'VND', category: item.category || undefined,
     rawSourceKind: item.rawSourceKind, nonProductReason: item.nonProductReason,
     campaignName: item.campaignName, commissionRate: item.commissionRate,
+    merchant: merchantFromUrl(item.canonicalProductUrl || item.originalUrl || item.affiliateUrl),
     verifiedSource: item.verifiedSource, autoPublishEligible: item.autoPublishEligible,
     sourceQualityScore: item.qualityScore,
   };
@@ -122,16 +184,107 @@ export function fastReject(payload: CandidatePayload): string | null {
   return null;
 }
 
-async function loadKeywordStats(keywords: string[]): Promise<KeywordStat[]> {
-  const stored = await readCollection<KeywordStat>(KEYWORD_COLLECTION);
-  return keywords.map((keyword, cursor) => stored.find((item) => item.keyword === keyword) || { keyword, found: 0, valid: 0, published: 0, empty: 0, cursor });
+function normalizeKeywordStat(keyword: string, cursor: number, stored?: Partial<KeywordYieldStat> & { empty?: number }): KeywordYieldStat {
+  const numeric = (key: keyof KeywordYieldStat) => Math.max(0, Number(stored?.[key]) || 0);
+  const valid = numeric('valid');
+  const requests = numeric('requests');
+  return {
+    keyword, cursor,
+    requests,
+    found: numeric('found'),
+    normalized: numeric('normalized'),
+    fastRejected: numeric('fastRejected'),
+    valid,
+    duplicate: numeric('duplicate'),
+    quarantined: numeric('quarantined'),
+    ready: numeric('ready'),
+    published: numeric('published'),
+    noResult: Math.max(numeric('noResult'), Number(stored?.empty) || 0),
+    timeout: numeric('timeout'),
+    rateLimited: numeric('rateLimited'),
+    costPerValidCandidate: valid > 0 ? Number((requests / valid).toFixed(4)) : null,
+    lastUsedAt: stored?.lastUsedAt,
+    nextEligibleAt: stored?.nextEligibleAt,
+    outcomeKeys: Array.isArray(stored?.outcomeKeys) ? stored.outcomeKeys.filter(item => typeof item === 'string').slice(-1_000) : [],
+  };
 }
 
-function selectKeywords(stats: KeywordStat[], count: number): KeywordStat[] {
-  const neverUsed = stats.filter((item) => !item.lastUsedAt);
-  const ranked = [...stats].sort((a, b) => (b.published * 5 + b.valid * 2 + b.found - b.empty * 3) - (a.published * 5 + a.valid * 2 + a.found - a.empty * 3) || Date.parse(a.lastUsedAt || '1970-01-01') - Date.parse(b.lastUsedAt || '1970-01-01'));
-  const exploration = neverUsed.slice(0, Math.max(1, Math.floor(count / 4)));
-  return [...new Map([...exploration, ...ranked].map((item) => [item.keyword, item])).values()].slice(0, count);
+async function loadKeywordStats(keywords: string[]): Promise<KeywordYieldStat[]> {
+  const stored = await readCollection<Partial<KeywordYieldStat> & { keyword: string; empty?: number }>(KEYWORD_COLLECTION);
+  return keywords.map((keyword, cursor) => normalizeKeywordStat(keyword, cursor, stored.find(item => item.keyword === keyword)));
+}
+
+function keywordFamily(keyword: string): string {
+  const value = keyword.toLowerCase();
+  if (/điện thoại|laptop|bàn phím|chuột|tai nghe|sạc/.test(value)) return 'technology';
+  if (/gia dụng|nồi chiên|hút bụi|lọc không khí/.test(value)) return 'home';
+  if (/làm đẹp|skincare|serum|chống nắng/.test(value)) return 'beauty';
+  if (/mẹ|bé|tã|bỉm/.test(value)) return 'family';
+  if (/thời trang|đồng hồ|giày/.test(value)) return 'fashion';
+  return value.split(/\s+/)[0] || 'other';
+}
+
+function keywordYieldScore(item: KeywordYieldStat): number {
+  const validRate = item.normalized ? item.valid / item.normalized : 0;
+  const readyRate = item.valid ? item.ready / item.valid : 0;
+  const thinRate = item.found ? item.fastRejected / item.found : 0;
+  const zeroPenalty = Math.min(1, item.noResult / Math.max(1, item.requests));
+  const costPenalty = item.costPerValidCandidate === null ? 0.5 : Math.min(1, item.costPerValidCandidate / 5);
+  return validRate * 40 + readyRate * 40 + Math.min(10, item.published * 0.5) - thinRate * 20 - zeroPenalty * 20 - costPenalty * 10;
+}
+
+export function selectSourceKeywords(stats: KeywordYieldStat[], count: number, now = Date.now()): KeywordYieldStat[] {
+  const eligible = stats.filter(item => !item.nextEligibleAt || Date.parse(item.nextEligibleAt) <= now);
+  const neverUsed = eligible.filter(item => !item.lastUsedAt).sort((a, b) => a.cursor - b.cursor);
+  const ranked = [...eligible].sort((a, b) => keywordYieldScore(b) - keywordYieldScore(a)
+    || Date.parse(a.lastUsedAt || '1970-01-01') - Date.parse(b.lastUsedAt || '1970-01-01'));
+  const explorationCount = Math.min(neverUsed.length, Math.max(1, Math.ceil(count * 0.25)));
+  const candidates = [...neverUsed.slice(0, explorationCount), ...ranked];
+  const selected: KeywordYieldStat[] = [];
+  const families = new Map<string, number>();
+  for (const item of candidates) {
+    if (selected.some(existing => existing.keyword === item.keyword)) continue;
+    const family = keywordFamily(item.keyword);
+    const familyCount = families.get(family) || 0;
+    const hasUnusedFamily = candidates.some(candidate => !selected.some(existing => existing.keyword === candidate.keyword)
+      && (families.get(keywordFamily(candidate.keyword)) || 0) < familyCount);
+    if (hasUnusedFamily && familyCount > 0) continue;
+    selected.push(item);
+    families.set(family, familyCount + 1);
+    if (selected.length >= count) break;
+  }
+  return selected;
+}
+
+export async function getKeywordYieldReport(limit = 5): Promise<{ top: KeywordYieldStat[]; poor: KeywordYieldStat[]; total: number }> {
+  const settings = await getAutomationSettings();
+  const stats = await loadKeywordStats(settings.sourceKeywords);
+  const used = stats.filter(item => item.requests > 0 || item.lastUsedAt);
+  const top = [...used].sort((a, b) => keywordYieldScore(b) - keywordYieldScore(a)).slice(0, limit);
+  const poor = [...used].sort((a, b) => keywordYieldScore(a) - keywordYieldScore(b)).slice(0, limit);
+  return { top, poor, total: stats.length };
+}
+
+async function recordKeywordCandidateOutcome(item: CandidateQueueItem, product?: Product): Promise<void> {
+  if (!item.keyword || !product) return;
+  const outcome = product.status === 'published' && product.publicHidden === false
+    ? 'published'
+    : product.lifecycleState === 'READY_FOR_PUBLISH'
+      ? 'ready'
+      : product.lifecycleState === 'QUARANTINED'
+        ? 'quarantined'
+        : null;
+  if (!outcome) return;
+  const key = `${item.id}:${item.sourceHash}:${outcome}`.slice(0, 240);
+  await runTransaction<KeywordYieldStat>(KEYWORD_COLLECTION, stored => {
+    const index = stored.findIndex(stat => stat.keyword === item.keyword);
+    const stat = normalizeKeywordStat(item.keyword!, index >= 0 ? stored[index].cursor : stored.length, index >= 0 ? stored[index] : undefined);
+    if (stat.outcomeKeys?.includes(key)) return undefined;
+    stat[outcome] += 1;
+    stat.outcomeKeys = [...(stat.outcomeKeys || []), key].slice(-1_000);
+    if (index >= 0) stored[index] = stat; else stored.push(stat);
+    return stored;
+  });
 }
 
 export async function scanSourcesToQueue(
@@ -170,8 +323,23 @@ export async function scanSourcesToQueue(
   const keywordCount = mode === 'bootstrap' ? settings.bootstrapKeywordCount : settings.steadyKeywordCount;
   const candidateLimit = mode === 'bootstrap' ? settings.bootstrapCandidateLimit : settings.steadyCandidateLimit;
   const stats = await loadKeywordStats(settings.sourceKeywords);
-  const selected = selectKeywords(stats, keywordCount);
+  const selected = selectSourceKeywords(stats, keywordCount, startedMs);
+  if (!selected.length) {
+    const nextEligibleAt = stats.map(item => item.nextEligibleAt).filter((item): item is string => Boolean(item)).sort()[0];
+    return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus, reason: 'source_keywords_exhausted', nextEligibleAt, resultTypes };
+  }
   const products = await getAllProducts();
+  const queuedCandidates = await listCandidateQueue();
+  const merchantCounts = new Map<string, number>();
+  const categoryCounts = new Map<string, number>();
+  for (const merchant of [
+    ...products.map(product => merchantFromUrl(product.originalUrl || product.affiliateUrl || '')),
+    ...queuedCandidates.map(candidate => candidate.payload.merchant || merchantFromUrl(candidate.payload.originalUrl)),
+  ]) merchantCounts.set(merchant, (merchantCounts.get(merchant) || 0) + 1);
+  for (const category of [
+    ...products.map(product => String(product.category || 'uncategorized').toLowerCase()),
+    ...queuedCandidates.map(candidate => String(candidate.payload.category || 'uncategorized').toLowerCase()),
+  ]) categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
   const qualitySnapshot = await getSourceQualitySnapshot(adapter.id);
   let timeoutStreak = 0;
 
@@ -181,57 +349,74 @@ export async function scanSourcesToQueue(
     try {
       const result = await adapter.discover({ keyword: stat.keyword, limit: Math.min(50, candidateLimit - counters.found) });
       counters.sourceRequests += result.requests;
+      stat.requests += result.requests;
       retryAfter = result.retryAfter || retryAfter;
       for (const [outcome, count] of Object.entries(result.outcomes || {})) {
         if (outcome in resultTypes || ['success_with_results', 'success_empty', 'unauthorized', 'forbidden', 'rate_limited', 'circuit_open', 'timeout', 'network_error', 'upstream_error', 'invalid_response'].includes(outcome)) {
           const typedOutcome = outcome as AccessTradeResultType;
           resultTypes[typedOutcome] = (resultTypes[typedOutcome] || 0) + count;
         }
-        if (outcome === 'timeout') timeout += count;
-        if (outcome === 'rate_limited') rateLimited += count;
+        if (outcome === 'timeout') { timeout += count; stat.timeout += count; }
+        if (outcome === 'rate_limited') { rateLimited += count; stat.rateLimited += count; }
       }
       timeoutStreak = 0;
       stat.found += result.items.length;
-      if (!result.items.length) stat.empty++;
+      if (!result.items.length) stat.noResult += 1;
+      stat.nextEligibleAt = new Date(startedMs + (result.items.length ? settings.intervalHours * 60 * 60_000 : Math.min(48, 3 * 2 ** Math.min(4, stat.noResult)) * 60 * 60_000)).toISOString();
       counters.found += result.items.length;
       for (const sourceItem of result.items) {
         const item = adapter.normalize(sourceItem);
         normalized++;
+        stat.normalized += 1;
         const payload = toPayload(item);
         const earlyReason = fastReject(payload);
-        if (!earlyReason) { stat.valid++; validCandidates++; } else rejected++;
+        if (!earlyReason) { stat.valid++; validCandidates++; } else { rejected++; stat.fastRejected += 1; }
         if (Number(payload.salePrice || payload.price || 0) > 0) pricesAvailable++;
         const sourceHash = hashPayload(payload);
         const existing = products.find((product) =>
           (product.source === adapter.id && (product.sourceId === item.id || product.externalId === item.id)) ||
           product.originalUrl === payload.originalUrl || product.affiliateUrl === payload.affiliateUrl,
         );
-        if (existing?.sourceHash === sourceHash) { counters.duplicate++; counters.unchanged++; continue; }
+        if (existing?.sourceHash === sourceHash) { counters.duplicate++; counters.unchanged++; stat.duplicate += 1; continue; }
         if (existing?.sourceHealthCooldownUntil && Date.parse(existing.sourceHealthCooldownUntil) > Date.now()) { counters.skippedCooldown++; continue; }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.affiliateUrl, payload.imageUrl].filter(Boolean).length;
-        const basePriority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) - (earlyReason ? 25 : 0));
+        const merchant = payload.merchant || 'unknown';
+        const category = String(payload.category || 'uncategorized').toLowerCase();
+        const merchantPenalty = Math.min(40, (merchantCounts.get(merchant) || 0) * 4);
+        const categoryBoost = Math.max(0, 12 - Math.min(12, categoryCounts.get(category) || 0));
+        const basePriority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) + categoryBoost - merchantPenalty - (earlyReason ? 25 : 0));
         const priority = applySourceQualityPriority(basePriority, qualitySnapshot).effectivePriority;
         const readiness = scoreCandidateReadiness(payload);
         const queued = await enqueueCandidate({ source: adapter.id as CandidateQueueItem['source'], sourceId: item.id, priority, readinessScore: readiness.score, lane: readiness.lane, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
-        if (queued.queued) { counters.queued++; counters.reviewQueued++; } else { counters.duplicate++; counters.unchanged++; }
+        if (queued.queued) {
+          counters.queued++; counters.reviewQueued++;
+          merchantCounts.set(merchant, (merchantCounts.get(merchant) || 0) + 1);
+          categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+        } else { counters.duplicate++; counters.unchanged++; stat.duplicate += 1; }
       }
+      stat.costPerValidCandidate = stat.valid > 0 ? Number((stat.requests / stat.valid).toFixed(4)) : null;
     } catch (error) {
       if (error instanceof AccessTradeRequestError) {
-        counters.sourceRequests += error.requests.reduce((total, request) => total + (request.attempts ?? 1), 0);
+        const requestCount = error.requests.reduce((total, request) => total + (request.attempts ?? 1), 0);
+        counters.sourceRequests += requestCount;
+        stat.requests += requestCount;
         retryAfter = error.requests.map((request) => request.retryAfter).filter((value): value is string => Boolean(value)).sort().at(-1) || retryAfter;
         resultTypes[error.resultType] = (resultTypes[error.resultType] || 0) + 1;
-        if (error.resultType === 'timeout') { timeoutStreak++; timeout++; } else timeoutStreak = 0;
-        if (error.resultType === 'rate_limited') rateLimited++;
+        if (error.resultType === 'timeout') { timeoutStreak++; timeout++; stat.timeout += 1; } else timeoutStreak = 0;
+        if (error.resultType === 'rate_limited') { rateLimited++; stat.rateLimited += 1; }
+        stat.nextEligibleAt = retryAfter || new Date(startedMs + (error.resultType === 'rate_limited' ? 60 : 30) * 60_000).toISOString();
         if (['unauthorized', 'forbidden', 'rate_limited', 'circuit_open'].includes(error.resultType) || timeoutStreak >= 2) break;
       } else {
         counters.failed++;
         const classified = adapter.classifyError(error);
         sourceStatus = classified;
         retryAfter = adapter.retryAfter(error) || retryAfter;
-        if (classified === 'rate_limited') rateLimited++;
-        if (classified === 'degraded' && /timeout|abort/i.test(error instanceof Error ? `${error.name}:${error.message}` : String(error))) timeout++;
+        if (classified === 'rate_limited') { rateLimited++; stat.rateLimited += 1; }
+        if (classified === 'degraded' && /timeout|abort/i.test(error instanceof Error ? `${error.name}:${error.message}` : String(error))) { timeout++; stat.timeout += 1; }
+        stat.nextEligibleAt = retryAfter || new Date(startedMs + 30 * 60_000).toISOString();
         if (['invalid_credential', 'quota_exhausted', 'rate_limited', 'circuit_open'].includes(classified)) break;
       }
+      stat.costPerValidCandidate = stat.valid > 0 ? Number((stat.requests / stat.valid).toFixed(4)) : null;
     }
   }
   await writeCollection(KEYWORD_COLLECTION, stats);
@@ -533,15 +718,15 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     : fixture === 'confirmed_broken'
       ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
       : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
-  const productHealth = fixture ? fixtureLink : await checkLinkHealth(payload.originalUrl); counters.networkChecks += 1;
-  const affiliateHealth = fixture ? fixtureLink : await checkLinkHealth(payload.affiliateUrl); counters.networkChecks += 1;
+  const productHealth = fixture ? fixtureLink : await checkCandidateLink(payload.originalUrl); counters.networkChecks += 1;
+  const affiliateHealth = fixture ? fixtureLink : await checkCandidateLink(payload.affiliateUrl); counters.networkChecks += 1;
   let imageUrl = payload.imageUrl;
-  let imageHealth = fixture ? fixtureImage : await checkImageHealth(imageUrl); counters.networkChecks += 1;
+  let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl); counters.networkChecks += 1;
   let imageChecks = 1;
   if (!imageHealth.ok) {
     for (const candidate of payload.imageCandidates || []) {
       if (candidate === imageUrl) continue;
-      const fallback = fixture ? fixtureImage : await checkImageHealth(candidate); counters.networkChecks += 1;
+      const fallback = fixture ? fixtureImage : await checkCandidateImage(candidate); counters.networkChecks += 1;
       imageChecks += 1;
       if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
     }
@@ -732,15 +917,15 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       : fixture === 'confirmed_broken'
         ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
         : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
-    const productHealth = fixture ? fixtureLink : await checkLinkHealth(payload.originalUrl); counters.networkChecks++;
-    const affiliateHealth = fixture ? fixtureLink : await checkLinkHealth(payload.affiliateUrl); counters.networkChecks++;
+    const productHealth = fixture ? fixtureLink : await checkCandidateLink(payload.originalUrl); counters.networkChecks++;
+    const affiliateHealth = fixture ? fixtureLink : await checkCandidateLink(payload.affiliateUrl); counters.networkChecks++;
     let imageUrl = payload.imageUrl;
-    let imageHealth = fixture ? fixtureImage : await checkImageHealth(imageUrl); counters.networkChecks++;
+    let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl); counters.networkChecks++;
     let imageChecks = 1;
     if (!imageHealth.ok) {
       for (const candidate of payload.imageCandidates || []) {
         if (candidate === imageUrl) continue;
-        const fallback = fixture ? fixtureImage : await checkImageHealth(candidate); counters.networkChecks++;
+        const fallback = fixture ? fixtureImage : await checkCandidateImage(candidate); counters.networkChecks++;
         imageChecks += 1;
         if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
       }
@@ -874,6 +1059,7 @@ export async function processCandidateFromDurableJob(input: {
   const product = outcome.productId
     ? (await getAllProducts()).find(entry => entry.id === outcome.productId)
     : (await getAllProducts()).find(entry => entry.source === item.source && (entry.sourceId === item.sourceId || entry.externalId === item.sourceId));
+  if (outcome.terminal) await recordKeywordCandidateOutcome(item, product);
   if (!outcome.terminal && outcome.nextRetryAt) throw new CandidateRetryScheduledError(outcome.nextRetryAt, outcome.status, outcome.reason);
   if (outcome.status === 'failed') throw new Error(`CANDIDATE_TERMINAL_FAILURE:${outcome.reason || 'review_failed'}`);
   await completeJournalEffect(input.operationId, 'canonical-product', product ? { id: product.id, sourceHash: product.sourceHash, status: product.status } : { candidateId: item.id, status: finalCandidate?.status });
@@ -930,9 +1116,9 @@ export async function recheckPublishedProducts(limit: number, deadlineMs: number
   await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, async () => {
     while (cursor < candidates.length && Date.now() < deadlineMs) {
       const product = candidates[cursor++];
-      const productHealth = await checkLinkHealth(product.originalUrl || ''); counters.networkChecks++;
-      const affiliateHealth = await checkLinkHealth(product.affiliateUrl || ''); counters.networkChecks++;
-      const imageHealth = await checkImageHealth(product.imageUrl || ''); counters.networkChecks++;
+      const productHealth = await checkCandidateLink(product.originalUrl || ''); counters.networkChecks++;
+      const affiliateHealth = await checkCandidateLink(product.affiliateUrl || ''); counters.networkChecks++;
+      const imageHealth = await checkCandidateImage(product.imageUrl || ''); counters.networkChecks++;
       const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
       const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
       const confirmedBroken = ['broken', 'not_found'].includes(productHealth.status)

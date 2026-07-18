@@ -17,6 +17,7 @@ import {
   publicAutomationJob,
 } from './store';
 import type { AutomationJob } from './types';
+import { buildLaunchInventoryOverview } from './launchInventory';
 
 export type DashboardRange = 'today' | '7d' | '30d';
 
@@ -87,10 +88,11 @@ function roleDiagnostic(role: RuntimeRole, lease: RuntimeRoleLease | undefined, 
 
 export async function buildAutomationDashboard(range: DashboardRange) {
   const now = Date.now();
-  const [jobs, products, sources, control, queue, usage, autopilotCircuit, geminiCircuit, audit, settings, runtimeHealth, roleLeases, roleConflicts, outboundEvents] = await Promise.all([
+  const [jobs, products, sources, control, queue, usage, autopilotCircuit, geminiCircuit, audit, settings, runtimeHealth, roleLeases, roleConflicts, outboundEvents, inventory] = await Promise.all([
     getAllAutomationJobs(), getAllProducts(), listProductSources(), getAutomationControl(), getAutomationQueueStats(),
     getAiUsage(), getCircuit('autopilot'), getCircuit('gemini'), listAutomationAudit(1, 20), getAutomationSettings(),
     getLatestRuntimeHealth(), listRuntimeRoleLeases(), listRecentRuntimeRoleConflicts(now - 24 * 60 * 60_000), listOutboundEvents(),
+    buildLaunchInventoryOverview(),
   ]);
   const start = rangeStart(range);
   const onboarding = await buildOperationsOnboarding();
@@ -246,6 +248,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       latestError: jobDiagnostic(latestError),
     },
     providers,
+    inventory,
     business: {
       publicProducts: products.filter(isPublicSafeProduct).length,
       freshPrice: products.filter(product => product.priceTruthState === 'FRESH').length,

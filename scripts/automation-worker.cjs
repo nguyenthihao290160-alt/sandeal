@@ -3,6 +3,7 @@ require('./register-typescript.cjs');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const { processAutomationBatch } = require('../src/lib/automation/worker.ts');
+const { getAutomationSettings } = require('../src/lib/storage/automationSettings.ts');
 const { acquireRuntimeRole, heartbeatRuntimeRole, releaseRuntimeRole } = require('../src/lib/automation/runtimeRoles.ts');
 const hostname = os.hostname();
 const workerId = `worker:${hostname}`;
@@ -22,7 +23,9 @@ process.on('SIGTERM', () => { stopping = true; });
   let lastIdleLogAt = 0;
   try {
     do {
-      const result = await processAutomationBatch(instanceId, 2);
+      const settings = await getAutomationSettings();
+      const concurrency = Math.max(1, Math.min(4, Number(settings.maxConcurrency) || 1));
+      const result = await processAutomationBatch(instanceId, concurrency);
       const now = Date.now();
       if (once || result.claimed > 0 || now - lastIdleLogAt >= 60_000) {
         console.log(JSON.stringify({ type: result.claimed ? 'worker_tick' : 'worker_idle', ...result }));
