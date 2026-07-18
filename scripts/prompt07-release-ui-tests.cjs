@@ -141,10 +141,11 @@ test('release CI có đủ gate và tuyệt đối không deploy', () => {
   assert(!/\bdeploy\b\s*:/i.test(workflow));
 });
 
-test('env example chỉ chứa tên biến và giá trị rỗng', () => {
+test('env example chỉ chứa placeholder rỗng hoặc default storage không nhạy cảm', () => {
   const lines = read('.env.example').split(/\r?\n/).filter(line => /^[A-Z][A-Z0-9_]*=/.test(line));
+  const safeDefaults = new Set(['SANDEAL_STORAGE_DRIVER=file', 'MONGODB_DATABASE=sandeal']);
   assert(lines.length > 10);
-  for (const line of lines) assert(/^[A-Z][A-Z0-9_]*=$/.test(line), line.split('=')[0]);
+  for (const line of lines) assert(/^[A-Z][A-Z0-9_]*=$/.test(line) || safeDefaults.has(line), line.split('=')[0]);
 });
 
 test('backup mặc định loại kho nhạy cảm, chống ghi đè và có checksum', () => {
