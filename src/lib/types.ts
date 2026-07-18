@@ -49,13 +49,20 @@ export type ProductKind =
   | "store_offer"
   | "unknown";
 
-export type ProductRecordType =
+export type ClassifiedProductRecordType =
   | 'PRODUCT'
-  | 'STORE_PROMOTION'
   | 'VOUCHER'
   | 'CAMPAIGN'
-  | 'CONTENT_ONLY'
+  | 'STORE_OFFER'
+  | 'CATEGORY_OR_LANDING_PAGE'
   | 'UNKNOWN';
+
+// Legacy values remain readable so existing persisted records fail closed while
+// the deterministic classifier only emits ClassifiedProductRecordType values.
+export type ProductRecordType =
+  | ClassifiedProductRecordType
+  | 'STORE_PROMOTION'
+  | 'CONTENT_ONLY';
 
 export type ProductLifecycleState =
   | 'DISCOVERED'
@@ -79,7 +86,8 @@ export type PriceTruthState = 'FRESH' | 'AGING' | 'STALE' | 'CONFLICTED' | 'ANOM
 export interface ProductClassificationSnapshot {
   schemaVersion: number;
   decisionId: string;
-  recordType: ProductRecordType;
+  recordType: ClassifiedProductRecordType;
+  sourceType: string;
   confidence: number;
   reasons: string[];
   signals: string[];
@@ -265,6 +273,10 @@ export interface Product {
   affiliateLinkErrors?: string;
   imageHealthStatus?: LinkHealthStatus;
   imageLastCheckedAt?: string;
+  imageValidationState?: 'VALID' | 'BROKEN' | 'HOTLINK_BLOCKED' | 'TIMEOUT' | 'INVALID_CONTENT_TYPE' | 'TOO_SMALL' | 'DARK_IMAGE_SUSPECTED' | 'PLACEHOLDER' | 'FALLBACK_USED';
+  imageWidth?: number;
+  imageHeight?: number;
+  imageDimensionsVerified?: boolean;
   archivedReason?: string;
   unpublishedReason?: string;
   contentPackageStatus?: 'none' | 'generated' | 'approved';
@@ -556,7 +568,7 @@ export interface BotRun {
   logs: BotRunLog[];
 }
 
-export type LinkHealthStatus = 'ok' | 'redirect_ok' | 'broken' | 'not_allowed' | 'unverified' | 'rate_limited' | 'server_error' | 'timeout' | 'dns_error' | 'error' | 'unknown' | 'not_found' | 'affiliate_error' | 'image_broken' | 'invalid_image' | 'forbidden' | 'product_unavailable' | 'needs_manual_check';
+export type LinkHealthStatus = 'ok' | 'redirect_ok' | 'broken' | 'not_allowed' | 'unverified' | 'rate_limited' | 'server_error' | 'timeout' | 'dns_error' | 'error' | 'unknown' | 'not_found' | 'affiliate_error' | 'image_broken' | 'invalid_image' | 'forbidden' | 'hotlink_blocked' | 'too_small' | 'too_large' | 'dark_image_suspected' | 'placeholder' | 'fallback_used' | 'product_unavailable' | 'needs_manual_check';
 
 export interface LinkHealthCheck {
   id: string;

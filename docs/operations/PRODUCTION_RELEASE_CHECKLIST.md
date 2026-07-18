@@ -12,6 +12,9 @@
 - [ ] Storage schema is v1; migration list is empty for this release.
 - [ ] Single-instance limitation is accepted; only one web writer is planned.
 - [ ] Rollback artifact and its checksum are available before deployment.
+- [ ] `SANDEAL_RELEASE_ID` identifies the reviewed immutable release and `/api/health/live` reports it.
+- [ ] New build lives in a separate release directory; the running release's `.next` directory was not overwritten or removed.
+- [ ] A verified backup copy exists outside the VPS/primary failure domain.
 - [ ] Every real `test:prompt10:*` script passed on the exact commit; runtime and job-schema contracts have no blocked regression.
 - [ ] Isolated autonomous/runtime smoke passed with a test port, temporary data, mock/local-only providers, and zero external requests.
 - [ ] Worker/scheduler PM2 entries remain opt-in; initial automation state is SHADOW, publishing paused, and launch disabled.
@@ -21,6 +24,7 @@
 - [ ] Public website responds without exposing dashboard data.
 - [ ] Login and administrator authorization work.
 - [ ] Liveness and readiness endpoints return the expected structured response.
+- [ ] `/api/health/live` is public and minimal; `/api/health/ready` is authenticated and distinguishes warning/critical dependencies.
 - [ ] Dashboard, Kết quả bot, Tác vụ, Tự động hóa, Nguồn, Kết nối bảo mật, Sức khỏe, and Cài đặt render.
 - [ ] Worker heartbeat is fresh and no second worker claims the same task.
 - [ ] Scheduler last/next run is plausible and does not enqueue duplicates.

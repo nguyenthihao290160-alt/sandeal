@@ -11,7 +11,7 @@ function legacyRecordType(input: Partial<Product>): NonNullable<Product['recordT
   if (input.kind === 'product' || input.kind === 'deal') return 'PRODUCT';
   if (input.kind === 'voucher') return 'VOUCHER';
   if (input.kind === 'campaign') return 'CAMPAIGN';
-  if (input.kind === 'store_offer') return 'STORE_PROMOTION';
+  if (input.kind === 'store_offer') return 'STORE_OFFER';
   return 'UNKNOWN';
 }
 

@@ -13,19 +13,23 @@ export default function ProductImage({
   compact = false,
   eager = false,
   sizes,
+  fallbackLabel,
 }: {
   src?: string | null;
   alt: string;
   compact?: boolean;
   eager?: boolean;
   sizes?: string;
+  fallbackLabel?: string | null;
 }) {
   const cleanSrc = typeof src === 'string' ? src.trim() : '';
   const [failedSrc, setFailedSrc] = useState('');
+  const initials = String(fallbackLabel || alt || 'SanDeal').trim().split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join('') || 'SD';
 
   if (!cleanSrc || failedSrc === cleanSrc) {
     return (
       <div role="img" aria-label={alt} className={styles.imageFallback}>
+        <span className={styles.imageFallbackMark} aria-hidden="true">{initials}</span>
         <span>{compact ? 'Ảnh chưa khả dụng' : `Ảnh của ${alt} đang được cập nhật`}</span>
       </div>
     );

@@ -28,7 +28,7 @@ import {
   waitAutomationJobForChildren,
   waitAutomationJobForManual,
 } from './store';
-import type { AutomationCheckpoint, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
+import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 
 function assertUnhandledJobType(type: never): never {
@@ -99,21 +99,36 @@ function disclosure(
 
 function errorCode(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (/TEMPORARY_ERROR/i.test(message)) return 'TEMPORARY_ERROR';
+  if (/429|rate.?limit/i.test(message)) return 'PROVIDER_RATE_LIMIT';
+  if (/timeout|abort|TEMPORARY_ERROR/i.test(message)) return 'PROVIDER_TIMEOUT';
+  if (/image.*(?:hotlink|403|forbidden)|hotlink.*image/i.test(message)) return 'IMAGE_HOTLINK_BLOCKED';
+  if (/link.*(?:404|410|not.?found)|LINK_NOT_FOUND/i.test(message)) return 'LINK_NOT_FOUND';
+  if (/duplicate/i.test(message)) return 'DUPLICATE';
+  if (/storage|filesystem|lock.?timeout|enospc|eacces/i.test(message)) return 'STORAGE_ERROR';
+  if (/invalid.?source|source.?data/i.test(message)) return 'INVALID_SOURCE_DATA';
   if (/not.?implemented|handler.?unavailable/i.test(message)) return 'PROVIDER_NOT_IMPLEMENTED';
   if (/invalid.?credential|401/i.test(message)) return 'INVALID_CREDENTIAL';
   if (/credential.?expired|403/i.test(message)) return 'CREDENTIAL_EXPIRED';
-  if (/timeout|abort/i.test(message)) return 'TIMEOUT';
-  if (/429|rate.?limit/i.test(message)) return 'RATE_LIMITED';
   if (/network|fetch|socket/i.test(message)) return 'NETWORK_ERROR';
   if (/credential|api.?key|configuration/i.test(message)) return 'CONFIGURATION_REQUIRED';
   if (/budget|quota/i.test(message)) return 'QUOTA_EXCEEDED';
-  if (/schema/i.test(message)) return 'SCHEMA_VALIDATION_FAILED';
   if (/provider.?response|json.?response/i.test(message)) return 'INVALID_PROVIDER_RESPONSE';
+  if (/validation|schema|invalid/i.test(message)) return 'VALIDATION_FAILED';
   if (/publish.*(?:paused|disabled|blocked)|mode.*blocked|dry.?run.*publish/i.test(message)) return 'SAFETY_POLICY_BLOCKED';
   if (/safety|policy|kill.?switch|paid.?provider/i.test(message)) return 'SAFETY_POLICY_BLOCKED';
-  if (/validation|invalid/i.test(message)) return 'VALIDATION_ERROR';
-  return 'INTERNAL_ERROR';
+  if (error instanceof Error) return 'INTERNAL_CODE_ERROR';
+  return 'UNKNOWN_ERROR';
+}
+
+function errorCategory(code: string): AutomationErrorCategory {
+  if (['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'LINK_NOT_FOUND', 'IMAGE_HOTLINK_BLOCKED', 'INVALID_SOURCE_DATA', 'VALIDATION_FAILED', 'DUPLICATE', 'STORAGE_ERROR', 'INTERNAL_CODE_ERROR', 'UNKNOWN_ERROR'].includes(code)) {
+    return code as AutomationErrorCategory;
+  }
+  if (/TIMEOUT|NETWORK|UNAVAILABLE|TEMPORARY/.test(code)) return 'PROVIDER_TIMEOUT';
+  if (/RATE|QUOTA/.test(code)) return 'PROVIDER_RATE_LIMIT';
+  if (/CREDENTIAL|SOURCE/.test(code)) return 'INVALID_SOURCE_DATA';
+  if (/VALIDATION|SCHEMA|SAFETY|POLICY|APPROVAL|KILL/.test(code)) return 'VALIDATION_FAILED';
+  return 'INTERNAL_CODE_ERROR';
 }
 
 async function dryRunPreview(job: AutomationJob): Promise<Record<string, unknown>> {
@@ -569,7 +584,9 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
         result.skipped += 1;
         return;
       }
-      await failAutomationJob(job.id, workerId, errorCode(error), error, {
+      const code = errorCode(error);
+      await failAutomationJob(job.id, workerId, code, error, {
+        errorCategory: errorCategory(code),
         nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
       });
       result.failed += 1;

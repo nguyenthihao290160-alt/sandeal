@@ -109,6 +109,7 @@ export function DealCard({
           <ProductImage
             src={product.imageUrl}
             alt={product.title}
+            fallbackLabel={product.brand || product.category}
             sizes="(max-width: 540px) calc(100vw - 28px), (max-width: 800px) 46vw, (max-width: 1060px) 30vw, 290px"
           />
           <div className={styles.imageBadges}>

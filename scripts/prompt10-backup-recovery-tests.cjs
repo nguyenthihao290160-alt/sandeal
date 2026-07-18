@@ -89,7 +89,7 @@ async function main() {
     return new NextRequest('http://localhost/api/automation/control', {
       method: 'PATCH',
       headers: { authorization: auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'set_mode', mode, confirmed: true, reason: `Controlled ${mode} backup verification` }),
+      body: JSON.stringify({ action: 'set_mode', mode, confirmed: true, confirmedAt: new Date().toISOString(), reason: `Controlled ${mode} backup verification` }),
     });
   }
 
@@ -177,7 +177,7 @@ async function main() {
     assert.ok(sloSnapshots[0].evaluation.reasons.includes('RUNTIME_GUARDIAN_UNSAFE'));
   });
 
-  await test('pre-CANARY snapshot is verified, source-state idempotent, and repeated mode PATCH does not create backup spam', async () => {
+  await test('pre-CANARY snapshot is verified/idempotent and mode PATCH cannot bypass a missing controlled launch plan', async () => {
     process.env.SANDEAL_DATA_DIR = modeDataDir;
     process.env.SANDEAL_BACKUP_DIR = modeBackupDir;
     for (const collection of ['products', 'automation-control', 'automation-audit']) await adapter.writeCollection(collection, []);
@@ -191,15 +191,16 @@ async function main() {
     assert.equal(first.created, true); assert.equal(replay.created, false); assert.equal(replay.manifest.id, first.manifest.id);
 
     const response = await controlRoute.PATCH(modeRequest('CANARY'));
-    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
-    assert.equal((await response.json()).data.mode, 'CANARY');
-    assert.equal((await controlRoute.PATCH(modeRequest('CANARY'))).status, 200);
+    assert.equal(response.status, 409, JSON.stringify(await response.clone().json()));
+    assert.equal((await response.json()).code, 'CONTROLLED_LAUNCH_REQUIRED');
+    assert.equal((await controlRoute.PATCH(modeRequest('CANARY'))).status, 409);
+    assert.equal((await store.getAutomationControl()).mode, 'OBSERVE');
     const snapshotDirectories = fs.readdirSync(modeBackupDir, { withFileTypes: true })
       .filter(entry => entry.isDirectory() && entry.name.startsWith('snapshot-'));
     assert.equal(snapshotDirectories.length, 1);
   });
 
-  await test('CANARY or AUTONOMOUS mode mutation returns 503 and leaves control unchanged when backup fails', async () => {
+  await test('CANARY or AUTONOMOUS mode mutation returns structured 503 when controlled gate storage is corrupt', async () => {
     process.env.SANDEAL_DATA_DIR = modeDataDir;
     process.env.SANDEAL_BACKUP_DIR = modeBackupDir;
     await store.updateAutomationControl({ mode: 'OBSERVE', effectiveMode: 'OBSERVE', publishPaused: true, ingestionPaused: false }, 'backup-failure-test');
@@ -209,7 +210,7 @@ async function main() {
     fs.writeFileSync(`${mainFile}.bak`, '{corrupt-pre-canary-backup', 'utf8');
     const response = await controlRoute.PATCH(modeRequest('AUTONOMOUS'));
     assert.equal(response.status, 503);
-    assert.equal((await response.json()).code, 'PRE_CANARY_BACKUP_FAILED');
+    assert.equal((await response.json()).code, 'CONTROLLED_LAUNCH_GATE_UNAVAILABLE');
     const after = await store.getAutomationControl();
     assert.equal(after.mode, before.mode); assert.equal(after.effectiveMode, before.effectiveMode);
     assert.equal(after.updatedAt, before.updatedAt);

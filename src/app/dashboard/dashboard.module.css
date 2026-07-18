@@ -355,14 +355,20 @@
   gap: 8px;
 }
 
-.metricList > div {
+.metricList > div,
+.metricList > a {
   display: grid;
   gap: 4px;
   min-width: 0;
   padding: 10px;
   border-radius: var(--ds-radius-md, 7px);
   background: var(--ds-surface-muted, #f1f5f9);
+  color: inherit;
+  text-decoration: none;
 }
+
+.metricList > a:hover { background: #e7eef8; }
+.metricList > a:focus-visible { outline: 3px solid rgb(49 87 200 / 30%); outline-offset: 2px; }
 
 .metricList span,
 .mutedText,

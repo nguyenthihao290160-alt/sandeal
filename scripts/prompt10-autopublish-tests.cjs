@@ -67,6 +67,13 @@ async function main() {
     for (const collection of ['products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-canary', 'operation-journal', 'automation-outbound-events', 'publication-audit', 'source-quality']) await adapter.writeCollection(collection, []);
     await settings.updateAutomationSettings({ launchEnabled: true });
     await store.updateAutomationControl({ mode, effectiveMode: mode, publishPaused: false, ingestionPaused: false, workerPaused: false, schedulerPaused: false, killSwitch: false }, 'autopublish-test');
+    const initial = await canary.getCanaryState();
+    const now = new Date().toISOString();
+    await adapter.writeCollection('automation-canary', [{
+      ...initial, controlledLaunch: true, wave: 1, approvedWave: 1, successfulShadowCycles: Math.max(1, initial.successfulShadowCycles),
+      approvedBy: 'autopublish-test', approvedAt: now, approvalReason: 'Isolated controlled launch fixture for durable publication tests.',
+      wavePublishedBaseline: initial.publishedEffectKeys.length, paused: false, pauseReasons: [], updatedAt: now,
+    }]);
   }
 
   await test('eligible product auto-publishes without approval or user action', async () => {
@@ -291,18 +298,19 @@ async function main() {
     assert.equal((await adapter.readCollection('publication-audit')).length, 0);
   });
 
-  await test('CANARY wave 1 publishes at most three products and pauses the fourth', async () => {
+  await test('controlled CANARY wave 1 publishes at most ten products and pauses the eleventh', async () => {
     await reset('CANARY'); await canary.recordSuccessfulShadowCycle();
     const fixtures = [];
-    for (const id of ['c1', 'c2', 'c3', 'c4']) fixtures.push(await hydratePersistedEvidence(readyProduct(id)));
+    for (const id of Array.from({ length: 11 }, (_, index) => `c${index + 1}`)) fixtures.push(await hydratePersistedEvidence(readyProduct(id)));
     await adapter.writeCollection('products', fixtures);
     for (const item of fixtures) await publishJob(store, item, `canary-${item.id}`);
-    const run = await worker.processAutomationBatch('auto-publish-worker-canary', 10);
-    assert.equal(run.succeeded, 4);
+    const firstRun = await worker.processAutomationBatch('auto-publish-worker-canary', 10);
+    const secondRun = await worker.processAutomationBatch('auto-publish-worker-canary', 1);
+    assert.equal(firstRun.succeeded, 10); assert.equal(secondRun.succeeded, 1);
     const saved = await products.getAllProducts();
-    assert.equal(saved.filter(item => item.status === 'published').length, 3);
-    assert.equal(saved.find(item => item.id === 'c4').lifecycleState, 'READY_FOR_PUBLISH');
-    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 3);
+    assert.equal(saved.filter(item => item.status === 'published').length, 10);
+    assert.equal(saved.find(item => item.id === 'c11').lifecycleState, 'READY_FOR_PUBLISH');
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 10);
   });
 
   await test('CANARY preserves a completed-write recovery slot until the same effect finishes', async () => {
@@ -316,18 +324,18 @@ async function main() {
     assert.equal(canaryAfterCrash.reservedEffectKeys.length, 1);
 
     const fillers = [];
-    for (const id of ['canary-fill-1', 'canary-fill-2', 'canary-fill-3']) fillers.push(await hydratePersistedEvidence(readyProduct(id)));
+    for (const id of Array.from({ length: 10 }, (_, index) => `canary-fill-${index + 1}`)) fillers.push(await hydratePersistedEvidence(readyProduct(id)));
     await adapter.writeCollection('products', [await products.getProductById(recoveryProduct.id), ...fillers]);
     for (const product of fillers) await publishJob(store, product, product.id);
-    const fillerRun = await worker.processAutomationBatch('auto-publish-worker-canary-fill', 3);
-    assert.equal(fillerRun.succeeded, 3);
-    assert.equal((await products.getAllProducts()).filter(product => product.status === 'published' && product.lifecycleState === 'PUBLISHED').length, 2);
+    const fillerRun = await worker.processAutomationBatch('auto-publish-worker-canary-fill', 10);
+    assert.equal(fillerRun.succeeded, 10);
+    assert.equal((await products.getAllProducts()).filter(product => product.status === 'published' && product.lifecycleState === 'PUBLISHED').length, 9);
 
     await adapter.runTransaction('automation-jobs', jobs => { const job = jobs.find(item => item.id === recoveryJob.job.id); job.nextRetryAt = new Date(0).toISOString(); return jobs; });
     const recovered = await worker.processAutomationBatch('auto-publish-worker-canary-recover', 1);
     assert.equal(recovered.succeeded, 1, JSON.stringify(await store.getAutomationJob(recoveryJob.job.id)));
     assert.equal((await products.getProductById(recoveryProduct.id)).lifecycleState, 'PUBLISHED');
-    assert.equal((await products.getAllProducts()).filter(product => product.status === 'published' && product.lifecycleState === 'PUBLISHED').length, 3);
+    assert.equal((await products.getAllProducts()).filter(product => product.status === 'published' && product.lifecycleState === 'PUBLISHED').length, 10);
     assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.productId === recoveryProduct.id && item.action === 'published').length, 1);
   });
 

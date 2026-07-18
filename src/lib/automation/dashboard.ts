@@ -61,7 +61,9 @@ function jobDiagnostic(job?: AutomationJob) {
   return {
     id: job.id, type: job.type, status: job.status, outcomeStatus: job.outcomeStatus || null,
     updatedAt: job.updatedAt, nextRetryAt: job.nextRetryAt || null,
-    lastErrorCode: job.lastErrorCode || null, lastErrorMessage: job.lastErrorMessage || null,
+    lastErrorCode: job.lastErrorCode || null, lastErrorCategory: job.lastErrorCategory || null,
+    lastErrorMessage: job.lastErrorMessage || null, retryable: job.retryable ?? null,
+    deadLetterReason: job.deadLetterReason || null,
     reasons: reasonList(job), schemaVersion: job.schemaVersion,
     policyVersion: job.policyVersion, handlerVersion: job.handlerVersion,
   };
@@ -72,11 +74,14 @@ function roleDiagnostic(role: RuntimeRole, lease: RuntimeRoleLease | undefined, 
   const acquiredAtMs = Date.parse(lease?.acquiredAt || lease?.startedAt || '');
   const active = lease?.status === 'ACTIVE' && Number.isFinite(expiresAtMs) && expiresAtMs > now;
   return {
+    role,
+    status: processStatus,
     processStatus,
     activeRole: active,
     roleState: active ? 'active' : lease?.status === 'ACTIVE' ? 'stale' : lease ? 'standby' : 'unverified',
     owner: lease?.ownerId || lease?.holderId || null,
     instanceId: lease?.instanceId || null,
+    pid: lease?.pid || null,
     heartbeatAt: lease?.heartbeatAt || null,
     acquiredAt: lease?.acquiredAt || lease?.startedAt || null,
     leaseAgeMs: Number.isFinite(acquiredAtMs) ? Math.max(0, now - acquiredAtMs) : null,
@@ -100,9 +105,9 @@ export async function buildAutomationDashboard(range: DashboardRange) {
   const terminal = current.filter(job => ['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED'].includes(job.status));
   const completed = current.filter(job => job.status === 'SUCCEEDED' && job.outcomeStatus !== 'PARTIALLY_COMPLETED');
   const workerHeartbeatMs = control.workerHeartbeatAt ? Date.parse(control.workerHeartbeatAt) : Number.NaN;
-  const workerFresh = Number.isFinite(workerHeartbeatMs) && Date.now() - workerHeartbeatMs < 45_000;
+  const workerFresh = Number.isFinite(workerHeartbeatMs) && now - workerHeartbeatMs < 45_000;
   const schedulerHeartbeatMs = control.schedulerHeartbeatAt ? Date.parse(control.schedulerHeartbeatAt) : Number.NaN;
-  const schedulerFresh = Number.isFinite(schedulerHeartbeatMs) && Date.now() - schedulerHeartbeatMs < 90_000;
+  const schedulerFresh = Number.isFinite(schedulerHeartbeatMs) && now - schedulerHeartbeatMs < 90_000;
 
   const pipeline = {
     sourceRequests: 0, sourceFound: 0, candidateQueued: 0, duplicateRejected: 0,
@@ -130,11 +135,29 @@ export async function buildAutomationDashboard(range: DashboardRange) {
   const sortedJobs = [...jobs].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const latestByType = (type: AutomationJob['type']) => sortedJobs.find(job => job.type === type);
   const latestError = sortedJobs.find(job => job.status === 'FAILED' || job.status === 'BLOCKED' || Boolean(job.lastErrorCode));
+  const latestSchedulerJob = sortedJobs.find(job => job.requestedBy === 'scheduler');
+  const latestSchedulerSuccess = sortedJobs.find(job => job.requestedBy === 'scheduler' && job.status === 'SUCCEEDED');
   const workerLease = roleLeases.find(item => item.role === 'WORKER');
   const schedulerLease = roleLeases.find(item => item.role === 'SCHEDULER');
   const latestSchedulerConflict = [...roleConflicts].filter(item => item.role === 'SCHEDULER').sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))[0];
-  const workerRuntimeStatus = runtimeHealth?.worker.status || (control.workerPaused ? 'paused' : workerFresh ? 'active' : control.workerHeartbeatAt ? 'stale' : 'unverified');
-  const schedulerRuntimeStatus = runtimeHealth?.scheduler.status || (control.schedulerPaused ? 'paused' : !settings.enabled ? 'disabled' : schedulerFresh ? 'active' : control.schedulerHeartbeatAt ? 'stale' : 'unverified');
+  const workerLeaseFresh = workerLease?.status === 'ACTIVE' && Date.parse(workerLease.leaseExpiresAt) > now;
+  const schedulerLeaseFresh = schedulerLease?.status === 'ACTIVE' && Date.parse(schedulerLease.leaseExpiresAt) > now;
+  const nextRunMs = Date.parse(control.schedulerNextRunAt || '');
+  const schedulerNextRunOverdue = Number.isFinite(nextRunMs) && now - nextRunMs > 90_000;
+  const workerRuntimeStatus = control.workerPaused ? 'paused'
+    : workerLeaseFresh || workerFresh ? 'active'
+      : workerLease || control.workerHeartbeatAt ? 'stale'
+        : runtimeHealth?.worker.status === 'crashed' ? 'crashed' : 'unverified';
+  const schedulerRuntimeStatus = control.schedulerPaused ? 'paused'
+    : !settings.enabled ? 'disabled'
+      : schedulerNextRunOverdue ? 'stale'
+        : schedulerLeaseFresh || schedulerFresh ? 'active'
+          : schedulerLease || control.schedulerHeartbeatAt ? 'stale'
+            : runtimeHealth?.scheduler.status === 'crashed' ? 'crashed' : 'unverified';
+  const schedulerBlockReason = schedulerRuntimeStatus === 'stale'
+    ? schedulerNextRunOverdue ? 'NEXT_RUN_OVERDUE' : 'HEARTBEAT_OR_LEASE_STALE'
+    : schedulerRuntimeStatus === 'paused' ? 'SCHEDULER_PAUSED'
+      : schedulerRuntimeStatus === 'disabled' ? 'SCHEDULER_DISABLED' : null;
   const providerNames = new Set(['accessTrade', 'gemini', ...Object.keys(runtimeHealth?.providers || {})]);
   const providers = [...providerNames].map(id => {
     const stored = runtimeHealth?.providers[id] || runtimeHealth?.providers[id.toLowerCase()] || 'unverified';
@@ -199,6 +222,11 @@ export async function buildAutomationDashboard(range: DashboardRange) {
         rejectedAt: latestSchedulerConflict?.observedAt || null,
         lastSuccessfulTickAt: control.schedulerLastRunAt || null,
         nextRunAt: control.schedulerNextRunAt || null,
+        blockReason: schedulerBlockReason,
+        lastJobCreatedAt: latestSchedulerJob?.createdAt || null,
+        lastSuccessAt: latestSchedulerSuccess?.completedAt || latestSchedulerSuccess?.updatedAt || null,
+        backlog: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT + queue.WAITING_CHILDREN,
+        errorRate: terminal.length ? Number((terminal.filter(job => job.status === 'FAILED').length / terminal.length).toFixed(4)) : null,
       },
       guardianCheckedAt: runtimeHealth?.checkedAt || null,
       reasons: runtimeHealth?.reasons || [],
@@ -214,6 +242,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       lastRunAt: control.schedulerLastRunAt || null,
       nextRunAt: control.schedulerNextRunAt || null,
       timezone: control.timezone,
+      blockReason: schedulerBlockReason,
     },
     aiUsage: { ...usage, freeOnly: settings.freeOnly },
     policy: {

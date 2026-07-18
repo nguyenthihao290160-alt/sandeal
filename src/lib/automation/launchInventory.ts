@@ -48,6 +48,13 @@ function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function explicitFixtureRecord(value: unknown): boolean {
+  const item = object(value);
+  return item.isFixture === true || item.isDemo === true || item.isTest === true || item.isSample === true
+    || Boolean(item.isolatedHealthFixture)
+    || /^(?:fixture|mock|sample|demo|test)(?:$|[-_:])/i.test(String(item.source || item.sourceId || ''));
+}
+
 function validUrl(value?: string): boolean {
   try { return ['http:', 'https:'].includes(new URL(value || '').protocol); } catch { return false; }
 }
@@ -103,11 +110,6 @@ export async function applyBootstrapLaunchProfile(input: { actor: string; reason
   if (input.reason.trim().length < 8) throw new Error('BOOTSTRAP_PROFILE_REASON_REQUIRED');
   const preview = await previewBootstrapLaunchProfile();
   const next = await updateAutomationSettings(BOOTSTRAP_LAUNCH_PROFILE);
-  const canaryController = await import('./canaryController');
-  const currentCanary = await canaryController.getCanaryState();
-  if (!currentCanary.controlledLaunch) {
-    await canaryController.activateControlledLaunch({ actor: input.actor, reason: input.reason });
-  }
   await appendAutomationAudit({
     correlationId: `bootstrap-profile:${Date.now()}`,
     operationId: `bootstrap-profile:${Date.now()}`,
@@ -158,14 +160,66 @@ function estimatedWaveCount(totalReady: number): number {
   return 2 + Math.ceil((totalReady - 35) / 50);
 }
 
+const PRODUCT_LIFECYCLE = [
+  'SOURCE_RECEIVED', 'CLASSIFIED', 'NORMALIZED', 'LINK_CHECKED', 'IMAGE_CHECKED',
+  'PRICE_VERIFIED', 'DEDUPED', 'SCORED', 'READY_FOR_PUBLISH', 'PUBLISHED', 'MONITORED',
+] as const;
+
+function projectedLifecycleStage(product: Product): typeof PRODUCT_LIFECYCLE[number] {
+  if (isPublicSafeProduct(product)) {
+    return product.lastHealthyAt ? 'MONITORED' : 'PUBLISHED';
+  }
+  if (product.lifecycleState === 'READY_FOR_PUBLISH') return 'READY_FOR_PUBLISH';
+  if (Number.isFinite(product.score) || Number.isFinite(product.qualityScore)) return 'SCORED';
+  if (product.duplicateStatus === 'CLEAR') return 'DEDUPED';
+  if (Number(product.salePrice || product.price || 0) > 0) return 'PRICE_VERIFIED';
+  if (GOOD_HEALTH.has(String(product.imageHealthStatus || ''))) return 'IMAGE_CHECKED';
+  if (GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''))) return 'LINK_CHECKED';
+  if (['NORMALIZED', 'VERIFYING', 'CONTENT_PREPARING'].includes(String(product.lifecycleState || ''))) return 'NORMALIZED';
+  if (product.recordType || product.classification) return 'CLASSIFIED';
+  return 'SOURCE_RECEIVED';
+}
+
+function structuredBlocker(product: Product, code: string) {
+  const retryable = /stale|health|link|image|price|source|cooldown|evidence/i.test(code)
+    && !/not_product|quarantined|duplicate_unresolved/i.test(code);
+  const manualApprovalRequired = /classification|duplicate|quarantined|editorial|risk|publish/i.test(code);
+  const owner = /image/i.test(code) ? 'IMAGE_VALIDATOR'
+    : /link|source/i.test(code) ? 'LINK_SOURCE_VALIDATOR'
+      : /price/i.test(code) ? 'PRICE_VERIFIER'
+        : /duplicate/i.test(code) ? 'DEDUPLICATION_BOT'
+          : /classification|record_type/i.test(code) ? 'RECORD_CLASSIFIER'
+            : /editorial|evidence/i.test(code) ? 'EDITORIAL_GUARD'
+              : 'PRODUCT_PIPELINE';
+  return {
+    code,
+    message: operatorRecommendation(code.toUpperCase()),
+    retryable,
+    nextRetryAt: retryable ? product.nextRetryAt || product.sourceHealthCooldownUntil || null : null,
+    owner,
+    evidence: [
+      `recordType=${product.recordType || 'UNKNOWN'}`,
+      `lifecycleState=${product.lifecycleState || 'UNSET'}`,
+      `link=${product.linkHealthStatus || product.productHealthStatus || 'unknown'}`,
+      `image=${product.imageHealthStatus || 'unknown'}`,
+      `duplicate=${product.duplicateStatus || 'unknown'}`,
+    ],
+    suggestedAction: operatorRecommendation(code.toUpperCase()),
+    manualApprovalRequired,
+  };
+}
+
 export async function buildLaunchReadyReport() {
   const now = Date.now();
   const [products, candidates] = await Promise.all([getAllProducts(), listCandidateQueue()]);
-  const candidateKeyword = new Map(candidates.map(candidate => [`${candidate.source}:${candidate.sourceId}`, candidate.keyword || 'unknown']));
+  const productionProducts = products.filter(product => !explicitFixtureRecord(product));
+  const productionCandidates = candidates.filter(candidate => !explicitFixtureRecord(candidate) && !explicitFixtureRecord(candidate.payload));
+  const candidateKeyword = new Map(productionCandidates.map(candidate => [`${candidate.source}:${candidate.sourceId}`, candidate.keyword || 'unknown']));
   const ready: Product[] = [];
   const blockers = new Map<string, number>();
+  const blockedItems: Array<Record<string, unknown>> = [];
 
-  for (const product of products.filter(item => !(item.status === 'published' && item.publicHidden === false))) {
+  for (const product of productionProducts.filter(item => !(item.status === 'published' && item.publicHidden === false))) {
     const reasons = preliminaryLaunchBlockers(product, now);
     if (!reasons.length) {
       const evidence = await verifyAutonomousPublishEvidence(product, now);
@@ -178,13 +232,40 @@ export async function buildLaunchReadyReport() {
       else reasons.push(...decision.reasons);
     }
     for (const reason of new Set(reasons)) blockers.set(reason, (blockers.get(reason) || 0) + 1);
+    if (reasons.length) {
+      const currentStage = projectedLifecycleStage(product);
+      const currentIndex = PRODUCT_LIFECYCLE.indexOf(currentStage);
+      blockedItems.push({
+        productId: product.id,
+        title: product.title,
+        currentStage,
+        nextStage: PRODUCT_LIFECYCLE[Math.min(PRODUCT_LIFECYCLE.length - 1, currentIndex + 1)],
+        blockers: [...new Set(reasons)].map(code => structuredBlocker(product, code)),
+      });
+    }
   }
 
   const group = (selector: (product: Product) => string) => Object.fromEntries([...ready.reduce((map, product) => {
     const key = selector(product) || 'unknown'; map.set(key, (map.get(key) || 0) + 1); return map;
   }, new Map<string, number>())].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
   const timestamps = ready.map(product => product.lifecycleUpdatedAt || product.updatedAt).filter((value): value is string => Boolean(value)).sort();
-  const publicCount = products.filter(isPublicSafeProduct).length;
+  const publicCount = productionProducts.filter(isPublicSafeProduct).length;
+  const sourceRecordKeys = new Set([
+    ...productionCandidates.map(candidate => `${candidate.source}:${candidate.sourceId}`),
+    ...productionProducts.map(product => `${product.source}:${product.sourceId || product.externalId || product.id}`),
+  ]);
+  const productRecords = productionProducts.filter(product => product.recordType === 'PRODUCT');
+  const linkValid = productRecords.filter(product => GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || '')));
+  const imageValid = linkValid.filter(product => GOOD_HEALTH.has(String(product.imageHealthStatus || '')));
+  const priceValid = imageValid.filter(product => Number(product.salePrice || product.price || 0) > 0);
+  const deduped = priceValid.filter(product => product.duplicateStatus === 'CLEAR');
+  const excluded = {
+    vouchers: productionProducts.filter(product => product.recordType === 'VOUCHER').length,
+    campaigns: productionProducts.filter(product => product.recordType === 'CAMPAIGN').length,
+    storeOffers: productionProducts.filter(product => ['STORE_OFFER', 'STORE_PROMOTION'].includes(String(product.recordType))).length,
+    categoryOrLandingPages: productionProducts.filter(product => ['CATEGORY_OR_LANDING_PAGE', 'CONTENT_ONLY'].includes(String(product.recordType))).length,
+    unknown: productionProducts.filter(product => !product.recordType || product.recordType === 'UNKNOWN').length,
+  };
   return {
     totalReady: ready.length,
     readyByCategory: group(product => String(product.category || 'unknown')),
@@ -198,6 +279,22 @@ export async function buildLaunchReadyReport() {
     targetReadyProducts: TARGET_READY_PRODUCTS,
     progressToTarget: percentage(ready.length, TARGET_READY_PRODUCTS),
     currentPublicCount: publicCount,
+    inventoryFunnel: {
+      totalSourceRecords: sourceRecordKeys.size,
+      productsClassified: productRecords.length,
+      vouchersCampaignsAndStoreOffersExcluded: excluded.vouchers + excluded.campaigns + excluded.storeOffers,
+      excluded,
+      productsLinkValid: linkValid.length,
+      productsImageValid: imageValid.length,
+      productsPriceValid: priceValid.length,
+      productsDeduped: deduped.length,
+      readyForPublish: ready.length,
+      published: publicCount,
+      blocked: Math.max(0, productRecords.length - publicCount - ready.length),
+      fixtureRecordsExcluded: products.length + candidates.length - productionProducts.length - productionCandidates.length,
+    },
+    launchTargets: { canary: 10, firstPublicMinimum: 30, firstPublicMaximum: 50 },
+    lifecycle: { stages: PRODUCT_LIFECYCLE, blockedItems: blockedItems.slice(0, 200), truncated: blockedItems.length > 200 },
   };
 }
 

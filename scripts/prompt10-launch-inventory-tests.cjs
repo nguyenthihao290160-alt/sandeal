@@ -63,6 +63,7 @@ async function main() {
     const applied = await inventory.applyBootstrapLaunchProfile({ actor: 'test-owner', reason: 'Owner reviewed bootstrap profile.', confirmed: true });
     assert.equal(applied.next.launchEnabled, false); assert.equal(applied.next.safePublish, true);
     assert.equal(applied.next.freeOnly, true); assert.equal(applied.next.allowPaidAi, false);
+    assert.equal((await canary.getCanaryState()).controlledLaunch, undefined, 'bootstrap profile must not activate controlled launch');
   });
 
   await test('keyword ranking favors measured yield while retaining exploration and cooldown', async () => {
@@ -143,7 +144,7 @@ async function main() {
     assert.equal(report.totalReady, 0); assert.equal(report.targetPublicCount, 50); assert.equal(report.progressToTarget, 0);
     assert.equal(canary.getControlledWaveBudget(0), 0); assert.equal(canary.getControlledWaveBudget(1), 10);
     assert.equal(canary.getControlledWaveBudget(2), 35); assert.equal(canary.getControlledWaveBudget(3), 85);
-    const state = await canary.getCanaryState(); assert.equal(state.controlledLaunch, true); assert.equal(state.wave, 0);
+    const state = await canary.getCanaryState(); assert.equal(state.controlledLaunch, undefined); assert.equal(state.wave, 0);
     const decision = await canary.canPublishInCurrentWave('SHADOW', 'fixture-effect');
     assert.equal(decision.allowed, false); assert.equal(decision.reason, 'MODE_DISALLOWS_PUBLISH');
     const wavePreview = await canary.previewControlledPublishWave(1);

@@ -40,11 +40,22 @@ function eventId(dedupeKey?: string) {
   }
 }
 
+function anonymousSessionId() {
+  const key = 'sandeal:anonymous-session';
+  try {
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = randomEventId();
+    window.sessionStorage.setItem(key, created);
+    return created;
+  } catch { return randomEventId(); }
+}
+
 export function trackPublicEvent(event: PublicClientEvent, dedupeKey?: string) {
   void fetch('/api/public/events', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...event, eventId: eventId(dedupeKey) }),
+    body: JSON.stringify({ ...event, eventId: eventId(dedupeKey), anonymousSessionId: anonymousSessionId() }),
     cache: 'no-store',
     keepalive: true,
   }).catch(() => undefined);

@@ -48,6 +48,10 @@ export async function POST(request: NextRequest) {
   if (requestedEventId && !/^[a-zA-Z0-9:_-]{8,160}$/.test(requestedEventId)) {
     return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 });
   }
+  const anonymousSessionId = body.anonymousSessionId === undefined ? undefined : boundedKey(body.anonymousSessionId, 80);
+  if (body.anonymousSessionId !== undefined && !anonymousSessionId) {
+    return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 });
+  }
   const contentPageId = body.contentPageId === undefined ? undefined : boundedKey(body.contentPageId);
   const contextKey = body.contextKey === undefined ? undefined : boundedKey(body.contextKey, 120);
   const resultCount = body.resultCount === undefined ? undefined : Number(body.resultCount);
@@ -65,6 +69,7 @@ export async function POST(request: NextRequest) {
     contentPageId,
     contextKey,
     resultCount,
+    anonymousSessionId,
     referrerCategory: classifyReferrer(request.headers.get('referer'), request.nextUrl.hostname),
     deviceCategory: classifyDevice(request.headers.get('user-agent')),
   });

@@ -104,9 +104,11 @@ async function main() {
     const result = await run(candidate('missing-price-two', { price: undefined, salePrice: undefined, isolatedHealthFixture: undefined }), 'gate4-incomplete-worker');
     assert.equal(result.job.status, 'SUCCEEDED');
     assert.equal(result.queued.status, 'needs_review');
-    assert.equal(result.product.recordType, 'PRODUCT');
+    assert.equal(result.product.recordType, 'UNKNOWN');
     assert.equal(result.product.lifecycleState, 'QUARANTINED');
-    assert.ok(result.product.quarantineReasons.includes('classification_cross_check_failed'));
+    assert.ok(result.product.quarantineReasons.includes('record_type_unknown'));
+    assert.ok(result.product.quarantineReasons.includes('insufficient_verified_product_fields'));
+    assert.equal(result.product.publicHidden, true);
     assert.equal(networkCalls, before);
   });
 

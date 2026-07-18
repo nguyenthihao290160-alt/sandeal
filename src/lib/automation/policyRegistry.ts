@@ -36,7 +36,10 @@ export interface AutomationPolicy {
   ownerEnqueueAllowed: boolean;
 }
 
-const RETRYABLE = ['TIMEOUT', 'RATE_LIMITED', 'NETWORK_ERROR', 'PROVIDER_UNAVAILABLE', 'SERVICE_UNAVAILABLE', 'TEMPORARY_ERROR'];
+const RETRYABLE = [
+  'TIMEOUT', 'RATE_LIMITED', 'NETWORK_ERROR', 'PROVIDER_UNAVAILABLE', 'SERVICE_UNAVAILABLE', 'TEMPORARY_ERROR',
+  'PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'IMAGE_HOTLINK_BLOCKED', 'STORAGE_ERROR',
+];
 
 function policy(
   input: Omit<AutomationPolicy, 'schemaVersion' | 'policyVersion' | 'retryPolicy' | 'handlerVersion' | 'ownerEnqueueAllowed'>

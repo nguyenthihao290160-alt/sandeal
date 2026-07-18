@@ -85,6 +85,22 @@ npm run scheduler
 Do not enable paid AI, external publishing, or production scheduling unless separately approved. Confirm worker and scheduler receive graceful stop signals during replacement.
 Start automation in SHADOW with publishing paused and launch disabled. CANARY and AUTONOMOUS require later, separate approvals; a successful build is not approval.
 
+### Atomic release layout
+
+Do not build over the directory used by a running process and do not delete its `.next` directory. A separately approved operator should:
+
+1. Create a new immutable release directory named from the reviewed commit/release ID.
+2. Check out the exact clean commit there, run `npm ci`, the complete quality gate, and `npm run build` with `SANDEAL_RELEASE_ID` set to that immutable ID.
+3. Start the new release on an isolated port with the same approved durable data path, but keep worker/scheduler and all publishing lanes disabled.
+4. Verify `/api/health/live`, authenticated `/api/health/ready`, public routes and admin authorization on the new port.
+5. Atomically switch the `current` symlink or traffic target, then gracefully reload the web process. Never mix old Server Action assets with a newly overwritten `.next` tree.
+6. Keep the previous release directory and checksum intact for rollback. Retire old processes only after their in-flight requests finish.
+7. Start exactly one worker and scheduler only under the later runtime approval. Verify lease owner, fencing token and heartbeat before allowing new jobs.
+
+The runtime should expose the same `SANDEAL_RELEASE_ID` through `/api/health/live`. A client that detects a Server Action build mismatch may reload once; a dirty form shows a manual reload notice instead of entering a reload loop.
+
+Store one verified backup outside the VPS/primary failure domain before deployment. The backup must be non-empty, record file count/size/checksum, and pass restore into a new empty directory; never restore over live production automatically.
+
 ## 6. Post-deploy checks
 
 Follow `PRODUCTION_RELEASE_CHECKLIST.md`. Roll back when readiness fails, 5xx errors rise, worker heartbeat becomes stale, queue depth grows without recovery, a duplicate side effect appears, data is incorrect, a secret is exposed, or migration/storage validation fails.

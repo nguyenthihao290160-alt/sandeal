@@ -90,12 +90,26 @@ export async function PATCH(request: NextRequest) {
         ownerConfirmed: body.confirmed === true,
         confirmationAt: typeof body.confirmedAt === 'string' ? body.confirmedAt : undefined,
       };
-      const preliminary = await previewControlledModeTransition(requestedMode, gateOptions);
+      let preliminary: ControlledModeTransitionPreview;
+      try { preliminary = await previewControlledModeTransition(requestedMode, gateOptions); }
+      catch {
+        return NextResponse.json({
+          ok: false, code: 'CONTROLLED_LAUNCH_GATE_UNAVAILABLE',
+          message: 'Không thể đánh giá đầy đủ controlled launch gate; chế độ vận hành không thay đổi.',
+        }, { status: 503 });
+      }
       const nonBackupBlockers = preliminary.gates.filter(item => !item.passed && item.code !== 'BACKUP_VERIFIED');
       if (nonBackupBlockers.length) return modeGateError({ ...preliminary, gates: nonBackupBlockers, eligible: false });
       try { await ensurePreCanarySnapshot({ targetMode: requestedMode, retention: 30 }); }
       catch { return NextResponse.json({ ok: false, code: 'PRE_CANARY_BACKUP_FAILED', message: 'Không thể xác minh bản sao lưu trước khi đổi chế độ vận hành.' }, { status: 503 }); }
-      const verified = await previewControlledModeTransition(requestedMode, { ...gateOptions, backupVerified: true });
+      let verified: ControlledModeTransitionPreview;
+      try { verified = await previewControlledModeTransition(requestedMode, { ...gateOptions, backupVerified: true }); }
+      catch {
+        return NextResponse.json({
+          ok: false, code: 'CONTROLLED_LAUNCH_GATE_UNAVAILABLE',
+          message: 'Không thể xác minh lại controlled launch gate sau backup; chế độ vận hành không thay đổi.',
+        }, { status: 503 });
+      }
       if (!verified.eligible) return modeGateError(verified);
       currentControl = await getAutomationControl();
       if (currentControl.killSwitch) return NextResponse.json({ ok: false, code: 'KILL_SWITCH_ACTIVE', message: 'Kill switch đang bật; chế độ vận hành không thay đổi.' }, { status: 409 });

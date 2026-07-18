@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerActor, requirePermission } from '@/lib/auth';
 import { appendAutomationAudit, createAutomationJob, getAllAutomationJobs, getAutomationControl } from '@/lib/automation/store';
-import { listAlerts, updateAlertStatus } from '@/lib/product-intelligence/alerts';
+import { listAlerts, updateAlertStatuses } from '@/lib/product-intelligence/alerts';
 import { generateId } from '@/lib/storage/adapter';
 import type { ProductAlert } from '@/lib/product-intelligence/types';
 
@@ -55,12 +55,13 @@ export async function PATCH(request: NextRequest) {
   let body: Record<string, unknown>; try { body = await request.json() as Record<string, unknown>; } catch { return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 }); }
   const status = String(body.status || ''); if (!['new', 'acknowledged', 'in_progress', 'resolved', 'ignored'].includes(status)) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 });
   try {
-    const data = await updateAlertStatus(String(body.id || ''), status as never, typeof body.reason === 'string' ? body.reason : undefined);
-    if (!data) return NextResponse.json({ ok: false, code: 'NOT_FOUND' }, { status: 404 });
+    const ids = Array.isArray(body.ids) ? body.ids.map(String).slice(0, 100) : [String(body.id || '')];
+    const data = await updateAlertStatuses(ids, status as never, typeof body.reason === 'string' ? body.reason : undefined);
+    if (!data.length) return NextResponse.json({ ok: false, code: 'NOT_FOUND' }, { status: 404 });
     const operationId = generateId();
     await appendAutomationAudit({
       correlationId: operationId, operationId, operationType: 'ALERT_STATUS_CHANGED', actor: getServerActor(),
-      target: data.id, nextState: data.status, risk: 'LOW', reasons: typeof body.reason === 'string' ? [body.reason] : [], dryRun: false, attempts: 0,
+      target: data.map(item => item.id).join(','), nextState: status, risk: 'LOW', reasons: typeof body.reason === 'string' ? [body.reason] : [], dryRun: false, attempts: 0,
     });
     return NextResponse.json({ ok: true, code: 'OK', operationId, data }, { headers: { 'Cache-Control': 'no-store', 'X-Operation-Id': operationId } });
   }

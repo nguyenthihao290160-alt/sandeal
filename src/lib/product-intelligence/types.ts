@@ -247,6 +247,7 @@ export interface OutboundEvent {
   contentPageId?: string;
   contextKey?: string;
   resultCount?: number;
+  anonymousSessionId?: string;
   timestamp: string;
   referrerCategory: 'search' | 'social' | 'internal' | 'direct' | 'other';
   deviceCategory?: 'mobile' | 'tablet' | 'desktop' | 'other';
@@ -276,6 +277,7 @@ export type AlertStatus = 'new' | 'acknowledged' | 'in_progress' | 'resolved' | 
 export interface ProductAlert {
   id: string;
   deduplicationKey: string;
+  groupKey: string;
   type: string;
   severity: AlertSeverity;
   title: string;
@@ -284,9 +286,16 @@ export interface ProductAlert {
   entityId?: string;
   operationId: string;
   suggestedAction: string;
+  recommendedAction: string;
   status: AlertStatus;
   createdAt: string;
   updatedAt: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrenceCount: number;
+  autoResolve: boolean;
+  relatedEntityIds?: string[];
+  suppressionUntil?: string;
   acknowledgedAt?: string;
   resolvedAt?: string;
   ignoredReason?: string;

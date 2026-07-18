@@ -43,6 +43,12 @@ export type ImageCheckStatus =
   | 'ok'
   | 'image_broken'    // 404/410 confirmed, or confirmed non-image data
   | 'invalid_image'   // response ok but content is not image/*
+  | 'hotlink_blocked'
+  | 'too_small'
+  | 'too_large'
+  | 'dark_image_suspected'
+  | 'placeholder'
+  | 'fallback_used'
   | 'forbidden'       // 401/403 anti-bot
   | 'not_allowed'     // same as forbidden, alias
   | 'rate_limited'    // 429: temporary
@@ -59,8 +65,22 @@ export interface ImageCheckResult {
   statusCode?: number;
   contentType?: string;
   contentLength?: number;
+  width?: number;
+  height?: number;
+  dimensionsVerified?: boolean;
   retryable?: boolean;
 }
+
+export type ProductImageValidationState =
+  | 'VALID'
+  | 'BROKEN'
+  | 'HOTLINK_BLOCKED'
+  | 'TIMEOUT'
+  | 'INVALID_CONTENT_TYPE'
+  | 'TOO_SMALL'
+  | 'DARK_IMAGE_SUSPECTED'
+  | 'PLACEHOLDER'
+  | 'FALLBACK_USED';
 
 export interface ImageCandidateResolution {
   selectedUrl?: string;
@@ -72,6 +92,7 @@ export interface ImageCandidateResolution {
 export interface HealthCheckRequestOptions {
   fetchImpl?: typeof fetch;
   resolveDns?: boolean;
+  inspectImageBody?: boolean;
 }
 
 /** Try source candidates in order and retain a retryable verdict over a false permanent failure. */
@@ -121,7 +142,9 @@ const LINK_CHECK_TIMEOUT_MS = 10_000;
 const IMAGE_CHECK_TIMEOUT_MS = 8_000;
 const MIN_PRODUCT_IMAGE_BYTES = 128;
 const MAX_PRODUCT_IMAGE_BYTES = 25 * 1024 * 1024;
+const MIN_PRODUCT_IMAGE_DIMENSION = 120;
 const INITIAL_FETCH = globalThis.fetch;
+const MAX_IMAGE_PROBE_BYTES = 64 * 1024;
 const MAX_BODY_BYTES = 8_192; // 8KB — enough to detect error text, not download large files
 
 /**
@@ -173,7 +196,7 @@ const RETRYABLE_LINK_STATUSES = new Set<LinkCheckStatus>([
 
 /** Retryable image statuses — should NOT trigger image_broken */
 const RETRYABLE_IMAGE_STATUSES = new Set<ImageCheckStatus>([
-  'forbidden', 'not_allowed', 'rate_limited', 'server_error', 'timeout', 'dns_error', 'error', 'unknown',
+  'forbidden', 'hotlink_blocked', 'not_allowed', 'rate_limited', 'server_error', 'timeout', 'dns_error', 'error', 'unknown',
 ]);
 
 // ---- Helpers ----
@@ -230,7 +253,7 @@ function buildImageRequestHeaders(method: 'HEAD' | 'GET'): Record<string, string
   };
   if (method === 'GET') {
     // Limit download for GET probe
-    headers['Range'] = `bytes=0-${MAX_BODY_BYTES - 1}`;
+    headers['Range'] = `bytes=0-${MAX_IMAGE_PROBE_BYTES - 1}`;
   }
   return headers;
 }
@@ -308,6 +331,107 @@ function invalidImageSize(length: number | undefined): string | undefined {
   if (length < MIN_PRODUCT_IMAGE_BYTES) return `Image payload too small: ${length} bytes`;
   if (length > MAX_PRODUCT_IMAGE_BYTES) return `Image payload too large: ${length} bytes`;
   return undefined;
+}
+
+function imageStatusForSize(length: number | undefined): 'too_small' | 'too_large' | undefined {
+  if (length === undefined) return undefined;
+  if (length < MIN_PRODUCT_IMAGE_BYTES) return 'too_small';
+  if (length > MAX_PRODUCT_IMAGE_BYTES) return 'too_large';
+  return undefined;
+}
+
+export function productImageValidationState(result: ImageCheckResult, fallbackUsed = false): ProductImageValidationState {
+  if (fallbackUsed && result.ok) return 'FALLBACK_USED';
+  if (result.status === 'ok' || result.status === 'fallback_used') return 'VALID';
+  if (result.status === 'image_broken') return 'BROKEN';
+  if (result.status === 'forbidden' || result.status === 'not_allowed' || result.status === 'hotlink_blocked') return 'HOTLINK_BLOCKED';
+  if (result.status === 'timeout' || result.status === 'dns_error' || result.status === 'rate_limited' || result.status === 'server_error') return 'TIMEOUT';
+  if (result.status === 'too_small' || result.status === 'too_large') return 'TOO_SMALL';
+  if (result.status === 'dark_image_suspected') return 'DARK_IMAGE_SUSPECTED';
+  if (result.status === 'placeholder') return 'PLACEHOLDER';
+  return 'INVALID_CONTENT_TYPE';
+}
+
+async function readLimitedBytes(response: Response, maximum: number): Promise<Uint8Array> {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maximum) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      const remaining = maximum - total;
+      const chunk = value.length > remaining ? value.slice(0, remaining) : value;
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* response already ended */ }
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
+  return output;
+}
+
+function jpegDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined;
+  let offset = 2;
+  while (offset + 8 < bytes.length) {
+    if (bytes[offset] !== 0xff) { offset += 1; continue; }
+    const marker = bytes[offset + 1];
+    if (marker === 0xd8 || marker === 0xd9) { offset += 2; continue; }
+    const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+    if (length < 2 || offset + length + 2 > bytes.length) return undefined;
+    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+      return { height: (bytes[offset + 5] << 8) | bytes[offset + 6], width: (bytes[offset + 7] << 8) | bytes[offset + 8] };
+    }
+    offset += length + 2;
+  }
+  return undefined;
+}
+
+function imageMetadata(bytes: Uint8Array, contentType: string): { signatureValid: boolean; width?: number; height?: number; darkSuspected?: boolean } {
+  const pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length >= 24 && pngSignature.every((value, index) => bytes[index] === value)) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { signatureValid: true, width: view.getUint32(16), height: view.getUint32(20) };
+  }
+  const ascii = new TextDecoder('ascii').decode(bytes.slice(0, Math.min(bytes.length, MAX_IMAGE_PROBE_BYTES)));
+  if (bytes.length >= 10 && (ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a'))) {
+    return { signatureValid: true, width: bytes[6] | (bytes[7] << 8), height: bytes[8] | (bytes[9] << 8) };
+  }
+  const jpeg = jpegDimensions(bytes);
+  if (jpeg) return { signatureValid: true, ...jpeg };
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) return { signatureValid: true };
+  if (bytes.length >= 30 && ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP') {
+    if (ascii.slice(12, 16) === 'VP8X') {
+      return {
+        signatureValid: true,
+        width: 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16),
+        height: 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16),
+      };
+    }
+    return { signatureValid: true };
+  }
+  if (contentType.toLowerCase().includes('svg')) {
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    if (!/<svg\b/i.test(text)) return { signatureValid: false };
+    const widthMatch = text.match(/\bwidth=["']\s*(\d+(?:\.\d+)?)/i);
+    const heightMatch = text.match(/\bheight=["']\s*(\d+(?:\.\d+)?)/i);
+    const viewBox = text.match(/\bviewBox=["']\s*[-\d.]+\s+[-\d.]+\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)/i);
+    const colors = [...text.matchAll(/(?:fill|background(?:-color)?)\s*[:=]\s*["']?([^;"'\s>]+)/gi)].map(match => match[1].toLowerCase());
+    const dark = colors.length > 0 && colors.every(color => /^(?:#0{3,8}|black|rgb\(0,?0,?0\))$/.test(color));
+    return {
+      signatureValid: true,
+      width: Number(widthMatch?.[1] || viewBox?.[1]) || undefined,
+      height: Number(heightMatch?.[1] || viewBox?.[2]) || undefined,
+      darkSuspected: dark,
+    };
+  }
+  if (bytes.length >= 12 && ascii.slice(4, 8) === 'ftyp') return { signatureValid: true };
+  return { signatureValid: false };
 }
 
 function shouldForceGet(url: string): boolean {
@@ -579,6 +703,11 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
  * - Proper status types for all temporary failures
  */
 export async function checkImageHealth(imageUrl: string, options: HealthCheckRequestOptions = {}): Promise<ImageCheckResult> {
+  if (/(?:placeholder|spacer|transparent[-_]?pixel|blank[-_]?image|\/1x1(?:\.|\/|$))/i.test(imageUrl)) {
+    return { status: 'placeholder', ok: false, retryable: false, reason: 'Image URL has a known placeholder shape' };
+  }
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const inspectImageBody = options.inspectImageBody ?? fetchImpl === INITIAL_FETCH;
   // Validate URL
   if (!imageUrl || !imageUrl.trim()) {
     return { status: 'error', ok: false, reason: 'Image URL rỗng' };
@@ -632,20 +761,23 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
           const sizeError = invalidImageSize(headContentLength);
           if (sizeError) {
             return {
-              status: 'invalid_image', ok: false, retryable: false,
+              status: imageStatusForSize(headContentLength) || 'invalid_image', ok: false, retryable: false,
               reason: sizeError,
               contentType: headContentType,
               contentLength: headContentLength,
               statusCode: headResponse.status,
             };
           }
-          return {
-            status: 'ok', ok: true, retryable: false,
-            reason: 'Image OK',
-            contentType: headContentType,
-            contentLength: headContentLength,
-            statusCode: headResponse.status,
-          };
+          if (!inspectImageBody) {
+            return {
+              status: 'ok', ok: true, retryable: false,
+              reason: 'Image headers OK; body inspection disabled for injected transport',
+              contentType: headContentType,
+              contentLength: headContentLength,
+              dimensionsVerified: false,
+              statusCode: headResponse.status,
+            };
+          }
         }
 
         // HEAD 200 but no content-type — fallback to GET
@@ -658,7 +790,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
     }
 
     // Step 2: GET fallback (if HEAD didn't resolve or had issues)
-    if (!headOk || !headContentType) {
+    if (!headOk || !headContentType || inspectImageBody) {
       const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('GET'), options);
 
       if (getResponse.status >= 400) {
@@ -674,7 +806,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
         // Access restricted — retryable, NOT image_broken
         if (getResponse.status === 401 || getResponse.status === 403) {
           return {
-            status: 'forbidden', ok: false, retryable: true,
+            status: 'hotlink_blocked', ok: false, retryable: true,
             reason: `HTTP ${getResponse.status} — Ảnh bị từ chối truy cập, có thể là anti-bot`,
             statusCode: getResponse.status,
           };
@@ -718,9 +850,8 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
       const getContentLength = responseContentLength(getResponse);
 
       // Cancel body download — we only need headers
-      try { getResponse.body?.cancel(); } catch { /* ignore */ }
-
       if (!contentType.toLowerCase().startsWith('image/')) {
+        try { await getResponse.body?.cancel(); } catch { /* ignore */ }
         return {
           status: 'invalid_image', ok: false, retryable: false,
           reason: contentType
@@ -733,8 +864,9 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
 
       const sizeError = invalidImageSize(getContentLength);
       if (sizeError) {
+        try { await getResponse.body?.cancel(); } catch { /* ignore */ }
         return {
-          status: 'invalid_image', ok: false, retryable: false,
+          status: imageStatusForSize(getContentLength) || 'invalid_image', ok: false, retryable: false,
           reason: sizeError,
           contentType,
           contentLength: getContentLength,
@@ -742,11 +874,48 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
         };
       }
 
+      if (inspectImageBody) {
+        const bytes = await readLimitedBytes(getResponse, MAX_IMAGE_PROBE_BYTES);
+        const metadata = imageMetadata(bytes, contentType);
+        if (!metadata.signatureValid) {
+          return {
+            status: 'invalid_image', ok: false, retryable: false,
+            reason: 'Image payload signature does not match a supported image format',
+            contentType, contentLength: getContentLength, statusCode: getResponse.status,
+          };
+        }
+        if (metadata.width && metadata.height && (metadata.width < MIN_PRODUCT_IMAGE_DIMENSION || metadata.height < MIN_PRODUCT_IMAGE_DIMENSION)) {
+          return {
+            status: 'too_small', ok: false, retryable: false,
+            reason: `Image dimensions too small: ${metadata.width}x${metadata.height}`,
+            contentType, contentLength: getContentLength, width: metadata.width, height: metadata.height,
+            dimensionsVerified: true, statusCode: getResponse.status,
+          };
+        }
+        if (metadata.darkSuspected) {
+          return {
+            status: 'dark_image_suspected', ok: false, retryable: false,
+            reason: 'Image payload is uniformly dark in the format that can be inspected safely',
+            contentType, contentLength: getContentLength, width: metadata.width, height: metadata.height,
+            dimensionsVerified: Boolean(metadata.width && metadata.height), statusCode: getResponse.status,
+          };
+        }
+        return {
+          status: 'ok', ok: true, retryable: false,
+          reason: metadata.width && metadata.height ? `Image OK (${metadata.width}x${metadata.height})` : 'Image signature OK; dimensions unavailable for this encoded format',
+          contentType, contentLength: getContentLength, width: metadata.width, height: metadata.height,
+          dimensionsVerified: Boolean(metadata.width && metadata.height), statusCode: getResponse.status,
+        };
+      }
+
+      try { await getResponse.body?.cancel(); } catch { /* ignore */ }
+
       return {
         status: 'ok', ok: true, retryable: false,
         reason: 'Image OK (GET)',
         contentType,
         contentLength: getContentLength,
+        dimensionsVerified: false,
         statusCode: getResponse.status,
       };
     }

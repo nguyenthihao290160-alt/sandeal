@@ -15,6 +15,9 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: config.siteUrl, changeFrequency: 'daily', priority: 1 },
     { url: new URL('/deals', config.siteUrl).toString(), changeFrequency: 'daily', priority: 0.9 },
     { url: new URL('/review-methodology', config.siteUrl).toString(), changeFrequency: 'monthly', priority: 0.5 },
+    ...['chinh-sach-bao-mat', 'dieu-khoan-su-dung', 'minh-bach-affiliate', 'lien-he'].map(slug => ({
+      url: new URL(`/thong-tin/${slug}`, config.siteUrl).toString(), changeFrequency: 'monthly' as const, priority: 0.35,
+    })),
     ...categories.map(item => ({
       url: new URL(taxonomyPath('category', item.slug), config.siteUrl).toString(),
       lastModified: item.lastModified,

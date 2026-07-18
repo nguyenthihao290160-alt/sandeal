@@ -114,6 +114,7 @@ async function main() {
   const publicFilter = require('../src/lib/publicProductFilter.ts');
   const settings = require('../src/lib/storage/automationSettings.ts');
   const sourceQuality = require('../src/lib/autonomous/sourceQuality.ts');
+  const canary = require('../src/lib/automation/canaryController.ts');
 
   const collections = [
     'products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs',
@@ -138,6 +139,15 @@ async function main() {
       schedulerPaused: false,
       killSwitch: false,
     }, 'self-healing-test');
+    if (mode === 'CANARY' || mode === 'AUTONOMOUS') {
+      const initial = await canary.getCanaryState();
+      const now = new Date().toISOString();
+      await adapter.writeCollection('automation-canary', [{
+        ...initial, controlledLaunch: true, wave: 1, approvedWave: 1, successfulShadowCycles: 1,
+        approvedBy: 'self-healing-test', approvedAt: now, approvalReason: 'Isolated controlled recovery publication fixture.',
+        wavePublishedBaseline: initial.publishedEffectKeys.length, paused: false, pauseReasons: [], updatedAt: now,
+      }]);
+    }
   }
 
   async function seed(id = 'self-healing-product', overrides = {}) {

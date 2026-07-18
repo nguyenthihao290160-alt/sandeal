@@ -24,6 +24,17 @@ export type AutomationRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'BLOCKER';
 export type ApprovalStatus = 'NOT_REQUIRED' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 export type AutonomousMode = 'OBSERVE' | 'SHADOW' | 'CANARY' | 'AUTONOMOUS' | 'EMERGENCY_STOP';
+export type AutomationErrorCategory =
+  | 'PROVIDER_TIMEOUT'
+  | 'PROVIDER_RATE_LIMIT'
+  | 'LINK_NOT_FOUND'
+  | 'IMAGE_HOTLINK_BLOCKED'
+  | 'INVALID_SOURCE_DATA'
+  | 'VALIDATION_FAILED'
+  | 'DUPLICATE'
+  | 'STORAGE_ERROR'
+  | 'INTERNAL_CODE_ERROR'
+  | 'UNKNOWN_ERROR';
 
 export type BotCategory = 'CONTROL_PLANE' | 'RULE_BASED_AUTOMATION' | 'AI_ASSISTED' | 'EXTERNAL_INTEGRATION' | 'HUMAN_APPROVAL_GATE';
 export type RequestedExecutionMode = 'AUTO' | 'API_ONLY' | 'LOCAL_ONLY' | 'MANUAL_ONLY';
@@ -165,7 +176,10 @@ export interface AutomationJob {
   completedAt?: string;
   cancelledAt?: string;
   lastErrorCode?: string;
+  lastErrorCategory?: AutomationErrorCategory;
   lastErrorMessage?: string;
+  retryable?: boolean;
+  deadLetterReason?: string;
   createdAt: string;
   updatedAt: string;
 }

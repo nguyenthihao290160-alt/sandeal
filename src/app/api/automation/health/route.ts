@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ok: true, code: 'OK', message: 'Đã kiểm tra hệ thống tự động hóa.', data: {
       web: runtime?.web || { status: 'alive', buildAvailable: process.env.NODE_ENV !== 'production', publicRouteHealthy: null },
       readiness: data.control.killSwitch || data.control.publishPaused ? 'paused' : runtime?.publishSafe === false ? 'degraded' : 'unverified',
-      worker: runtime?.worker || data.worker, scheduler: runtime?.scheduler || data.scheduler,
+      worker: data.worker, scheduler: data.scheduler,
       queue: data.queue, aiUsage: data.aiUsage, circuits: data.circuits, policy: data.policy,
       providers, runtime: runtime ? { publishSafe: runtime.publishSafe, reasons: runtime.reasons, storage: runtime.storage, duplicateRoles: runtime.duplicateRoles, checkedAt: runtime.checkedAt } : null,
       killSwitch: data.control.killSwitch, updatedAt: data.updatedAt,

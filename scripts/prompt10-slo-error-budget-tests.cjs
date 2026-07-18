@@ -175,60 +175,68 @@ async function main() {
     });
   }
 
-  async function seedWaveOneWithThreePublished() {
-    await reset('CANARY');
-    await canary.recordSuccessfulShadowCycle();
-    for (const key of ['effect-1', 'effect-2', 'effect-3']) {
-      assert.equal(await canary.reserveCanaryEffect('CANARY', key), true);
-      await canary.completeCanaryEffect('CANARY', key, true);
-    }
+  async function seedControlledWave(wave, publishedCount = 0) {
+    const initial = await canary.getCanaryState();
+    const now = new Date().toISOString();
+    await adapter.writeCollection('automation-canary', [{
+      ...initial, controlledLaunch: true, wave, approvedWave: wave, successfulShadowCycles: 1,
+      reservedEffectKeys: [], publishedEffectKeys: Array.from({ length: publishedCount }, (_, index) => `effect-${index + 1}`),
+      approvedBy: 'slo-test', approvedAt: now, approvalReason: `Isolated approved controlled wave ${wave}.`,
+      wavePublishedBaseline: 0, paused: false, pauseReasons: [], updatedAt: now,
+    }]);
   }
 
-  async function seedWaveTwoWithTenPublished() {
-    await seedWaveOneWithThreePublished();
-    await canary.advanceCanaryWaveAfterHealthyEvaluation({
-      evaluationId: 'seed-healthy-wave-1', status: 'PASS', dataStatus: 'MEASURED', sampleSize: 5, evaluatedAt: new Date().toISOString(),
-    });
-    for (let index = 4; index <= 10; index += 1) {
-      assert.equal(await canary.reserveCanaryEffect('CANARY', `effect-${index}`), true);
-      await canary.completeCanaryEffect('CANARY', `effect-${index}`, true);
-    }
+  async function seedWaveOneWithTenPublished() {
+    await reset('CANARY');
+    await seedControlledWave(1, 10);
   }
 
-  await test('wave 0 is shadow-only and wave 1 admits at most three unique effects', async () => {
+  async function seedWaveTwoWithThirtyFivePublished() {
     await reset('CANARY');
-    assert.equal(canary.getCanaryWaveBudget(0), 0);
+    await seedControlledWave(2, 35);
+  }
+
+  await test('controlled wave 0 is shadow-only and approved wave 1 admits at most ten unique effects', async () => {
+    await reset('CANARY');
+    await seedControlledWave(0, 0);
+    assert.equal(canary.getControlledWaveBudget(0), 0);
     assert.equal((await canary.canPublishInCurrentWave('CANARY', 'effect-1')).allowed, false);
-    assert.equal((await canary.recordSuccessfulShadowCycle()).wave, 1);
-    assert.equal(canary.getCanaryWaveBudget(1), 3);
-    for (const key of ['effect-1', 'effect-2', 'effect-3']) assert.equal(await canary.reserveCanaryEffect('CANARY', key), true);
-    assert.equal(await canary.reserveCanaryEffect('CANARY', 'effect-4'), false);
-    for (const key of ['effect-1', 'effect-2', 'effect-3']) await canary.completeCanaryEffect('CANARY', key, true);
+    assert.equal((await canary.recordSuccessfulShadowCycle()).wave, 0, 'shadow success must not auto-create a controlled wave');
+    await seedControlledWave(1, 0);
+    assert.equal(canary.getControlledWaveBudget(1), 10);
+    for (let index = 1; index <= 10; index += 1) assert.equal(await canary.reserveCanaryEffect('CANARY', `effect-${index}`), true);
+    assert.equal(await canary.reserveCanaryEffect('CANARY', 'effect-11'), false);
+    for (let index = 1; index <= 10; index += 1) await canary.completeCanaryEffect('CANARY', `effect-${index}`, true);
     assert.equal((await canary.canPublishInCurrentWave('CANARY', 'effect-1')).allowed, true, 'completed effect replay must remain allowed');
   });
 
-  await test('wave promotion rejects missing or insufficient evidence and wave 2 caps total effects at ten', async () => {
-    await seedWaveOneWithThreePublished();
+  await test('controlled promotion rejects missing evidence, never auto-approves, and approved wave 2 caps at thirty-five', async () => {
+    await seedWaveOneWithTenPublished();
     assert.equal((await canary.advanceCanaryWaveAfterHealthyEvaluation()).wave, 1);
     assert.equal((await canary.advanceCanaryWaveAfterHealthyEvaluation({
       evaluationId: 'insufficient', status: 'INSUFFICIENT_DATA', dataStatus: 'INSUFFICIENT_DATA', sampleSize: 99, evaluatedAt: new Date().toISOString(),
     })).wave, 1);
-    assert.equal((await canary.advanceCanaryWaveAfterHealthyEvaluation({
+    const measured = await canary.advanceCanaryWaveAfterHealthyEvaluation({
       evaluationId: 'healthy-wave-1', status: 'PASS', dataStatus: 'MEASURED', sampleSize: 5, evaluatedAt: new Date().toISOString(),
-    })).wave, 2);
-    assert.equal(canary.getCanaryWaveBudget(2), 10);
-    for (let index = 4; index <= 10; index += 1) assert.equal(await canary.reserveCanaryEffect('CANARY', `effect-${index}`), true);
-    assert.equal(await canary.reserveCanaryEffect('CANARY', 'effect-11'), false);
+    });
+    assert.equal(measured.wave, 1, 'measured PASS is evidence, not owner wave approval');
+    assert.equal(measured.lastHealthyEvaluationId, 'healthy-wave-1');
+    await seedControlledWave(2, 10);
+    assert.equal(canary.getControlledWaveBudget(2), 35);
+    for (let index = 11; index <= 35; index += 1) assert.equal(await canary.reserveCanaryEffect('CANARY', `effect-${index}`), true);
+    assert.equal(await canary.reserveCanaryEffect('CANARY', 'effect-36'), false);
   });
 
-  await test('wave 3 expands only after a new measured PASS and retains a deterministic budget', async () => {
-    await seedWaveTwoWithTenPublished();
-    assert.equal((await canary.advanceCanaryWaveAfterHealthyEvaluation({
+  await test('controlled wave 3 requires a separate approval and retains its deterministic cumulative budget', async () => {
+    await seedWaveTwoWithThirtyFivePublished();
+    const measured = await canary.advanceCanaryWaveAfterHealthyEvaluation({
       evaluationId: 'healthy-wave-2', status: 'PASS', dataStatus: 'MEASURED', sampleSize: 5, evaluatedAt: new Date().toISOString(),
-    })).wave, 3);
-    assert.equal(canary.getCanaryWaveBudget(3), 50);
-    for (let index = 11; index <= 50; index += 1) assert.equal(await canary.reserveCanaryEffect('CANARY', `effect-${index}`), true);
-    assert.equal(await canary.reserveCanaryEffect('CANARY', 'effect-51'), false);
+    });
+    assert.equal(measured.wave, 2);
+    await seedControlledWave(3, 35);
+    assert.equal(canary.getControlledWaveBudget(3), 85);
+    for (let index = 36; index <= 85; index += 1) assert.equal(await canary.reserveCanaryEffect('CANARY', `effect-${index}`), true);
+    assert.equal(await canary.reserveCanaryEffect('CANARY', 'effect-86'), false);
   });
 
   await test('empty persisted telemetry is insufficient data and never reports SLO PASS', async () => {

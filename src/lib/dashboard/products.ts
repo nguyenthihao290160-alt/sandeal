@@ -22,9 +22,11 @@ export const SAFE_PUBLISH_STATUSES = [
   'published',
   'archived',
 ] as const;
+export const PIPELINE_STAGES = ['classified', 'link_valid', 'image_valid', 'price_valid', 'deduped', 'ready', 'published', 'blocked'] as const;
 
 export type DashboardProductSort = (typeof DASHBOARD_PRODUCT_SORTS)[number];
 export type SafePublishStatus = (typeof SAFE_PUBLISH_STATUSES)[number];
+export type DashboardPipelineStage = (typeof PIPELINE_STAGES)[number];
 
 export interface DashboardProductQuery {
   q?: string;
@@ -33,6 +35,7 @@ export interface DashboardProductQuery {
   kind?: ProductKind;
   riskLevel?: ProductRiskLevel;
   safePublishStatus?: SafePublishStatus;
+  pipelineStage?: DashboardPipelineStage;
   sort: DashboardProductSort;
   page: number;
   pageSize: number;
@@ -132,6 +135,7 @@ export function parseDashboardProductQuery(searchParams: URLSearchParams):
   const kind = searchParams.get('kind');
   const riskLevel = searchParams.get('riskLevel');
   const safePublishStatus = searchParams.get('safePublishStatus');
+  const pipelineStage = searchParams.get('pipelineStage');
   const sort = searchParams.get('sort') || 'updated_desc';
   const page = positiveInteger(searchParams.get('page'), 1);
   const requestedPageSize = positiveInteger(searchParams.get('pageSize'), 20);
@@ -142,6 +146,7 @@ export function parseDashboardProductQuery(searchParams: URLSearchParams):
   if (kind && !KINDS.has(kind as ProductKind)) return { ok: false, message: 'Bộ lọc loại dữ liệu không hợp lệ.' };
   if (riskLevel && !RISKS.has(riskLevel as ProductRiskLevel)) return { ok: false, message: 'Bộ lọc mức rủi ro không hợp lệ.' };
   if (safePublishStatus && !SAFE_PUBLISH_STATUSES.includes(safePublishStatus as SafePublishStatus)) return { ok: false, message: 'Bộ lọc đăng an toàn không hợp lệ.' };
+  if (pipelineStage && !PIPELINE_STAGES.includes(pipelineStage as DashboardPipelineStage)) return { ok: false, message: 'Bộ lọc giai đoạn pipeline không hợp lệ.' };
   if (!DASHBOARD_PRODUCT_SORTS.includes(sort as DashboardProductSort)) return { ok: false, message: 'Cách sắp xếp không hợp lệ.' };
   if (page === null) return { ok: false, message: 'Số trang không hợp lệ.' };
   if (requestedPageSize === null || requestedPageSize > 50) return { ok: false, message: 'Số sản phẩm mỗi trang phải từ 1 đến 50.' };
@@ -155,6 +160,7 @@ export function parseDashboardProductQuery(searchParams: URLSearchParams):
       kind: kind as ProductKind || undefined,
       riskLevel: riskLevel as ProductRiskLevel || undefined,
       safePublishStatus: safePublishStatus as SafePublishStatus || undefined,
+      pipelineStage: pipelineStage as DashboardPipelineStage || undefined,
       sort: sort as DashboardProductSort,
       page,
       pageSize: requestedPageSize,
@@ -230,7 +236,24 @@ function sortItems(items: DashboardProductItem[], sort: DashboardProductSort): v
 }
 
 export function buildDashboardProducts(products: Product[], query: DashboardProductQuery): DashboardProductsResult {
-  const filtered = products.map(toDashboardProductItem).filter((item) => {
+  const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+  const matchesPipeline = (product: Product) => {
+    if (!query.pipelineStage) return true;
+    const classified = product.recordType === 'PRODUCT';
+    const linkValid = classified && goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || ''));
+    const imageValid = linkValid && goodHealth.has(String(product.imageHealthStatus || ''));
+    const priceValid = imageValid && Number(product.salePrice || product.price || 0) > 0;
+    const deduped = priceValid && product.duplicateStatus === 'CLEAR';
+    if (query.pipelineStage === 'classified') return classified;
+    if (query.pipelineStage === 'link_valid') return linkValid;
+    if (query.pipelineStage === 'image_valid') return imageValid;
+    if (query.pipelineStage === 'price_valid') return priceValid;
+    if (query.pipelineStage === 'deduped') return deduped;
+    if (query.pipelineStage === 'ready') return classified && product.lifecycleState === 'READY_FOR_PUBLISH' && !isPublicSafeProduct(product);
+    if (query.pipelineStage === 'published') return isPublicSafeProduct(product);
+    return classified && product.lifecycleState !== 'READY_FOR_PUBLISH' && !isPublicSafeProduct(product);
+  };
+  const filtered = products.filter(matchesPipeline).map(toDashboardProductItem).filter((item) => {
     if (query.q && !includesSearch(item, query.q)) return false;
     if (query.platform && item.platform !== query.platform) return false;
     if (query.status && item.status !== query.status) return false;

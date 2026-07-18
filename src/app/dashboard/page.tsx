@@ -37,7 +37,7 @@ type DashboardData = {
   business: { publicProducts: number; freshPrice: number; stalePrice: number; healthyAffiliateLinks: number; brokenLinks: number; outboundClicks: number; degradedProviders: string[] };
   inventory: {
     diagnostic: { primaryBlocker: string; secondaryBlockers: string[]; sourceStatus: string; sourceReason: string; publicProductCount: number; totalProductRecords: number; readyForLaunchCount: number; publishBlockedCount: number; quarantineCount: number; duplicateCount: number; invalidCount: number; nextAutomaticAction: string; recommendedOperatorAction: string };
-    launchReady: { totalReady: number; readyByCategory: Record<string, number>; readyByMerchant: Record<string, number>; readyByKeyword: Record<string, number>; blockedByReason: Record<string, number>; oldestReady: string | null; newestReady: string | null; estimatedWaveCount: number; targetPublicCount: number; targetReadyProducts: number; progressToTarget: number | null; currentPublicCount: number };
+    launchReady: { totalReady: number; readyByCategory: Record<string, number>; readyByMerchant: Record<string, number>; readyByKeyword: Record<string, number>; blockedByReason: Record<string, number>; oldestReady: string | null; newestReady: string | null; estimatedWaveCount: number; targetPublicCount: number; targetReadyProducts: number; progressToTarget: number | null; currentPublicCount: number; inventoryFunnel: { totalSourceRecords: number; productsClassified: number; vouchersCampaignsAndStoreOffersExcluded: number; productsLinkValid: number; productsImageValid: number; productsPriceValid: number; productsDeduped: number; readyForPublish: number; published: number; blocked: number; fixtureRecordsExcluded: number } };
     bootstrap: { profile: 'BOOTSTRAP_LAUNCH'; changes: Array<{ field: string; current: unknown; proposed: unknown }>; estimatedThroughput: { scheduledCyclesPerDay: number; maximumCandidatesPerRun: number; maximumCandidatesPerDay: number; bootstrapCandidatePoolPerScan: number; reviewBatchPerCycle: number; targetReadyProducts: number; firstPublicTarget: number; estimateOnly: true }; warnings: string[] };
     keywords: { top: KeywordYield[]; poor: KeywordYield[]; total: number };
     processing: { processingRatePerMinute: number | null; averageCandidateDurationMs: number | null; queueWaitP50: number | null; queueWaitP95: number | null; networkFailureRate: number | null; validToReadyRate: number | null; readyToPublishedRate: number | null; topBlockReasons: Record<string, number>; sampleSize: number };
@@ -112,6 +112,19 @@ function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, ru
   ];
   const paused = data.control.schedulerPaused || data.control.publishPaused;
   const topBlockers = Object.entries(data.inventory.launchReady.blockedByReason).slice(0, 5);
+  const funnel = data.inventory.launchReady.inventoryFunnel;
+  const funnelRows = [
+    ['Bản ghi nguồn', funnel.totalSourceRecords, '/dashboard/product-sources'],
+    ['Phân loại PRODUCT', funnel.productsClassified, '/dashboard/products?pipelineStage=classified'],
+    ['Voucher/campaign/store offer đã loại', funnel.vouchersCampaignsAndStoreOffersExcluded, '/dashboard/product-sources'],
+    ['Link hợp lệ', funnel.productsLinkValid, '/dashboard/products?pipelineStage=link_valid'],
+    ['Ảnh hợp lệ', funnel.productsImageValid, '/dashboard/products?pipelineStage=image_valid'],
+    ['Giá hợp lệ', funnel.productsPriceValid, '/dashboard/products?pipelineStage=price_valid'],
+    ['Đã chống trùng', funnel.productsDeduped, '/dashboard/products?pipelineStage=deduped'],
+    ['Sẵn sàng', funnel.readyForPublish, '/dashboard/products?pipelineStage=ready'],
+    ['Đã public', funnel.published, '/dashboard/products?pipelineStage=published'],
+    ['Bị chặn', funnel.blocked, '/dashboard/products?pipelineStage=blocked'],
+  ] as const;
   return <>
     <section className={styles.metricGroups} aria-label="Chẩn đoán kho sản phẩm ra mắt">
       <article className={styles.panel}>
@@ -135,6 +148,8 @@ function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, ru
           <div><dt>Số wave ước tính</dt><dd>{data.inventory.launchReady.estimatedWaveCount}</dd></div>
         </dl>
         {topBlockers.length ? <p className={styles.reasonText}>Blocker nhiều nhất: {topBlockers.map(([reason, count]) => `${reason} (${count})`).join(' · ')}</p> : <p className={styles.mutedText}>Chưa có blocker sản phẩm được ghi nhận.</p>}
+        <div className={styles.metricList} aria-label="Funnel sản phẩm thật">{funnelRows.map(([label, value, href]) => <Link href={href} key={label}><span>{label}</span><strong>{value}</strong></Link>)}</div>
+        {funnel.fixtureRecordsExcluded > 0 && <p className={styles.mutedText}>{funnel.fixtureRecordsExcluded} fixture/test record đã bị loại khỏi readiness.</p>}
         <div className={styles.advancedActions}><button type="button" onClick={() => openControl({ action: 'apply_bootstrap_profile', profile: 'BOOTSTRAP_LAUNCH', title: 'Áp dụng BOOTSTRAP_LAUNCH', danger: true })}>Xem và xác nhận profile bootstrap</button></div>
       </article>
     </section>

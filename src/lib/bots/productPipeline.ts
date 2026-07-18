@@ -6,7 +6,7 @@ import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsert
 import { readCollection, runTransaction, writeCollection } from '../storage/adapter';
 import { createAutomationJob, getAutomationControl } from '../automation/store';
 import { completeJournalEffect } from '../automation/operationJournal';
-import { checkImageHealth, checkLinkHealth } from './productHealthCheck';
+import { checkImageHealth, checkLinkHealth, productImageValidationState, type ImageCheckResult } from './productHealthCheck';
 import type { Product, ProductLifecycleState, ProductOffer, ReviewContent } from '../types';
 import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
 import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
@@ -153,7 +153,7 @@ function checkCandidateLink(url: string) {
   if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, finalUrl: url });
   return withDomainConcurrency(url, () => checkLinkHealth(url));
 }
-function checkCandidateImage(url: string) {
+function checkCandidateImage(url: string): Promise<ImageCheckResult> {
   if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, contentType: 'image/png' });
   return withDomainConcurrency(url, () => checkImageHealth(url));
 }
@@ -494,7 +494,7 @@ function attachObservedPriceEvidence(product: Product, offers: ProductOffer[], o
 function kindForRecordType(recordType: Product['recordType']): Product['kind'] {
   if (recordType === 'VOUCHER') return 'voucher';
   if (recordType === 'CAMPAIGN') return 'campaign';
-  if (recordType === 'STORE_PROMOTION') return 'store_offer';
+  if (recordType === 'STORE_OFFER' || recordType === 'STORE_PROMOTION') return 'store_offer';
   return recordType === 'PRODUCT' ? 'product' : 'unknown';
 }
 
@@ -658,7 +658,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     counters.needsReview += 1;
     counters.noindex += 1;
     if (canonical.created) counters.created += 1; else counters.updated += 1;
-    const status: CandidateQueueStatus = classification.recordType === 'PRODUCT' ? 'needs_review' : 'discarded';
+    const status: CandidateQueueStatus = classification.recordType === 'UNKNOWN' || incompleteProduct ? 'needs_review' : 'discarded';
     await finishCandidate(item.id, { status, delayReason: reasons.join(',') });
     return { status, terminal: true, reason: reasons.join(','), productId: product.id };
   }
@@ -713,7 +713,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     : fixture === 'confirmed_broken'
       ? { status: 'broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
       : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
-  const fixtureImage = fixture === 'healthy'
+  const fixtureImage: ImageCheckResult = fixture === 'healthy'
     ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', contentType: 'image/jpeg' }
     : fixture === 'confirmed_broken'
       ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
@@ -721,6 +721,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   const productHealth = fixture ? fixtureLink : await checkCandidateLink(payload.originalUrl); counters.networkChecks += 1;
   const affiliateHealth = fixture ? fixtureLink : await checkCandidateLink(payload.affiliateUrl); counters.networkChecks += 1;
   let imageUrl = payload.imageUrl;
+  const primaryImageUrl = imageUrl;
   let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl); counters.networkChecks += 1;
   let imageChecks = 1;
   if (!imageHealth.ok) {
@@ -745,13 +746,17 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status);
   await recordDomainHealth(imageUrl, imageHealth.status);
   const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
-  const confirmedBroken = statuses.some(status => ['broken', 'image_broken', 'invalid_image', 'not_found'].includes(status));
+  const confirmedBroken = statuses.some(status => ['broken', 'image_broken', 'invalid_image', 'not_found', 'too_small', 'too_large', 'dark_image_suspected', 'placeholder'].includes(status));
   const healthPatch: Partial<Product> = {
     imageUrl,
     linkHealthStatus: productHealth.status === 'ok' ? 'ok' : productHealth.status,
     productHealthStatus: productHealth.status,
     affiliateHealthStatus: affiliateHealth.status,
     imageHealthStatus: imageHealth.status === 'ok' ? 'ok' : imageHealth.status,
+    imageValidationState: productImageValidationState(imageHealth, imageHealth.ok && imageUrl !== primaryImageUrl),
+    imageWidth: imageHealth.width,
+    imageHeight: imageHealth.height,
+    imageDimensionsVerified: imageHealth.dimensionsVerified,
     linkLastCheckedAt: now,
     affiliateLastCheckedAt: now,
     imageLastCheckedAt: now,

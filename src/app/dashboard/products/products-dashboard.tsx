@@ -24,8 +24,9 @@ const TYPE_LABELS: Record<string, string> = { product: 'Sản phẩm', deal: 'Ư
 const STATUS_LABELS: Record<string, string> = { draft: 'Bản nháp', needs_review: 'Cần xem xét', approved: 'Đã duyệt', published: 'Đã đăng', archived: 'Đã lưu trữ' };
 const SAFE_LABELS: Record<string, string> = { qualified: 'Đủ điều kiện', needs_review: 'Chờ phê duyệt', blocked: 'Bị chặn', published: 'Đã đăng', archived: 'Đã lưu trữ' };
 const RISK_LABELS: Record<string, string> = { low: 'Rủi ro thấp', medium: 'Rủi ro trung bình', high: 'Rủi ro cao', unknown: 'Chưa đánh giá' };
-const FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'sort', 'page', 'pageSize'] as const;
-const SAVED_FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel'] as const;
+const PIPELINE_LABELS: Record<string, string> = { classified: 'Đã phân loại sản phẩm', link_valid: 'Link hợp lệ', image_valid: 'Ảnh hợp lệ', price_valid: 'Giá hợp lệ', deduped: 'Đã chống trùng', ready: 'Sẵn sàng đăng', published: 'Đang công khai', blocked: 'Đang bị chặn' };
+const FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'pipelineStage', 'sort', 'page', 'pageSize'] as const;
+const SAVED_FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'pipelineStage'] as const;
 const PRODUCT_COLUMNS = ['title', 'kind', 'source', 'status', 'price', 'riskLevel'];
 type SafeAutomationJob = Omit<AutomationJob, 'payload'>;
 
@@ -379,6 +380,7 @@ export default function ProductsDashboard() {
             <summary><DashboardIcon name="filter" size={16} />Bộ lọc nâng cao</summary>
             <div className={styles.advancedGrid}>
               <label><span>Đăng an toàn</span><select value={searchParams.get('safePublishStatus') || ''} onChange={(e) => setFilter('safePublishStatus', e.target.value)}><option value="">Tất cả</option>{Object.entries(SAFE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label><span>Giai đoạn pipeline</span><select value={searchParams.get('pipelineStage') || ''} onChange={(e) => setFilter('pipelineStage', e.target.value)}><option value="">Tất cả</option>{Object.entries(PIPELINE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label><span>Mức rủi ro</span><select value={searchParams.get('riskLevel') || ''} onChange={(e) => setFilter('riskLevel', e.target.value)}><option value="">Tất cả</option>{Object.entries(RISK_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label><span>Sắp xếp</span><select value={searchParams.get('sort') || 'updated_desc'} onChange={(e) => setFilter('sort', e.target.value)}><option value="updated_desc">Mới cập nhật</option><option value="created_desc">Mới tạo</option><option value="created_asc">Tạo lâu nhất</option><option value="title_asc">Tên A-Z</option><option value="price_desc">Giá cao nhất</option></select></label>
               <label><span>Mỗi trang</span><select value={searchParams.get('pageSize') || '20'} onChange={(e) => setFilter('pageSize', e.target.value)}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>

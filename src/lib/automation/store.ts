@@ -12,6 +12,7 @@ import type {
   AutomationControlState,
   AutomationExecutionDisclosure,
   AutomationExecutionPlanStep,
+  AutomationErrorCategory,
   AutomationJob,
   AutomationJobStatus,
   AutomationJobType,
@@ -376,6 +377,19 @@ function retryDelayMs(type: AutomationJobType, attempt: number): number {
   return base + Math.floor(Math.random() * Math.max(250, base * 0.15));
 }
 
+function defaultErrorCategory(code: string): AutomationErrorCategory {
+  if (code === 'PROVIDER_TIMEOUT' || /TIMEOUT|NETWORK|UNAVAILABLE|TEMPORARY|LEASE_EXPIRED/.test(code)) return 'PROVIDER_TIMEOUT';
+  if (code === 'PROVIDER_RATE_LIMIT' || /RATE|QUOTA/.test(code)) return 'PROVIDER_RATE_LIMIT';
+  if (code === 'IMAGE_HOTLINK_BLOCKED') return 'IMAGE_HOTLINK_BLOCKED';
+  if (code === 'LINK_NOT_FOUND') return 'LINK_NOT_FOUND';
+  if (code === 'DUPLICATE') return 'DUPLICATE';
+  if (code === 'STORAGE_ERROR' || /STORAGE|LOCK/.test(code)) return 'STORAGE_ERROR';
+  if (code === 'INVALID_SOURCE_DATA' || /CREDENTIAL|SOURCE/.test(code)) return 'INVALID_SOURCE_DATA';
+  if (code === 'VALIDATION_FAILED' || /VALIDATION|SCHEMA|SAFETY|POLICY|APPROVAL|KILL/.test(code)) return 'VALIDATION_FAILED';
+  if (code === 'UNKNOWN_ERROR') return 'UNKNOWN_ERROR';
+  return 'INTERNAL_CODE_ERROR';
+}
+
 export function isRetryableAutomationError(code: string, type?: AutomationJobType): boolean {
   if (type) return getAutomationPolicy(type).retryPolicy.retryableCodes.includes(code);
   return listPolicyRetryCodes().has(code);
@@ -605,7 +619,8 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
       if (item.status === 'RUNNING' && item.leaseExpiresAt && Date.parse(item.leaseExpiresAt) <= nowMs) {
         item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
         item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
-        item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.'; item.claimedBy = undefined; item.updatedAt = now;
+        item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorCategory = 'PROVIDER_TIMEOUT'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.';
+        item.retryable = item.status === 'RETRY_SCHEDULED'; item.deadLetterReason = item.retryable ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED'; item.claimedBy = undefined; item.updatedAt = now;
         changed = true;
       }
       if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) { item.status = 'PENDING'; changed = true; }
@@ -656,6 +671,7 @@ export async function completeAutomationJob(id: string, workerId: string, result
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'RUNNING' || job.claimedBy !== workerId) return undefined;
     job.status = 'SUCCEEDED'; job.result = sanitizeAutomationData(result) as Record<string, unknown>; job.completedAt = now;
+    job.lastErrorCode = undefined; job.lastErrorCategory = undefined; job.lastErrorMessage = undefined; job.retryable = undefined; job.deadLetterReason = undefined;
     if (job.progress) {
       const total = job.progress.total;
       const fullyCompleted = job.outcomeStatus !== 'PARTIALLY_COMPLETED' && !job.checkpoint?.pendingSteps.length;
@@ -671,7 +687,7 @@ export async function completeAutomationJob(id: string, workerId: string, result
   return completedJob;
 }
 
-export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string } = {}): Promise<AutomationJob | null> {
+export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string; errorCategory?: AutomationErrorCategory } = {}): Promise<AutomationJob | null> {
   let failed: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
@@ -683,7 +699,10 @@ export async function failAutomationJob(id: string, workerId: string, code: stri
       ? new Date(requestedRetryAt).toISOString()
       : new Date(Date.now() + retryDelayMs(job.type, job.attemptCount)).toISOString()
       : undefined;
-    job.lastErrorCode = code; job.lastErrorMessage = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
+    job.lastErrorCode = code; job.lastErrorCategory = options.errorCategory || defaultErrorCategory(code);
+    job.lastErrorMessage = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
+    job.retryable = retry;
+    job.deadLetterReason = retry ? undefined : `${job.lastErrorCategory}:${code}`.slice(0, 240);
     job.leaseExpiresAt = undefined; job.updatedAt = now; if (!retry) job.completedAt = now; failed = { ...job }; return items;
   });
   const failedJob = failed as AutomationJob | null;
@@ -711,7 +730,7 @@ export async function retryAutomationJob(id: string, actor: string): Promise<Aut
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'FAILED' || job.attemptCount >= job.maxAttempts) return undefined;
-    job.status = 'PENDING'; job.nextRetryAt = undefined; job.completedAt = undefined; job.updatedAt = now; retried = { ...job }; return items;
+    job.status = 'PENDING'; job.nextRetryAt = undefined; job.completedAt = undefined; job.retryable = undefined; job.deadLetterReason = undefined; job.updatedAt = now; retried = { ...job }; return items;
   });
   const retriedJob = retried as AutomationJob | null;
   if (retriedJob) await appendAutomationAudit({ correlationId: retriedJob.operationId, operationId: retriedJob.operationId, jobId: retriedJob.id, operationType: 'JOB_RETRIED', actor,

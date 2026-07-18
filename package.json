@@ -30,6 +30,7 @@
     "test:prompt10:revenue-integrity": "node scripts/prompt10-revenue-integrity-tests.cjs",
     "test:prompt10:gate8": "node scripts/prompt10-gate8-dashboard-tests.cjs",
     "test:prompt10:launch-inventory": "node scripts/prompt10-launch-inventory-tests.cjs",
+    "test:prompt11": "node scripts/prompt11-production-completion-tests.cjs",
     "test:stabilization": "node scripts/stabilization-tests.cjs",
     "dev": "next dev",
     "build": "next build",

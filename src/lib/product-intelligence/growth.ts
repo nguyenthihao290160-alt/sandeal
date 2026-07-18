@@ -29,6 +29,9 @@ export async function recordGrowthEvent(
     resultCount: Number.isSafeInteger(input.resultCount) && Number(input.resultCount) >= 0 && Number(input.resultCount) <= 50
       ? Number(input.resultCount)
       : undefined,
+    anonymousSessionId: input.anonymousSessionId && /^[a-zA-Z0-9:_-]{8,80}$/.test(input.anonymousSessionId)
+      ? input.anonymousSessionId
+      : undefined,
     timestamp: input.timestamp && Number.isFinite(Date.parse(input.timestamp)) ? input.timestamp : new Date().toISOString(),
   };
   let stored = event;

@@ -47,6 +47,7 @@ export default function AlertsPage() {
   const [actionError, setActionError] = useState('');
   const [ignoreAlert, setIgnoreAlert] = useState<ProductAlert | null>(null);
   const [ignoreReason, setIgnoreReason] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
   const response = resource.data;
   const alerts = useMemo(() => Array.isArray(response) ? response : response?.alerts || response?.items || [], [response]);
   const visible = useMemo(() => alerts.filter((alert) => (!severity || alert.severity === severity) && (!status || alert.status === status)), [alerts, severity, status]);
@@ -88,6 +89,20 @@ export default function AlertsPage() {
     }
   };
 
+  const updateSelected = async (nextStatus: AlertStatus) => {
+    if (!selected.length) return;
+    setBusy('bulk'); setActionError('');
+    try {
+      await dashboardRequest('/api/dashboard/alerts', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selected, status: nextStatus }),
+      });
+      setSelected([]); resource.reload();
+    } catch (issue) {
+      setActionError(issue instanceof Error ? issue.message : 'Không thể cập nhật nhóm cảnh báo.');
+    } finally { setBusy(''); }
+  };
+
   return (
     <main className={styles.page}>
       <DashboardPageHeader
@@ -116,6 +131,9 @@ export default function AlertsPage() {
             <label className={styles.field}><span>Mức độ</span><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="">Tất cả</option>{Object.entries(SEVERITY_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
             <label className={styles.field}><span>Trạng thái</span><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">Tất cả</option>{Object.entries(STATUS_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
             <button type="button" className={styles.secondaryButton} disabled={!severity && !status} onClick={() => { setSeverity(''); setStatus(''); }}>Xóa bộ lọc</button>
+            <button type="button" className={styles.secondaryButton} disabled={!selected.length || Boolean(busy)} onClick={() => void updateSelected('acknowledged')}>Đã xem ({selected.length})</button>
+            <button type="button" className={styles.secondaryButton} disabled={!selected.length || Boolean(busy)} onClick={() => void updateSelected('in_progress')}>Đang xử lý</button>
+            <button type="button" className={styles.secondaryButton} disabled={!selected.length || Boolean(busy)} onClick={() => void updateSelected('resolved')}>Giải quyết nhóm</button>
           </div>
 
           <Panel title="Cảnh báo cần theo dõi" icon="alert" description={`${visible.length} cảnh báo phù hợp bộ lọc.`}>
@@ -123,9 +141,10 @@ export default function AlertsPage() {
               <div className={styles.alertList}>
                 {visible.map((alert) => (
                   <article className={styles.alertCard} data-severity={alert.severity} key={alert.id}>
+                    <label aria-label={`Chọn cảnh báo ${alert.title}`}><input type="checkbox" checked={selected.includes(alert.id)} onChange={(event) => setSelected(current => event.target.checked ? [...new Set([...current, alert.id])] : current.filter(id => id !== alert.id))} /></label>
                     <span className={styles.alertIcon}><DashboardIcon name={alert.severity === 'critical' ? 'emergency' : 'alert'} size={19} /></span>
                     <div>
-                      <div className={styles.cardMeta}><StatusBadge tone={severityTone(alert.severity)}>{SEVERITY_LABELS[alert.severity]}</StatusBadge><StatusBadge tone={statusTone(alert.status)}>{STATUS_LABELS[alert.status]}</StatusBadge><span className={styles.help}>{formatDateTime(alert.createdAt)}</span></div>
+                      <div className={styles.cardMeta}><StatusBadge tone={severityTone(alert.severity)}>{SEVERITY_LABELS[alert.severity]}</StatusBadge><StatusBadge tone={statusTone(alert.status)}>{STATUS_LABELS[alert.status]}</StatusBadge>{alert.occurrenceCount > 1 && <StatusBadge tone="neutral">{alert.occurrenceCount} đối tượng</StatusBadge>}<span className={styles.help}>{formatDateTime(alert.firstSeenAt || alert.createdAt)}</span></div>
                       <h3>{alert.title}</h3>
                       <p>{alert.message}</p>
                       {alert.suggestedAction && <div className={styles.notice}><DashboardIcon name="today" size={16} /><span><strong>Hành động đề xuất:</strong> {alert.suggestedAction}</span></div>}

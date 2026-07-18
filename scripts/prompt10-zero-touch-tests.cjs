@@ -133,6 +133,12 @@ async function main() {
     if (mode === 'CANARY') {
       const state = await canary.recordSuccessfulShadowCycle();
       assert.equal(state.wave, 1, 'CANARY fixture must start in bounded wave 1');
+      const now = new Date().toISOString();
+      await adapter.writeCollection('automation-canary', [{
+        ...state, controlledLaunch: true, wave: 1, approvedWave: 1, approvedBy: 'zero-touch-test',
+        approvedAt: now, approvalReason: 'Isolated controlled launch fixture for durable publish behavior.',
+        wavePublishedBaseline: state.publishedEffectKeys.length, paused: false, pauseReasons: [], updatedAt: now,
+      }]);
     }
   }
 

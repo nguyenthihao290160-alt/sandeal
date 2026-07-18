@@ -10,7 +10,7 @@ import type { PriceSnapshot, ProductAlert, RecommendedAction } from './types';
 const ALERTS = 'product-alerts';
 const ACTIONS = 'recommended-actions';
 
-type AlertDraft = Omit<ProductAlert, 'id' | 'createdAt' | 'updatedAt' | 'status' | 'acknowledgedAt' | 'resolvedAt' | 'ignoredReason' | 'cooldownUntil'>;
+type AlertDraft = Omit<ProductAlert, 'id' | 'groupKey' | 'createdAt' | 'updatedAt' | 'firstSeenAt' | 'lastSeenAt' | 'occurrenceCount' | 'autoResolve' | 'recommendedAction' | 'status' | 'acknowledgedAt' | 'resolvedAt' | 'ignoredReason' | 'cooldownUntil' | 'suppressionUntil'>;
 
 function alert(input: AlertDraft): AlertDraft { return input; }
 
@@ -139,6 +139,8 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
     priceHistoryByProduct.set(snapshot.productId, history);
   }
 
+  const buildingPriceHistory: Product[] = [];
+  const stalePriceProducts: Product[] = [];
   for (const product of products.slice(0, 2_000)) {
     const productPriceHistory = priceHistoryByProduct.get(product.id) || [];
     const observedPriceTimes = [timestamp(product.lastSeenAt), timestamp(product.priceLastChangedAt),
@@ -158,11 +160,13 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
       title: 'Chất lượng dữ liệu thấp', message: `${product.title} có Quality Score ${product.qualityScore}.`, entityType: 'product', entityId: product.id,
       operationId, suggestedAction: 'Bổ sung field theo recommendations của Quality Score.',
     }));
-    if (priceObservedAt !== undefined && now - priceObservedAt > CONFIG.freshness.priceDays * 86_400_000) drafts.push(alert({
-      deduplicationKey: `product:${product.id}:stale-price`, type: 'stale_price', severity: 'attention', title: 'Giá cần kiểm tra lại',
-      message: `${product.title} chưa có giá mới trong ${CONFIG.freshness.priceDays} ngày.`, entityType: 'product', entityId: product.id,
-      operationId, suggestedAction: 'Chạy tác vụ tạo snapshot giá và health check.',
-    }));
+    const productStartedAt = timestamp(product.createdAt || product.updatedAt);
+    const productAge = productStartedAt === null ? Number.POSITIVE_INFINITY : now - productStartedAt;
+    if (productPriceHistory.length < 2 && productAge <= CONFIG.freshness.priceDays * 86_400_000) {
+      buildingPriceHistory.push(product);
+    } else if (priceObservedAt !== undefined && now - priceObservedAt > CONFIG.freshness.priceDays * 86_400_000) {
+      stalePriceProducts.push(product);
+    }
     if (['broken', 'not_found', 'product_unavailable', 'affiliate_error'].includes(String(product.linkHealthStatus || ''))) drafts.push(alert({
       deduplicationKey: `product:${product.id}:link`, type: 'broken_link', severity: product.status === 'published' ? 'critical' : 'important', title: 'Link sản phẩm lỗi',
       message: `${product.title} có trạng thái link ${product.linkHealthStatus}.`, entityType: 'product', entityId: product.id, operationId,
@@ -198,20 +202,45 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
     }));
   }
 
+  if (buildingPriceHistory.length) drafts.push(alert({
+    deduplicationKey: 'group:products:price-history-building', type: 'price_history_building', severity: 'info',
+    title: 'Sản phẩm mới đang tích lũy lịch sử giá',
+    message: `${buildingPriceHistory.length} sản phẩm mới chưa đủ lịch sử giá — không cần xử lý ngay.`,
+    entityType: 'product_group', operationId, suggestedAction: 'Hệ thống sẽ tự ghi thêm snapshot theo lịch; chỉ kiểm tra nếu trạng thái kéo dài quá thời hạn.',
+    relatedEntityIds: buildingPriceHistory.map(product => product.id).slice(0, 500),
+  }));
+  if (stalePriceProducts.length) drafts.push(alert({
+    deduplicationKey: 'group:products:stale-price', type: 'stale_price', severity: 'attention', title: 'Nhóm sản phẩm cần kiểm tra lại giá',
+    message: `${stalePriceProducts.length} sản phẩm chưa có giá mới trong ${CONFIG.freshness.priceDays} ngày.`, entityType: 'product_group',
+    operationId, suggestedAction: 'Chạy tác vụ snapshot giá theo nhóm và kiểm tra lỗi provider trước khi xử lý từng sản phẩm.',
+    relatedEntityIds: stalePriceProducts.map(product => product.id).slice(0, 500),
+  }));
+
   let created = 0; let reopened = 0; let resolved = 0;
   const activeKeys = new Set(drafts.map(item => item.deduplicationKey));
   await runTransaction<ProductAlert>(ALERTS, items => {
     for (const draft of drafts) {
       const existing = items.find(item => item.deduplicationKey === draft.deduplicationKey);
       if (!existing) {
-        items.push({ ...draft, id: generateId(), status: 'new', createdAt: nowIso, updatedAt: nowIso }); created += 1;
+        items.push({
+          ...draft, id: generateId(), groupKey: draft.deduplicationKey, recommendedAction: draft.suggestedAction,
+          status: 'new', createdAt: nowIso, updatedAt: nowIso, firstSeenAt: nowIso, lastSeenAt: nowIso,
+          occurrenceCount: Math.max(1, draft.relatedEntityIds?.length || 1), autoResolve: true,
+        }); created += 1;
       } else if (existing.status === 'resolved' || (existing.status === 'ignored' && !cooldownActive(existing.cooldownUntil, now))) {
         Object.assign(existing, draft, {
           status: 'new', acknowledgedAt: undefined, resolvedAt: undefined, ignoredReason: undefined, cooldownUntil: undefined, updatedAt: nowIso,
+          groupKey: draft.deduplicationKey, recommendedAction: draft.suggestedAction,
+          firstSeenAt: existing.firstSeenAt || existing.createdAt, lastSeenAt: nowIso,
+          occurrenceCount: Math.max(1, draft.relatedEntityIds?.length || 1), autoResolve: true,
         });
         reopened += 1;
       } else if (!['resolved', 'ignored'].includes(existing.status)) {
-        Object.assign(existing, draft, { updatedAt: nowIso });
+        Object.assign(existing, draft, {
+          updatedAt: nowIso, groupKey: draft.deduplicationKey, recommendedAction: draft.suggestedAction,
+          firstSeenAt: existing.firstSeenAt || existing.createdAt, lastSeenAt: nowIso,
+          occurrenceCount: Math.max(1, draft.relatedEntityIds?.length || 1), autoResolve: true,
+        });
       }
     }
     for (const existing of items) {
@@ -238,26 +267,36 @@ export async function listAlerts(options: { status?: ProductAlert['status']; lim
   return result.slice(0, Math.max(1, Math.min(options.limit || 100, CONFIG.limits.alerts)));
 }
 
-export async function updateAlertStatus(id: string, status: ProductAlert['status'], reason?: string, nowMs = Date.now()): Promise<ProductAlert | null> {
+export async function updateAlertStatuses(ids: string[], status: ProductAlert['status'], reason?: string, nowMs = Date.now()): Promise<ProductAlert[]> {
   if (status === 'ignored' && String(reason || '').trim().length < 5) throw new Error('REASON_REQUIRED');
-  let updated: ProductAlert | null = null;
+  const targets = new Set(ids.map(id => String(id).trim()).filter(Boolean).slice(0, 100));
+  if (!targets.size) return [];
+  const updated: ProductAlert[] = [];
   await runTransaction<ProductAlert>(ALERTS, items => {
-    const item = items.find(alertItem => alertItem.id === id);
-    if (!item) return undefined;
-    const now = new Date(nowMs).toISOString(); item.status = status; item.updatedAt = now;
-    if (status === 'new') {
-      item.acknowledgedAt = undefined; item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined;
+    const now = new Date(nowMs).toISOString();
+    for (const item of items) {
+      if (!targets.has(item.id)) continue;
+      item.status = status; item.updatedAt = now; item.lastSeenAt ||= item.updatedAt; item.firstSeenAt ||= item.createdAt;
+      item.groupKey ||= item.deduplicationKey; item.recommendedAction ||= item.suggestedAction; item.autoResolve ??= true;
+      item.occurrenceCount ||= 1;
+      if (status === 'new') { item.acknowledgedAt = undefined; item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
+      if (status === 'acknowledged') { item.acknowledgedAt = now; item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
+      if (status === 'in_progress') { item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
+      if (status === 'resolved') { item.resolvedAt = now; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
+      if (status === 'ignored') {
+        item.resolvedAt = undefined; item.ignoredReason = reason!.trim().slice(0, 500);
+        item.cooldownUntil = new Date(nowMs + CONFIG.cooldown.alertHours * 60 * 60_000).toISOString();
+        item.suppressionUntil = item.cooldownUntil;
+      }
+      updated.push({ ...item });
     }
-    if (status === 'acknowledged') { item.acknowledgedAt = now; item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
-    if (status === 'in_progress') { item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
-    if (status === 'resolved') { item.resolvedAt = now; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
-    if (status === 'ignored') {
-      item.resolvedAt = undefined; item.ignoredReason = reason!.trim().slice(0, 500);
-      item.cooldownUntil = new Date(nowMs + CONFIG.cooldown.alertHours * 60 * 60_000).toISOString();
-    }
-    updated = { ...item }; return items;
+    return items;
   });
   return updated;
+}
+
+export async function updateAlertStatus(id: string, status: ProductAlert['status'], reason?: string, nowMs = Date.now()): Promise<ProductAlert | null> {
+  return (await updateAlertStatuses([id], status, reason, nowMs))[0] || null;
 }
 
 export async function generateRecommendedActions(now = Date.now()): Promise<RecommendedAction[]> {

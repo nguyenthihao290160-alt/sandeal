@@ -62,14 +62,14 @@ async function main() {
     const campaign = classifier.classifyRecord({ kind: 'product', rawSourceType: 'campaign', title: 'Mega Sale 7.7', price: 100000, originalUrl: 'https://merchant.example/campaign' });
     const store = classifier.classifyRecord({ kind: 'product', title: '[Fixture Official Store] - Giam 10% toi da 100K', price: 100000, originalUrl: 'https://merchant.example/store' });
     assert.equal(campaign.recordType, 'CAMPAIGN'); assert.equal(campaign.action, 'QUARANTINE');
-    assert.equal(store.recordType, 'STORE_PROMOTION'); assert.equal(store.action, 'QUARANTINE');
+    assert.equal(store.recordType, 'STORE_OFFER'); assert.equal(store.action, 'QUARANTINE');
   });
 
   await test('content source type overrides product claim and a complete product gets a stable versioned decision', () => {
     const content = classifier.classifyRecord({ kind: 'product', rawSourceType: 'article', title: 'Guide to choosing headphones', price: 100000, originalUrl: 'https://merchant.example/blog/guide' });
     const semanticContent = classifier.classifyRecord({ kind: 'product', title: 'Review tai nghe nao phu hop?', price: 100000, originalUrl: 'https://merchant.example/blog/review-headphones' });
-    assert.equal(content.recordType, 'CONTENT_ONLY'); assert.equal(content.action, 'QUARANTINE');
-    assert.equal(semanticContent.recordType, 'CONTENT_ONLY'); assert.equal(semanticContent.action, 'QUARANTINE');
+    assert.equal(content.recordType, 'CATEGORY_OR_LANDING_PAGE'); assert.equal(content.action, 'QUARANTINE');
+    assert.equal(semanticContent.recordType, 'CATEGORY_OR_LANDING_PAGE'); assert.equal(semanticContent.action, 'QUARANTINE');
     const input = { kind: 'product', title: 'Fixture Headset X', sku: 'X-1', price: 1200000, originalUrl: 'https://merchant.example/products/x' };
     const first = classifier.classifyRecord(input); const replay = classifier.classifyRecord({ ...input });
     assert.equal(first.recordType, 'PRODUCT'); assert.equal(first.action, 'ACCEPT');

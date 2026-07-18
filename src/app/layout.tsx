@@ -2,6 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { config } from '@/lib/config';
 import { buildSiteJsonLd } from '@/lib/seo/siteSeo';
+import { BuildMismatchGuard } from '@/components/public/BuildMismatchGuard';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 export const viewport: Viewport = {
   themeColor: "#0f6ef6",
@@ -34,6 +36,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   const structuredData = buildSiteJsonLd();
+  const release = getReleaseIdentity();
   return (
     <html lang="vi">
       <body>
@@ -45,6 +48,7 @@ export default function RootLayout({
           />
         ))}
         {children}
+        <BuildMismatchGuard buildId={release.buildId} />
       </body>
     </html>
   );
