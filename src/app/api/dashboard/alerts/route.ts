@@ -53,7 +53,9 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   const denied = await requirePermission(request, 'MANAGE_ALERTS'); if (denied) return denied;
   let body: Record<string, unknown>; try { body = await request.json() as Record<string, unknown>; } catch { return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 }); }
-  const status = String(body.status || ''); if (!['new', 'acknowledged', 'in_progress', 'resolved', 'ignored'].includes(status)) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 });
+  const status = String(body.status || '');
+  if (status === 'resolved') return NextResponse.json({ ok: false, code: 'RECHECK_EVIDENCE_REQUIRED', message: 'Không thể resolved trực tiếp; incident phải recheck và có evidence PASS.' }, { status: 409 });
+  if (!['new', 'acknowledged', 'in_progress', 'ignored'].includes(status)) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 });
   try {
     const ids = Array.isArray(body.ids) ? body.ids.map(String).slice(0, 100) : [String(body.id || '')];
     const data = await updateAlertStatuses(ids, status as never, typeof body.reason === 'string' ? body.reason : undefined);

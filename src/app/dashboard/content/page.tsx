@@ -42,6 +42,7 @@ type ContentApiItem = {
   editorialCheck?: EditorialCheckResult;
   evidenceFacts?: VerifiedProductFact[];
   product?: { id: string; title: string; opportunityScore?: number; qualityBand?: string; source?: string; contentWorkflowStatus?: ContentWorkflowStatus; updatedAt?: string };
+  operationalTruth?: { blocker: string | null; blockers: string[]; autoRemediationPossible: boolean; currentJob: { id: string; status: string; attemptCount: number; maxAttempts: number; nextRetryAt: string | null; lastAttemptAt: string; lastSuccessAt: string | null } | null; manualActionRequired: boolean; originalityScore: number | null; seoReadiness: number | null; sourceVerified: boolean; paidAiAllowed: false };
 };
 
 type ContentResponse = ContentApiItem[] | {
@@ -68,6 +69,7 @@ type ContentRow = {
   draft?: ContentDraft;
   editorialCheck?: EditorialCheckResult;
   evidenceFacts: VerifiedProductFact[];
+  operationalTruth?: ContentApiItem['operationalTruth'];
 };
 
 type ViewMode = 'list' | 'kanban' | 'calendar';
@@ -135,6 +137,7 @@ function normalizeRows(response: ContentResponse | null): ContentRow[] {
       draft,
       editorialCheck: item.editorialCheck,
       evidenceFacts: item.evidenceFacts || [],
+      operationalTruth: item.operationalTruth,
     }];
   });
 }
@@ -226,7 +229,7 @@ export default function ContentPage() {
             <>
               {view === 'list' && (
                 <Panel title="Danh sách nội dung" icon="list" description={`${visible.length} sản phẩm trong chế độ xem hiện tại.`}>
-                  <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Sản phẩm</th><th>Điểm cơ hội</th><th>Workflow</th><th>Nguồn / người xử lý</th><th>Cảnh báo</th><th>Thao tác</th></tr></thead><tbody>{visible.map((row) => <tr key={row.key}><td data-label="Sản phẩm"><strong>{row.productTitle}</strong><small>Cập nhật: {formatDateTime(row.updatedAt)}</small></td><td data-label="Điểm cơ hội"><strong>{Number.isFinite(row.opportunityScore) ? row.opportunityScore : 'Chưa chấm'}</strong><small>Chất lượng: {row.qualityBand || 'Chưa có'}</small></td><td data-label="Workflow"><StatusBadge tone={statusTone(row.status)}>{STATUS_LABELS[row.status]}</StatusBadge>{row.editorialCheck && <small>Editorial Guard: {row.editorialCheck.status}</small>}</td><td data-label="Nguồn / người xử lý">{row.source || 'Chưa rõ nguồn'}<small>{row.assignee || 'Chưa phân công'}</small></td><td data-label="Cảnh báo">{row.warnings.length ? row.warnings.slice(0, 3).join(' · ') : 'Không có cảnh báo'}{row.draft?.claims.some((claim) => claim.type === 'UNVERIFIED') && <small>Có claim chưa xác minh</small>}</td><td data-label="Thao tác"><div className={styles.cellActions}><Link className={styles.textButton} href={`/dashboard/products/${encodeURIComponent(row.productId)}`}>Sản phẩm</Link>{row.status === 'ready_for_draft' && !row.draft && <button type="button" className={styles.textButton} disabled={Boolean(busy)} onClick={() => void runAction(row, 'create_local_draft')}>{busy === `create_local_draft:${row.productId}` ? 'Đang tạo' : 'Tạo khung local'}</button>}{row.draft && <button type="button" className={styles.textButton} onClick={() => setSelectedDraftId(row.draft!.id)}>Mở trình soạn</button>}{row.draft && <button type="button" className={styles.textButton} disabled={Boolean(busy)} onClick={() => void runAction(row, 'editorial_check')}>{busy === `editorial_check:${row.productId}` ? 'Đang kiểm tra' : 'Editorial Guard'}</button>}</div></td></tr>)}</tbody></table></div>
+                  <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Sản phẩm</th><th>Workflow / nội dung</th><th>Operational truth</th><th>Blocker</th><th>Thao tác</th></tr></thead><tbody>{visible.map((row) => <tr key={row.key}><td data-label="Sản phẩm"><strong>{row.productTitle}</strong><small>{row.source || 'Chưa rõ nguồn'} · {row.operationalTruth?.sourceVerified ? 'Nguồn đã xác minh' : 'Nguồn chưa xác minh'}</small></td><td data-label="Workflow / nội dung"><StatusBadge tone={statusTone(row.status)}>{STATUS_LABELS[row.status]}</StatusBadge><small>Originality: {row.operationalTruth?.originalityScore ?? '—'} · SEO: {row.operationalTruth?.seoReadiness ?? '—'}</small></td><td data-label="Operational truth">{row.operationalTruth?.currentJob ? <><strong>{row.operationalTruth.currentJob.status}</strong><small>Attempt {row.operationalTruth.currentJob.attemptCount}/{row.operationalTruth.currentJob.maxAttempts} · retry {formatDateTime(row.operationalTruth.currentJob.nextRetryAt)}</small></> : <span>Không có job hiện tại</span>}<small>{row.operationalTruth?.manualActionRequired ? 'Cần thao tác thủ công' : row.operationalTruth?.autoRemediationPossible ? 'Có thể remediation' : 'Chưa có remediation an toàn'}</small></td><td data-label="Blocker">{row.operationalTruth?.blocker || (row.warnings.length ? row.warnings.slice(0, 3).join(' · ') : 'Không có blocker được ghi nhận')}</td><td data-label="Thao tác"><div className={styles.cellActions}><Link className={styles.textButton} href={`/dashboard/products/${encodeURIComponent(row.productId)}`}>Sản phẩm</Link>{row.status === 'ready_for_draft' && !row.draft && <button type="button" className={styles.textButton} disabled={Boolean(busy)} onClick={() => void runAction(row, 'create_local_draft')}>Tạo khung local</button>}{row.draft && <button type="button" className={styles.textButton} onClick={() => setSelectedDraftId(row.draft!.id)}>Mở trình soạn</button>}{row.draft && <button type="button" className={styles.textButton} disabled={Boolean(busy)} onClick={() => void runAction(row, 'editorial_check')}>Editorial Guard</button>}</div></td></tr>)}</tbody></table></div>
                 </Panel>
               )}
 

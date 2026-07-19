@@ -51,8 +51,17 @@ function secretScan() {
 
   const example = path.join(root, '.env.example');
   if (fs.existsSync(example)) {
+    // These are public, non-credential defaults that document the safe local
+    // storage mode. Every other populated example value remains a finding.
+    const publicExampleDefaults = new Set([
+      'SANDEAL_STORAGE_DRIVER=file',
+      'MONGODB_DATABASE=sandeal',
+    ]);
     fs.readFileSync(example, 'utf8').split(/\r?\n/).forEach((line, index) => {
-      if (/^[A-Z][A-Z0-9_]*=.+/.test(line.trim())) findings.push({ file: '.env.example', line: index + 1, rule: 'non-empty-example-value' });
+      const normalizedLine = line.trim();
+      if (/^[A-Z][A-Z0-9_]*=.+/.test(normalizedLine) && !publicExampleDefaults.has(normalizedLine)) {
+        findings.push({ file: '.env.example', line: index + 1, rule: 'non-empty-example-value' });
+      }
     });
   }
 

@@ -89,7 +89,8 @@ export function decryptSecret(encrypted: string): string {
 
 /**
  * Mask a secret for safe frontend display.
- * Shows first 4 and last 4 characters, masks middle.
+ * Shows only the last 4 characters. Prefixes can reveal provider/key families
+ * and are not needed by the browser.
  * 
  * Examples:
  * - "AIzaSyABCDEF123456" → "AIza****3456"
@@ -100,9 +101,8 @@ export function maskSecret(value: string): string {
   if (!value) return '';
   const trimmed = value.trim();
   if (trimmed.length <= 8) return '****';
-  const prefix = trimmed.slice(0, 4);
   const suffix = trimmed.slice(-4);
-  return `${prefix}****${suffix}`;
+  return `****${suffix}`;
 }
 
 // ---- Safe Projection ----
@@ -114,8 +114,8 @@ export function maskSecret(value: string): string {
  */
 export function toSafeCredential(stored: StoredCredential): SafeCredential {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { encryptedValue, ...safe } = stored;
-  return safe;
+  const { encryptedValue, lastError, ...safe } = stored;
+  return { ...safe, lastError: lastError ? 'PROVIDER_CHECK_FAILED' : undefined };
 }
 
 /**

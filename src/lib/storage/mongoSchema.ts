@@ -7,6 +7,9 @@ export const MONGO_STORAGE_METADATA_COLLECTION = 'sandeal_storage_metadata';
 export const MONGO_STORAGE_SCHEMA_KEY = 'storage_schema';
 
 export const MONGO_LOGICAL_COLLECTIONS = [
+  'alert-incidents',
+  'alert-occurrences',
+  'alert-remediation-runs',
   'automation-ai-usage',
   'automation-audit',
   'automation-canary',
@@ -41,6 +44,7 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'pipeline-runtime',
   'price-history',
   'product-alerts',
+  'product-admin-actions',
   'product-lifecycle-events',
   'product-sources',
   'products',

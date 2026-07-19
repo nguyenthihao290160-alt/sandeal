@@ -17,6 +17,7 @@ import { capturePriceSnapshot, getPriceStatistics } from './priceHistory';
 import { createLocalContentDraft, editorialCheckDraft, listContentDrafts } from './contentStudio';
 import { aggregateGrowthMetrics } from './growth';
 import { evaluateAlerts } from './alerts';
+import { getAlertIncident, recordServerIncidentRecheck, synchronizeAlertIncidents } from './alertIncidents';
 
 const JOB_TYPES = new Set([
   'IMPORT_PRODUCTS', 'RECHECK_PRODUCT_HEALTH', 'DETECT_DUPLICATES', 'SCORE_PRODUCTS', 'CAPTURE_PRICE_HISTORY',
@@ -432,7 +433,19 @@ export async function executeProductIntelligenceJob(job: AutomationJob): Promise
       approvedSource: job.payload.approvedSource === true && job.payload.ownerConfirmed === true,
     });
   }
-  if (job.type === 'RECHECK_PRODUCT_HEALTH') return recheckHealth(job);
+  if (job.type === 'RECHECK_PRODUCT_HEALTH') {
+    const result = await recheckHealth(job);
+    const incidentId = stringValue(job.payload.incidentId);
+    if (!incidentId || job.dryRun) return result;
+    const before = (await getAlertIncident(incidentId))?.affectedCount || 0;
+    await evaluateAlerts(job.operationId);
+    await synchronizeAlertIncidents();
+    const checked = await recordServerIncidentRecheck({
+      incidentId, checker: 'product-health-remediation', checkerVersion: 'prompt12-v1', affectedCountBefore: before,
+      metadata: { jobId: job.id, checked: result.checked, failed: result.failed, healthTarget: result.healthTarget },
+    });
+    return { ...result, incidentRecheck: { incidentId, status: checked.status, evidenceStatus: checked.evidenceStatus, affectedCount: checked.affectedCount } };
+  }
   if (job.type === 'DETECT_DUPLICATES') {
     const products = await selectedProducts(job.payload);
     if (!job.dryRun) await assertJobMayContinue(job);
@@ -446,7 +459,9 @@ export async function executeProductIntelligenceJob(job: AutomationJob): Promise
   if (job.type === 'EVALUATE_ALERTS') {
     if (job.dryRun) return { preview: true, businessDataChanged: false };
     await assertJobMayContinue(job);
-    return { ...(await evaluateAlerts(job.operationId)), businessDataChanged: true };
+    const alertResult = await evaluateAlerts(job.operationId);
+    const incidentResult = await synchronizeAlertIncidents();
+    return { ...alertResult, incidents: incidentResult, businessDataChanged: true };
   }
   if (job.type === 'AGGREGATE_GROWTH_METRICS') {
     if (job.dryRun) return { preview: true, businessDataChanged: false };

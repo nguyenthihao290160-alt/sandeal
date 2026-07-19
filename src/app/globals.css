@@ -170,8 +170,8 @@ img {
 }
 
 ::selection {
-  color: #ffffff;
-  background: rgba(124, 58, 237, 0.55);
+  color: #172033;
+  background: rgba(148, 184, 235, 0.42);
 }
 
 ::-webkit-scrollbar {
@@ -311,7 +311,7 @@ img {
 .input:focus,
 .textarea:focus,
 .select:focus {
-  background: rgba(15, 23, 42, 0.82);
+  background: var(--bg-input);
   border-color: var(--border-focus);
   box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1);
 }
@@ -753,7 +753,7 @@ img {
   gap: var(--space-md);
   height: var(--topbar-height);
   padding: 0 var(--space-xl);
-  background: rgba(6, 8, 15, 0.8);
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
   border-bottom: 1px solid var(--border-primary);
   backdrop-filter: blur(18px);
 }
@@ -2464,7 +2464,7 @@ tr:hover td {
   min-height: var(--topbar-height);
   padding: 0 var(--space-xl);
   color: var(--text-primary);
-  background: rgba(6, 8, 15, 0.82);
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
   border-bottom: 1px solid var(--border-primary);
   backdrop-filter: blur(18px);
 }
@@ -2629,10 +2629,67 @@ tr:hover td {
 .admin-main select,
 .admin-main textarea {
   color: var(--text-primary);
-  background: rgba(15, 23, 42, 0.72);
+  background: var(--bg-input);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   outline: none;
+}
+
+/* Prompt 12: form, image and long operational-data hardening. */
+.dashboard-shell :where(input, select, textarea),
+.dashboard-main :where(input, select, textarea),
+.main-content :where(input, select, textarea) {
+  max-width: 100%;
+  color: var(--ds-text, var(--text-primary));
+  background: var(--ds-surface, var(--bg-input)) !important;
+  border: 1px solid var(--ds-border-strong, var(--border-primary));
+}
+.dashboard-shell :where(input, textarea)::placeholder,
+.dashboard-main :where(input, textarea)::placeholder { color: var(--ds-text-muted, var(--text-tertiary)); opacity: .82; }
+.dashboard-shell :where(input, select, textarea):focus,
+.dashboard-main :where(input, select, textarea):focus {
+  border-color: var(--ds-primary, var(--border-focus));
+  box-shadow: 0 0 0 3px rgba(49, 87, 200, .16);
+}
+.dashboard-shell select option,
+.dashboard-main select option { color: #172033; background: #ffffff; }
+.dashboard-shell :where(input, textarea):-webkit-autofill,
+.dashboard-main :where(input, textarea):-webkit-autofill { -webkit-text-fill-color: #172033; box-shadow: 0 0 0 1000px #ffffff inset; }
+.dashboard-shell ::selection { color: #172033; background: rgba(148, 184, 235, .42); }
+
+.safe-product-image {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  background: #eef2f6;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+}
+.safe-product-image img { width: 100%; height: 100%; object-fit: contain; }
+.safe-product-image-loading { position: absolute; inset: 0; background: linear-gradient(90deg, #eef2f6, #f8fafc, #eef2f6); background-size: 200% 100%; animation: safe-image-loading 1.2s linear infinite; }
+.product-detail-image { width: 100px; flex: 0 0 100px; }
+@keyframes safe-image-loading { to { background-position: -200% 0; } }
+
+.token-card,
+.token-card > *,
+.product-truth-card,
+.product-truth-card > * { min-width: 0; overflow-wrap: anywhere; }
+.token-card-masked { max-width: 100%; white-space: normal; word-break: normal; overflow-wrap: anywhere; }
+.token-card-actions .btn { width: auto; max-width: 100%; }
+.pipeline-blockers { margin-top: var(--space-md); overflow-wrap: anywhere; }
+.pipeline-blockers ul { margin: var(--space-xs) 0 0; padding-left: 20px; }
+.detail-meta-row > * { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 480px) {
+  .product-detail-image { width: 84px; flex-basis: 84px; }
+  .token-card-header { align-items: flex-start; flex-direction: column; }
+  .token-card-actions { align-items: stretch; }
+  .token-card-actions .btn { width: 100%; }
+  .detail-meta-row { align-items: flex-start; flex-direction: column; gap: 3px; }
 }
 
 .app-shell input,

@@ -17,7 +17,7 @@ import type {
 import { PLATFORM_CONFIG } from '../types/tokenVault';
 import {
   readCollection,
-  writeCollection,
+  runTransaction,
   findById,
   insertOne,
   updateOne,
@@ -29,18 +29,16 @@ import { encryptSecret, decryptSecret, maskSecret, toSafeCredential, toSafeCrede
 const COLLECTION = 'token-vault';
 
 function initialMetadata(input: CreateCredentialInput): Record<string, unknown> | undefined {
-  if (input.platform !== 'gemini') return input.metadata;
-
   const userMetadata = (input.metadata || {}) as Record<string, unknown>;
-  const {
-    billingMode, keyType, supportedModels, lightTestStatus,
-    generationStatus, failureStreak, requestsTodayEstimated,
-    inputTokensTodayEstimated, outputTokensTodayEstimated, healthScore,
-    ...safeMetadata
-  } = userMetadata;
+  const allowedMetadata: Record<string, unknown> = {};
+  for (const key of ['projectAlias', 'quotaGroupId', 'preferredModel']) {
+    if (typeof userMetadata[key] === 'string' && userMetadata[key].trim()) allowedMetadata[key] = userMetadata[key].trim().slice(0, 160);
+  }
+  if (Number.isInteger(Number(userMetadata.priority))) allowedMetadata.priority = Math.max(0, Math.min(10_000, Number(userMetadata.priority)));
+  if (input.platform !== 'gemini') return Object.keys(allowedMetadata).length ? allowedMetadata : undefined;
 
   return {
-    ...safeMetadata,
+    ...allowedMetadata,
     billingMode: 'unknown', keyType: 'unknown', supportedModels: [], lightTestStatus: 'unchecked',
     generationStatus: 'unchecked', failureStreak: 0, requestsTodayEstimated: 0,
     inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore: 50,
@@ -71,8 +69,12 @@ export async function listCredentials(filters?: CredentialFilters): Promise<Safe
     }
   }
 
-  // Sort: primary first, then by updatedAt desc
+  // Lower numeric priority is preferred. Stable role/time ordering keeps the
+  // browser view aligned with deterministic server routing.
   creds.sort((a, b) => {
+    const priorityA = Number.isInteger(Number(a.metadata?.priority)) ? Number(a.metadata?.priority) : 100;
+    const priorityB = Number.isInteger(Number(b.metadata?.priority)) ? Number(b.metadata?.priority) : 100;
+    if (priorityA !== priorityB) return priorityA - priorityB;
     if (a.role === 'primary' && b.role !== 'primary') return -1;
     if (b.role === 'primary' && a.role !== 'primary') return 1;
     return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
@@ -186,6 +188,25 @@ export async function updateCredential(
 ): Promise<SafeCredential | null> {
   const updated = await updateOne<StoredCredential>(COLLECTION, id, patch as Partial<StoredCredential>);
   return updated ? toSafeCredential(updated) : null;
+}
+
+export async function updateCredentialPriority(id: string, priority: number, operationId: string): Promise<{ credential: SafeCredential; changed: boolean } | null> {
+  const bounded = Math.max(0, Math.min(10_000, Math.floor(priority)));
+  let output: { credential: SafeCredential; changed: boolean } | null = null;
+  await runTransaction<StoredCredential>(COLLECTION, items => {
+    const credential = items.find(item => item.id === id);
+    if (!credential) return undefined;
+    const metadata = credential.metadata || {};
+    if (metadata.lastPriorityOperationId === operationId) {
+      output = { credential: toSafeCredential(credential), changed: false };
+      return undefined;
+    }
+    credential.metadata = { ...metadata, priority: bounded, lastPriorityOperationId: operationId.slice(0, 160) };
+    credential.updatedAt = new Date().toISOString();
+    output = { credential: toSafeCredential(credential), changed: true };
+    return items;
+  });
+  return output;
 }
 
 /**

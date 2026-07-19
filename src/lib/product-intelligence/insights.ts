@@ -7,6 +7,7 @@ import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import { extractVerifiedProductFacts } from '@/lib/editorialReview';
 import { readCollection } from '@/lib/storage/adapter';
 import type { PriceSnapshot } from './types';
+import { getAllAutomationJobs } from '@/lib/automation/store';
 
 export async function buildBusinessOverview() {
   const [products, groups, drafts, alerts, growth, priceSnapshots] = await Promise.all([
@@ -97,10 +98,15 @@ export async function getQualityDashboard(page = 1, pageSize = 20) {
 }
 
 export async function getContentStudioDashboard() {
-  const [products, drafts] = await Promise.all([getAllProducts(), listContentDrafts()]);
+  const [products, drafts, jobs] = await Promise.all([getAllProducts(), listContentDrafts(), getAllAutomationJobs()]);
   return {
     items: products.filter(product => product.status !== 'archived').map(product => {
       const draft = drafts.find(item => item.productId === product.id && item.status !== 'archived');
+      const productJobs = jobs.filter(job => job.payload.productId === product.id || (Array.isArray(job.payload.productIds) && job.payload.productIds.map(String).includes(product.id)) || job.payload.draftId === draft?.id)
+        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+      const currentJob = productJobs.find(job => ['PENDING', 'RUNNING', 'RETRY_SCHEDULED', 'WAITING_FOR_MANUAL_INPUT', 'WAITING_APPROVAL'].includes(job.status)) || productJobs[0];
+      const blockers = [...new Set([...(product.dataIssues || []), ...(product.reviewContent?.reviewBlockReasons || []), ...(draft?.lastEditorialCheck?.issues.map(issue => issue.code) || [])])];
+      const needsData = blockers.some(item => /needs_data|missing|source|price|link|image/i.test(item));
       return {
         product: { id: product.id, title: product.title, imageUrl: product.imageUrl, source: product.source, updatedAt: product.updatedAt },
         opportunityScore: product.opportunityScore,
@@ -113,6 +119,17 @@ export async function getContentStudioDashboard() {
         draftId: draft?.id,
         editorialCheck: draft?.lastEditorialCheck,
         evidenceFacts: extractVerifiedProductFacts(product),
+        operationalTruth: {
+          blocker: blockers[0] || null,
+          blockers,
+          autoRemediationPossible: Boolean(currentJob?.status === 'FAILED' && currentJob.attemptCount < currentJob.maxAttempts) && !needsData,
+          currentJob: currentJob ? { id: currentJob.id, status: currentJob.status, attemptCount: currentJob.attemptCount, maxAttempts: currentJob.maxAttempts, nextRetryAt: currentJob.nextRetryAt || null, lastAttemptAt: currentJob.startedAt || currentJob.updatedAt, lastSuccessAt: productJobs.find(job => job.status === 'SUCCEEDED')?.completedAt || null } : null,
+          manualActionRequired: needsData || draft?.lastEditorialCheck?.status === 'BLOCKED',
+          originalityScore: product.reviewContent?.originalityScore ?? null,
+          seoReadiness: product.reviewContent?.seoReadinessScore ?? null,
+          sourceVerified: product.verifiedSource === true || product.sourceVerified === true,
+          paidAiAllowed: false,
+        },
       };
     }).sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0)),
     drafts,

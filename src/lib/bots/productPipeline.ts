@@ -23,6 +23,7 @@ import { persistLifecycleTransition } from '../autonomous/lifecycleStore';
 import { readinessSnapshotHash } from '../autonomous/publishPolicy';
 import { createDefaultSourceAdapterRegistry, type SourceAdapterRegistry, type SourceProviderStatus } from '../autonomous/sourceAdapterPlatform';
 import { applySourceQualityPriority, getSourceQualitySnapshot, recordSourceQualityObservation } from '../autonomous/sourceQuality';
+import { vietnamDayKey } from '../automation/timezone';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
@@ -89,7 +90,7 @@ function emptyCounters(): PipelineCounters {
     claimValidationFailed: 0, duplicateContentSkipped: 0, seoReady: 0, seoBlocked: 0, indexable: 0, noindex: 0, sitemapIncluded: 0 };
 }
 
-function todayInVietnam(): string { return new Date(Date.now() + 7 * 60 * 60_000).toISOString().slice(0, 10); }
+function todayInVietnam(): string { return vietnamDayKey(); }
 export async function getDailyPipelineUsage(): Promise<DailyPipelineUsage> {
   const id = todayInVietnam();
   return (await readCollection<DailyPipelineUsage>(USAGE_COLLECTION)).find((item) => item.id === id)

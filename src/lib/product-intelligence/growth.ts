@@ -1,6 +1,7 @@
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
 import { getAllProducts } from '@/lib/storage/products';
 import { summarizeRevenueIntegrity } from '@/lib/autonomous/revenueIntegrity';
+import { vietnamDayKey } from '@/lib/automation/timezone';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import type { GrowthDaily, OutboundEvent } from './types';
 
@@ -9,7 +10,7 @@ const DAILY = 'growth-daily';
 
 function dayInVietnam(value: string | number | Date): string {
   const timestamp = value instanceof Date ? value.getTime() : typeof value === 'number' ? value : Date.parse(value);
-  return new Date(timestamp + 7 * 60 * 60_000).toISOString().slice(0, 10);
+  return vietnamDayKey(timestamp);
 }
 
 export async function recordGrowthEvent(

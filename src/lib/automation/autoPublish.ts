@@ -18,6 +18,7 @@ import { canPublishInCurrentWave, completeCanaryEffect, reserveCanaryEffect } fr
 import { claimJournalEffect, completeJournalEffect, ensureOperationJournal, failJournalEffect, getOperationJournal } from './operationJournal';
 import { createAutomationJob, getAutomationControl } from './store';
 import type { AutomationJob } from './types';
+import { vietnamDayKey } from './timezone';
 
 const OUTBOUND_COLLECTION = 'automation-outbound-events';
 const RUNTIME_BLOCK_REASONS = new Set([
@@ -48,8 +49,8 @@ function lifecycleActor(job: AutomationJob, workerId: string) {
 
 async function withinDailyPublishBudget(nowMs = Date.now()): Promise<boolean> {
   const [products, settings] = await Promise.all([getAllProducts(), getAutomationSettings()]);
-  const day = new Date(nowMs + 7 * 60 * 60_000).toISOString().slice(0, 10);
-  const count = products.filter(product => product.autoPublished && product.publishedAt && new Date(Date.parse(product.publishedAt) + 7 * 60 * 60_000).toISOString().slice(0, 10) === day).length;
+  const day = vietnamDayKey(nowMs);
+  const count = products.filter(product => product.autoPublished && product.publishedAt && vietnamDayKey(Date.parse(product.publishedAt)) === day).length;
   return count < settings.maxItemsPerDay;
 }
 

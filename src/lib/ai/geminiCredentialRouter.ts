@@ -3,11 +3,12 @@ import { decryptSecret } from '../security/secrets';
 import type { GeminiCredentialMetadata, GeminiGenerationStatus, StoredCredential } from '../types/tokenVault';
 import { getGeminiPoolState, quotaGroupAvailable, setGeminiPoolState, updateQuotaGroup } from './geminiQuotaGroupManager';
 import { recordGeminiUsage } from './geminiUsageTracker';
+import { getCredentialTruth } from './credentialTruth';
 
 const COLLECTION = 'token-vault';
 const TRANSIENT_HTTP = new Set([408, 429, 500, 502, 503, 504]);
 
-export interface GeminiCredentialSelection { credentialId: string; quotaGroupId: string; supportedModels: string[]; preferredModel?: string; healthScore: number; primary: boolean; }
+export interface GeminiCredentialSelection { credentialId: string; quotaGroupId: string; supportedModels: string[]; preferredModel?: string; healthScore: number; primary: boolean; priority: number; }
 export interface GeminiRequest { modelId: string; taskType: string; idempotencyKey: string; body: unknown; timeoutMs: number; inputTokenEstimate?: number; maxFailoverGroups?: number; }
 export interface GeminiRequestResult { ok: boolean; status: number; data?: unknown; errorCode?: string; credentialId?: string; quotaGroupId?: string; }
 
@@ -20,6 +21,7 @@ function metadataOf(credential: StoredCredential): GeminiCredentialMetadata {
     keyType: raw.keyType === 'auth' || raw.keyType === 'restricted_standard' || raw.keyType === 'standard' ? raw.keyType : 'unknown',
     supportedModels: Array.isArray(raw.supportedModels) ? raw.supportedModels.map(String) : [],
     preferredModel: typeof raw.preferredModel === 'string' ? raw.preferredModel : undefined,
+    priority: Number.isInteger(Number(raw.priority)) ? Math.max(0, Math.min(10_000, Number(raw.priority))) : 100,
     lightTestStatus: raw.lightTestStatus === 'available' || raw.lightTestStatus === 'invalid' || raw.lightTestStatus === 'missing_permission' || raw.lightTestStatus === 'transient_error' ? raw.lightTestStatus : 'unchecked',
     generationStatus: isGenerationStatus(raw.generationStatus) ? raw.generationStatus : 'unchecked',
     lastLightTestAt: text(raw.lastLightTestAt), lastGenerationTestAt: text(raw.lastGenerationTestAt), lastSuccessfulRequestAt: text(raw.lastSuccessfulRequestAt), lastFailureAt: text(raw.lastFailureAt), lastErrorCode: text(raw.lastErrorCode),
@@ -39,8 +41,9 @@ export async function selectGeminiCredentials(modelId: string, now = Date.now())
     .filter(({ metadata }) => !metadata.quotaExhaustedUntil || Date.parse(metadata.quotaExhaustedUntil) <= now)
     .filter(({ metadata }) => metadata.supportedModels.includes(modelId))
     .filter(({ metadata }) => Boolean(metadata.quotaGroupId) && quotaGroupAvailable(pool.groups[metadata.quotaGroupId!], now))
-    .sort((a, b) => b.metadata.healthScore - a.metadata.healthScore || Number(b.credential.role === 'primary') - Number(a.credential.role === 'primary') || Date.parse(a.metadata.lastSuccessfulRequestAt || '1970-01-01') - Date.parse(b.metadata.lastSuccessfulRequestAt || '1970-01-01'))
-    .map(({ credential, metadata }) => ({ credentialId: credential.id, quotaGroupId: metadata.quotaGroupId!, supportedModels: metadata.supportedModels, preferredModel: metadata.preferredModel, healthScore: metadata.healthScore, primary: credential.role === 'primary' }));
+    .filter(({ credential }) => getCredentialTruth(credential, now).generationReady)
+    .sort((a, b) => a.metadata.priority! - b.metadata.priority! || a.credential.id.localeCompare(b.credential.id))
+    .map(({ credential, metadata }) => ({ credentialId: credential.id, quotaGroupId: metadata.quotaGroupId!, supportedModels: metadata.supportedModels, preferredModel: metadata.preferredModel, healthScore: metadata.healthScore, primary: credential.role === 'primary', priority: metadata.priority! }));
 }
 export async function listAvailableGeminiModels(now = Date.now()): Promise<string[]> {
   const credentials = await readCollection<StoredCredential>(COLLECTION); const models = new Set<string>();

@@ -4,14 +4,27 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import type { Product } from '@/lib/types';
-import { classifyProductKind, looksLikeVoucherOrCampaign } from '@/lib/sourceItemClassifier';
+import { classifyProductKind } from '@/lib/sourceItemClassifier';
+import { SafeProductImage } from '@/components/safe-product-image';
+
+type PipelineTruth = {
+  classification: { type: string; confidence: number | null; reasonCodes: string[] };
+  lifecycle: { stage: string; blockers: string[]; reviewed: boolean; dataVerified: boolean; canaryReady: boolean; safePublishRequested: boolean; publishApproved: boolean; published: boolean; publicHidden: boolean };
+  automation: { currentJobId: string | null; status: string | null; attempts: number; maxAttempts: number | null; nextRetryAt: string | null; workerOwner: string | null; lastProcessedAt: string | null };
+  health: { link: string; image: string; price: string; source: string; content: string };
+  requiredAction: string | null;
+  remediationAvailable: boolean;
+  safety: { publishingEnabled: boolean; launchEnabled: boolean; effectiveMode: string };
+};
 
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [product, setProduct] = useState<Product | null>(null);
+  const [pipelineTruth, setPipelineTruth] = useState<PipelineTruth | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ type: string; message: string } | null>(null);
   const [showTechnical, setShowTechnical] = useState(false);
+  const [actionBusy, setActionBusy] = useState('');
 
   const showToast = useCallback((type: string, message: string) => {
     setToast({ type, message });
@@ -21,48 +34,57 @@ export default function ProductDetailPage() {
   const loadProduct = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/products/${id}`);
-      const data = await res.json();
-      if (data.ok) {
-        setProduct(data.data);
-      }
+      const [productResponse, truthResponse] = await Promise.all([fetch(`/api/products/${id}`), fetch(`/api/dashboard/products/${id}/truth`)]);
+      const [data, truthData] = await Promise.all([productResponse.json(), truthResponse.json()]);
+      if (data.ok) setProduct(data.data);
+      if (truthData.ok) setPipelineTruth(truthData.data);
     } catch { /* ignore */ }
     setLoading(false);
   };
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/products/${id}`)
-      .then(res => res.json())
-      .then(data => { if (!cancelled && data.ok) setProduct(data.data); })
+    Promise.all([fetch(`/api/products/${id}`).then(res => res.json()), fetch(`/api/dashboard/products/${id}/truth`).then(res => res.json())])
+      .then(([data, truthData]) => { if (!cancelled && data.ok) setProduct(data.data); if (!cancelled && truthData.ok) setPipelineTruth(truthData.data); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [id]);
 
   const handleAction = async (action: string) => {
+    if (actionBusy) return;
+    setActionBusy(action);
+    const semanticActions = new Set(['reviewed', 'data_verified', 'canary_ready', 'safe_publish_requested']);
     const url = action === 'score' ? `/api/products/${id}/score`
-      : action === 'approve' ? `/api/products/${id}/approve`
       : action === 'archive' ? `/api/products/${id}/archive`
-      : action === 'needs_review' ? `/api/products/${id}` : '';
+      : semanticActions.has(action) ? `/api/dashboard/products/${id}/actions` : '';
 
-    const method = action === 'needs_review' ? 'PATCH' : 'POST';
-    const body = action === 'needs_review' ? JSON.stringify({ status: 'needs_review' }) : undefined;
-    const headers: Record<string, string> = {};
-    if (body) headers['Content-Type'] = 'application/json';
+    const method = 'POST';
+    const body = semanticActions.has(action) ? JSON.stringify({ action, operationId: `product-ui:${id}:${action}` }) : undefined;
+    const headers: Record<string, string> = body ? { 'Content-Type': 'application/json' } : {};
 
-    const res = await fetch(url, { method, body, headers });
-    const data = await res.json();
-    if (data.ok) {
-      const messages: Record<string, string> = {
+    try {
+      const res = await fetch(url, { method, body, headers });
+      const data = await res.json();
+      if (data.ok) {
+        const messages: Record<string, string> = {
+        reviewed: 'Đã ghi nhận admin đã xem; dữ liệu và publish state không đổi.',
+        data_verified: 'Đã ghi nhận xác minh dữ liệu; chưa đưa ra public.',
+        canary_ready: 'Đã đưa vào danh sách xét CANARY; CANARY chưa được bật.',
+        safe_publish_requested: 'Đã tạo yêu cầu kiểm tra Safe Publish; chưa phê duyệt hoặc publish.',
         score: 'Đã chấm điểm sản phẩm.',
         approve: 'Đã duyệt sản phẩm.',
         archive: 'Đã lưu trữ sản phẩm.',
         needs_review: 'Đã chuyển về cần xem xét.',
       };
-      showToast('success', messages[action] || 'Thành công.');
-      loadProduct();
-    } else {
-      showToast('error', data.message);
+        showToast('success', messages[action] || 'Thành công.');
+        await loadProduct();
+      } else {
+        showToast('error', data.message);
+      }
+    } catch {
+      showToast('error', 'Không thể thực hiện thao tác.');
+    } finally {
+      setActionBusy('');
     }
   };
 
@@ -118,13 +140,7 @@ export default function ProductDetailPage() {
             {/* Product Header */}
             <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
               <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
-                {product.imageUrl ? (
-                  <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'var(--bg-tertiary)', flexShrink: 0 }}>
-                    <img src={product.imageUrl} alt={product.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                  </div>
-                ) : (
-                  <div style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', background: '#eef2f6', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', fontWeight: 700, flexShrink: 0 }}>SP</div>
-                )}
+                <SafeProductImage originalUrl={product.imageUrl} candidates={product.gallery} healthStatus={product.imageHealthStatus} alt={product.title} className="product-detail-image" />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: '6px', letterSpacing: '-0.01em' }}>{product.title}</h1>
                   <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
@@ -278,28 +294,32 @@ export default function ProductDetailPage() {
               </span>
             </div>
 
+            {pipelineTruth && (
+              <div className="glass-card product-truth-card" style={{ marginBottom: 'var(--space-lg)' }}>
+                <h3 className="card-title">Operational truth</h3>
+                <div className="detail-meta">
+                  <div className="detail-meta-row"><span>Phân loại</span><strong>{pipelineTruth.classification.type}</strong></div>
+                  <div className="detail-meta-row"><span>Lifecycle</span><strong>{pipelineTruth.lifecycle.stage}</strong></div>
+                  <div className="detail-meta-row"><span>Job hiện tại</span><strong>{pipelineTruth.automation.status || 'Không có'}</strong></div>
+                  <div className="detail-meta-row"><span>Retry</span><span>{pipelineTruth.automation.attempts}/{pipelineTruth.automation.maxAttempts ?? '—'}{pipelineTruth.automation.nextRetryAt ? ` · ${new Date(pipelineTruth.automation.nextRetryAt).toLocaleString('vi-VN')}` : ''}</span></div>
+                  <div className="detail-meta-row"><span>Worker owner</span><span>{pipelineTruth.automation.workerOwner || 'Không có owner active'}</span></div>
+                  <div className="detail-meta-row"><span>publicHidden</span><strong>{pipelineTruth.lifecycle.publicHidden ? 'YES' : 'NO'}</strong></div>
+                  <div className="detail-meta-row"><span>Publishing</span><strong>{pipelineTruth.safety.publishingEnabled ? 'Enabled' : 'Disabled'}</strong></div>
+                  <div className="detail-meta-row"><span>Link / ảnh / giá</span><span>{pipelineTruth.health.link} · {pipelineTruth.health.image} · {pipelineTruth.health.price}</span></div>
+                </div>
+                {pipelineTruth.lifecycle.blockers.length > 0 && <div className="pipeline-blockers"><strong>Blockers</strong><ul>{pipelineTruth.lifecycle.blockers.slice(0, 12).map(blocker => <li key={blocker}>{blocker}</li>)}</ul></div>}
+                <p className="help">Hành động cần thiết: {pipelineTruth.requiredAction || 'Không có'}</p>
+              </div>
+            )}
+
             {/* Actions */}
             <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
               <h3 className="card-title">⚡ Hành động</h3>
               <div className="flex flex-col gap-sm">
-                {(() => {
-                  const inferred = product.kind || classifyProductKind(product);
-                  if (inferred !== 'product') {
-                    return (
-                      <button className="btn btn-primary" style={{ width: '100%' }} disabled title="Mục này là voucher/chiến dịch/ưu đãi shop, không thể duyệt">✅ Duyệt sản phẩm</button>
-                    );
-                  }
-                  return (product.status !== 'approved' && product.status !== 'published') ? (
-                    <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => handleAction('approve')}>
-                      ✅ Duyệt sản phẩm
-                    </button>
-                  ) : null;
-                })()}
-                {product.status !== 'needs_review' && (
-                  <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => handleAction('needs_review')}>
-                    🔍 Chuyển về cần xem xét
-                  </button>
-                )}
+                <button className="btn btn-secondary" onClick={() => handleAction('reviewed')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.reviewed}>Đánh dấu đã xem</button>
+                <button className="btn btn-secondary" onClick={() => handleAction('data_verified')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.dataVerified}>Xác nhận dữ liệu</button>
+                <button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.canaryReady || Boolean(pipelineTruth?.lifecycle.blockers.length)}>Đưa vào danh sách xét CANARY</button>
+                <button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.safePublishRequested || Boolean(pipelineTruth?.lifecycle.blockers.length)}>Yêu cầu kiểm tra Safe Publish</button>
                 <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => handleAction('archive')}>
                   📥 Lưu trữ
                 </button>

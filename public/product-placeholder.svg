@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-labelledby="title desc">
+  <title id="title">Không có ảnh sản phẩm</title>
+  <desc id="desc">Khung ảnh trung tính của SanDeal, không đại diện cho sản phẩm cụ thể.</desc>
+  <rect width="640" height="480" rx="24" fill="#eef2f6"/>
+  <path d="M210 330h220V150H210zm24-24 55-65 42 46 28-31 47 50z" fill="#cbd5e1"/>
+  <circle cx="272" cy="205" r="24" fill="#94a3b8"/>
+  <text x="320" y="390" text-anchor="middle" font-family="system-ui,sans-serif" font-size="24" fill="#64748b">Chưa có ảnh đã xác minh</text>
+</svg>

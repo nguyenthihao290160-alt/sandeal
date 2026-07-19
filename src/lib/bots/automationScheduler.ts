@@ -7,6 +7,7 @@ import { processReviewQueue, recheckPublishedProducts, scanSourcesToQueue, selec
 import { recoverDueGeminiCredentials } from '../ai/geminiCredentialProbe';
 import { canRunLaunchWave, recordLaunchWave } from './launchAccelerator';
 import { runAutomationSchedulerTick, runProductIntelligenceSchedulerTick } from '../automation/scheduler';
+import { vietnamDayKey, vietnamTimeParts } from '../automation/timezone';
 
 const COLLECTION = 'scheduler-state';
 
@@ -38,10 +39,6 @@ export function getModeIntervals(mode: OperationMode) {
 
 export function isJobDue(nextAt: string | undefined, now = Date.now()): boolean {
   return !nextAt || !Number.isFinite(Date.parse(nextAt)) || Date.parse(nextAt) <= now;
-}
-
-function vietnamDayKey(now: number): string {
-  return new Date(now + 7 * 60 * 60_000).toISOString().slice(0, 10);
 }
 
 export async function getSchedulerState(): Promise<SchedulerState> {
@@ -133,8 +130,8 @@ export async function runSchedulerTick(now = Date.now()): Promise<{ status: 'com
       state.nextRecheckAt = new Date(now + intervals.recheckMs).toISOString();
       ran.push('public_recheck');
     }
-    const vietnamNow = new Date(now + 7 * 60 * 60_000);
-    const cleanupDueToday = vietnamNow.getUTCHours() > 2 || (vietnamNow.getUTCHours() === 2 && vietnamNow.getUTCMinutes() >= 30);
+    const vietnamNow = vietnamTimeParts(now);
+    const cleanupDueToday = vietnamNow.hour > 2 || (vietnamNow.hour === 2 && vietnamNow.minute >= 30);
     if (vietnamDayKey(Date.parse(state.lastCleanupAt || '1970-01-01')) !== vietnamDayKey(now) && cleanupDueToday) {
       const cleaned = await cleanupCandidateQueue(now);
       state.lastCleanupAt = new Date(now).toISOString();

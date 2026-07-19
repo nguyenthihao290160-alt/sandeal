@@ -175,7 +175,7 @@ export default function TokenVaultPage() {
       const res = await fetch('/api/token-vault/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id, operationId: `credential-primary:${id}` }),
       });
       const data = await res.json();
       showToast(data.ok && data.data?.status === 'valid' ? 'success' : 'warning', data.message || 'Đã kiểm tra.');
@@ -192,7 +192,7 @@ export default function TokenVaultPage() {
       const res = await fetch('/api/token-vault/set-primary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id, operationId: `credential-disable:${id}` }),
       });
       const data = await res.json();
       showToast(data.ok ? 'success' : 'error', data.message);
@@ -236,6 +236,23 @@ export default function TokenVaultPage() {
     } catch {
       showToast('error', 'Lỗi kết nối.');
     }
+  };
+
+  const handlePriority = async (credential: SafeCredential) => {
+    const currentPriority = Number(credential.readiness?.priority ?? credential.metadata?.priority ?? 100);
+    const entered = window.prompt('Priority (0–10000, số nhỏ hơn được ưu tiên trước):', String(currentPriority));
+    if (entered === null) return;
+    const priority = Number(entered);
+    if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
+      showToast('error', 'Priority phải là số nguyên từ 0 đến 10000.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/token-vault/priority', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: credential.id, priority, operationId: `credential-priority:${credential.id}:${priority}` }) });
+      const data = await res.json();
+      showToast(data.ok ? 'success' : 'error', data.message || 'Không thể cập nhật priority.');
+      if (data.ok) await loadCredentials();
+    } catch { showToast('error', 'Không thể cập nhật priority.'); }
   };
 
   const handleDelete = async (id: string) => {
@@ -482,6 +499,7 @@ export default function TokenVaultPage() {
                   onProbe={handleGenerationProbe}
                   onSetPrimary={handleSetPrimary}
                   onDisable={handleDisable}
+                  onPriority={handlePriority}
                   onDelete={setDeleteConfirm}
                   onReplace={(id) => { setReplaceId(id); setReplaceValue(''); }}
                   onReplaceSubmit={handleReplace}
@@ -530,6 +548,7 @@ interface PlatformCardProps {
   onProbe: (id: string) => void;
   onSetPrimary: (id: string) => void;
   onDisable: (id: string) => void;
+  onPriority: (credential: SafeCredential) => void;
   onDelete: (id: string) => void;
   onReplace: (id: string) => void;
   onReplaceSubmit: (id: string) => void;
@@ -546,6 +565,7 @@ function PlatformCard({
   onProbe,
   onSetPrimary,
   onDisable,
+  onPriority,
   onDelete,
   onReplace,
   onReplaceSubmit,
@@ -571,8 +591,8 @@ function PlatformCard({
           </div>
         </div>
         {primary ? (
-           <span className="badge badge-success" style={{ fontSize: '10px' }}>
-             Đã kết nối
+           <span className={`badge ${primary.readiness?.generationReady ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '10px' }}>
+             {primary.readiness?.generationReady ? 'Sẵn sàng tạo nội dung' : 'Đã lưu — chưa sẵn sàng tạo'}
            </span>
         ) : hasCredentials ? (
           <span className="badge badge-warning" style={{ fontSize: '10px' }}>
@@ -612,6 +632,7 @@ function PlatformCard({
           onProbe={onProbe}
           onSetPrimary={onSetPrimary}
           onDisable={onDisable}
+          onPriority={onPriority}
           onDelete={onDelete}
           onReplace={onReplace}
           onReplaceSubmit={onReplaceSubmit}
@@ -634,6 +655,7 @@ interface CredentialRowProps {
   onProbe: (id: string) => void;
   onSetPrimary: (id: string) => void;
   onDisable: (id: string) => void;
+  onPriority: (credential: SafeCredential) => void;
   onDelete: (id: string) => void;
   onReplace: (id: string) => void;
   onReplaceSubmit: (id: string) => void;
@@ -650,6 +672,7 @@ function CredentialRow({
   onProbe,
   onSetPrimary,
   onDisable,
+  onPriority,
   onDelete,
   onReplace,
   onReplaceSubmit,
@@ -681,6 +704,11 @@ function CredentialRow({
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
             {CREDENTIAL_TYPE_LABELS[cred.credentialType]} · {cred.maskedValue}
           </div>
+          {cred.readiness && (
+            <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '3px', overflowWrap: 'anywhere' }}>
+              Readiness: {cred.readiness.state} · Ưu tiên: {cred.readiness.priority} · Generation ready: {cred.readiness.generationReady ? 'YES' : 'NO'}
+            </div>
+          )}
           {cred.lastCheckedAt && (
             <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
               Kiểm tra lần cuối: {new Date(cred.lastCheckedAt).toLocaleString('vi-VN')}
@@ -698,7 +726,7 @@ function CredentialRow({
           )}
           {cred.platform === 'gemini' && (
             <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-              Dự án: {String(cred.metadata?.projectAlias || 'chưa đặt')} · Nhóm hạn mức: {String(cred.metadata?.quotaGroupId || 'chưa đặt')} · Thanh toán: {String(cred.metadata?.billingMode || 'chưa rõ')}<br />
+              Dự án: {String(cred.metadata?.projectAlias || 'chưa đặt')} · Nhóm hạn mức: {String(cred.metadata?.quotaGroupId || 'chưa đặt')} · Ưu tiên: {String(cred.metadata?.priority ?? 100)} · Thanh toán: {String(cred.metadata?.billingMode || 'chưa rõ')}<br />
               Loại khóa: {String(cred.metadata?.keyType || 'chưa rõ')} · Kiểm tra tạo nội dung: {String(cred.metadata?.generationStatus || 'chưa kiểm tra')} · Mô hình: {String(cred.metadata?.preferredModel || 'chưa đặt')}<br />
               Chờ phục hồi: {cred.metadata?.cooldownUntil ? new Date(String(cred.metadata.cooldownUntil)).toLocaleString('vi-VN') : 'không có'} · Số yêu cầu: {String(cred.metadata?.requestsTodayEstimated || 0)}
             </div>
@@ -714,6 +742,7 @@ function CredentialRow({
               Đặt làm chính
             </button>
           )}
+          <button className="btn btn-ghost btn-sm" onClick={() => onPriority(cred)} title="Đổi priority deterministic">Đổi ưu tiên</button>
           <button className="btn btn-ghost btn-sm" onClick={() => onReplace(cred.id)} title="Thay thế">
             Thay thế
           </button>

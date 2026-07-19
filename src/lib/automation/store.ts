@@ -4,6 +4,8 @@ import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 import { getJobRegistryDefaults } from './botRegistry';
 import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, listAutomationPolicies } from './policyRegistry';
 import { buildAutoPilotExecutionPlan } from './autoPilotGraph';
+import { vietnamDayKey } from './timezone';
+import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -70,10 +72,6 @@ export function sanitizeAutomationData(value: unknown, depth = 0): unknown {
     output[key] = sanitizeAutomationData(item, depth + 1);
   }
   return output;
-}
-
-function vietnamDay(now = Date.now()): string {
-  return new Date(now + 7 * 60 * 60_000).toISOString().slice(0, 10);
 }
 
 export async function appendAutomationAudit(input: Omit<AutomationAuditEvent, 'schemaVersion' | 'id' | 'createdAt'>): Promise<void> {
@@ -738,6 +736,47 @@ export async function retryAutomationJob(id: string, actor: string): Promise<Aut
   return retriedJob;
 }
 
+export async function appendAutomationAuditOnce(input: Omit<AutomationAuditEvent, 'schemaVersion' | 'id' | 'createdAt'>): Promise<boolean> {
+  let created = false;
+  await runTransaction<AutomationAuditEvent>(AUDIT, items => {
+    if (items.some(item => item.operationId === input.operationId && item.operationType === input.operationType)) return undefined;
+    items.push({
+      ...input, schemaVersion: 2, id: generateId(),
+      result: sanitizeAutomationData(input.result) as Record<string, unknown> | undefined,
+      reasons: input.reasons.map(reason => sanitizeErrorMessage(reason)).slice(0, 20),
+      createdAt: new Date().toISOString(),
+    });
+    if (items.length > 5_000) items.splice(0, items.length - 5_000);
+    created = true;
+    return items;
+  });
+  return created;
+}
+
+export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRoleOwnership, actor: string, nowMs = Date.now()): Promise<AutomationJob | null> {
+  if (!await isRuntimeRoleOwner('WORKER', ownership, nowMs)) throw new Error('STALE_RECOVERY_FENCING_REJECTED');
+  let recovered: AutomationJob | null = null;
+  const now = new Date(nowMs).toISOString();
+  await runTransaction<AutomationJob>(JOBS, items => {
+    const job = items.find(item => item.id === id);
+    if (!job || job.status !== 'RUNNING' || job.completedAt) return undefined;
+    if (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) > nowMs) throw new Error('HEALTHY_JOB_LEASE_TAKEOVER_FORBIDDEN');
+    const retry = job.attemptCount < job.maxAttempts;
+    job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED';
+    job.nextRetryAt = retry ? new Date(nowMs + retryDelayMs(job.type, job.attemptCount)).toISOString() : undefined;
+    job.lastErrorCode = 'LEASE_EXPIRED'; job.lastErrorCategory = 'PROVIDER_TIMEOUT';
+    job.lastErrorMessage = 'Lease job đã hết hạn và được worker owner có fencing hợp lệ phục hồi.';
+    job.retryable = retry; job.deadLetterReason = retry ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED';
+    job.claimedBy = undefined; job.claimedAt = undefined; job.leaseExpiresAt = undefined; job.updatedAt = now;
+    if (!retry) job.completedAt = now;
+    recovered = structuredClone(job);
+    return items;
+  });
+  const result = recovered as AutomationJob | null;
+  if (result) await appendAutomationAudit({ correlationId: result.operationId, operationId: `${result.operationId}:stale-recovery:${ownership.fencingToken}`.slice(0, 160), jobId: result.id, operationType: 'STALE_JOB_RECOVERED', actor, previousState: 'RUNNING', nextState: result.status, risk: 'MEDIUM', reasons: ['LEASE_EXPIRED', `fencing:${ownership.fencingToken}`], dryRun: result.dryRun, attempts: result.attemptCount });
+  return result;
+}
+
 export async function approveAutomationJob(id: string, actor: string, reason: string, approve: boolean): Promise<AutomationJob | null> {
   let changed: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
@@ -759,12 +798,12 @@ export async function approveAutomationJob(id: string, actor: string, reason: st
 }
 
 export async function getAiUsage(now = Date.now()): Promise<AiUsageRecord> {
-  const day = vietnamDay(now); const existing = (await readCollection<AiUsageRecord>(USAGE)).find(item => item.day === day);
+  const day = vietnamDayKey(now); const existing = (await readCollection<AiUsageRecord>(USAGE)).find(item => item.day === day);
   return existing || { id: day, day, requests: 0, tokens: 0, fallbacks: 0, blocked: 0, requestLimit: 100, tokenLimit: 100_000, updatedAt: new Date(now).toISOString() };
 }
 
 export async function reserveAiUsage(requests: number, tokens: number, now = Date.now()): Promise<{ allowed: boolean; usage: AiUsageRecord }> {
-  const day = vietnamDay(now); let result!: { allowed: boolean; usage: AiUsageRecord };
+  const day = vietnamDayKey(now); let result!: { allowed: boolean; usage: AiUsageRecord };
   await runTransaction<AiUsageRecord>(USAGE, items => {
     let usage = items.find(item => item.day === day);
     if (!usage) { usage = { id: day, day, requests: 0, tokens: 0, fallbacks: 0, blocked: 0, requestLimit: 100, tokenLimit: 100_000, updatedAt: new Date(now).toISOString() }; items.push(usage); }

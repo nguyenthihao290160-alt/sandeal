@@ -49,6 +49,7 @@ export type GeminiGenerationStatus = 'unchecked' | 'available' | 'rate_limited' 
 export type GeminiLightTestStatus = 'unchecked' | 'available' | 'invalid' | 'missing_permission' | 'transient_error';
 
 export interface GeminiCredentialMetadata {
+  priority?: number;
   projectAlias?: string;
   quotaGroupId?: string;
   billingMode: GeminiBillingMode;
@@ -95,7 +96,21 @@ export interface StoredCredential {
 
 // ---- Safe Credential (frontend projection — no secrets) ----
 
-export type SafeCredential = Omit<StoredCredential, 'encryptedValue'>;
+export type SafeCredential = Omit<StoredCredential, 'encryptedValue'> & {
+  readiness?: {
+    state: 'stored' | 'valid' | 'generation_ready' | 'cooldown' | 'quota_limited' | 'invalid' | 'disabled' | 'missing_permission' | 'unknown';
+    stored: boolean;
+    valid: boolean;
+    generationReady: boolean;
+    priority: number;
+    preferredModel: string | null;
+    projectLabel: string | null;
+    quotaGroup: string | null;
+    cooldownUntil: string | null;
+    lastCheckedAt: string | null;
+    errorCategory: string | null;
+  };
+};
 
 // ---- Input for creating a credential ----
 

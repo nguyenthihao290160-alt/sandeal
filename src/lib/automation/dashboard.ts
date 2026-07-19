@@ -18,13 +18,14 @@ import {
 } from './store';
 import type { AutomationJob } from './types';
 import { buildLaunchInventoryOverview } from './launchInventory';
+import { startOfVietnamDay, vietnamActivityLabel } from './timezone';
+import { getAutomationTruth } from './truth';
 
 export type DashboardRange = 'today' | '7d' | '30d';
 
 function rangeStart(range: DashboardRange, now = Date.now()): number {
   if (range === 'today') {
-    const local = new Date(now + 7 * 60 * 60_000).toISOString().slice(0, 10);
-    return Date.parse(`${local}T00:00:00+07:00`);
+    return startOfVietnamDay(now);
   }
   return now - (range === '7d' ? 7 : 30) * 24 * 60 * 60_000;
 }
@@ -93,11 +94,11 @@ function roleDiagnostic(role: RuntimeRole, lease: RuntimeRoleLease | undefined, 
 
 export async function buildAutomationDashboard(range: DashboardRange) {
   const now = Date.now();
-  const [jobs, products, sources, control, queue, usage, autopilotCircuit, geminiCircuit, audit, settings, runtimeHealth, roleLeases, roleConflicts, outboundEvents, inventory] = await Promise.all([
+  const [jobs, products, sources, control, queue, usage, autopilotCircuit, geminiCircuit, audit, settings, runtimeHealth, roleLeases, roleConflicts, outboundEvents, inventory, truth] = await Promise.all([
     getAllAutomationJobs(), getAllProducts(), listProductSources(), getAutomationControl(), getAutomationQueueStats(),
     getAiUsage(), getCircuit('autopilot'), getCircuit('gemini'), listAutomationAudit(1, 20), getAutomationSettings(),
     getLatestRuntimeHealth(), listRuntimeRoleLeases(), listRecentRuntimeRoleConflicts(now - 24 * 60 * 60_000), listOutboundEvents(),
-    buildLaunchInventoryOverview(),
+    buildLaunchInventoryOverview(), getAutomationTruth(now),
   ]);
   const start = rangeStart(range);
   const onboarding = await buildOperationsOnboarding();
@@ -179,8 +180,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
 
   const activityMap = new Map<string, { label: string; completed: number; failed: number; retried: number; blocked: number; scanned: number }>();
   for (const job of current) {
-    const date = new Date(Date.parse(job.updatedAt) + 7 * 60 * 60_000);
-    const label = range === 'today' ? `${String(date.getUTCHours()).padStart(2, '0')}:00` : `${String(date.getUTCDate()).padStart(2, '0')}/${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+    const label = vietnamActivityLabel(job.updatedAt, range === 'today');
     const bucket = activityMap.get(label) || { label, completed: 0, failed: 0, retried: 0, blocked: 0, scanned: 0 };
     if (job.status === 'SUCCEEDED') bucket.completed += 1;
     if (job.status === 'FAILED') bucket.failed += 1;
@@ -201,6 +201,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
 
   return {
     updatedAt: new Date().toISOString(), range,
+    truth,
     kpis: {
       productsProcessed: products.length,
       running: queue.RUNNING,

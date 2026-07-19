@@ -31,6 +31,8 @@
     "test:prompt10:gate8": "node scripts/prompt10-gate8-dashboard-tests.cjs",
     "test:prompt10:launch-inventory": "node scripts/prompt10-launch-inventory-tests.cjs",
     "test:prompt11": "node scripts/prompt11-production-completion-tests.cjs",
+    "test:prompt12": "node scripts/prompt12-operational-truth-tests.cjs",
+    "accesstrade:cleanup:prompt12": "node scripts/prompt12-accesstrade-cleanup.cjs",
     "test:stabilization": "node scripts/stabilization-tests.cjs",
     "test:storage": "node scripts/storage-adapter-phase1a-tests.cjs",
     "test:storage:mongo": "node scripts/storage-adapter-mongo-tests.cjs",
