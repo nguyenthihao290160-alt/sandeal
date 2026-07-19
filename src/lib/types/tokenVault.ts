@@ -102,6 +102,7 @@ export type SafeCredential = Omit<StoredCredential, 'encryptedValue'> & {
     stored: boolean;
     valid: boolean;
     generationReady: boolean;
+    reasonCode: 'ready' | 'not_applicable' | 'credential_not_checked' | 'credential_not_valid' | 'generation_not_verified' | 'generation_temporarily_unavailable' | 'cooldown_active' | 'quota_limited' | 'billing_not_confirmed' | 'quota_group_missing' | 'model_not_verified' | 'invalid' | 'disabled' | 'missing_permission' | 'unknown';
     priority: number;
     preferredModel: string | null;
     projectLabel: string | null;

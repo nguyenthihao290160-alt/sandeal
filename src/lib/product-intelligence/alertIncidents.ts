@@ -231,6 +231,32 @@ export async function getAlertIncidentSummary() {
   };
 }
 
+export async function getAlertIncidentProjectionStatus(now = Date.now()) {
+  const [sourceAlerts, storedIncidents] = await Promise.all([
+    readCollection<ProductAlert>('product-alerts'),
+    readCollection<AlertIncident>(INCIDENTS),
+  ]);
+  const activeSourceAlerts = sourceAlerts.filter(item => !['resolved', 'ignored'].includes(item.status));
+  const projected = groupAlertsIntoIncidents(activeSourceAlerts, now);
+  const materializedActive = storedIncidents.filter(item => !['RESOLVED', 'IGNORED'].includes(item.status));
+  const materializedByRootCause = new Map(materializedActive.map(item => [item.rootCauseKey, item]));
+  const syncRequired = materializedActive.length !== projected.incidents.length
+    || projected.incidents.some(item => {
+      const current = materializedByRootCause.get(item.rootCauseKey);
+      return !current || current.affectedCount !== item.affectedCount;
+    });
+  const lastIncidentUpdateAt = storedIncidents.map(item => item.updatedAt).filter(Boolean).sort().at(-1) || null;
+  return {
+    state: syncRequired ? 'SYNC_REQUIRED' as const : projected.incidents.length ? 'CURRENT' as const : 'EMPTY' as const,
+    syncRequired,
+    sourceActiveAlerts: activeSourceAlerts.length,
+    sourceOccurrences: projected.occurrences.length,
+    expectedIncidentGroups: projected.incidents.length,
+    materializedIncidentGroups: materializedActive.length,
+    lastIncidentUpdateAt,
+  };
+}
+
 export async function getAlertIncident(incidentIdValue: string): Promise<AlertIncident | null> {
   return (await readCollection<AlertIncident>(INCIDENTS)).find(item => item.id === incidentIdValue) || null;
 }

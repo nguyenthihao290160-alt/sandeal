@@ -27,6 +27,7 @@ const urlSafety = require('../src/lib/product-intelligence/urlSafety.ts');
 const credentialTruth = require('../src/lib/ai/credentialTruth.ts');
 const secrets = require('../src/lib/security/secrets.ts');
 const tokenVault = require('../src/lib/storage/tokenVault.ts');
+const dashboardProducts = require('../src/lib/dashboard/products.ts');
 
 const source = (file) => fs.readFileSync(path.join(process.cwd(), file), 'utf8');
 const now = Date.parse('2026-07-19T05:00:00.000Z');
@@ -159,7 +160,7 @@ async function main() {
   await test(61, 'Retry max được tôn trọng', () => assert.ok(source('src/lib/automation/store.ts').includes('job.attemptCount < job.maxAttempts')));
   await test(62, 'Không gọi network thật', () => assert.equal(global.fetch.toString().includes('PROMPT12_NETWORK_FORBIDDEN'), true));
 
-  const storedCredential = { id: 'cred-b', maskedValue: '****abcd', status: 'valid', role: 'backup', metadata: { generationStatus: 'available', priority: 2 }, lastCheckedAt: new Date(now).toISOString() };
+  const storedCredential = { id: 'cred-b', platform: 'gemini', maskedValue: '****abcd', status: 'valid', role: 'backup', metadata: { generationStatus: 'available', billingMode: 'free_confirmed', quotaGroupId: 'group-a', supportedModels: ['gemini-free-fixture'], priority: 2 }, lastCheckedAt: new Date(now).toISOString() };
   await test(63, 'API không trả raw key', () => assert.ok(!source('src/app/api/token-vault/list/route.ts').includes('encryptedValue')));
   await test(64, 'Masking đúng', () => assert.equal(secrets.maskSecret('fixture-value-abcd'), '****abcd'));
   await test(65, 'stored không đồng nghĩa valid', () => { const value = credentialTruth.getCredentialTruth({ ...storedCredential, status: 'unchecked' }, now); assert.equal(value.valid, false); });
@@ -212,6 +213,68 @@ async function main() {
   await test(106, 'publicHidden vẫn true', () => assert.equal(pipeline(product({ publicHidden: undefined })).lifecycle.publicHidden, true));
   await test(107, 'Token Vault không nằm trong report/backup mới', () => assert.ok(!source('src/lib/product-intelligence/accessTradeCleanup.ts').includes('token-vault')));
   await test(108, 'Không thay đổi .data thật', () => assert.ok(tempDir.includes('.test-tmp') && process.env.SANDEAL_DATA_DIR === tempDir));
+  await test(109, 'Product blockingSignals là lượt cộng dồn, không phải số sản phẩm', () => {
+    const result = dashboardProducts.buildDashboardProducts([
+      product({ status: 'draft', linkHealthStatus: 'broken', imageHealthStatus: 'image_broken' }),
+    ], { sort: 'updated_desc', page: 1, pageSize: 20 });
+    assert.equal(result.summary.totalItems, 1);
+    assert.equal(result.summary.blocked, 1);
+    assert.equal(result.summary.brokenLinks, 1);
+    assert.equal(result.summary.brokenImages, 1);
+    assert.equal(result.summary.blockingSignals, 3);
+  });
+  await test(110, 'Projection báo cần sync mà không tự materialize', async () => {
+    await reset('product-alerts', 'alert-incidents', 'alert-occurrences');
+    await storage.writeCollection('product-alerts', [{ ...alert('projection-source'), relatedEntityIds: ['p1', 'p2'], entityId: '' }]);
+    const before = await incidents.getAlertIncidentProjectionStatus(now);
+    assert.equal(before.state, 'SYNC_REQUIRED');
+    assert.equal(before.sourceActiveAlerts, 1);
+    assert.equal(before.sourceOccurrences, 2);
+    assert.equal(before.expectedIncidentGroups, 1);
+    assert.equal(before.materializedIncidentGroups, 0);
+    assert.equal((await incidents.listAlertIncidents()).pagination.totalItems, 0);
+  });
+  await test(111, 'Explicit sync materialize projection idempotent', async () => {
+    await incidents.synchronizeAlertIncidents(now);
+    const current = await incidents.getAlertIncidentProjectionStatus(now);
+    assert.equal(current.state, 'CURRENT');
+    assert.equal(current.syncRequired, false);
+    assert.equal(current.materializedIncidentGroups, 1);
+  });
+  await test(112, 'Alert GET không gọi sync và manual sync có audit', () => {
+    const route = source('src/app/api/dashboard/alert-incidents/route.ts');
+    const getHandler = route.slice(route.indexOf('export async function GET'), route.indexOf('export async function POST'));
+    assert.ok(!getHandler.includes('synchronizeAlertIncidents('));
+    assert.ok(route.includes("operationType: 'ALERT_INCIDENTS_SYNCHRONIZED'"));
+  });
+  await test(113, 'Token Vault dùng full-width auto-fit và actions không ép metadata', () => {
+    const page = source('src/app/dashboard/token-vault/page.tsx');
+    assert.ok(page.includes('token-vault-platform-grid') && page.includes('token-vault-credential-actions'));
+    assert.ok(cssSource.includes('repeat(auto-fit, minmax(min(100%, 520px), 1fr))'));
+    assert.ok(cssSource.includes('.token-vault-credential-layout { display: grid; grid-template-columns: minmax(0, 1fr)'));
+    assert.ok(cssSource.includes('.token-vault-credential-actions { display: flex;'));
+  });
+  await test(114, 'Gemini valid nhưng chưa generation probe có lý do chưa xác minh', () => {
+    const truth = credentialTruth.getCredentialTruth({ ...storedCredential, metadata: { generationStatus: 'unchecked' } }, now);
+    assert.equal(truth.valid, true);
+    assert.equal(truth.generationReady, false);
+    assert.equal(truth.reasonCode, 'generation_not_verified');
+  });
+  await test(115, 'Token Vault render lý do readiness mà không tự probe', () => {
+    const page = source('src/app/dashboard/token-vault/page.tsx');
+    assert.ok(page.includes('READINESS_REASON_LABELS') && page.includes('data-readiness-reason'));
+    assert.ok(!page.match(/useEffect\([\s\S]{0,300}\/probe/));
+  });
+  await test(116, 'Generation ready fail-closed khi billing Free chưa xác minh', () => {
+    const truth = credentialTruth.getCredentialTruth({ ...storedCredential, metadata: { ...storedCredential.metadata, billingMode: 'unknown' } }, now);
+    assert.equal(truth.generationReady, false);
+    assert.equal(truth.reasonCode, 'billing_not_confirmed');
+  });
+  await test(117, 'Generation ready cần valid, available, Free, quota group và model', () => {
+    const truth = credentialTruth.getCredentialTruth(storedCredential, now);
+    assert.equal(truth.generationReady, true);
+    assert.equal(truth.reasonCode, 'ready');
+  });
 
   console.log(`\nPrompt 12 tests: ${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;

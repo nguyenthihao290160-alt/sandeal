@@ -3,6 +3,7 @@ import { getServerActor, requirePermission } from '@/lib/auth';
 import {
   listAlertIncidents,
   getAlertIncidentSummary,
+  getAlertIncidentProjectionStatus,
   listIncidentOccurrences,
   queueIncidentRemediation,
   synchronizeAlertIncidents,
@@ -10,6 +11,7 @@ import {
   type AlertIncidentStatus,
 } from '@/lib/product-intelligence/alertIncidents';
 import { generateId } from '@/lib/storage/adapter';
+import { appendAutomationAuditOnce } from '@/lib/automation/store';
 
 export const dynamic = 'force-dynamic';
 const STATUSES = new Set<AlertIncidentStatus>(['NEW', 'ACKNOWLEDGED', 'REMEDIATION_QUEUED', 'REMEDIATION_RUNNING', 'RECHECK_REQUIRED', 'RESOLVED', 'HUMAN_DECISION_REQUIRED', 'IGNORED', 'EXHAUSTED']);
@@ -25,11 +27,12 @@ export async function GET(request: NextRequest) {
   }
   const rawStatus = request.nextUrl.searchParams.get('status');
   if (rawStatus && !STATUSES.has(rawStatus as AlertIncidentStatus)) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR' }, { status: 400 });
-  const [data, summary] = await Promise.all([
+  const [data, summary, projection] = await Promise.all([
     listAlertIncidents({ status: rawStatus as AlertIncidentStatus || undefined, page, pageSize }),
     getAlertIncidentSummary(),
+    getAlertIncidentProjectionStatus(),
   ]);
-  return NextResponse.json({ ok: true, code: 'OK', data: { ...data, summary } }, { headers: { 'Cache-Control': 'no-store' } });
+  return NextResponse.json({ ok: true, code: 'OK', data: { ...data, summary, projection } }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 export async function POST(request: NextRequest) {
@@ -40,7 +43,15 @@ export async function POST(request: NextRequest) {
   const action = String(body.action || '');
   const operationId = typeof body.operationId === 'string' ? body.operationId : generateId();
   try {
-    if (action === 'synchronize') return NextResponse.json({ ok: true, code: 'OK', operationId, data: await synchronizeAlertIncidents() });
+    if (action === 'synchronize') {
+      const result = await synchronizeAlertIncidents();
+      await appendAutomationAuditOnce({
+        correlationId: operationId, operationId, operationType: 'ALERT_INCIDENTS_SYNCHRONIZED', actor: getServerActor(),
+        target: 'alert-incidents', nextState: 'SYNCHRONIZED', risk: 'LOW', result,
+        reasons: [], dryRun: false, attempts: 0,
+      });
+      return NextResponse.json({ ok: true, code: 'OK', operationId, data: result });
+    }
     if (action === 'queue_remediation') {
       const result = await queueIncidentRemediation(String(body.incidentId || ''), getServerActor(), operationId);
       return NextResponse.json({ ok: true, code: result.code, operationId, data: { jobId: result.job.id, status: result.job.status } }, { status: result.created ? 202 : 200 });

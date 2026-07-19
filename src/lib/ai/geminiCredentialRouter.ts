@@ -47,7 +47,7 @@ export async function selectGeminiCredentials(modelId: string, now = Date.now())
 }
 export async function listAvailableGeminiModels(now = Date.now()): Promise<string[]> {
   const credentials = await readCollection<StoredCredential>(COLLECTION); const models = new Set<string>();
-  for (const credential of credentials) { const metadata = metadataOf(credential); if (metadata.billingMode !== 'free_confirmed' || metadata.generationStatus !== 'available' || (metadata.cooldownUntil && Date.parse(metadata.cooldownUntil) > now)) continue; metadata.supportedModels.forEach((model) => models.add(model)); }
+  for (const credential of credentials) { const metadata = metadataOf(credential); if (!getCredentialTruth(credential, now).generationReady) continue; metadata.supportedModels.forEach((model) => models.add(model)); }
   return [...models];
 }
 

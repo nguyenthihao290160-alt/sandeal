@@ -84,6 +84,12 @@ export interface DashboardProductSummary {
   published: number;
   publishCandidates: number;
   blocked: number;
+  /**
+   * Additive operational signals, not a distinct-product count. A product may
+   * contribute once for blocked status, once for a broken link, and once for a
+   * broken image.
+   */
+  blockingSignals: number;
   brokenLinks: number;
   brokenImages: number;
   missingPrice: number;
@@ -265,6 +271,9 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
 
   sortItems(filtered, query.sort);
   const realKinds = new Set<ProductKind>(['product', 'deal']);
+  const blocked = filtered.filter((item) => item.safePublishStatus === 'blocked').length;
+  const brokenLinks = filtered.filter((item) => item.health.link && BROKEN.has(item.health.link)).length;
+  const brokenImages = filtered.filter((item) => item.health.image && BROKEN.has(item.health.image)).length;
   const summary: DashboardProductSummary = {
     totalItems: filtered.length,
     qualifiedForPublish: filtered.filter((item) => item.publish.eligible).length,
@@ -276,9 +285,10 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
     campaigns: filtered.filter((item) => item.type === 'campaign').length,
     published: filtered.filter((item) => item.safePublishStatus === 'published').length,
     publishCandidates: filtered.filter((item) => item.safePublishStatus === 'qualified').length,
-    blocked: filtered.filter((item) => item.safePublishStatus === 'blocked').length,
-    brokenLinks: filtered.filter((item) => item.health.link && BROKEN.has(item.health.link)).length,
-    brokenImages: filtered.filter((item) => item.health.image && BROKEN.has(item.health.image)).length,
+    blocked,
+    blockingSignals: blocked + brokenLinks + brokenImages,
+    brokenLinks,
+    brokenImages,
     missingPrice: filtered.filter((item) => item.price === null).length,
     archived: filtered.filter((item) => item.safePublishStatus === 'archived').length,
   };

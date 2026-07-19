@@ -11,7 +11,15 @@ type Incident = {
   maxRemediationAttempts: number; humanDecisionRequired: boolean; autoRemediationAllowed: boolean;
   evidenceStatus: string; evidence: { checker: string; checkerVersion: string; checkedAt: string; result: string; affectedCountBefore: number; affectedCountAfter: number; sampleEntityIds: string[] } | null;
 };
-type Response = { items: Incident[]; pagination: { page: number; pageSize: number; totalItems: number; totalPages: number }; summary: { active: number; critical: number; humanDecision: number; autoFixable: number } };
+type Response = {
+  items: Incident[];
+  pagination: { page: number; pageSize: number; totalItems: number; totalPages: number };
+  summary: { active: number; critical: number; humanDecision: number; autoFixable: number };
+  projection: {
+    state: 'SYNC_REQUIRED' | 'CURRENT' | 'EMPTY'; syncRequired: boolean; sourceActiveAlerts: number;
+    sourceOccurrences: number; expectedIncidentGroups: number; materializedIncidentGroups: number; lastIncidentUpdateAt: string | null;
+  };
+};
 type Occurrence = { id: string; entityType: string; entityId: string; reasonCode: string; active: boolean; lastSeenAt: string };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -56,10 +64,12 @@ export default function AlertsPage() {
   const bulkRemediationAllowed = selectedIncidents.length > 0 && selectedIncidents.every(item => item.autoRemediationAllowed && !item.humanDecisionRequired && item.remediationAttemptCount < item.maxRemediationAttempts);
 
   return <main className={styles.page}>
-    <DashboardPageHeader icon="alert" eyebrow="Vận hành" title="Root-Cause Alert Center" description="Mặc định hiển thị incident theo nguyên nhân gốc. REMEDIATION_QUEUED không đồng nghĩa RESOLVED; chỉ recheck PASS với 0 occurrence active mới đóng incident." actions={<><button className={styles.primaryButton} disabled={Boolean(busy)} onClick={() => void mutate({ action: 'synchronize' }, 'POST')}>Đồng bộ incident</button><button className={styles.secondaryButton} onClick={resource.reload}>Làm mới</button></>} />
+    <DashboardPageHeader icon="alert" eyebrow="Vận hành" title="Root-Cause Alert Center" description="Mặc định hiển thị incident theo nguyên nhân gốc. REMEDIATION_QUEUED không đồng nghĩa RESOLVED; chỉ recheck PASS với 0 occurrence active mới đóng incident." actions={<><button className={styles.primaryButton} disabled={Boolean(busy)} title="Materialize cảnh báo nguồn thành incident groups và ghi audit" onClick={() => void mutate({ action: 'synchronize' }, 'POST')}>Đồng bộ incident</button><button className={styles.secondaryButton} onClick={resource.reload}>Làm mới</button></>} />
     {resource.loading && !response && <DashboardState kind="loading" title="Đang tải incidents" />}
     {(resource.error || error) && <DashboardState kind="error" description={resource.error || error} onRetry={resource.reload} />}
     {response && <>
+      {response.projection.syncRequired && <div className={styles.notice} role="status"><strong>Incident chưa đồng bộ với cảnh báo nguồn.</strong><span>{response.projection.sourceActiveAlerts} cảnh báo nguồn tạo ra {response.projection.sourceOccurrences} occurrence dự kiến trong {response.projection.expectedIncidentGroups} root-cause group. Bấm “Đồng bộ incident” để materialize có kiểm soát; mở hoặc làm mới trang không ghi dữ liệu.</span></div>}
+      {!response.projection.syncRequired && response.projection.state === 'EMPTY' && <div className={styles.notice} role="status"><strong>Không có root-cause incident active.</strong><span>Nguồn hiện có 0 cảnh báo active. Trạng thái này khác với số lượt chặn/lỗi trên Products.</span></div>}
       <section className={styles.metrics}>
         <MetricCard icon="alert" label="Incident active" value={response.summary.active} tone={response.summary.active ? 'warning' : 'success'} />
         <MetricCard icon="emergency" label="Critical" value={response.summary.critical} tone={response.summary.critical ? 'danger' : 'neutral'} />
@@ -72,8 +82,8 @@ export default function AlertsPage() {
         <button className={styles.secondaryButton} disabled={!selected.length || Boolean(busy)} onClick={() => void mutate({ ids: selected, action: 'acknowledge' })}>Đã xem ({selected.length})</button>
         <button className={styles.secondaryButton} disabled={!bulkRemediationAllowed || Boolean(busy)} onClick={() => selectedIncidents.forEach(item => void mutate({ action: 'queue_remediation', incidentId: item.id }, 'POST'))}>Queue sửa an toàn</button>
       </div>
-      <Panel title="Incident groups" icon="alert" description={`${response.pagination.totalItems} root cause; mỗi drill-down tối đa 25 occurrence.`}>
-        {!items.length ? <div className={styles.panelBody}><DashboardState kind="empty" title="Không có incident phù hợp" /></div> : <div className={styles.alertList}>{items.map(item => <article className={styles.alertCard} data-severity={item.severity} key={item.id}>
+      <Panel title="Incident groups" icon="alert" description={`${response.pagination.totalItems} root cause đã materialize; mỗi drill-down tối đa 25 occurrence.${response.projection.lastIncidentUpdateAt ? ` Dữ liệu incident cập nhật gần nhất: ${formatDateTime(response.projection.lastIncidentUpdateAt)}.` : ''}`}>
+        {!items.length ? <div className={styles.panelBody}><DashboardState kind="empty" title={response.projection.syncRequired ? 'Chưa materialize incident groups' : 'Không có incident phù hợp'} description={response.projection.syncRequired ? 'Cảnh báo nguồn vẫn được giữ nguyên. Dùng nút Đồng bộ incident khi bạn muốn tạo projection.' : 'Không có root cause active theo bộ lọc hiện tại.'} /></div> : <div className={styles.alertList}>{items.map(item => <article className={styles.alertCard} data-severity={item.severity} key={item.id}>
           <label><input type="checkbox" checked={selected.includes(item.id)} onChange={event => setSelected(current => event.target.checked ? [...new Set([...current, item.id])] : current.filter(id => id !== item.id))} /><span className="sr-only">Chọn incident</span></label>
           <span className={styles.alertIcon}><DashboardIcon name="alert" size={19} /></span>
           <div>

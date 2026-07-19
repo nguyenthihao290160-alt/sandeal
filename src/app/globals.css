@@ -2680,6 +2680,42 @@ tr:hover td {
 .product-truth-card > * { min-width: 0; overflow-wrap: anywhere; }
 .token-card-masked { max-width: 100%; white-space: normal; word-break: normal; overflow-wrap: anywhere; }
 .token-card-actions .btn { width: auto; max-width: 100%; }
+.token-vault-page { width: 100%; min-width: 0; }
+.token-vault-platform-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+  gap: var(--space-md);
+  width: 100%;
+  min-width: 0;
+}
+.token-vault-platform-card { width: 100%; min-width: 0; padding: var(--space-md); }
+.token-vault-platform-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+.token-vault-platform-header > * { min-width: 0; }
+.token-vault-platform-header .badge { max-width: 100%; white-space: normal; overflow-wrap: break-word; }
+.token-vault-credential {
+  min-width: 0;
+  padding: var(--space-sm) 0;
+  margin-top: var(--space-sm);
+  border-top: 1px solid var(--border-primary);
+}
+.token-vault-credential-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-sm); min-width: 0; }
+.token-vault-credential-info,
+.token-vault-readiness-summary,
+.token-vault-readiness-reason,
+.token-vault-gemini-meta { min-width: 0; overflow-wrap: break-word; word-break: normal; }
+.token-vault-readiness-summary { margin-top: 3px; color: var(--text-secondary); font-size: 10px; }
+.token-vault-readiness-reason { margin-top: 3px; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.token-vault-gemini-meta { margin-top: 4px; color: var(--text-tertiary); font-size: 10px; line-height: 1.55; }
+.token-vault-credential-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; }
+.token-vault-credential-actions .btn { flex: 0 1 auto; width: auto; max-width: 100%; white-space: normal; }
+.token-vault-replace-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--space-sm); align-items: center; min-width: 0; margin-top: var(--space-sm); }
 .pipeline-blockers { margin-top: var(--space-md); overflow-wrap: anywhere; }
 .pipeline-blockers ul { margin: var(--space-xs) 0 0; padding-left: 20px; }
 .detail-meta-row > * { min-width: 0; overflow-wrap: anywhere; }
@@ -2689,6 +2725,9 @@ tr:hover td {
   .token-card-header { align-items: flex-start; flex-direction: column; }
   .token-card-actions { align-items: stretch; }
   .token-card-actions .btn { width: 100%; }
+  .token-vault-credential-actions .btn { flex: 1 1 140px; }
+  .token-vault-replace-form { grid-template-columns: minmax(0, 1fr); }
+  .token-vault-replace-form .btn { width: 100%; }
   .detail-meta-row { align-items: flex-start; flex-direction: column; gap: 3px; }
 }
 

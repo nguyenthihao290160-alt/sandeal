@@ -212,6 +212,7 @@
 }
 
 .primaryMetrics strong { color: var(--metric-color); font-size: 28px; font-weight: 700; line-height: 1.1; }
+.metricHelp { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .metricIndigo { --metric-color: var(--primary) !important; --metric-surface: var(--ds-surface-blue, #eef4ff) !important; }
 .metricGreen { --metric-color: var(--success) !important; --metric-surface: var(--ds-surface-green, #ecfdf5) !important; }
 .metricAmber { --metric-color: var(--warning) !important; --metric-surface: var(--ds-surface-amber, #fff8e7) !important; }

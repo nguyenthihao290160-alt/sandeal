@@ -45,6 +45,24 @@ const PLATFORM_ICONS: Record<CredentialPlatform, DashboardIconName> = {
   system: 'settings', other: 'security',
 };
 
+const READINESS_REASON_LABELS: Record<NonNullable<SafeCredential['readiness']>['reasonCode'], string> = {
+  ready: 'Generation probe đã xác minh model tạo nội dung.',
+  not_applicable: 'Readiness tạo nội dung không áp dụng cho kết nối này.',
+  credential_not_checked: 'Kết nối đã lưu nhưng chưa chạy kiểm tra hợp lệ.',
+  credential_not_valid: 'Kết nối chưa có kết quả kiểm tra hợp lệ.',
+  generation_not_verified: 'Khóa hợp lệ theo kiểm tra nhẹ; khả năng tạo nội dung chưa được xác minh.',
+  generation_temporarily_unavailable: 'Kiểm tra tạo nội dung gần nhất chưa thành công; hệ thống vẫn fail-closed.',
+  cooldown_active: 'Kết nối đang trong thời gian chờ phục hồi.',
+  quota_limited: 'Nhóm hạn mức hiện không cho phép tạo nội dung.',
+  billing_not_confirmed: 'Chưa xác minh kết nối thuộc chính sách Free; hệ thống không định tuyến yêu cầu tạo.',
+  quota_group_missing: 'Chưa cấu hình nhóm hạn mức cho định tuyến deterministic.',
+  model_not_verified: 'Light Test chưa xác minh model tạo nội dung phù hợp.',
+  invalid: 'Kết nối không hợp lệ theo lần kiểm tra gần nhất.',
+  disabled: 'Kết nối đang bị tắt.',
+  missing_permission: 'Kết nối thiếu quyền hoặc model tạo nội dung phù hợp.',
+  unknown: 'Chưa có đủ metadata để xác minh khả năng tạo nội dung.',
+};
+
 interface FormState {
   platform: CredentialPlatform;
   credentialType: CredentialType;
@@ -306,7 +324,7 @@ export default function TokenVaultPage() {
 
   // ---- Render ----
   return (
-      <div className="page-content">
+      <div className="token-vault-page">
         {/* Toast */}
         {toast && (
           <div className="toast-container">
@@ -487,7 +505,7 @@ export default function TokenVaultPage() {
         {!loading && groupedSections.map(section => (
           <div key={section.name} style={{ marginBottom: 'var(--space-xl)' }}>
             <h2 className="section-title">{section.name}</h2>
-            <div className="grid grid-2" style={{ gap: 'var(--space-md)' }}>
+            <div className="token-vault-platform-grid">
               {section.groups.map(group => (
                 <PlatformCard
                   key={group.platform}
@@ -576,9 +594,9 @@ function PlatformCard({
   const hasCredentials = group.credentials.length > 0;
 
   return (
-    <div className="glass-card" style={{ padding: 'var(--space-md)' }}>
+    <div className="glass-card token-vault-platform-card">
       {/* Platform Header */}
-      <div className="flex items-center justify-between" style={{ marginBottom: hasCredentials ? 'var(--space-md)' : 0 }}>
+      <div className="token-vault-platform-header" style={{ marginBottom: hasCredentials ? 'var(--space-md)' : 0 }}>
         <div className="flex items-center gap-sm">
           <span className="dashboard-page-icon" style={{ width: 38, height: 38, flexBasis: 38 }}><DashboardIcon name={PLATFORM_ICONS[group.platform]} size={20} /></span>
           <div>
@@ -590,10 +608,14 @@ function PlatformCard({
             </div>
           </div>
         </div>
-        {primary ? (
+        {primary && group.platform === 'gemini' ? (
            <span className={`badge ${primary.readiness?.generationReady ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '10px' }}>
              {primary.readiness?.generationReady ? 'Sẵn sàng tạo nội dung' : 'Đã lưu — chưa sẵn sàng tạo'}
            </span>
+        ) : primary ? (
+          <span className={`badge ${primary.status === 'valid' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
+            {primary.status === 'valid' ? 'Kết nối hợp lệ' : 'Kết nối đã lưu'}
+          </span>
         ) : hasCredentials ? (
           <span className="badge badge-warning" style={{ fontSize: '10px' }}>
             Chưa chọn kết nối chính
@@ -685,13 +707,9 @@ function CredentialRow({
   const isReplacing = replaceId === cred.id;
 
   return (
-    <div style={{
-      borderTop: '1px solid var(--border-primary)',
-      padding: 'var(--space-sm) 0',
-      marginTop: 'var(--space-sm)',
-    }}>
-      <div className="flex items-center justify-between" style={{ gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+    <div className="token-vault-credential">
+      <div className="token-vault-credential-layout">
+        <div className="token-vault-credential-info">
           <div className="flex items-center gap-xs" style={{ flexWrap: 'wrap', marginBottom: '4px' }}>
             <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{cred.label}</span>
             <span className={`badge ${roleConfig.badge}`} style={{ fontSize: '9px', padding: '2px 6px' }}>
@@ -705,8 +723,13 @@ function CredentialRow({
             {CREDENTIAL_TYPE_LABELS[cred.credentialType]} · {cred.maskedValue}
           </div>
           {cred.readiness && (
-            <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '3px', overflowWrap: 'anywhere' }}>
+            <div className="token-vault-readiness-summary">
               Readiness: {cred.readiness.state} · Ưu tiên: {cred.readiness.priority} · Generation ready: {cred.readiness.generationReady ? 'YES' : 'NO'}
+            </div>
+          )}
+          {cred.platform === 'gemini' && cred.readiness && (
+            <div className="token-vault-readiness-reason" data-readiness-reason={cred.readiness.reasonCode}>
+              {READINESS_REASON_LABELS[cred.readiness.reasonCode]}
             </div>
           )}
           {cred.lastCheckedAt && (
@@ -725,14 +748,14 @@ function CredentialRow({
             </div>
           )}
           {cred.platform === 'gemini' && (
-            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+            <div className="token-vault-gemini-meta">
               Dự án: {String(cred.metadata?.projectAlias || 'chưa đặt')} · Nhóm hạn mức: {String(cred.metadata?.quotaGroupId || 'chưa đặt')} · Ưu tiên: {String(cred.metadata?.priority ?? 100)} · Thanh toán: {String(cred.metadata?.billingMode || 'chưa rõ')}<br />
               Loại khóa: {String(cred.metadata?.keyType || 'chưa rõ')} · Kiểm tra tạo nội dung: {String(cred.metadata?.generationStatus || 'chưa kiểm tra')} · Mô hình: {String(cred.metadata?.preferredModel || 'chưa đặt')}<br />
               Chờ phục hồi: {cred.metadata?.cooldownUntil ? new Date(String(cred.metadata.cooldownUntil)).toLocaleString('vi-VN') : 'không có'} · Số yêu cầu: {String(cred.metadata?.requestsTodayEstimated || 0)}
             </div>
           )}
         </div>
-        <div className="flex gap-xs" style={{ flexShrink: 0, flexWrap: 'wrap' }}>
+        <div className="token-vault-credential-actions">
           <button className="btn btn-ghost btn-sm" onClick={() => onTest(cred.id)} disabled={isTesting} title="Kiểm tra">
             {isTesting ? '...' : 'Kiểm tra'}
           </button>
@@ -759,7 +782,7 @@ function CredentialRow({
 
       {/* Replace inline form */}
       {isReplacing && (
-        <div className="flex gap-sm items-center" style={{ marginTop: 'var(--space-sm)' }}>
+        <div className="token-vault-replace-form">
           <input
             className="input"
             type="password"
