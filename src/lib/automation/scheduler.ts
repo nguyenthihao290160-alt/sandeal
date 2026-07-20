@@ -3,9 +3,10 @@ import { createAutomationJob, getAutomationControl, updateAutomationControl } fr
 import { getAutomationPolicy } from './policyRegistry';
 import { heartbeatRuntimeRole, isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import type { AutomationJobType } from './types';
+import { getProductProcessingCapacity } from './businessUsage';
 
 export interface SchedulerTickResult {
-  status: 'paused' | 'killed' | 'disabled' | 'ingestion_paused' | 'worker_stale' | 'scheduled' | 'duplicate' | 'not_due';
+  status: 'paused' | 'killed' | 'disabled' | 'ingestion_paused' | 'worker_stale' | 'limit_reached' | 'scheduled' | 'duplicate' | 'not_due';
   jobId?: string;
   nextRunAt?: string;
 }
@@ -111,12 +112,14 @@ export async function runAutomationSchedulerTick(now = Date.now()): Promise<Sche
   if (!Number.isFinite(workerHeartbeat) || now - workerHeartbeat > 90_000) return { status: 'worker_stale' };
   const intervalMs = settings.intervalHours * 60 * 60_000;
   if (control.schedulerNextRunAt && Date.parse(control.schedulerNextRunAt) > now) return { status: 'not_due', nextRunAt: control.schedulerNextRunAt };
+  const capacity = await getProductProcessingCapacity(settings.maxItemsPerDay, now);
+  if (capacity.remaining <= 0) return { status: 'limit_reached' };
 
   const nextRunAt = new Date(now + intervalMs).toISOString();
   const policy = getAutomationPolicy('AUTO_PILOT');
   const created = await createAutomationJob({
     type: 'AUTO_PILOT',
-    payload: { mode: settings.mode, autonomousMode: control.effectiveMode, source: settings.source, limit: settings.maxItemsPerRun },
+    payload: { mode: settings.mode, autonomousMode: control.effectiveMode, source: settings.source, limit: Math.min(settings.maxItemsPerRun, capacity.remaining) },
     priority: 60,
     idempotencyKey: `scheduler:auto:${bucketKey(now, settings.intervalHours)}`,
     requestedBy: 'scheduler',

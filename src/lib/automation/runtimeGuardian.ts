@@ -105,7 +105,13 @@ export async function runRuntimeGuardian(options: {
       : options.webAlive === true && options.publicRouteHealthy === true ? 'ready' : 'alive';
   const staleJobs = jobs.filter(job => job.status === 'RUNNING' && (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= now)).length;
   const stuck = jobs.filter(job => ['PENDING', 'RETRY_SCHEDULED'].includes(job.status) && now - Date.parse(job.updatedAt) > 30 * 60_000).length;
-  const duplicateRoles = [...new Set(conflicts.map(item => item.role))];
+  const currentConflicts = conflicts.filter(conflict => {
+    const lease = roles.find(item => item.role === conflict.role);
+    const processStartedAt = Date.parse(lease?.processStartedAt || lease?.acquiredAt || '');
+    return (!Number.isFinite(processStartedAt) || Date.parse(conflict.observedAt) >= processStartedAt)
+      && (!lease?.instanceId || conflict.activeInstanceId === lease.instanceId);
+  });
+  const duplicateRoles = [...new Set(currentConflicts.map(item => item.role))];
   const reasons: string[] = [];
   if (!['active', 'paused'].includes(workerStatus)) reasons.push(`WORKER_${workerStatus.toUpperCase()}`);
   if (!['active', 'paused', 'disabled'].includes(schedulerStatus)) reasons.push(`SCHEDULER_${schedulerStatus.toUpperCase()}`);

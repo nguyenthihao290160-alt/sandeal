@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation';
 import type { Product } from '@/lib/types';
 import { classifyProductKind } from '@/lib/sourceItemClassifier';
 import { SafeProductImage } from '@/components/safe-product-image';
+import styles from './product-detail.module.css';
 
 type PipelineTruth = {
   classification: { type: string; confidence: number | null; reasonCodes: string[] };
@@ -118,246 +119,59 @@ export default function ProductDetailPage() {
     );
   }
 
+  const inferredKind = product.kind || classifyProductKind(product);
+  const statusLabel = product.status === 'approved' ? 'Đã duyệt' : product.status === 'needs_review' ? 'Cần xem xét' : product.status === 'draft' ? 'Nháp' : product.status === 'published' ? 'Đã xuất bản' : product.status;
+  const blockers = pipelineTruth?.lifecycle.blockers || [];
+  const blockerGroups = blockers.reduce<Record<string, string[]>>((groups, blocker) => {
+    const group = /link|url/i.test(blocker) ? 'Liên kết' : /image|ảnh/i.test(blocker) ? 'Hình ảnh' : /price|giá/i.test(blocker) ? 'Giá'
+      : /duplicate|trùng/i.test(blocker) ? 'Trùng lặp' : /content|claim|evidence|review/i.test(blocker) ? 'Nội dung & bằng chứng' : 'Dữ liệu & chính sách';
+    (groups[group] ||= []).push(blocker);
+    return groups;
+  }, {});
+  const canaryDisabledReason = pipelineTruth?.lifecycle.canaryReady ? 'Sản phẩm đã ở danh sách xét CANARY.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.` : '';
+  const publishDisabledReason = pipelineTruth?.lifecycle.safePublishRequested ? 'Đã có yêu cầu Safe Publish.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.`
+    : pipelineTruth && !pipelineTruth.safety.publishingEnabled ? 'Publishing đang bị khóa bởi chính sách vận hành.' : '';
+
   return (
-    <>
-      <div className="topbar">
-        <div className="topbar-title">Chi tiết sản phẩm</div>
-        <Link href="/dashboard/products" className="btn btn-secondary btn-sm">← Quay lại</Link>
-      </div>
-      <div className="page-content">
-        {/* Toast */}
-        {toast && (
-          <div className="toast-container">
-            <div className={`toast toast-${toast.type}`}>
-              {toast.type === 'success' ? '✅' : '❌'} {toast.message}
-            </div>
-          </div>
-        )}
+    <main className={styles.page}>
+      {toast && <div className="toast-container"><div className={`toast toast-${toast.type}`} role={toast.type === 'error' ? 'alert' : 'status'}><span>{toast.message}</span><button className="toast-close" onClick={() => setToast(null)} aria-label="Đóng thông báo">×</button></div></div>}
+      <header className={styles.topbar}><div><span>Danh mục sản phẩm</span><h1>Chi tiết vận hành</h1></div><Link href="/dashboard/products" className="btn btn-secondary btn-sm">← Quay lại danh sách</Link></header>
 
-        <div className="product-detail-grid">
-          {/* Left: Main info */}
-          <div>
-            {/* Product Header */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
-              <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
-                <SafeProductImage originalUrl={product.imageUrl} candidates={product.gallery} healthStatus={product.imageHealthStatus} alt={product.title} className="product-detail-image" />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 800, marginBottom: '6px', letterSpacing: '-0.01em' }}>{product.title}</h1>
-                  <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
-                    <span className="badge badge-neutral">{product.platform}</span>
-                    {(() => {
-                      const inferred = product.kind || classifyProductKind(product);
-                      return (
-                        <>
-                          <span className="badge badge-neutral">{inferred}</span>
-                          {inferred !== 'product' && (
-                            <div style={{ fontSize: 12, color: 'var(--text-warning)', marginLeft: 8 }}>Chưa phải sản phẩm cụ thể</div>
-                          )}
-                        </>
-                      );
-                    })()}
-                    <span className={`badge ${product.status === 'approved' ? 'badge-success' : product.status === 'needs_review' ? 'badge-warning' : product.status === 'published' ? 'badge-info' : 'badge-neutral'}`}>
-                      {product.status === 'approved' ? 'Đã duyệt' : product.status === 'needs_review' ? 'Cần xem xét' : product.status === 'draft' ? 'Nháp' : product.status === 'published' ? 'Đã xuất bản' : product.status}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {product.description && (
-                <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-md)', fontSize: 'var(--text-sm)', lineHeight: 1.7 }}>{product.description}</p>
-              )}
-
-              {/* Price */}
-              <div className="flex items-center gap-md" style={{ marginBottom: 'var(--space-md)', flexWrap: 'wrap' }}>
-                {product.salePrice ? (
-                  <>
-                    <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--color-accent-light)' }}>{formatPrice(product.salePrice)}</span>
-                    {product.price && product.price !== product.salePrice && (
-                      <span style={{ fontSize: 'var(--text-base)', color: 'var(--text-tertiary)', textDecoration: 'line-through' }}>{formatPrice(product.price)}</span>
-                    )}
-                  </>
-                ) : product.price ? (
-                  <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, color: 'var(--color-accent-light)' }}>{formatPrice(product.price)}</span>
-                ) : null}
-                {product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}
-              </div>
-
-              {/* Links */}
-              <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
-                {product.affiliateUrl && (
-                  <a href={product.affiliateUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm">🔗 Mở link affiliate</a>
-                )}
-                {product.originalUrl && (
-                  <a href={product.originalUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm">🌐 Mở link gốc</a>
-                )}
-              </div>
-            </div>
-
-            {/* Benefits */}
-            {product.benefits && product.benefits.length > 0 && (
-              <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
-                <h3 className="card-title">✅ Lợi ích chính</h3>
-                <ul className="detail-list">
-                  {product.benefits.map((b, i) => <li key={i}>{b}</li>)}
-                </ul>
-              </div>
-            )}
-
-            {/* Warnings */}
-            {product.warnings && product.warnings.length > 0 && (
-              <div className="glass-card" style={{ marginBottom: 'var(--space-lg)', borderColor: 'rgba(245, 158, 11, 0.2)' }}>
-                <h3 className="card-title">⚠️ Cảnh báo / Không được nói quá</h3>
-                <ul className="detail-list detail-list-warning">
-                  {product.warnings.map((w, i) => <li key={i}>{w}</li>)}
-                </ul>
-              </div>
-            )}
-
-            {/* Content Intelligence */}
-            <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
-              <h3 className="card-title">🧠 Content Intelligence</h3>
-              {product.painPoints && product.painPoints.length > 0 && (
-                <div style={{ marginBottom: 'var(--space-md)' }}>
-                  <strong style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>Pain points:</strong>
-                  <ul className="detail-list">{product.painPoints.map((p2, i) => <li key={i}>{p2}</li>)}</ul>
-                </div>
-              )}
-              {product.targetAudience && product.targetAudience.length > 0 && (
-                <div style={{ marginBottom: 'var(--space-md)' }}>
-                  <strong style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>Đối tượng:</strong>
-                  <ul className="detail-list">{product.targetAudience.map((t, i) => <li key={i}>{t}</li>)}</ul>
-                </div>
-              )}
-              {product.contentAngles && product.contentAngles.length > 0 && (
-                <div style={{ marginBottom: 'var(--space-md)' }}>
-                  <strong style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>Góc nội dung:</strong>
-                  <ul className="detail-list">{product.contentAngles.map((c, i) => <li key={i}>{c}</li>)}</ul>
-                </div>
-              )}
-              {product.complianceNotes && product.complianceNotes.length > 0 && (
-                <div>
-                  <strong style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>Ghi chú kiểm duyệt:</strong>
-                  <ul className="detail-list">{product.complianceNotes.map((n, i) => <li key={i}>{n}</li>)}</ul>
-                </div>
-              )}
-              {!product.painPoints?.length && !product.targetAudience?.length && !product.contentAngles?.length && (
-                <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)' }}>Chưa có thông tin content intelligence.</p>
-              )}
-            </div>
-          </div>
-
-          {/* Right: Score + Actions */}
-          <div>
-            {/* Score Card */}
-            <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
-              <h3 className="card-title">📊 Điểm đánh giá</h3>
-              {product.score != null ? (
-                <>
-                  <div style={{ textAlign: 'center', margin: 'var(--space-lg) 0' }}>
-                    <div className={`score-badge ${product.score >= 75 ? 'score-badge-green' : product.score >= 45 ? 'score-badge-yellow' : 'score-badge-red'}`} style={{ fontSize: 'var(--text-2xl)', padding: '14px 28px' }}>
-                      {product.score}
-                    </div>
-                    {product.scoreLabel && (
-                      <div style={{ marginTop: 'var(--space-sm)', fontWeight: 700, fontSize: 'var(--text-sm)' }}>{product.scoreLabel}</div>
-                    )}
-                  </div>
-                  {product.scoreReasons && product.scoreReasons.length > 0 && (
-                    <div style={{ marginBottom: 'var(--space-md)' }}>
-                      <strong style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>Lý do:</strong>
-                      <ul className="detail-list" style={{ fontSize: 'var(--text-xs)' }}>
-                        {product.scoreReasons.map((r, i) => <li key={i} style={{ color: 'var(--color-success)' }}>{r}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                  {product.scoreWarnings && product.scoreWarnings.length > 0 && (
-                    <div>
-                      <strong style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>Cảnh báo:</strong>
-                      <ul className="detail-list" style={{ fontSize: 'var(--text-xs)' }}>
-                        {product.scoreWarnings.map((w, i) => <li key={i} style={{ color: 'var(--color-warning)' }}>{w}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-sm)' }}>Chưa được chấm điểm.</p>
-              )}
-              <button className="btn btn-accent" style={{ width: '100%', marginTop: 'var(--space-md)' }} onClick={() => handleAction('score')}>
-                ⭐ Chấm điểm lại
-              </button>
-            </div>
-
-            {/* Risk */}
-            <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
-              <h3 className="card-title">🛡️ Mức rủi ro</h3>
-              <span className={`badge ${product.riskLevel === 'low' ? 'badge-success' : product.riskLevel === 'medium' ? 'badge-warning' : product.riskLevel === 'high' ? 'badge-danger' : 'badge-neutral'}`} style={{ fontSize: 'var(--text-sm)', padding: '6px 14px' }}>
-                {product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa rõ'}
-              </span>
-            </div>
-
-            {pipelineTruth && (
-              <div className="glass-card product-truth-card" style={{ marginBottom: 'var(--space-lg)' }}>
-                <h3 className="card-title">Operational truth</h3>
-                <div className="detail-meta">
-                  <div className="detail-meta-row"><span>Phân loại</span><strong>{pipelineTruth.classification.type}</strong></div>
-                  <div className="detail-meta-row"><span>Lifecycle</span><strong>{pipelineTruth.lifecycle.stage}</strong></div>
-                  <div className="detail-meta-row"><span>Job hiện tại</span><strong>{pipelineTruth.automation.status || 'Không có'}</strong></div>
-                  <div className="detail-meta-row"><span>Retry</span><span>{pipelineTruth.automation.attempts}/{pipelineTruth.automation.maxAttempts ?? '—'}{pipelineTruth.automation.nextRetryAt ? ` · ${new Date(pipelineTruth.automation.nextRetryAt).toLocaleString('vi-VN')}` : ''}</span></div>
-                  <div className="detail-meta-row"><span>Worker owner</span><span>{pipelineTruth.automation.workerOwner || 'Không có owner active'}</span></div>
-                  <div className="detail-meta-row"><span>publicHidden</span><strong>{pipelineTruth.lifecycle.publicHidden ? 'YES' : 'NO'}</strong></div>
-                  <div className="detail-meta-row"><span>Publishing</span><strong>{pipelineTruth.safety.publishingEnabled ? 'Enabled' : 'Disabled'}</strong></div>
-                  <div className="detail-meta-row"><span>Link / ảnh / giá</span><span>{pipelineTruth.health.link} · {pipelineTruth.health.image} · {pipelineTruth.health.price}</span></div>
-                </div>
-                {pipelineTruth.lifecycle.blockers.length > 0 && <div className="pipeline-blockers"><strong>Blockers</strong><ul>{pipelineTruth.lifecycle.blockers.slice(0, 12).map(blocker => <li key={blocker}>{blocker}</li>)}</ul></div>}
-                <p className="help">Hành động cần thiết: {pipelineTruth.requiredAction || 'Không có'}</p>
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="glass-card" style={{ marginBottom: 'var(--space-lg)' }}>
-              <h3 className="card-title">⚡ Hành động</h3>
-              <div className="flex flex-col gap-sm">
-                <button className="btn btn-secondary" onClick={() => handleAction('reviewed')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.reviewed}>Đánh dấu đã xem</button>
-                <button className="btn btn-secondary" onClick={() => handleAction('data_verified')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.dataVerified}>Xác nhận dữ liệu</button>
-                <button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.canaryReady || Boolean(pipelineTruth?.lifecycle.blockers.length)}>Đưa vào danh sách xét CANARY</button>
-                <button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.safePublishRequested || Boolean(pipelineTruth?.lifecycle.blockers.length)}>Yêu cầu kiểm tra Safe Publish</button>
-                <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => handleAction('archive')}>
-                  📥 Lưu trữ
-                </button>
-                <Link href="/dashboard/content" className="btn btn-ghost" style={{ width: '100%', textAlign: 'center' }}>
-                  ✍️ Tạo nội dung (sắp có)
-                </Link>
-              </div>
-            </div>
-
-            {/* Meta */}
-            <div className="glass-card">
-              <h3 className="card-title">📋 Thông tin thêm</h3>
-              <div className="detail-meta">
-                <div className="detail-meta-row"><span>Nguồn:</span><span>{product.source}</span></div>
-                {product.category && <div className="detail-meta-row"><span>Danh mục:</span><span>{product.category}</span></div>}
-                {product.tags && product.tags.length > 0 && (
-                  <div className="detail-meta-row"><span>Tags:</span><span>{product.tags.join(', ')}</span></div>
-                )}
-                {product.campaignName && <div className="detail-meta-row"><span>Chiến dịch:</span><span>{product.campaignName}</span></div>}
-                {product.commissionNote && <div className="detail-meta-row"><span>Hoa hồng:</span><span>{product.commissionNote}</span></div>}
-                {product.affiliateDisclosure && <div className="detail-meta-row"><span>Disclosure:</span><span>{product.affiliateDisclosure}</span></div>}
-                <div className="detail-meta-row"><span>Tạo lúc:</span><span>{new Date(product.createdAt).toLocaleString('vi-VN')}</span></div>
-                <div className="detail-meta-row"><span>Cập nhật:</span><span>{new Date(product.updatedAt).toLocaleString('vi-VN')}</span></div>
-              </div>
-
-              {/* Technical Details */}
-              <button className="btn btn-ghost btn-sm" style={{ marginTop: 'var(--space-md)' }} onClick={() => setShowTechnical(!showTechnical)}>
-                {showTechnical ? '▲' : '▼'} Chi tiết kỹ thuật
-              </button>
-              {showTechnical && (
-                <pre style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', background: 'rgba(148, 163, 184, 0.04)', padding: 'var(--space-md)', borderRadius: 'var(--radius-md)', marginTop: 'var(--space-sm)', overflow: 'auto', maxHeight: '400px', border: '1px solid var(--border-primary)' }}>
-                  {JSON.stringify(product, null, 2)}
-                </pre>
-              )}
-            </div>
-          </div>
+      <section className={styles.hero}>
+        <SafeProductImage originalUrl={product.imageUrl} candidates={product.gallery} healthStatus={product.imageHealthStatus} alt={product.title} className={styles.heroImage} />
+        <div className={styles.heroMain}>
+          <div className={styles.badges}><span className="badge badge-neutral">{product.platform}</span><span className="badge badge-neutral">{inferredKind}</span><span className={`badge ${product.status === 'approved' ? 'badge-success' : product.status === 'needs_review' ? 'badge-warning' : product.status === 'published' ? 'badge-info' : 'badge-neutral'}`}>{statusLabel}</span>{inferredKind !== 'product' && <span className="badge badge-warning">Chưa phải sản phẩm cụ thể</span>}</div>
+          <h2>{product.title}</h2>
+          <p>{product.description || 'Chưa có mô tả sản phẩm.'}</p>
+          <div className={styles.priceRow}><strong>{formatPrice(product.salePrice || product.price)}</strong>{product.salePrice && product.price && product.price !== product.salePrice && <del>{formatPrice(product.price)}</del>}{product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}</div>
+          <dl className={styles.heroFacts}><div><dt>Nguồn</dt><dd>{product.source || '—'}</dd></div><div><dt>Danh mục</dt><dd>{product.category || '—'}</dd></div><div><dt>Trạng thái public</dt><dd>{pipelineTruth?.lifecycle.publicHidden === false ? 'Đang hiển thị' : 'Đang ẩn'}</dd></div><div><dt>Rủi ro</dt><dd>{product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa rõ'}</dd></div></dl>
+          <div className={styles.linkRow}>{product.affiliateUrl && <a href={product.affiliateUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm">Mở link affiliate</a>}{product.originalUrl && <a href={product.originalUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm">Mở link gốc</a>}</div>
         </div>
-      </div>
-    </>
+        <aside className={styles.scoreSummary}><span>Điểm đánh giá</span><strong className={product.score != null && product.score >= 75 ? styles.goodScore : product.score != null && product.score >= 45 ? styles.mediumScore : styles.lowScore}>{product.score ?? '—'}</strong><small>{product.scoreLabel || 'Chưa có nhãn điểm'}</small><button className="btn btn-accent btn-sm" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>{actionBusy === 'score' ? 'Đang chấm…' : 'Chấm điểm lại'}</button></aside>
+      </section>
+
+      <section className={styles.operationGrid}>
+        <article className={styles.card}>
+          <div className={styles.cardHeader}><div><span>Runtime & policy</span><h3>Operational truth</h3></div><span className={`badge ${blockers.length ? 'badge-warning' : 'badge-success'}`}>{blockers.length ? `${blockers.length} blocker` : 'Không có blocker'}</span></div>
+          {pipelineTruth ? <><dl className={styles.truthGrid}><div><dt>Phân loại</dt><dd>{pipelineTruth.classification.type}</dd></div><div><dt>Lifecycle</dt><dd>{pipelineTruth.lifecycle.stage}</dd></div><div><dt>Job hiện tại</dt><dd>{pipelineTruth.automation.status || 'Không có'}</dd></div><div><dt>Worker owner</dt><dd>{pipelineTruth.automation.workerOwner || 'Không có owner active'}</dd></div><div><dt>Retry</dt><dd>{pipelineTruth.automation.attempts}/{pipelineTruth.automation.maxAttempts ?? '—'}</dd></div><div><dt>Publishing</dt><dd>{pipelineTruth.safety.publishingEnabled ? 'Enabled' : 'Disabled'}</dd></div></dl><div className={styles.healthStrip}><span>Link <strong>{pipelineTruth.health.link}</strong></span><span>Ảnh <strong>{pipelineTruth.health.image}</strong></span><span>Giá <strong>{pipelineTruth.health.price}</strong></span><span>Nguồn <strong>{pipelineTruth.health.source}</strong></span></div>{blockers.length ? <div className={styles.blockerGroups}>{Object.entries(blockerGroups).map(([group, items]) => <div key={group}><strong>{group}</strong><div>{items.map(blocker => <span key={blocker} className={styles.blockerBadge}>{blocker}</span>)}</div></div>)}</div> : <p className={styles.clearState}>Không có blocker được ghi nhận trong snapshot hiện tại.</p>}<p className={styles.requiredAction}>Hành động cần thiết: <strong>{pipelineTruth.requiredAction || 'Không có'}</strong></p></> : <p className={styles.clearState}>Chưa tải được operational truth. Các hành động nhạy cảm vẫn bị khóa.</p>}
+        </article>
+
+        <article className={styles.card}>
+          <div className={styles.cardHeader}><div><span>Theo mức độ rủi ro</span><h3>Hành động vận hành</h3></div></div>
+          <div className={styles.actionGroup}><strong>Kiểm tra</strong><div><button className="btn btn-secondary" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>Chấm điểm lại</button><button className="btn btn-secondary" onClick={() => handleAction('reviewed')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.reviewed} title={pipelineTruth?.lifecycle.reviewed ? 'Đã ghi nhận xem xét.' : undefined}>Đánh dấu đã xem</button></div></div>
+          <div className={styles.actionGroup}><strong>Xác nhận dữ liệu</strong><div><button className="btn btn-secondary" onClick={() => handleAction('data_verified')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.dataVerified} title={pipelineTruth?.lifecycle.dataVerified ? 'Dữ liệu đã được xác nhận.' : undefined}>Xác nhận dữ liệu</button></div></div>
+          <div className={styles.actionGroup}><strong>Canary & Safe Publish</strong><div><button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || Boolean(canaryDisabledReason)} title={canaryDisabledReason || undefined}>Đưa vào danh sách xét CANARY</button><button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy) || Boolean(publishDisabledReason)} title={publishDisabledReason || undefined}>Yêu cầu kiểm tra Safe Publish</button></div>{(canaryDisabledReason || publishDisabledReason) && <p className={styles.disabledReason}>{publishDisabledReason || canaryDisabledReason}</p>}</div>
+          <div className={`${styles.actionGroup} ${styles.archiveGroup}`}><strong>Lưu trữ</strong><div><button className="btn btn-secondary" onClick={() => handleAction('archive')} disabled={Boolean(actionBusy)}>Lưu trữ sản phẩm</button><Link href="/dashboard/content" className="btn btn-ghost" aria-disabled="true" title="Tính năng tạo nội dung chưa sẵn sàng.">Tạo nội dung (sắp có)</Link></div></div>
+        </article>
+      </section>
+
+      <section className={styles.contentGrid}>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Lợi ích & cảnh báo</h3></div>{product.benefits?.length ? <div><h4>Lợi ích chính</h4><ul className="detail-list">{product.benefits.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : <p className={styles.emptyText}>Chưa có lợi ích được xác minh.</p>}{product.warnings?.length ? <div className={styles.warningList}><h4>Cảnh báo / không được nói quá</h4><ul className="detail-list detail-list-warning">{product.warnings.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}</article>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Content intelligence</h3></div><div className={styles.intelligenceGrid}><div><h4>Pain points</h4>{product.painPoints?.length ? <ul className="detail-list">{product.painPoints.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div><div><h4>Đối tượng</h4>{product.targetAudience?.length ? <ul className="detail-list">{product.targetAudience.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div><div><h4>Góc nội dung</h4>{product.contentAngles?.length ? <ul className="detail-list">{product.contentAngles.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div><div><h4>Ghi chú kiểm duyệt</h4>{product.complianceNotes?.length ? <ul className="detail-list">{product.complianceNotes.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div></div></article>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Thông tin bổ sung</h3></div><dl className={styles.metaList}><div><dt>Tags</dt><dd>{product.tags?.join(', ') || '—'}</dd></div><div><dt>Chiến dịch</dt><dd>{product.campaignName || '—'}</dd></div><div><dt>Hoa hồng</dt><dd>{product.commissionNote || '—'}</dd></div><div><dt>Disclosure</dt><dd>{product.affiliateDisclosure || '—'}</dd></div><div><dt>Tạo lúc</dt><dd>{new Date(product.createdAt).toLocaleString('vi-VN')}</dd></div><div><dt>Cập nhật</dt><dd>{new Date(product.updatedAt).toLocaleString('vi-VN')}</dd></div></dl></article>
+      </section>
+
+      <section className={styles.technical}><button className="btn btn-ghost btn-sm" onClick={() => setShowTechnical(!showTechnical)}>{showTechnical ? 'Ẩn' : 'Hiện'} chi tiết kỹ thuật</button>{showTechnical && <pre>{JSON.stringify(product, null, 2)}</pre>}</section>
+    </main>
   );
 }

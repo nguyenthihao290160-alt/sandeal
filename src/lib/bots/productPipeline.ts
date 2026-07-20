@@ -24,10 +24,16 @@ import { readinessSnapshotHash } from '../autonomous/publishPolicy';
 import { createDefaultSourceAdapterRegistry, type SourceAdapterRegistry, type SourceProviderStatus } from '../autonomous/sourceAdapterPlatform';
 import { applySourceQualityPriority, getSourceQualitySnapshot, recordSourceQualityObservation } from '../autonomous/sourceQuality';
 import { vietnamDayKey } from '../automation/timezone';
+import {
+  commitProductProcessingCapacity,
+  getDailyBusinessUsage,
+  recordPipelineUsageMetrics,
+  reserveProductProcessingCapacity,
+  type DailyBusinessUsage,
+} from '../automation/businessUsage';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
-const USAGE_COLLECTION = 'pipeline-daily-usage';
 
 export type OperationMode = 'bootstrap' | 'steady';
 export interface PipelineCounters {
@@ -62,7 +68,7 @@ export interface KeywordYieldStat {
   outcomeKeys?: string[];
 }
 interface RuntimeState { id: string; currentConcurrency: number; rateLimitUntil?: string; timeoutStreak: number; updatedAt: string; }
-export interface DailyPipelineUsage { id: string; sourceRequests: number; candidatesFound: number; candidatesQueued: number; networkChecks: number; productsReviewed: number; productsPublished: number; updatedAt: string; }
+export type DailyPipelineUsage = DailyBusinessUsage;
 
 export interface SourceRunMetrics {
   normalized: number;
@@ -91,22 +97,17 @@ function emptyCounters(): PipelineCounters {
 }
 
 function todayInVietnam(): string { return vietnamDayKey(); }
-export async function getDailyPipelineUsage(): Promise<DailyPipelineUsage> {
-  const id = todayInVietnam();
-  return (await readCollection<DailyPipelineUsage>(USAGE_COLLECTION)).find((item) => item.id === id)
-    || { id, sourceRequests: 0, candidatesFound: 0, candidatesQueued: 0, networkChecks: 0, productsReviewed: 0, productsPublished: 0, updatedAt: new Date().toISOString() };
+export async function getDailyPipelineUsage(now = Date.now()): Promise<DailyPipelineUsage> {
+  return getDailyBusinessUsage(now);
 }
 async function recordDailyUsage(counters: PipelineCounters): Promise<void> {
-  const current = await getDailyPipelineUsage();
-  current.sourceRequests += counters.sourceRequests;
-  current.candidatesFound += counters.found;
-  current.candidatesQueued += counters.queued;
-  current.networkChecks += counters.networkChecks;
-  current.productsReviewed += counters.reviewed;
-  current.productsPublished += counters.published;
-  current.updatedAt = new Date().toISOString();
-  const all = (await readCollection<DailyPipelineUsage>(USAGE_COLLECTION)).filter((item) => item.id !== current.id).slice(-6);
-  await writeCollection(USAGE_COLLECTION, [...all, current]);
+  await recordPipelineUsageMetrics({
+    sourceRequests: counters.sourceRequests,
+    candidatesFound: counters.found,
+    candidatesQueued: counters.queued,
+    networkChecks: counters.networkChecks,
+    productsPublished: counters.published,
+  });
 }
 
 function hashPayload(payload: CandidatePayload): string {
@@ -1083,7 +1084,11 @@ export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.
   const remainingNetworkChecks = Math.max(0, settings.networkCheckBudgetPerDay - usage.networkChecks);
   const runtime = (await readCollection<RuntimeState>(RUNTIME_COLLECTION))[0] || { id: 'runtime', currentConcurrency: 3, timeoutStreak: 0, updatedAt: new Date().toISOString() };
   const batchLimit = batchOverride || (mode === 'bootstrap' ? settings.bootstrapReviewBatch : settings.steadyReviewBatch);
-  const batch = await claimCandidateBatch(Math.min(batchLimit, Math.floor(remainingNetworkChecks / 8)));
+  const requested = Math.min(batchLimit, Math.floor(remainingNetworkChecks / 8));
+  const reservationKey = `legacy-review:${todayInVietnam()}:${randomUUID()}`;
+  const reservation = await reserveProductProcessingCapacity(reservationKey, requested, settings.maxItemsPerDay);
+  if (!reservation.allowed && reservation.units === 0) return { ...counters, currentConcurrency: 0 };
+  const batch = await claimCandidateBatch(reservation.units);
   const concurrency = Math.max(1, Math.min(3, settings.maxConcurrency, runtime.currentConcurrency || 3, batch.length || 1));
   let cursor = 0;
   let budgetExhausted = false;
@@ -1108,6 +1113,7 @@ export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.
   runtime.updatedAt = new Date().toISOString();
   await writeCollection(RUNTIME_COLLECTION, [runtime]);
   counters.queueSize = (await getQueueStats()).total;
+  await commitProductProcessingCapacity(reservationKey, counters.reviewed);
   await recordDailyUsage(counters);
   return { ...counters, currentConcurrency: runtime.currentConcurrency };
 }

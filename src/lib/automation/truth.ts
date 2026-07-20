@@ -3,6 +3,7 @@ import { getAiUsage, getAllAutomationJobs, getAutomationControl, publicAutomatio
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases, type RuntimeRoleConflict, type RuntimeRoleLease } from './runtimeRoles';
 import type { AiUsageRecord, AutomationControlState, AutomationJob } from './types';
 import { AUTOMATION_TIMEZONE, vietnamDayKey } from './timezone';
+import { getDailyBusinessUsage, type DailyBusinessUsage } from './businessUsage';
 
 export type AutomationTruthStatus = 'HEALTHY' | 'DEGRADED' | 'INCONSISTENT' | 'INACTIVE';
 export type TruthSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
@@ -23,6 +24,7 @@ export interface AutomationTruthInput {
   conflicts: RuntimeRoleConflict[];
   jobs: AutomationJob[];
   usage: AiUsageRecord;
+  businessUsage?: DailyBusinessUsage;
 }
 
 const HEARTBEAT_FRESH_MS = 90_000;
@@ -57,7 +59,10 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
   const nextRunAt = control.schedulerNextRunAt || null;
   const tickRecent = parsed(lastTickAt || undefined) !== null && now - parsed(lastTickAt || undefined)! <= Math.max(2 * 60 * 60_000, settings.intervalHours * 2 * 60 * 60_000);
   const nextRunValid = parsed(nextRunAt || undefined) !== null && parsed(nextRunAt || undefined)! >= now - HEARTBEAT_FRESH_MS;
-  const recentSchedulerConflict = input.conflicts.some(item => item.role === 'SCHEDULER' && now - Date.parse(item.observedAt) <= 5 * 60_000);
+  const schedulerStartedAt = parsed(schedulerLease?.processStartedAt || schedulerLease?.acquiredAt) || 0;
+  const recentSchedulerConflict = input.conflicts.some(item => item.role === 'SCHEDULER'
+    && Date.parse(item.observedAt) >= Math.max(now - 5 * 60_000, schedulerStartedAt)
+    && (!schedulerLease?.instanceId || item.activeInstanceId === schedulerLease.instanceId));
   const fencingValid = Boolean(schedulerLease && Number.isInteger(schedulerLease.fencingToken) && schedulerLease.fencingToken > 0);
   const schedulerActive = settings.enabled && !control.schedulerPaused && schedulerLeaseFresh && schedulerHeartbeatFresh
     && fencingValid && Boolean(schedulerLease?.ownerId) && (tickRecent || nextRunValid) && !recentSchedulerConflict && schedulerLeases.length === 1;
@@ -82,9 +87,9 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
   if (settings.enabled && !control.schedulerPaused && !schedulerActive) inconsistencies.push(inconsistency(
     'SCHEDULE_ENABLED_RUNTIME_INACTIVE', 'CRITICAL', 'Lịch được bật nhưng runtime scheduler chưa chứng minh ACTIVE.',
     { leaseFresh: schedulerLeaseFresh, heartbeatFresh: schedulerHeartbeatFresh, fencingValid, tickRecent, nextRunValid }, now));
-  if (schedulerLeaseFresh && schedulerHeartbeatFresh && !tickRecent && !nextRunValid) inconsistencies.push(inconsistency(
+  if (!control.schedulerPaused && schedulerLeaseFresh && schedulerHeartbeatFresh && !tickRecent && !nextRunValid) inconsistencies.push(inconsistency(
     'SCHEDULER_NO_RECENT_TICK', 'WARNING', 'Scheduler có lease nhưng tick gần nhất và lịch kế tiếp đều không hợp lệ.', { lastTickAt, nextRunAt }, now));
-  if (parsed(nextRunAt || undefined) !== null && parsed(nextRunAt || undefined)! < now - HEARTBEAT_FRESH_MS) inconsistencies.push(inconsistency(
+  if (!control.schedulerPaused && parsed(nextRunAt || undefined) !== null && parsed(nextRunAt || undefined)! < now - HEARTBEAT_FRESH_MS) inconsistencies.push(inconsistency(
     'NEXT_RUN_OVERDUE', 'CRITICAL', 'nextRunAt đã ở quá khứ quá ngưỡng cho phép.', { nextRunAt, overdueMs: now - parsed(nextRunAt || undefined)! }, now));
   if ((pending + retrying) > 0 && activeWorkers === 0) inconsistencies.push(inconsistency(
     'QUEUE_PENDING_WORKER_INACTIVE', 'CRITICAL', 'Hàng đợi có việc nhưng không có worker ACTIVE.', { pending, retrying }, now));
@@ -98,7 +103,7 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
   if (completedStillRunning.length) inconsistencies.push(inconsistency(
     'COMPLETED_JOB_STILL_RUNNING', 'CRITICAL', 'Job đã có completedAt nhưng vẫn mang trạng thái RUNNING.', { jobIds: completedStillRunning.map(item => item.id).slice(0, 10) }, now));
   const latestSchedulerJob = [...jobs].filter(job => job.requestedBy === 'scheduler').sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
-  if (settings.enabled && latestSchedulerJob && parsed(latestSchedulerJob.updatedAt) !== null
+  if (settings.enabled && !control.schedulerPaused && latestSchedulerJob && parsed(latestSchedulerJob.updatedAt) !== null
     && now - parsed(latestSchedulerJob.updatedAt)! > Math.max(2, settings.intervalHours * 2) * 60 * 60_000) inconsistencies.push(inconsistency(
       'SCHEDULE_RUN_STALE', 'WARNING', 'Lần chạy scheduler gần nhất cũ hơn nhiều so với chu kỳ cấu hình.', { latestRunAt: latestSchedulerJob.updatedAt, intervalHours: settings.intervalHours }, now));
   if (usage.day !== vietnamDayKey(now)) inconsistencies.push(inconsistency(
@@ -109,7 +114,12 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
   const latestCompletedAt = newest(jobs.map(job => job.completedAt));
   const latestSuccessfulAt = newest(jobs.filter(job => job.status === 'SUCCEEDED').map(job => job.completedAt || job.updatedAt));
   const latestFailedAt = newest(jobs.filter(job => job.status === 'FAILED').map(job => job.completedAt || job.updatedAt));
-  const processedToday = jobs.filter(job => job.status === 'SUCCEEDED' && vietnamDayKey(parsed(job.completedAt || job.updatedAt) || 0) === vietnamDayKey(now)).length;
+  const processedToday = input.businessUsage?.id === vietnamDayKey(now) ? input.businessUsage.productsReviewed : 0;
+  const latestSafeJob = sorted.find(job => job.type === 'AUTO_PILOT' && job.dryRun);
+  const safeRunStatus = latestSafeJob ? latestSafeJob.status === 'PENDING' || latestSafeJob.status === 'RETRY_SCHEDULED' ? 'QUEUED'
+    : latestSafeJob.status === 'RUNNING' ? 'RUNNING'
+      : latestSafeJob.status === 'SUCCEEDED' ? 'SUCCEEDED'
+        : latestSafeJob.status === 'FAILED' ? 'FAILED' : 'SKIPPED' : null;
   const overall: AutomationTruthStatus = inconsistencies.some(item => item.severity === 'CRITICAL') ? 'INCONSISTENT'
     : inconsistencies.length ? 'DEGRADED'
       : schedulerActive || activeWorkers > 0 ? 'HEALTHY' : 'INACTIVE';
@@ -139,6 +149,21 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
     runs: {
       latestStartedAt, latestCompletedAt, latestSuccessfulAt, latestFailedAt,
       recent: sorted.slice(0, 20).map(job => publicAutomationJob(job)),
+      latestSafeRun: latestSafeJob ? {
+        jobId: latestSafeJob.id,
+        createdAt: latestSafeJob.createdAt,
+        queuedAt: latestSafeJob.queuedAt || latestSafeJob.scheduledAt,
+        startedAt: latestSafeJob.startedAt || null,
+        completedAt: latestSafeJob.completedAt || null,
+        status: safeRunStatus,
+        result: {
+          claimed: Number(latestSafeJob.result?.claimed) || 0,
+          succeeded: Number(latestSafeJob.result?.succeeded) || 0,
+          failed: Number(latestSafeJob.result?.failed) || 0,
+          skipped: Number(latestSafeJob.result?.skipped) || 0,
+        },
+        error: latestSafeJob.lastErrorMessage || latestSafeJob.lastErrorCode || null,
+      } : null,
     },
     dailyUsage: {
       day: vietnamDayKey(now), processed: processedToday, limit: settings.maxItemsPerDay,
@@ -149,9 +174,10 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
 }
 
 export async function getAutomationTruth(now = Date.now()) {
-  const [settings, control, leases, conflicts, jobs, usage] = await Promise.all([
+  const [settings, control, leases, conflicts, jobs, usage, businessUsage] = await Promise.all([
     getAutomationSettings(), getAutomationControl(), listRuntimeRoleLeases(),
     listRecentRuntimeRoleConflicts(now - 24 * 60 * 60_000), getAllAutomationJobs(), getAiUsage(now),
+    getDailyBusinessUsage(now),
   ]);
-  return buildAutomationTruth({ now, settings, control, leases, conflicts, jobs, usage });
+  return buildAutomationTruth({ now, settings, control, leases, conflicts, jobs, usage, businessUsage });
 }

@@ -27,7 +27,7 @@ type DashboardData = {
   runtime: {
     web: { status: string; checkedAt: string | null };
     worker: RoleDiagnostic;
-    scheduler: RoleDiagnostic & { lastContenderState: string; rejectedOwner: string | null; rejectedAt: string | null; lastSuccessfulTickAt: string | null; nextRunAt: string | null };
+    scheduler: RoleDiagnostic & { lastContenderState: string; rejectedOwner: string | null; rejectedAt: string | null; historicalErrorLabel: string | null; lastSuccessfulTickAt: string | null; nextRunAt: string | null };
     guardianCheckedAt: string | null; reasons: string[];
   };
   control: { mode: string; effectiveMode: string; publishPaused: boolean; ingestionPaused: boolean; workerPaused: boolean; schedulerPaused: boolean; killSwitch: boolean; launchEnabled: boolean; reason: string | null; safePublish: { state: string; reasons: string[] } };
@@ -170,6 +170,7 @@ function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, ru
           <div><dt>Scheduler tick / lần tới</dt><dd>{formatTime(data.runtime.scheduler.lastSuccessfulTickAt)} · {formatTime(data.runtime.scheduler.nextRunAt)}</dd></div>
         </dl>
         {data.runtime.scheduler.lastContenderState === 'rejected' && <div className={styles.degradedNotice} role="status">Một scheduler online đã bị từ chối vai trò vì leader <strong>{data.runtime.scheduler.owner || 'khác'}</strong> còn lease hợp lệ. Tiến trình online không đồng nghĩa đang active.</div>}
+        {data.runtime.scheduler.lastContenderState === 'recovered' && <div className={styles.recoveredNotice} role="status"><strong>{data.runtime.scheduler.historicalErrorLabel || 'Lỗi cũ/đã phục hồi'}:</strong> xung đột thuộc instance trước, không làm trạng thái scheduler hiện tại thành lỗi{data.runtime.scheduler.rejectedAt ? ` · ${formatTime(data.runtime.scheduler.rejectedAt)}` : ''}.</div>}
       </article>
       <article className={styles.panel}>
         <div className={styles.panelHeader}><div><h2><DashboardIcon name="settings" size={19} />Automation</h2><p>Chế độ yêu cầu, chế độ hiệu lực và các khóa an toàn.</p></div></div>
@@ -308,7 +309,7 @@ export default function DashboardPage() {
   const kpis = data?.zeroData ? zeroDataKpis : populatedKpis;
 
   return <div className={styles.page} aria-busy={loading}>
-    {toast && <div className={styles.toast} role="status">{toast}</div>}
+    {toast && <div className={styles.toast} role="status"><span>{toast}</span><button type="button" onClick={() => setToast('')} aria-label="Đóng thông báo">×</button></div>}
     <header className={styles.header}><div><div className={styles.headerStatus}><span className={data?.control.killSwitch ? styles.dangerDot : styles.okDot} />{data?.control.killSwitch ? 'Dừng khẩn cấp đang bật' : data ? 'Hệ thống sẵn sàng' : 'Đang kiểm tra'}</div><h1>Bảng điều khiển</h1><p>Theo dõi hoạt động bot, tác vụ, nguồn dữ liệu và tình trạng hệ thống.</p>{data && <div className={styles.updated}>Cập nhật gần nhất: {new Date(data.updatedAt).toLocaleString('vi-VN')}</div>}</div><div className={styles.headerActions}><label><span>Khoảng thời gian</span><select value={range} onChange={event => setRange(event.target.value as Range)}><option value="today">Hôm nay</option><option value="7d">7 ngày</option><option value="30d">30 ngày</option></select></label><button type="button" onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />{loading ? 'Đang làm mới' : 'Làm mới'}</button></div></header>
     {error && <section className={styles.error}><h2>Không thể tải bảng điều khiển</h2><p>{error} Dữ liệu hiện tại không bị thay đổi.</p><button type="button" onClick={() => void load()}>Thử lại</button></section>}
     {loading && !data && <div className={styles.skeleton}><span /><span /><span /></div>}

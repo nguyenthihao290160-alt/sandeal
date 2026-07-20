@@ -22,12 +22,14 @@ import {
   getAutomationControl,
   getAutomationJob,
   heartbeatAutomationJob,
+  productProcessingReservationKey,
   recordCircuitResult,
   updateAutomationControl,
   updateAutomationJobExecution,
   waitAutomationJobForChildren,
   waitAutomationJobForManual,
 } from './store';
+import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 
@@ -140,6 +142,10 @@ async function dryRunPreview(job: AutomationJob): Promise<Record<string, unknown
   return {
     preview: true,
     inspected: selected.length,
+    claimed: selected.length,
+    succeeded: selected.length,
+    failed: 0,
+    skipped: 0,
     qualified: dashboard.summary.qualifiedForPublish,
     needsReview: dashboard.summary.needsReview,
     blocked: dashboard.summary.blocked + dashboard.summary.rejectedItems,
@@ -485,6 +491,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
     const freshControl = await getAutomationControl();
     if (freshControl.killSwitch && job.type !== 'RUNTIME_GUARDIAN') {
       await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.');
+      if (job.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(job));
       result.skipped += 1;
       return;
     }
@@ -495,6 +502,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
         updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId),
       ]);
     }, 20_000);
+    let businessExecutionStarted = false;
     try {
       assertWorkerPolicy(job);
       const startedPlan = (job.executionPlan || []).map((step, index) => index === 0 && step.status === 'PENDING' ? { ...step, status: 'RUNNING' as const } : step);
@@ -502,6 +510,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
         executionPlan: startedPlan,
         progress: { processed: 0, total: startedPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: new Date().toISOString() },
       });
+      businessExecutionStarted = job.type === 'PROCESS_CANDIDATE';
       const output = await executeJob(job, workerId);
       const latest = await getAutomationJob(job.id);
       if (latest?.status === 'CANCELLED') { result.skipped += 1; return; }
@@ -592,6 +601,10 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);
+      if (job.type === 'PROCESS_CANDIDATE') {
+        if (businessExecutionStarted) await commitProductProcessingCapacity(productProcessingReservationKey(job), 1);
+        else await releaseProductProcessingCapacity(productProcessingReservationKey(job));
+      }
       await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: undefined }, workerId);
     }
   };

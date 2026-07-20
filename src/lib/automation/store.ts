@@ -6,6 +6,8 @@ import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, l
 import { buildAutoPilotExecutionPlan } from './autoPilotGraph';
 import { vietnamDayKey } from './timezone';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
+import { getAutomationSettings } from '@/lib/storage/automationSettings';
+import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -40,6 +42,10 @@ const COOPERATIVELY_CANCELLABLE = new Set<AutomationJobType>([
   'EDITORIAL_CHECK',
   'BULK_PRODUCT_OPERATION',
 ]);
+
+export function productProcessingReservationKey(job: Pick<AutomationJob, 'idempotencyKey'>): string {
+  return `automation-product:${job.idempotencyKey}`;
+}
 
 function canCancelWhileRunning(job: AutomationJob): boolean {
   if (!COOPERATIVELY_CANCELLABLE.has(job.type)) return false;
@@ -92,7 +98,7 @@ export async function getAutomationControl(): Promise<AutomationControlState> {
 }
 
 export async function updateAutomationControl(
-  updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
+  updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'pausedAt' | 'pauseReason' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
   actor = 'system',
 ): Promise<AutomationControlState> {
   let previous = await getAutomationControl();
@@ -275,6 +281,7 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
     approvalStatus, approvalReason: input.approvalReason, approvalExpiresAt: approvalStatus === 'PENDING' ? new Date(nowMs + 24 * 60 * 60_000).toISOString() : undefined,
     riskLevel: risk, dryRun: input.dryRun === true, attemptCount: 0,
     maxAttempts: jobPolicy.retryPolicy.maxAttempts,
+    queuedAt: now,
     scheduledAt: input.scheduledAt && Number.isFinite(Date.parse(input.scheduledAt)) ? input.scheduledAt : now,
     createdAt: now, updatedAt: now,
   };
@@ -316,17 +323,37 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
     await auditRejectedAutomationJob(input, error);
     throw error;
   }
-  let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
-  await runTransaction<AutomationJob>(JOBS, items => {
-    const existing = items.find(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey);
-    if (existing) {
-      response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
-      return undefined;
+  const reservationKey = productProcessingReservationKey(job);
+  let quotaReserved = false;
+  if (job.type === 'PROCESS_CANDIDATE') {
+    const settings = await getAutomationSettings();
+    const reservation = await reserveProductProcessingCapacity(reservationKey, 1, settings.maxItemsPerDay);
+    if (!reservation.allowed && !reservation.alreadyProcessed) {
+      const error = new AutomationJobEnqueueError('DAILY_PRODUCT_LIMIT_REACHED', ['No product-processing capacity remains for the Vietnam business day.']);
+      await auditRejectedAutomationJob(input, error);
+      throw error;
     }
-    items.push(job);
-    response = { job, created: true, code: 'CREATED' };
-    return items;
-  });
+    quotaReserved = !reservation.alreadyProcessed;
+  }
+  let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
+  try {
+    await runTransaction<AutomationJob>(JOBS, items => {
+      const existing = items.find(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey);
+      if (existing) {
+        response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
+        return undefined;
+      }
+      items.push(job);
+      response = { job, created: true, code: 'CREATED' };
+      return items;
+    });
+  } catch (error) {
+    if (quotaReserved) await releaseProductProcessingCapacity(reservationKey);
+    throw error;
+  }
+  if (!response.created && ['FAILED', 'CANCELLED', 'BLOCKED'].includes(response.job.status)) {
+    await releaseProductProcessingCapacity(reservationKey);
+  }
   if (response.created) {
     await appendAutomationAudit({ correlationId: response.job.correlationId || response.job.operationId, operationId: response.job.operationId, jobId: response.job.id,
       operationType: response.job.type, actor: response.job.requestedBy, nextState: response.job.status, risk: response.job.riskLevel,
@@ -359,6 +386,7 @@ export function publicAutomationJob(job: AutomationJob) {
   void _payload;
   return {
     ...safe,
+    queuedAt: job.queuedAt || job.scheduledAt,
     result: sanitizeAutomationData(job.result),
     checkpoint: job.checkpoint ? {
       ...job.checkpoint,
@@ -594,6 +622,22 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
   const claimed: AutomationJob[] = [];
   const rejectedBeforeClaim: Array<{ job: AutomationJob; validation: AutomationJobContractValidation; previousStatus: AutomationJobStatus }> = [];
   const now = new Date(nowMs).toISOString();
+  const preclaimJobs = (await readCollection<AutomationJob>(JOBS))
+    .filter(item => item.type === 'PROCESS_CANDIDATE'
+      && (item.status === 'PENDING' || (item.status === 'RETRY_SCHEDULED' && Boolean(item.nextRetryAt) && Date.parse(item.nextRetryAt!) <= nowMs))
+      && Date.parse(item.scheduledAt) <= nowMs)
+    .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
+    .slice(0, Math.max(0, Math.min(limit, 10)));
+  const candidateClaimable = new Set<string>();
+  const candidateQuotaDenied = new Set<string>();
+  if (preclaimJobs.length) {
+    const settings = await getAutomationSettings();
+    for (const item of preclaimJobs) {
+      const reservation = await reserveProductProcessingCapacity(productProcessingReservationKey(item), 1, settings.maxItemsPerDay, nowMs);
+      if (reservation.allowed) candidateClaimable.add(item.id);
+      else candidateQuotaDenied.add(item.id);
+    }
+  }
   await runTransaction<AutomationJob>(JOBS, items => {
     let changed = false;
     for (const item of items) {
@@ -622,8 +666,19 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
         changed = true;
       }
       if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) { item.status = 'PENDING'; changed = true; }
+      if (item.status === 'PENDING' && item.type === 'PROCESS_CANDIDATE' && candidateQuotaDenied.has(item.id)) {
+        item.status = 'BLOCKED';
+        item.lastErrorCode = 'DAILY_PRODUCT_LIMIT_REACHED';
+        item.lastErrorCategory = 'VALIDATION_FAILED';
+        item.lastErrorMessage = 'Đã đạt giới hạn sản phẩm xử lý trong ngày Việt Nam.';
+        item.completedAt = now;
+        item.updatedAt = now;
+        changed = true;
+      }
     }
-    const due = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN'))
+    const due = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
+      && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
+      && (item.type !== 'PROCESS_CANDIDATE' || candidateClaimable.has(item.id)))
       .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt)).slice(0, Math.max(0, Math.min(limit, 10)));
     for (const item of due) {
       item.status = 'RUNNING'; item.claimedBy = workerId; item.claimedAt = now; item.heartbeatAt = now;
@@ -634,6 +689,7 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
     return changed ? items : undefined;
   });
   for (const rejected of rejectedBeforeClaim) {
+    if (rejected.job.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(rejected.job), nowMs);
     const operationId = rejected.job.operationId || generateId();
     const risk = rejected.job.riskLevel && rejected.job.riskLevel in RISK_RANK ? rejected.job.riskLevel : 'BLOCKER';
     await appendAutomationAudit({
@@ -718,6 +774,7 @@ export async function cancelAutomationJob(id: string, actor: string, reason: str
     job.lastErrorCode = 'CANCELLED'; job.lastErrorMessage = sanitizeErrorMessage(reason); cancelled = { ...job, result: { previousState: previous } }; return items;
   });
   const cancelledJob = cancelled as AutomationJob | null;
+  if (cancelledJob?.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(cancelledJob));
   if (cancelledJob) await appendAutomationAudit({ correlationId: cancelledJob.operationId, operationId: cancelledJob.operationId, jobId: cancelledJob.id, operationType: 'JOB_CANCELLED', actor,
     previousState: String(cancelledJob.result?.previousState || ''), nextState: 'CANCELLED', risk: cancelledJob.riskLevel, reasons: [reason], dryRun: cancelledJob.dryRun, attempts: cancelledJob.attemptCount });
   return cancelledJob;

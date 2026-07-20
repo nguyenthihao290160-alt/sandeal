@@ -37,7 +37,8 @@ export async function POST(request: NextRequest) {
       approvalReason: policy.approvalMode === 'REQUIRED' ? 'Policy yêu cầu chủ sở hữu phê duyệt tác vụ này.' : undefined });
     return NextResponse.json({ ok: true, code: result.code, message: result.created ? 'Đã tạo tác vụ.' : result.code === 'ALREADY_PROCESSED' ? 'Tác vụ đã được hoàn thành trước đó.' : 'Tác vụ đã tồn tại và đang được xử lý.', data: publicAutomationJob(result.job) }, { status: result.created ? 201 : 200 });
   } catch (error) {
-    const code = error instanceof Error ? error.message : 'VALIDATION_ERROR';
-    return NextResponse.json({ ok: false, code, message: code === 'PAYLOAD_TOO_LARGE' ? 'Dữ liệu tác vụ vượt giới hạn cho phép.' : 'Mã chống thực hiện trùng không hợp lệ.' }, { status: 400 });
+    const code = error instanceof Error && 'code' in error ? String((error as { code: unknown }).code) : error instanceof Error ? error.message : 'VALIDATION_ERROR';
+    const dailyLimitReached = code === 'DAILY_PRODUCT_LIMIT_REACHED';
+    return NextResponse.json({ ok: false, code, message: dailyLimitReached ? 'Đã đạt giới hạn sản phẩm xử lý trong ngày Việt Nam.' : code === 'PAYLOAD_TOO_LARGE' ? 'Dữ liệu tác vụ vượt giới hạn cho phép.' : 'Mã chống thực hiện trùng không hợp lệ.' }, { status: dailyLimitReached ? 409 : 400 });
   }
 }

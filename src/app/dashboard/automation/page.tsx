@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
 import styles from '../operations.module.css';
 
@@ -31,9 +31,17 @@ type AutomationTruth = {
   worker: { state: string; ownerIds: string[]; latestHeartbeatAt: string | null; activeWorkers: number; staleWorkers: number };
   queue: { pending: number; running: number; retrying: number; failed: number; deadLetter: number; completedRecent: number; oldestPendingAt: string | null };
   dailyUsage: { day: string; processed: number; limit: number | null; remaining: number | null };
+  runs: { latestSafeRun: SafeRunLifecycle | null };
   inconsistencies: Array<{ code: string; severity: string; message: string; evidence: Record<string, unknown>; detectedAt: string }>;
 };
-type DialogAction = 'enable_schedule' | 'pause_scheduler' | 'resume_scheduler' | 'save_settings';
+type SafeRunLifecycle = {
+  jobId: string; createdAt: string; queuedAt: string; startedAt: string | null; completedAt: string | null;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED';
+  result: { claimed: number; succeeded: number; failed: number; skipped: number };
+  error: string | null;
+};
+type DialogAction = 'enable_schedule' | 'save_settings';
+type ToastState = { tone: 'success' | 'warning' | 'error' | 'info'; message: string };
 
 const STATUS_LABELS: Record<string, string> = {
   active: 'Đang hoạt động', paused: 'Đã tạm dừng', not_configured: 'Chưa cấu hình',
@@ -41,6 +49,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 const RUN_LABELS: Record<string, string> = { completed: 'Hoàn thành', failed: 'Thất bại', skipped: 'Đã bỏ qua', running: 'Đang xử lý' };
 const TRIGGER_LABELS: Record<string, string> = { manual: 'Quản trị viên', scheduler: 'Lịch tự động', startup: 'Khởi động hệ thống' };
+const SAFE_RUN_LABELS: Record<SafeRunLifecycle['status'], string> = { QUEUED: 'Đang chờ', RUNNING: 'Đang chạy', SUCCEEDED: 'Hoàn thành', FAILED: 'Thất bại', SKIPPED: 'Đã bỏ qua' };
 
 function formatTime(value?: string | null) {
   if (!value) return 'Chưa ghi nhận';
@@ -53,10 +62,14 @@ export default function AutomationDashboard() {
   const [draft, setDraft] = useState({ intervalHours: 6, maxItemsPerRun: 10, maxItemsPerDay: 30 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [toast, setToast] = useState('');
+  const [toast, setToast] = useState<ToastState | null>(null);
   const [dialog, setDialog] = useState<DialogAction | null>(null);
+  const [pauseConfirm, setPauseConfirm] = useState(false);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const [trackedSafeRunId, setTrackedSafeRunId] = useState<string | null>(null);
+  const trackedStatus = useRef<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -88,27 +101,63 @@ export default function AutomationDashboard() {
     return () => window.removeEventListener('keydown', close);
   }, [dialog, busy]);
 
-  const notify = (message: string) => {
-    setToast(message);
-    window.setTimeout(() => setToast(''), 4500);
-  };
+  const notify = useCallback((message: string, tone: ToastState['tone'] = 'success') => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    setToast({ message, tone });
+    toastTimer.current = window.setTimeout(() => setToast(null), tone === 'error' ? 7000 : 4500);
+  }, []);
+
+  const latestSafeRun = truth?.runs?.latestSafeRun || null;
+  useEffect(() => {
+    if (!trackedSafeRunId || !latestSafeRun || latestSafeRun.jobId !== trackedSafeRunId) return;
+    const previous = trackedStatus.current;
+    trackedStatus.current = latestSafeRun.status;
+    if (previous && !['SUCCEEDED', 'FAILED', 'SKIPPED'].includes(previous) && latestSafeRun.status === 'SUCCEEDED') notify('Chạy thử hoàn thành', 'success');
+    if (previous && !['SUCCEEDED', 'FAILED', 'SKIPPED'].includes(previous) && latestSafeRun.status === 'FAILED') notify(`Chạy thử thất bại: ${latestSafeRun.error || 'Không có nguyên nhân chi tiết.'}`, 'error');
+  }, [latestSafeRun, notify, trackedSafeRunId]);
+  useEffect(() => {
+    if (!trackedSafeRunId || !latestSafeRun || latestSafeRun.jobId !== trackedSafeRunId || !['QUEUED', 'RUNNING'].includes(latestSafeRun.status)) return;
+    const timer = window.setInterval(() => void load(), 2500);
+    return () => window.clearInterval(timer);
+  }, [latestSafeRun, load, trackedSafeRunId]);
+  useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current); }, []);
 
   async function createDryRun() {
     setBusy(true);
     try {
-      const response = await fetch('/api/automation/jobs', {
+      const response = await fetch('/api/automation/safe-run', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'AUTO_PILOT', dryRun: true, idempotencyKey: `automation:preview:${new Date().toISOString().slice(0, 16)}`, payload: { limit: Math.min(20, state?.settings.maxItemsPerRun || 10) } }),
+        body: JSON.stringify({ idempotencyKey: `dashboard:${Math.floor(Date.now() / 60_000)}`, limit: Math.min(20, state?.settings.maxItemsPerRun || 10) }),
       });
       const body = await response.json();
       if (!response.ok || !body.ok) throw new Error(body.message || 'Không thể tạo tác vụ chạy thử.');
-      notify('Đã tạo tác vụ chạy thử an toàn. Dữ liệu sản phẩm không bị thay đổi.');
+      setTrackedSafeRunId(body.data.id);
+      trackedStatus.current = body.data.status === 'RUNNING' ? 'RUNNING' : 'QUEUED';
+      notify('Đã tạo tác vụ chạy thử', 'info');
       await load();
     } catch (cause) {
-      setError(`${cause instanceof Error ? cause.message : 'Không thể tạo tác vụ.'} Dữ liệu hiện tại không bị thay đổi.`);
+      notify(`${cause instanceof Error ? cause.message : 'Không thể tạo tác vụ.'} Dữ liệu hiện tại không bị thay đổi.`, 'error');
     } finally {
       setBusy(false);
     }
+  }
+
+  async function updateScheduler(action: 'pause_scheduler' | 'resume_scheduler') {
+    setBusy(true);
+    try {
+      const response = await fetch('/api/automation/control', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, reason: reason.trim() }),
+      });
+      const body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.message || 'Không thể cập nhật lịch tự động.');
+      notify(action === 'pause_scheduler' ? 'Đã tạm dừng lịch tự động' : 'Đã tiếp tục lịch; lần chạy kế tiếp đã được tính lại.', action === 'pause_scheduler' ? 'warning' : 'success');
+      setPauseConfirm(false);
+      setReason('');
+      await load();
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : 'Không thể cập nhật lịch tự động.', 'error');
+    } finally { setBusy(false); }
   }
 
   async function submitDialog() {
@@ -138,15 +187,15 @@ export default function AutomationDashboard() {
     }
   }
 
-  const schedulerStatus = truth?.scheduler.active ? 'active'
-    : truth?.status === 'INCONSISTENT' ? 'stale'
-      : truth?.scheduler.state === 'PAUSED' ? 'paused'
+  const schedulerStatus = truth?.scheduler.state === 'PAUSED' ? 'paused'
+    : truth?.scheduler.active ? 'active'
+      : truth?.status === 'INCONSISTENT' ? 'stale'
         : (state?.settings.enabled ? 'unverified' : 'not_configured');
-  const schedulerAction: DialogAction = !state?.settings.enabled ? 'enable_schedule' : schedulerStatus === 'paused' ? 'resume_scheduler' : 'pause_scheduler';
+  const schedulerAction = !state?.settings.enabled ? 'enable_schedule' : schedulerStatus === 'paused' ? 'resume_scheduler' : 'pause_scheduler';
   const actionLabel = schedulerAction === 'enable_schedule' ? 'Bật lịch tự động' : schedulerAction === 'resume_scheduler' ? 'Tiếp tục lịch tự động' : 'Tạm dừng lịch tự động';
 
   return <main className={styles.page} aria-busy={loading}>
-    {toast && <div className="toast-container"><div className="toast toast-success" role="status">{toast}</div></div>}
+    {toast && <div className={styles.toastRegion}><div className={`${styles.toast} ${styles[`toast_${toast.tone}`]}`} role={toast.tone === 'error' ? 'alert' : 'status'}><span>{toast.message}</span><button type="button" onClick={() => setToast(null)} aria-label="Đóng thông báo">×</button></div></div>}
     <header className={styles.header}>
       <div><h1>Tự động hóa</h1><p>Quản lý lịch xử lý có giới hạn, tạo tác vụ chạy thử và theo dõi trạng thái bằng dữ liệu backend.</p></div>
       <div className={styles.actions}><button className={styles.button} onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />Làm mới</button></div>
@@ -158,7 +207,7 @@ export default function AutomationDashboard() {
         <article className={`${styles.panel} ${schedulerStatus === 'active' ? styles.successPanel : schedulerStatus === 'paused' ? styles.warningPanel : schedulerStatus === 'stale' ? styles.dangerPanel : styles.infoPanel}`}>
           <div className={styles.panelHeader}><h2><DashboardIcon name="scheduler" size={19} />Lịch chạy tự động</h2><span className={`${styles.badge} ${schedulerStatus === 'active' ? styles.success : schedulerStatus === 'stale' ? styles.error : styles.warning}`}>{STATUS_LABELS[schedulerStatus] || 'Không thể xác minh'}</span></div>
           <div className={styles.healthList}>
-            <div className={styles.healthRow}><span>Lần chạy tiếp theo</span><strong>{formatTime(truth?.scheduler.nextRunAt || state.nextRunAt)}</strong></div>
+            <div className={styles.healthRow}><span>Lần chạy tiếp theo</span><strong>{schedulerStatus === 'paused' ? 'Lịch đang tạm dừng' : formatTime(truth?.scheduler.nextRunAt || state.nextRunAt)}</strong></div>
             <div className={styles.healthRow}><span>Đã xử lý hôm nay</span><strong>{truth?.dailyUsage.processed ?? state.dailyUsage}/{truth?.dailyUsage.limit ?? state.settings.maxItemsPerDay}</strong></div>
             <div className={styles.healthRow}><span>Tác vụ đang chờ</span><strong>{truth ? truth.queue.pending + truth.queue.retrying : (state.queue?.pending || 0) + (state.queue?.delayed || 0)}</strong></div>
             <div className={styles.healthRow}><span>Timezone</span><strong>{truth?.timezone || 'Asia/Ho_Chi_Minh'}</strong></div>
@@ -166,9 +215,12 @@ export default function AutomationDashboard() {
             <div className={styles.healthRow}><span>Worker ACTIVE</span><strong>{truth?.worker.activeWorkers ?? 0}</strong></div>
           </div>
           <div className={styles.actions} style={{ padding: 16, justifyContent: 'flex-start' }}>
-            <button className={schedulerAction === 'pause_scheduler' ? styles.warningButton : styles.primary} onClick={() => setDialog(schedulerAction)} disabled={busy}>{actionLabel}</button>
+            {schedulerAction === 'enable_schedule' ? <button className={styles.primary} onClick={() => setDialog('enable_schedule')} disabled={busy}>{actionLabel}</button>
+              : schedulerAction === 'resume_scheduler' ? <button className={styles.primary} onClick={() => void updateScheduler('resume_scheduler')} disabled={busy}>{actionLabel}</button>
+                : <button className={styles.warningButton} onClick={() => setPauseConfirm(value => !value)} disabled={busy}>{actionLabel}</button>}
             <button className={styles.button} onClick={() => void createDryRun()} disabled={busy}><DashboardIcon name="task" size={16} />Chạy thử an toàn</button>
           </div>
+          {pauseConfirm && <div className={styles.inlineConfirm}><strong>Tạm dừng lịch?</strong><span>Job hiện có không bị xóa. Lý do là tùy chọn.</span><input aria-label="Lý do tạm dừng (tùy chọn)" value={reason} onChange={event => setReason(event.target.value)} placeholder="Ví dụ: kiểm tra vận hành" /><div><button className={styles.button} onClick={() => { setPauseConfirm(false); setReason(''); }} disabled={busy}>Hủy</button><button className={styles.warningButton} onClick={() => void updateScheduler('pause_scheduler')} disabled={busy}>Tạm dừng</button></div></div>}
           {truth?.status === 'INCONSISTENT' && <div className={`${styles.notice} ${styles.errorBox}`}>Inconsistent — cần kiểm tra. Trạng thái ACTIVE không được suy ra chỉ từ cấu hình lịch.</div>}
         </article>
 
@@ -201,11 +253,16 @@ export default function AutomationDashboard() {
       </section>
 
       <section className={styles.panel}>
-        <div className={styles.panelHeader}><h2><DashboardIcon name="task" size={19} />Nhật ký chạy gần đây</h2></div>
+        <div className={styles.panelHeader}><h2><DashboardIcon name="task" size={19} />Lần chạy thử mới nhất</h2><button className={styles.button} onClick={() => void load()} disabled={loading}>Làm mới trạng thái</button></div>
+        {latestSafeRun ? <div className={styles.safeRunCard}><div><span>Trạng thái</span><strong className={`${styles.badge} ${latestSafeRun.status === 'SUCCEEDED' ? styles.success : latestSafeRun.status === 'FAILED' ? styles.error : styles.info}`}>{SAFE_RUN_LABELS[latestSafeRun.status]}</strong></div><div><span>Job ID</span><code>{latestSafeRun.jobId}</code></div><div><span>Tạo / vào hàng chờ</span><strong>{formatTime(latestSafeRun.createdAt)} · {formatTime(latestSafeRun.queuedAt)}</strong></div><div><span>Bắt đầu / hoàn tất</span><strong>{formatTime(latestSafeRun.startedAt)} · {formatTime(latestSafeRun.completedAt)}</strong></div><div><span>Kết quả</span><strong>{latestSafeRun.result.claimed} nhận · {latestSafeRun.result.succeeded} thành công · {latestSafeRun.result.failed} lỗi · {latestSafeRun.result.skipped} bỏ qua</strong></div>{latestSafeRun.error && <div><span>Nguyên nhân</span><strong>{latestSafeRun.error}</strong></div>}</div> : <div className={styles.empty}><p>Chưa có lần chạy thử an toàn.</p></div>}
+      </section>
+
+      <section className={styles.panel}>
+        <div className={styles.panelHeader}><h2><DashboardIcon name="task" size={19} />Nhật ký pipeline gần đây</h2></div>
         {state.recentRuns.length ? <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Thời gian</th><th>Trạng thái</th><th>Nguồn khởi chạy</th><th>Kết quả</th><th>Chi tiết</th></tr></thead><tbody>{state.recentRuns.map(run => <tr key={run.id}><td>{formatTime(run.startedAt)}</td><td><span className={`${styles.badge} ${run.status === 'completed' ? styles.success : run.status === 'failed' ? styles.error : styles.info}`}>{RUN_LABELS[run.status] || 'Không thể xác minh'}</span></td><td>{TRIGGER_LABELS[run.trigger] || 'Hệ thống'}</td><td>{run.summary ? `${run.summary.saved || 0} đã lưu, ${run.summary.errors || run.summary.skipped || 0} lỗi` : 'Chưa có số liệu'}</td><td>{run.message || run.error || 'Không có chi tiết'}</td></tr>)}</tbody></table></div> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={22} /></span><h3>Chưa có nhật ký chạy</h3><p>Tạo một tác vụ chạy thử an toàn để xác minh hàng chờ mà không thay đổi dữ liệu sản phẩm.</p><div className={styles.emptyActions}><button className={styles.button} onClick={() => void createDryRun()} disabled={busy}>Chạy thử an toàn</button></div></div>}
       </section>
     </>}
 
-    {dialog && <div className={styles.dialogBackdrop} onMouseDown={event => { if (event.target === event.currentTarget && !busy) { setDialog(null); setReason(''); } }}><section className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="automation-dialog-title"><h2 id="automation-dialog-title">{dialog === 'save_settings' ? 'Lưu giới hạn xử lý' : actionLabel}</h2><p>Thay đổi được thực hiện ở backend, lưu bền vững và ghi vào nhật ký kiểm soát. Tác vụ hiện có không bị xóa.</p><label htmlFor="automation-reason">Lý do<textarea id="automation-reason" autoFocus rows={3} value={reason} onChange={event => setReason(event.target.value)} /></label><p className={styles.muted}>Nhập ít nhất 8 ký tự.</p><div className={styles.dialogActions}><button className={styles.button} onClick={() => { setDialog(null); setReason(''); }} disabled={busy}>Đóng</button><button className={dialog === 'pause_scheduler' ? styles.warningButton : styles.primary} onClick={() => void submitDialog()} disabled={busy || reason.trim().length < 8}>{busy ? 'Đang cập nhật' : 'Xác nhận'}</button></div></section></div>}
+    {dialog && <div className={styles.dialogBackdrop} onMouseDown={event => { if (event.target === event.currentTarget && !busy) { setDialog(null); setReason(''); } }}><section className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="automation-dialog-title"><h2 id="automation-dialog-title">{dialog === 'save_settings' ? 'Lưu giới hạn xử lý' : actionLabel}</h2><p>Thay đổi được thực hiện ở backend, lưu bền vững và ghi vào nhật ký kiểm soát. Tác vụ hiện có không bị xóa.</p><label htmlFor="automation-reason">Lý do<textarea id="automation-reason" autoFocus rows={3} value={reason} onChange={event => setReason(event.target.value)} /></label><p className={styles.muted}>Nhập ít nhất 8 ký tự.</p><div className={styles.dialogActions}><button className={styles.button} onClick={() => { setDialog(null); setReason(''); }} disabled={busy}>Đóng</button><button className={styles.primary} onClick={() => void submitDialog()} disabled={busy || reason.trim().length < 8}>{busy ? 'Đang cập nhật' : 'Xác nhận'}</button></div></section></div>}
   </main>;
 }

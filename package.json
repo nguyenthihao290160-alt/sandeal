@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "node scripts/test-runner.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
+    "test": "node scripts/test-runner.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
     "test:dashboard": "node scripts/prompt05b-dashboard-tests.cjs",
-    "test:automation": "node scripts/prompt06-automation-tests.cjs",
+    "test:automation": "node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs",
     "test:release-ui": "node scripts/prompt07-release-ui-tests.cjs",
     "test:prompt08": "node scripts/prompt08-product-intelligence-tests.cjs && node scripts/prompt08-import-dedupe-tests.cjs && node scripts/prompt08-content-studio-tests.cjs && node scripts/prompt08-growth-alerts-links-tests.cjs && node scripts/prompt08-backend-hardening-tests.cjs",
     "test:prompt09:a": "node scripts/prompt09-bot-foundation-tests.cjs",

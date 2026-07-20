@@ -140,11 +140,15 @@ export async function buildAutomationDashboard(range: DashboardRange) {
   const latestSchedulerSuccess = sortedJobs.find(job => job.requestedBy === 'scheduler' && job.status === 'SUCCEEDED');
   const workerLease = roleLeases.find(item => item.role === 'WORKER');
   const schedulerLease = roleLeases.find(item => item.role === 'SCHEDULER');
-  const latestSchedulerConflict = [...roleConflicts].filter(item => item.role === 'SCHEDULER').sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))[0];
+  const schedulerStartedAt = Date.parse(schedulerLease?.processStartedAt || schedulerLease?.acquiredAt || '');
+  const schedulerConflicts = [...roleConflicts].filter(item => item.role === 'SCHEDULER').sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt));
+  const latestSchedulerConflict = schedulerConflicts.find(item => Date.parse(item.observedAt) >= Math.max(now - 5 * 60_000, Number.isFinite(schedulerStartedAt) ? schedulerStartedAt : 0)
+    && (!schedulerLease?.instanceId || item.activeInstanceId === schedulerLease.instanceId));
+  const historicalSchedulerConflict = schedulerConflicts.find(item => item !== latestSchedulerConflict);
   const workerLeaseFresh = workerLease?.status === 'ACTIVE' && Date.parse(workerLease.leaseExpiresAt) > now;
   const schedulerLeaseFresh = schedulerLease?.status === 'ACTIVE' && Date.parse(schedulerLease.leaseExpiresAt) > now;
   const nextRunMs = Date.parse(control.schedulerNextRunAt || '');
-  const schedulerNextRunOverdue = Number.isFinite(nextRunMs) && now - nextRunMs > 90_000;
+  const schedulerNextRunOverdue = !control.schedulerPaused && Number.isFinite(nextRunMs) && now - nextRunMs > 90_000;
   const workerRuntimeStatus = control.workerPaused ? 'paused'
     : workerLeaseFresh || workerFresh ? 'active'
       : workerLease || control.workerHeartbeatAt ? 'stale'
@@ -218,9 +222,10 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       worker: roleDiagnostic('WORKER', workerLease, workerRuntimeStatus, now),
       scheduler: {
         ...roleDiagnostic('SCHEDULER', schedulerLease, schedulerRuntimeStatus, now),
-        lastContenderState: latestSchedulerConflict ? 'rejected' : 'none',
-        rejectedOwner: latestSchedulerConflict?.rejectedHolderId || null,
-        rejectedAt: latestSchedulerConflict?.observedAt || null,
+        lastContenderState: latestSchedulerConflict ? 'rejected' : historicalSchedulerConflict ? 'recovered' : 'none',
+        rejectedOwner: (latestSchedulerConflict || historicalSchedulerConflict)?.rejectedHolderId || null,
+        rejectedAt: (latestSchedulerConflict || historicalSchedulerConflict)?.observedAt || null,
+        historicalErrorLabel: !latestSchedulerConflict && historicalSchedulerConflict ? 'Lỗi cũ/đã phục hồi' : null,
         lastSuccessfulTickAt: control.schedulerLastRunAt || null,
         nextRunAt: control.schedulerNextRunAt || null,
         blockReason: schedulerBlockReason,

@@ -166,6 +166,7 @@ export interface AutomationJob {
   dryRun: boolean;
   attemptCount: number;
   maxAttempts: number;
+  queuedAt: string;
   scheduledAt: string;
   nextRetryAt?: string;
   claimedAt?: string;
@@ -193,6 +194,8 @@ export interface AutomationControlState {
   ingestionPaused: boolean;
   workerPaused: boolean;
   schedulerPaused: boolean;
+  pausedAt?: string;
+  pauseReason?: string;
   killSwitch: boolean;
   reason?: string;
   changedBy?: string;

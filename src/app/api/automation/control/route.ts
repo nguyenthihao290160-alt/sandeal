@@ -5,6 +5,7 @@ import { approveControlledPublishWave, previewControlledModeTransition, previewC
 import { applyBootstrapLaunchProfile, previewBootstrapLaunchProfile } from '@/lib/automation/launchInventory';
 import { getAutomationControl, updateAutomationControl } from '@/lib/automation/store';
 import type { AutonomousMode } from '@/lib/automation/types';
+import { getAutomationSettings } from '@/lib/storage/automationSettings';
 
 const CONFIRMED_ACTIONS = new Set([
   'enable_kill_switch',
@@ -53,7 +54,8 @@ export async function PATCH(request: NextRequest) {
   catch { return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Dữ liệu điều khiển không hợp lệ.' }, { status: 400 }); }
   const action = body.action;
   const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
-  if (typeof action !== 'string' || reason.length < 8) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Vui lòng chọn thao tác và nhập lý do ít nhất 8 ký tự.' }, { status: 400 });
+  const optionalReasonActions = new Set(['pause_worker', 'resume_worker', 'pause_scheduler', 'resume_scheduler', 'pause_autopilot', 'resume_autopilot']);
+  if (typeof action !== 'string' || (!optionalReasonActions.has(action) && reason.length < 8)) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Vui lòng chọn thao tác và nhập lý do ít nhất 8 ký tự.' }, { status: 400 });
   if (CONFIRMED_ACTIONS.has(action) && body.confirmed !== true) return NextResponse.json({ ok: false, code: 'CONFIRMATION_REQUIRED', message: 'Thay đổi chế độ vận hành cần được xác nhận rõ ràng.' }, { status: 409 });
 
   if (action === 'apply_bootstrap_profile') {
@@ -115,16 +117,22 @@ export async function PATCH(request: NextRequest) {
       if (currentControl.killSwitch) return NextResponse.json({ ok: false, code: 'KILL_SWITCH_ACTIVE', message: 'Kill switch đang bật; chế độ vận hành không thay đổi.' }, { status: 409 });
     }
   }
+  const changedAt = new Date();
+  const settings = optionalReasonActions.has(action) && (action === 'resume_scheduler' || action === 'resume_autopilot') ? await getAutomationSettings() : null;
+  const resumedNextRunAt = settings ? new Date(changedAt.getTime() + settings.intervalHours * 60 * 60_000).toISOString() : undefined;
+  const pauseReason = reason || 'Tạm dừng từ bảng điều khiển.';
+  const effectiveReason = reason || (action.startsWith('resume_') ? 'Tiếp tục từ bảng điều khiển.' : pauseReason);
   const updates = action === 'pause_worker' ? { workerPaused: true } : action === 'resume_worker' ? { workerPaused: false }
-    : action === 'pause_scheduler' ? { schedulerPaused: true } : action === 'resume_scheduler' ? { schedulerPaused: false }
-      : action === 'pause_autopilot' ? { schedulerPaused: true, publishPaused: true }
-        : action === 'resume_autopilot' ? { schedulerPaused: false, publishPaused: false }
+    : action === 'pause_scheduler' ? { schedulerPaused: true, pausedAt: changedAt.toISOString(), pauseReason, schedulerNextRunAt: undefined }
+      : action === 'resume_scheduler' ? { schedulerPaused: false, pausedAt: undefined, pauseReason: undefined, schedulerNextRunAt: resumedNextRunAt }
+      : action === 'pause_autopilot' ? { schedulerPaused: true, publishPaused: true, pausedAt: changedAt.toISOString(), pauseReason, schedulerNextRunAt: undefined }
+        : action === 'resume_autopilot' ? { schedulerPaused: false, publishPaused: false, pausedAt: undefined, pauseReason: undefined, schedulerNextRunAt: resumedNextRunAt }
           : action === 'set_mode' && requestedMode === 'EMERGENCY_STOP' ? { mode: requestedMode, killSwitch: true, publishPaused: true, ingestionPaused: true }
             : action === 'set_mode' && (requestedMode === 'CANARY' || requestedMode === 'AUTONOMOUS') ? { mode: requestedMode, effectiveMode: requestedMode }
               : action === 'set_mode' && (requestedMode === 'OBSERVE' || requestedMode === 'SHADOW') ? { mode: requestedMode, effectiveMode: requestedMode, killSwitch: false, publishPaused: true, ingestionPaused: requestedMode === 'OBSERVE' }
               : action === 'enable_kill_switch' ? { mode: 'EMERGENCY_STOP' as const, killSwitch: true, publishPaused: true, ingestionPaused: true }
                 : action === 'disable_kill_switch' ? { mode: 'OBSERVE' as const, effectiveMode: 'OBSERVE' as const, killSwitch: false, publishPaused: true, ingestionPaused: true } : null;
   if (!updates) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Thao tác điều khiển không hợp lệ.' }, { status: 400 });
-  const state = await updateAutomationControl({ ...updates, reason }, 'dashboard-admin');
+  const state = await updateAutomationControl({ ...updates, reason: effectiveReason }, 'dashboard-admin');
   return NextResponse.json({ ok: true, code: 'OK', message: 'Đã cập nhật trạng thái vận hành.', data: state });
 }

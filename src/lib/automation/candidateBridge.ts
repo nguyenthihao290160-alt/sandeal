@@ -1,4 +1,4 @@
-import { createAutomationJob } from './store';
+import { AutomationJobEnqueueError, createAutomationJob } from './store';
 import { ensureOperationJournal, completeJournalEffect } from './operationJournal';
 import { listCandidateQueue, markCandidateBridged } from '@/lib/storage/candidateQueue';
 
@@ -31,16 +31,25 @@ export async function bridgeCandidatesToDurableJobs(input: {
   for (const candidate of candidates) {
     const key = candidateJobKey(candidate.id, candidate.sourceHash);
     const operationId = `candidate-operation:${candidate.id}:${candidate.sourceHash}`.slice(0, 160);
-    const created = await createAutomationJob({
-      type: 'PROCESS_CANDIDATE',
-      payload: { candidateId: candidate.id, sourceHash: candidate.sourceHash },
-      priority: Math.max(1, Math.min(100, candidate.priority)),
-      idempotencyKey: key,
-      operationId,
-      requestedBy: input.requestedBy || 'automation-bridge',
-      parentJobId: input.parentJobId,
-      dryRun: false,
-    });
+    let created;
+    try {
+      created = await createAutomationJob({
+        type: 'PROCESS_CANDIDATE',
+        payload: { candidateId: candidate.id, sourceHash: candidate.sourceHash },
+        priority: Math.max(1, Math.min(100, candidate.priority)),
+        idempotencyKey: key,
+        operationId,
+        requestedBy: input.requestedBy || 'automation-bridge',
+        parentJobId: input.parentJobId,
+        dryRun: false,
+      });
+    } catch (error) {
+      if (error instanceof AutomationJobEnqueueError && error.code === 'DAILY_PRODUCT_LIMIT_REACHED') {
+        result.skipped += candidates.length - result.jobs.length;
+        break;
+      }
+      throw error;
+    }
     await ensureOperationJournal({
       operationId,
       jobId: created.job.id,
