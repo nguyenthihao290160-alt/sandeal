@@ -120,6 +120,9 @@ export async function POST(request: NextRequest) {
       source: (body.source as ProductSource) || 'manual',
       originalUrl: typeof body.originalUrl === 'string' ? body.originalUrl : undefined,
       affiliateUrl: typeof body.affiliateUrl === 'string' ? body.affiliateUrl : undefined,
+      affiliateUrlSource: body.affiliateUrlSource === 'provider_api' ? 'provider_api' : body.affiliateUrlSource === 'manual' ? 'manual' : 'none',
+      deepLinkSupported: body.deepLinkSupported === true,
+      affiliateLinkReason: typeof body.affiliateLinkReason === 'string' ? body.affiliateLinkReason.slice(0, 240) : undefined,
       imageUrl: typeof body.imageUrl === 'string' ? body.imageUrl : undefined,
       gallery: parseMultiline(body.gallery),
       price: body.price !== undefined && body.price !== '' ? Number(body.price) : undefined,
@@ -142,6 +145,7 @@ export async function POST(request: NextRequest) {
       // Manual creation can never bypass the review/publication transaction.
       status: 'needs_review',
       publicHidden: true,
+      publicBlocked: true,
       autoPublished: false,
       needsVerification: true,
       verifiedSource: false,

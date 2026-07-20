@@ -231,6 +231,9 @@ export interface Product {
 
   originalUrl?: string;
   affiliateUrl?: string;
+  affiliateUrlSource?: 'provider_api' | 'manual' | 'none';
+  deepLinkSupported?: boolean;
+  affiliateLinkReason?: string;
   imageUrl?: string;
   gallery?: string[];
 
@@ -269,8 +272,20 @@ export interface Product {
   linkHealthStatus?: LinkHealthStatus;
   linkLastCheckedAt?: string;
   linkFailureCount?: number;
+  productUrlHttpStatus?: number;
+  productUrlFinalUrl?: string;
+  productUrlFinalDomain?: string;
+  productUrlHealthReason?: string;
+  productUrlErrorCode?: string;
+  productUrlTimedOut?: boolean;
   affiliateHealthStatus?: LinkHealthStatus;
   affiliateLinkErrors?: string;
+  affiliateUrlHttpStatus?: number;
+  affiliateUrlFinalUrl?: string;
+  affiliateUrlFinalDomain?: string;
+  affiliateUrlHealthReason?: string;
+  affiliateUrlErrorCode?: string;
+  affiliateUrlTimedOut?: boolean;
   imageHealthStatus?: LinkHealthStatus;
   imageLastCheckedAt?: string;
   imageValidationState?: 'VALID' | 'BROKEN' | 'HOTLINK_BLOCKED' | 'TIMEOUT' | 'INVALID_CONTENT_TYPE' | 'TOO_SMALL' | 'DARK_IMAGE_SUSPECTED' | 'PLACEHOLDER' | 'FALLBACK_USED';
@@ -299,6 +314,7 @@ export interface Product {
   autoPublishEligible?: boolean;
   publicDecision?: string;
   publicHidden?: boolean;
+  publicBlocked?: boolean;
   publicBlockReason?: string;
   publicBlockReasons?: string[];
   autoPublished?: boolean;

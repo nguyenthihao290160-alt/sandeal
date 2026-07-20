@@ -379,6 +379,10 @@
 .badge.info { color: #1e40af; background: var(--ds-surface-blue, #eef4ff); border-color: #bfdbfe; }
 
 .rowActions { display: flex; flex-wrap: wrap; gap: 3px; min-width: 160px; }
+.urlHealth { display: grid; flex: 1 0 100%; gap: 2px; margin-bottom: 5px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.urlHealth strong[data-valid='true'] { color: var(--success); }
+.urlHealth strong[data-valid='false'],
+.urlError { color: var(--danger); overflow-wrap: anywhere; }
 .textButton { min-height: 30px !important; padding: 4px 7px !important; color: var(--primary) !important; background: transparent !important; border: 0 !important; font-size: 12px; }
 .dangerText { color: var(--danger) !important; }
 

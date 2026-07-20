@@ -273,6 +273,18 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
     };
   }
   await assertKillSwitchInactive();
+  const evidenceProductIds = Array.isArray(job.payload.productIds)
+    ? job.payload.productIds.map(value => String(value || '')).filter(Boolean).slice(0, 100)
+    : typeof job.payload.productId === 'string' ? [job.payload.productId] : [];
+  if (evidenceProductIds.length) {
+    const evidenceProducts = (await Promise.all(evidenceProductIds.map(getProductById))).filter(Boolean);
+    const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+    if (evidenceProducts.some(product => product!.publicBlocked === true
+      || !goodHealth.has(String(product!.linkHealthStatus || product!.productHealthStatus || ''))
+      || !goodHealth.has(String(product!.affiliateHealthStatus || '')))) {
+      throw new Error('URL_HEALTH_BLOCKED_BEFORE_AI');
+    }
+  }
 
   if (job.manualTaskId) {
     const task = await getManualTask(job.manualTaskId);

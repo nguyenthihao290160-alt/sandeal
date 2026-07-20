@@ -68,7 +68,15 @@ export interface DashboardProductItem {
   };
   health: {
     link: string | null;
+    affiliate: string | null;
     image: string | null;
+    productUrlValid: boolean;
+    affiliateUrlValid: boolean;
+    finalDomain: string | null;
+    productUrlHttpStatus: number | null;
+    affiliateUrlHttpStatus: number | null;
+    productUrlError: string | null;
+    affiliateUrlError: string | null;
   };
 }
 
@@ -122,7 +130,8 @@ const RISKS = new Set<ProductRiskLevel>(['low', 'medium', 'high', 'unknown']);
 const BROKEN = new Set([
   'broken', 'broken_link', 'not_found', 'forbidden', 'timeout', 'error',
   'failed', 'dead', 'unavailable', 'missing', 'invalid', 'blocked',
-  'image_broken', 'invalid_image',
+  'image_broken', 'invalid_image', 'not_allowed', 'rate_limited',
+  'server_error', 'dns_error', 'affiliate_error', 'needs_manual_check',
 ]);
 
 function positiveInteger(value: string | null, fallback: number): number | null {
@@ -193,6 +202,10 @@ function publicMessage(product: Product, eligible: boolean): string {
 export function toDashboardProductItem(product: Product): DashboardProductItem {
   const eligible = isPublicSafeProduct(product);
   const message = publicMessage(product, eligible);
+  const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+  const finalUrl = product.affiliateUrlFinalUrl || product.productUrlFinalUrl || product.affiliateUrl || product.originalUrl;
+  let finalDomain: string | null = null;
+  try { finalDomain = new URL(finalUrl || '').hostname.toLowerCase().replace(/^www\./, '') || null; } catch { /* invalid URL */ }
   return {
     id: product.id,
     title: product.title || 'Sản phẩm chưa có tên',
@@ -220,7 +233,15 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
     },
     health: {
       link: product.linkHealthStatus || null,
+      affiliate: product.affiliateHealthStatus || null,
       image: product.imageHealthStatus || null,
+      productUrlValid: goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || '')),
+      affiliateUrlValid: goodHealth.has(String(product.affiliateHealthStatus || '')) && product.publicBlockReasons?.includes('affiliate_url_unhealthy') !== true,
+      finalDomain,
+      productUrlHttpStatus: product.productUrlHttpStatus ?? null,
+      affiliateUrlHttpStatus: product.affiliateUrlHttpStatus ?? null,
+      productUrlError: product.productUrlErrorCode || product.productUrlHealthReason || null,
+      affiliateUrlError: product.affiliateUrlErrorCode || product.affiliateUrlHealthReason || product.affiliateLinkErrors || null,
     },
   };
 }
@@ -272,7 +293,10 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
   sortItems(filtered, query.sort);
   const realKinds = new Set<ProductKind>(['product', 'deal']);
   const blocked = filtered.filter((item) => item.safePublishStatus === 'blocked').length;
-  const brokenLinks = filtered.filter((item) => item.health.link && BROKEN.has(item.health.link)).length;
+  const brokenLinks = filtered.filter((item) =>
+    (item.health.link && BROKEN.has(item.health.link))
+    || (item.health.affiliate && BROKEN.has(item.health.affiliate)),
+  ).length;
   const brokenImages = filtered.filter((item) => item.health.image && BROKEN.has(item.health.image)).length;
   const summary: DashboardProductSummary = {
     totalItems: filtered.length,

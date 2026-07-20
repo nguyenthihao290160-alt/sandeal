@@ -63,10 +63,24 @@ function Badge({ children, tone = 'neutral' }: { children: React.ReactNode; tone
   return <span className={`${styles.badge} ${styles[tone]}`}>{children}</span>;
 }
 
+function UrlHealth({ item }: { item: DashboardProductItem }) {
+  const productDetail = item.health.productUrlError || (item.health.productUrlHttpStatus ? `HTTP ${item.health.productUrlHttpStatus}` : undefined);
+  const affiliateDetail = item.health.affiliateUrlError || (item.health.affiliateUrlHttpStatus ? `HTTP ${item.health.affiliateUrlHttpStatus}` : undefined);
+  return (
+    <div className={styles.urlHealth}>
+      <span title={productDetail}>Link gốc: <strong data-valid={item.health.productUrlValid}>{item.health.productUrlValid ? 'hợp lệ' : 'không hợp lệ'}</strong></span>
+      <span title={affiliateDetail}>Affiliate: <strong data-valid={item.health.affiliateUrlValid}>{item.health.affiliateUrlValid ? 'hợp lệ' : 'không hợp lệ'}</strong></span>
+      <span>Đích: <strong>{item.health.finalDomain || 'chưa xác định'}</strong></span>
+      {!item.health.affiliateUrlValid && affiliateDetail && <span className={styles.urlError}>{affiliateDetail}</span>}
+    </div>
+  );
+}
+
 function ProductActions({ item, busy, onAction }: { item: DashboardProductItem; busy: string | null; onAction: (action: 'approve' | 'archive', item: DashboardProductItem) => void }) {
   const disabled = busy !== null;
   return (
     <div className={styles.rowActions}>
+      <UrlHealth item={item} />
       <Link href={`/dashboard/products/${item.id}`} className={styles.textButton}>Xem chi tiết</Link>
       {item.status !== 'approved' && item.status !== 'published' && item.status !== 'archived' && (
         <button type="button" className={styles.textButton} disabled={disabled || item.safePublishStatus === 'blocked'} title={item.safePublishStatus === 'blocked' ? item.publish.message : 'Tạo yêu cầu Safe Publish'} onClick={() => onAction('approve', item)}>

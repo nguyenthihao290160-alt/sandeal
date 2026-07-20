@@ -106,39 +106,31 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
   // V2: Product Health Check Tests
   // ============================================================
 
-  await test('V2-01. HEAD timeout, GET 200 => link ok', async () => {
+  await test('V2-01. GET 200 đọc body trong một request authoritative', async () => {
     let callCount = 0;
     global.fetch = async (url, opts) => {
       callCount++;
-      if (opts && opts.method === 'HEAD') {
-        const e = new Error('timeout'); e.name = 'TimeoutError'; throw e;
-      }
+      equal(opts && opts.method, 'GET');
       return new Response('<html>OK</html>', { status: 200, headers: { 'content-type': 'text/html' } });
     };
     const result = await health.checkLinkHealth('https://shop.test/v2-timeout');
     equal(result.status, 'ok');
     equal(result.ok, true);
-    assert(callCount >= 2, 'Should have made HEAD then GET');
+    equal(callCount, 1);
   });
 
-  await test('V2-02. HEAD 403, GET 200 => link ok', async () => {
-    global.fetch = async (url, opts) => {
-      if (opts && opts.method === 'HEAD') return new Response('', { status: 403 });
-      return new Response('<html>OK</html>', { status: 200, headers: { 'content-type': 'text/html' } });
-    };
+  await test('V2-02. GET 403 => not_allowed', async () => {
+    global.fetch = async () => new Response('', { status: 403 });
     const result = await health.checkLinkHealth('https://shop.test/v2-403');
-    equal(result.status, 'ok');
-    equal(result.ok, true);
+    equal(result.status, 'not_allowed');
+    equal(result.ok, false);
   });
 
-  await test('V2-03. HEAD 405, GET 200 => link ok', async () => {
-    global.fetch = async (url, opts) => {
-      if (opts && opts.method === 'HEAD') return new Response('', { status: 405 });
-      return new Response('<html>OK</html>', { status: 200, headers: { 'content-type': 'text/html' } });
-    };
+  await test('V2-03. GET 405 => not_allowed', async () => {
+    global.fetch = async () => new Response('', { status: 405 });
     const result = await health.checkLinkHealth('https://shop.test/v2-405');
-    equal(result.status, 'ok');
-    equal(result.ok, true);
+    equal(result.status, 'not_allowed');
+    equal(result.ok, false);
   });
 
   await test('V2-04. GET 404 => broken', async () => {
@@ -421,8 +413,8 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     equal(result.errorCode, 'local_only'); equal((await geminiPool.getGeminiPoolState()).state, 'LOCAL_ONLY');
   });
 
-  await test('V4-10. HEAD 429/500 đều fallback GET 200', async () => {
-    for (const status of [429, 500]) { let calls = 0; global.fetch = async () => ++calls === 1 ? new Response('', { status }) : new Response('', { status: 200, headers: { 'content-type': 'text/html' } }); const result = await health.checkLinkHealth(`https://fallback-${status}.test/p`); equal(result.ok, true); equal(calls, 2); }
+  await test('V4-10. GET 429/500 được phân loại retryable trong một request', async () => {
+    for (const status of [429, 500]) { let calls = 0; global.fetch = async () => { calls += 1; return new Response('', { status }); }; const result = await health.checkLinkHealth(`https://fallback-${status}.test/p`); equal(result.ok, false); equal(result.retryable, true); equal(result.status, status === 429 ? 'rate_limited' : 'server_error'); equal(calls, 1); }
   });
 
   await test('V4-11. redirect sang private IP bị SSRF chặn', async () => {

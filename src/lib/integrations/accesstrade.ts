@@ -46,6 +46,9 @@ export interface NormalizedAccessTradeItem {
   originalUrl: string;
   canonicalProductUrl?: string; // Decoded from affiliate deeplink if available
   affiliateUrl: string;
+  affiliateUrlSource?: 'provider_api' | 'none';
+  deepLinkSupported?: boolean;
+  affiliateLinkReason?: string;
   price: number;
   salePrice: number;
   category: string;
@@ -482,18 +485,8 @@ export function normalizeAccessTradeItem(
     'merchant_url',
   ]);
 
-  const affiliateUrl = getFirstText(item, [
-    'aff_link',
-    'affiliate_url',
-    'affiliateUrl',
-    'affiliate_link',
-    'affiliateLink',
-    'tracking_link',
-    'trackingLink',
-    'deep_link',
-    'deepLink',
-    'deeplink',
-  ]);
+  const affiliateResolution = resolveAccessTradeAffiliateUrl(item);
+  const affiliateUrl = affiliateResolution.affiliateUrl;
 
   const category = getFirstText(item, [
     'cate',
@@ -643,6 +636,9 @@ export function normalizeAccessTradeItem(
     originalUrl,
     canonicalProductUrl,
     affiliateUrl,
+    affiliateUrlSource: affiliateResolution.source,
+    deepLinkSupported: affiliateResolution.deepLinkSupported,
+    affiliateLinkReason: affiliateResolution.reason,
     price,
     salePrice,
     category,
@@ -658,6 +654,36 @@ export function normalizeAccessTradeItem(
     nonProductReason,
     qualityScore,
     rawData: item,
+  };
+}
+
+/**
+ * Only accepts a tracking/deep-link URL returned explicitly by AccessTrade.
+ * It intentionally never synthesizes a go.isclix.com/deep_link URL from a
+ * campaign id and product URL.
+ */
+export function resolveAccessTradeAffiliateUrl(
+    item: Record<string, unknown>,
+): { affiliateUrl: string; source: 'provider_api' | 'none'; deepLinkSupported: boolean; reason?: string } {
+  const trackingFields = [
+    'aff_link', 'affiliate_url', 'affiliateUrl', 'affiliate_link',
+    'affiliateLink', 'tracking_link', 'trackingLink', 'deep_link',
+    'deepLink', 'deeplink',
+  ];
+  const affiliateUrl = getFirstText(item as AccessTradeRawItem, trackingFields);
+  if (affiliateUrl && isValidHttpUrl(affiliateUrl)) {
+    const field = trackingFields.find((name) => getFirstText(item as AccessTradeRawItem, [name]) === affiliateUrl) || '';
+    return {
+      affiliateUrl,
+      source: 'provider_api',
+      deepLinkSupported: /deep/i.test(field) || /\/deep[_-]?link(?:\/|$)/i.test(new URL(affiliateUrl).pathname),
+    };
+  }
+  return {
+    affiliateUrl: '',
+    source: 'none',
+    deepLinkSupported: false,
+    reason: 'provider_deeplink_not_supported',
   };
 }
 
@@ -849,6 +875,9 @@ export function mapAccessTradeToProduct(
 
     originalUrl: item.originalUrl || undefined,
     affiliateUrl: item.affiliateUrl || undefined,
+    affiliateUrlSource: item.affiliateUrlSource,
+    deepLinkSupported: item.deepLinkSupported,
+    affiliateLinkReason: item.affiliateLinkReason,
     url: item.affiliateUrl || item.originalUrl || undefined,
 
     imageUrl: item.imageUrl || undefined,
@@ -887,6 +916,7 @@ export function mapAccessTradeToProduct(
     // Always keep imported records hidden at the integration boundary.
     // SourceScout is the only layer allowed to unhide after strict health checks.
     publicHidden: true,
+    publicBlocked: true,
     needsVerification: item.needsVerification,
     healthCheckRequired: isRealProduct,
 

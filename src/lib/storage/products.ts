@@ -103,6 +103,54 @@ function requestsPublicProductState(updates: Partial<Product>): boolean {
   return updates.status === 'published' || updates.publicHidden === false || updates.autoPublished === true;
 }
 
+function invalidateChangedUrlHealth(previous: Product, updates: Partial<Product>): Partial<Product> {
+  const productUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'originalUrl')
+    && updates.originalUrl !== previous.originalUrl;
+  const affiliateUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'affiliateUrl')
+    && updates.affiliateUrl !== previous.affiliateUrl;
+  if (!productUrlChanged && !affiliateUrlChanged) return updates;
+  const reasons = new Set(previous.publicBlockReasons || []);
+  if (productUrlChanged) reasons.add('product_url_unhealthy');
+  if (affiliateUrlChanged) reasons.add('affiliate_url_unhealthy');
+  const reason = productUrlChanged && affiliateUrlChanged
+    ? 'Product URL và affiliate URL đã thay đổi; bắt buộc kiểm tra lại.'
+    : productUrlChanged
+      ? 'Product URL đã thay đổi; bắt buộc kiểm tra lại.'
+      : 'Affiliate URL đã thay đổi; bắt buộc kiểm tra lại.';
+  return {
+    ...updates,
+    ...(productUrlChanged ? {
+      linkHealthStatus: 'unknown' as const,
+      linkLastCheckedAt: undefined,
+      productUrlHttpStatus: undefined,
+      productUrlFinalUrl: undefined,
+      productUrlFinalDomain: undefined,
+      productUrlHealthReason: reason,
+      productUrlErrorCode: 'URL_CHANGED_RECHECK_REQUIRED',
+      productUrlTimedOut: false,
+    } : {}),
+    ...(affiliateUrlChanged ? {
+      affiliateHealthStatus: 'unknown' as const,
+      affiliateLastCheckedAt: undefined,
+      affiliateUrlHttpStatus: undefined,
+      affiliateUrlFinalUrl: undefined,
+      affiliateUrlFinalDomain: undefined,
+      affiliateUrlHealthReason: reason,
+      affiliateUrlErrorCode: 'URL_CHANGED_RECHECK_REQUIRED',
+      affiliateUrlTimedOut: false,
+    } : {}),
+    status: previous.status === 'archived' ? 'archived' : 'needs_review',
+    publicHidden: true,
+    publicBlocked: true,
+    needsVerification: true,
+    autoPublishEligible: false,
+    publicDecision: previous.status === 'archived' ? previous.publicDecision : 'blocked',
+    publicBlockReason: reason,
+    publicBlockReasons: [...reasons],
+    unpublishedReason: reason,
+  };
+}
+
 export async function createProduct(data: CreateProductInput): Promise<Product> {
   if (requestsPublicProductState(data as Partial<Product>)) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
@@ -145,7 +193,8 @@ export async function saveCanonicalProduct(
     const alreadyPublic = products[index].status === 'published' && products[index].publicHidden === false;
     if (requestsPublicProductState(updates) && !alreadyPublic) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
     const now = new Date().toISOString();
-    const merged = { ...products[index], ...updates, id, updatedAt: now };
+    const guardedUpdates = invalidateChangedUrlHealth(products[index], updates);
+    const merged = { ...products[index], ...guardedUpdates, id, updatedAt: now };
     const before = JSON.stringify({ ...products[index], updatedAt: undefined });
     const after = JSON.stringify({ ...merged, updatedAt: undefined });
     if (before === after) return products[index];
@@ -180,7 +229,8 @@ export async function upsertCanonicalProduct(
       const staleReview = sourceChanged && products[index].reviewContent
         ? { ...products[index].reviewContent, reviewStatus: 'stale' as const }
         : products[index].reviewContent;
-      const merged = { ...products[index], ...draft, reviewContent: draft.reviewContent || staleReview, id: products[index].id, sourceHash: hash, contentHash: hash, updatedAt: now };
+      const guardedDraft = invalidateChangedUrlHealth(products[index], draft);
+      const merged = { ...products[index], ...guardedDraft, reviewContent: draft.reviewContent || staleReview, id: products[index].id, sourceHash: hash, contentHash: hash, updatedAt: now };
       products[index] = options.evaluate ? evaluateCanonicalProduct(merged, now) : normalizeCanonicalProduct(merged, now);
       await writeCollection(COLLECTION, products);
       return { product: products[index], created: false, unchanged: false };

@@ -42,6 +42,7 @@ export function evaluateSafePublish(product: Partial<Product>): SafePublishResul
   if (!validHttpUrl(imageUrl)) reasons.push('missing_image');
   if (!GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''))) reasons.push('product_url_unhealthy');
   if (!GOOD_HEALTH.has(String(product.affiliateHealthStatus || ''))) reasons.push('affiliate_url_unhealthy');
+  if (product.publicBlocked === true) reasons.push('public_blocked');
   if (!GOOD_HEALTH.has(String(product.imageHealthStatus || ''))) reasons.push('image_unhealthy');
   if (product.sourceHealthCooldownUntil && Date.parse(product.sourceHealthCooldownUntil) > Date.now()) reasons.push('cooldown');
   if (product.autoPublishEligible !== true) reasons.push('auto_publish_ineligible');
@@ -89,6 +90,7 @@ export function applySafePublishDecision(product: Product, now = new Date().toIS
       status: 'published',
       publicDecision: 'published',
       publicHidden: false,
+      publicBlocked: false,
       publicBlockReason: undefined,
       publicBlockReasons: [],
       needsVerification: false,
@@ -103,6 +105,7 @@ export function applySafePublishDecision(product: Product, now = new Date().toIS
     status: 'needs_review',
     publicDecision: 'needs_review',
     publicHidden: true,
+    publicBlocked: true,
     publicBlockReason: evaluation.reasons.join(', '),
     publicBlockReasons: evaluation.reasons,
     needsVerification: true,

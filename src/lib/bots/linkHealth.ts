@@ -11,6 +11,7 @@ import {
   updateLinkHealth,
   incrementLinkFailureCount,
 } from '../storage/linkHealth';
+import { checkImageHealth, checkLinkHealth } from './productHealthCheck';
 
 export class LinkHealthBot {
   private ctx: BotContext;
@@ -83,6 +84,12 @@ export class LinkHealthBot {
   }
 
   private async checkUrl(url: string, isImage = false): Promise<LinkHealthStatus> {
+    const result = isImage ? await checkImageHealth(url) : await checkLinkHealth(url);
+    return result.status as LinkHealthStatus;
+  }
+
+  /** Retained only for compatibility evidence; active checks use the bounded body-aware checker above. */
+  private async legacyCheckUrl(url: string, isImage = false): Promise<LinkHealthStatus> {
     try {
       // Validate URL format
       const urlObj = new URL(url);

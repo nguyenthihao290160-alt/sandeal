@@ -118,6 +118,7 @@ type ProductRecord = Product &
   needsVerification?: boolean;
 
   publicHidden?: boolean;
+  publicBlocked?: boolean;
   archived?: boolean;
   deleted?: boolean;
   hidden?: boolean;
@@ -404,6 +405,7 @@ function hasUnsafeFlags(product: Product): boolean {
 
   return Boolean(
       p.publicHidden === true ||
+      p.publicBlocked === true ||
       p.archived === true ||
       p.deleted === true ||
       p.hidden === true ||

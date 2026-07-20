@@ -33,6 +33,8 @@ export interface LinkCheckResult {
   reason: string;
   statusCode?: number;
   finalUrl?: string;
+  errorCode?: string;
+  timedOut?: boolean;
   retryable?: boolean;
   retryAfter?: string;
 }
@@ -161,22 +163,7 @@ const BODY_ERROR_PATTERNS: Array<{ pattern: RegExp; status: LinkCheckStatus }> =
   { pattern: /\bblocked\b/i, status: 'forbidden' },
 ];
 
-/**
- * Domains where HEAD is typically unreliable — need GET to detect errors
- * in body (e.g. AccessTrade returns 200 but body contains "Not Allowed!").
- */
-const FORCE_GET_DOMAINS = [
-  'go.isclix.com',
-  'pub.accesstrade.vn',
-  'accesstrade.vn',
-];
-
-/**
- * Affiliate deeplink domains: returning HTML 200 without immediate redirect
- * is NORMAL — deeplinks need JavaScript to redirect. Only need 2xx/3xx
- * not 404/410/5xx for affiliate link to be ok.
- * Do NOT consider HTML response from these domains as "unverified".
- */
+/** Known AccessTrade redirect hosts; response-body errors still take precedence. */
 const AFFILIATE_DEEPLINK_DOMAINS = [
   'pub.accesstrade.vn',
   'go.isclix.com',
@@ -434,17 +421,6 @@ function imageMetadata(bytes: Uint8Array, contentType: string): { signatureValid
   return { signatureValid: false };
 }
 
-function shouldForceGet(url: string): boolean {
-  try {
-    const hostname = new URL(url).hostname.toLowerCase();
-    return FORCE_GET_DOMAINS.some(
-      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
-    );
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Read up to `maxBytes` from response body as text.
  * Avoid downloading entire large body.
@@ -491,7 +467,15 @@ function matchBodyError(body: string): { status: LinkCheckStatus; reason: string
  * Returns null if the error is NOT an SSRF block (should fall through to GET).
  * Returns a result if the error is SSRF or similar hard block.
  */
-function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: string; isSsrf: boolean } | null {
+function networkErrorCode(error: Error): string | undefined {
+  const direct = (error as Error & { code?: unknown }).code;
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const caused = cause && typeof cause === 'object' ? (cause as { code?: unknown }).code : undefined;
+  const value = typeof direct === 'string' ? direct : typeof caused === 'string' ? caused : undefined;
+  return value?.trim().slice(0, 80) || undefined;
+}
+
+function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: string; isSsrf: boolean; errorCode?: string; timedOut?: boolean } | null {
   if (!(error instanceof Error)) return null;
 
   if (error.message.includes('SSRF')) {
@@ -499,19 +483,26 @@ function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: 
   }
 
   if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-    return { status: 'timeout', reason: 'Request timeout', isSsrf: false };
+    return { status: 'timeout', reason: 'Request timeout', isSsrf: false, errorCode: 'TIMEOUT', timedOut: true };
   }
 
   const msg = error.message.toLowerCase();
-  if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound')) {
-    return { status: 'dns_error', reason: `DNS lỗi: ${error.message}`, isSsrf: false };
+  const errorCode = networkErrorCode(error);
+  if (msg.includes('getaddrinfo') || msg.includes('dns') || msg.includes('enotfound') || errorCode === 'ENOTFOUND') {
+    return { status: 'dns_error', reason: `DNS lỗi: ${error.message}`, isSsrf: false, errorCode: errorCode || 'DNS_ERROR' };
   }
 
   if (error.message.includes('Too many redirects')) {
     return { status: 'error', reason: 'Quá nhiều redirect', isSsrf: false };
   }
 
-  return { status: 'error', reason: `Network error: ${error.message}`, isSsrf: false };
+  const reset = errorCode === 'ECONNRESET' || msg.includes('socket hang up') || msg.includes('connection reset');
+  return {
+    status: 'error',
+    reason: reset ? 'Kết nối bị reset bởi upstream' : `Network error: ${error.message}`,
+    isSsrf: false,
+    errorCode: reset ? 'ECONNRESET' : errorCode || 'NETWORK_ERROR',
+  };
 }
 
 /**
@@ -584,14 +575,9 @@ function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResu
  * Check link health for product / affiliate URLs.
  *
  * V2 STRATEGY:
- * 1. HEAD is a probe only — if HEAD succeeds with 200, link is ok.
- * 2. If HEAD fails (timeout, error, 4xx, 5xx), ALWAYS fall through to GET
- *    (except SSRF/invalid URL which are hard blocks).
- * 3. GET is the authoritative check. Only GET 404/410 = broken.
- * 4. 401/403/405 = not_allowed (retryable), NOT broken.
- * 5. 429 = rate_limited (retryable).
- * 6. 5xx = server_error (retryable).
- * 7. timeout = timeout (retryable).
+ * GET is authoritative because a successful HEAD cannot reveal an upstream
+ * error page such as "Not Allowed!". Redirects are still followed manually
+ * and validated at every hop.
  */
 export async function checkLinkHealth(url: string, options: HealthCheckRequestOptions = {}): Promise<LinkCheckResult> {
   // Validate URL
@@ -613,47 +599,13 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
     return { status: 'error', ok: false, reason: 'URL parse error' };
   }
 
-  const forceGet = shouldForceGet(url);
-
   try {
-    // Step 1: HEAD request (probe only — skip if domain needs GET)
-    if (!forceGet) {
-      try {
-        const headResponse = await fetchSafeRedirects(url, 'HEAD', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('HEAD'), options);
-
-        if (headResponse.ok) {
-          // HEAD 200 — link is ok
-          return {
-            status: 'ok', ok: true, retryable: false,
-            reason: 'HEAD 200 OK',
-            statusCode: headResponse.status,
-            finalUrl: headResponse.url || url,
-          };
-        }
-
-        // HEAD returned definitive 404/410 — still try GET to confirm
-        // (some servers return wrong status for HEAD)
-        if (PERMANENTLY_DEAD_CODES.has(headResponse.status)) {
-          // Fall through to GET for confirmation
-        }
-
-        // All other HEAD errors: fall through to GET
-        // 401/403/405/429/5xx from HEAD may just mean server blocks HEAD
-      } catch (headError) {
-        const classified = classifyFetchError(headError);
-        if (classified?.isSsrf) {
-          return { status: 'forbidden', ok: false, reason: classified.reason };
-        }
-        // All other HEAD errors (timeout, DNS, network): fall through to GET
-      }
-    }
-
-    // Step 2: GET request (authoritative check)
+    // A single GET both verifies transport and inspects the short response body.
     const getResponse = await fetchSafeRedirects(url, 'GET', LINK_CHECK_TIMEOUT_MS, buildRequestHeaders('GET'), options);
 
     // Check HTTP status
     const statusResult = classifyGetResponse(getResponse.status, retryAfterIso(getResponse.headers.get('retry-after')));
-    if (statusResult) return statusResult;
+    if (statusResult) return { ...statusResult, finalUrl: getResponse.url || url };
 
     // Response is 2xx or 3xx — read limited body to check for error content
     const body = await readLimitedBody(getResponse, MAX_BODY_BYTES);
@@ -684,6 +636,9 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
         ok: false,
         retryable: !classified.isSsrf,
         reason: classified.reason,
+        finalUrl: url,
+        errorCode: classified.errorCode,
+        timedOut: classified.timedOut,
       };
     }
     return { status: 'unknown', ok: false, retryable: true, reason: 'Lỗi không xác định' };
@@ -1111,7 +1066,7 @@ async function checkAffiliateVerification(
   try {
     const isDeeplinkDomain = isAffiliateDeeplyinkDomain(affiliateUrl);
 
-    const response = await fetchSafeRedirects(affiliateUrl, 'HEAD', 3000, buildRequestHeaders('HEAD'));
+    const response = await fetchSafeRedirects(affiliateUrl, 'GET', 3000, buildRequestHeaders('GET'));
 
     // 404/410 = stale regardless of domain
     if (response.status === 404 || response.status === 410) {
@@ -1145,7 +1100,16 @@ async function checkAffiliateVerification(
       };
     }
 
-    // For affiliate deeplink domains: any 2xx/3xx is OK
+    const responseBody = await readLimitedBody(response, MAX_BODY_BYTES);
+    const bodyError = matchBodyError(responseBody);
+    if (bodyError) {
+      return {
+        status: 'unverified',
+        reason: bodyError.reason,
+      };
+    }
+
+    // For affiliate deeplink domains, a clean 2xx/3xx response can be accepted.
     // These domains redirect via JavaScript, not HTTP 30x
     if (isDeeplinkDomain) {
       if (response.ok || (response.status >= 200 && response.status < 400)) {

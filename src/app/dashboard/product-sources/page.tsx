@@ -8,6 +8,7 @@ import {
 import Link from 'next/link';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
 import type { Product, ProductKind } from '@/lib/types';
+import { pollScanJob, type ScanJobResult } from '@/lib/dashboard/scanPolling';
 
 // ---- Tab IDs ----
 const TABS = [
@@ -38,6 +39,9 @@ type AccessTradeItem = Record<string, unknown> & {
   imageUrl?: string;
   originalUrl?: string;
   affiliateUrl?: string;
+  affiliateUrlSource?: string;
+  deepLinkSupported?: boolean;
+  affiliateLinkReason?: string;
   url?: string;
   price?: number | string;
   salePrice?: number | string;
@@ -497,7 +501,9 @@ function getAtItemValidationIssues(item: AccessTradeItem): string[] {
     issues.push('Thiếu tên sản phẩm.');
   }
 
-  if (!isValidHttpUrl(item.affiliateUrl)) {
+  if (!isValidHttpUrl(item.affiliateUrl) && item.affiliateLinkReason === 'provider_deeplink_not_supported') {
+    issues.push('Nhà cung cấp không cho phép deep-link.');
+  } else if (!isValidHttpUrl(item.affiliateUrl)) {
     issues.push('Thiếu affiliate link hợp lệ.');
   }
 
@@ -776,6 +782,7 @@ export default function ProductSourcesPage() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [recentProducts, setRecentProducts] = useState<Product[]>([]);
   const [runningBot, setRunningBot] = useState(false);
+  const [scanResult, setScanResult] = useState<(ScanJobResult & { completedAt: string }) | null>(null);
 
   // AccessTrade state
   const [atKeyword, setAtKeyword] = useState('');
@@ -836,53 +843,41 @@ export default function ProductSourcesPage() {
 
 
 
-  const handleRunAutoPilot = async (
-      mode: 'source_scan' | 'full_safe_run' = 'source_scan',
-  ) => {
+  const handleProductHealthScan = async () => {
     setRunningBot(true);
 
     try {
-      const res = await fetch('/api/ai-bots', {
+      const res = await fetch('/api/automation/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mode,
-          source: 'all',
-          limit: 10,
-          costMode: 'safe_free',
-          safeMode: true,
-          freeOnly: true,
-          autoMode: true,
-          autoApprove: true,
-          autoPublish: true,
-          allowPaidAi: false,
+          type: 'RECHECK_PRODUCT_HEALTH',
+          payload: { limit: 100, healthTarget: 'all', trigger: 'dashboard' },
+          idempotencyKey: `dashboard-product-health:${Date.now()}`,
+          dryRun: false,
         }),
       });
-
-      const data = (await res
-          .json()
-          .catch(() => null)) as ApiEnvelope<unknown> | null;
-
-      if (!res.ok || (!data?.ok && !data?.success)) {
-        throw new Error(
-            data?.message ||
-            data?.error ||
-            `Không chạy được bot. HTTP ${res.status}`,
-        );
+      const data = await res.json().catch(() => null) as ApiEnvelope<Record<string, unknown>> | null;
+      const jobId = getString(data?.data?.id || data?.data?.jobId);
+      if (!res.ok || !data?.ok || !jobId) {
+        throw new Error(data?.message || data?.error || `Không tạo được tác vụ quét. HTTP ${res.status}`);
       }
-
+      showToast('info', 'Đã bắt đầu quét');
+      const job = await pollScanJob({ jobId });
+      if (job.status !== 'SUCCEEDED') {
+        throw new Error(job.lastErrorMessage || job.lastErrorCode || `Tác vụ kết thúc với trạng thái ${job.status}.`);
+      }
+      const result = job.result || {};
+      setScanResult({ ...result, completedAt: new Date().toISOString() });
       showToast(
           'success',
-          mode === 'full_safe_run'
-              ? 'Đã khởi chạy chế độ tự động. Chỉ sản phẩm thật đạt chuẩn mới được đăng công khai.'
-              : 'Đã tạo tác vụ quét nguồn. Bot sẽ ưu tiên sản phẩm thật và giữ mã giảm giá, chiến dịch trong nội bộ.',
+          `Quét hoàn tất: đã kiểm tra ${result.checked || result.inspected || 0}, hợp lệ ${result.valid || 0}, bị chặn ${result.blocked || 0}, lỗi ${result.failed || 0}.`,
       );
-
       await loadRecent();
     } catch (err) {
       showToast(
           'error',
-          err instanceof Error ? err.message : 'Không chạy được AutoPilot.',
+          err instanceof Error ? err.message : 'Không chạy được tác vụ quét.',
       );
     } finally {
       setRunningBot(false);
@@ -1016,6 +1011,7 @@ export default function ProductSourcesPage() {
           // Chỉ SourceScout + Product Health Guard mới được mở public.
           needsVerification: true,
           publicHidden: true,
+          publicBlocked: true,
           aiApproved: false,
           autoPublished: false,
           autoPublishEligible: false,
@@ -1023,6 +1019,9 @@ export default function ProductSourcesPage() {
 
           originalUrl,
           affiliateUrl,
+          affiliateUrlSource: getString(item.affiliateUrlSource) || 'none',
+          deepLinkSupported: item.deepLinkSupported === true,
+          affiliateLinkReason: getString(item.affiliateLinkReason) || undefined,
           url: affiliateUrl || originalUrl,
 
           imageUrl,
@@ -1209,7 +1208,7 @@ export default function ProductSourcesPage() {
                   type="button"
                   className="primary-button"
                   disabled={runningBot}
-                  onClick={() => void handleRunAutoPilot('source_scan')}
+                  onClick={() => void handleProductHealthScan()}
               >
                 {runningBot
                     ? 'Đang chạy...'
@@ -1219,8 +1218,8 @@ export default function ProductSourcesPage() {
               <button
                   type="button"
                   className="secondary-button"
-                  disabled={runningBot}
-                  onClick={() => void handleRunAutoPilot('full_safe_run')}
+                  disabled
+                  title="Chế độ tự động đã bị vô hiệu hóa theo chính sách an toàn."
               >
                 Chạy chế độ tự động
               </button>
@@ -1234,6 +1233,15 @@ export default function ProductSourcesPage() {
               </Link>
             </div>
           </div>
+
+          {scanResult && (
+              <div className="disclosure-banner" style={{ alignSelf: 'center', textAlign: 'left' }}>
+                <strong>Kết quả quét gần nhất:</strong>{' '}
+                đã kiểm tra {scanResult.checked || scanResult.inspected || 0}, hợp lệ {scanResult.valid || 0},
+                {' '}bị chặn {scanResult.blocked || 0}, lỗi {scanResult.failed || 0}.
+                {' '}Cập nhật {new Date(scanResult.completedAt).toLocaleString('vi-VN')}.
+              </div>
+          )}
 
           <div className="command-hero-panel">
             <div className="card" style={{ minWidth: 280 }}>
@@ -1551,7 +1559,7 @@ export default function ProductSourcesPage() {
                     <button
                         type="button"
                         className="btn btn-accent"
-                        onClick={() => void handleRunAutoPilot('source_scan')}
+                        onClick={() => void handleProductHealthScan()}
                         disabled={runningBot || !atConfigured}
                         title={!atConfigured ? 'Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : 'Tạo tác vụ quét nguồn an toàn'}
                     >

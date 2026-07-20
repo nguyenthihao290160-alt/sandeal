@@ -210,6 +210,39 @@ function latestTimestamp(values: Array<string | undefined>): string | undefined 
   return latest > 0 ? new Date(latest).toISOString() : undefined;
 }
 
+function finalDomain(value?: string): string | undefined {
+  try { return new URL(value || '').hostname.toLowerCase().replace(/^www\./, '') || undefined; } catch { return undefined; }
+}
+
+function urlContainsDomain(value: string | undefined, domain: string): boolean {
+  try {
+    const host = new URL(value || '').hostname.toLowerCase();
+    if (host === domain || host.endsWith(`.${domain}`)) return true;
+    for (const key of ['url', 'deeplink', 'target', 'destination', 'redirect']) {
+      const nested = new URL(value || '').searchParams.get(key);
+      if (nested && urlContainsDomain(nested, domain)) return true;
+    }
+  } catch { /* malformed URLs are handled by the health checker */ }
+  return false;
+}
+
+export function accessTradeAffiliateSupport(product: Partial<Product>): { supported: boolean; reason?: string } {
+  if (product.source !== 'accesstrade' && product.platform !== 'accesstrade') return { supported: true };
+  if (!product.affiliateUrl) return { supported: false, reason: 'Nhà cung cấp không trả về tracking URL/deep-link.' };
+  let legacySynthesized = false;
+  try {
+    const parsed = new URL(product.affiliateUrl);
+    legacySynthesized = parsed.hostname.toLowerCase() === 'go.isclix.com' && /\/deep[_-]?link(?:\/|$)/i.test(parsed.pathname);
+  } catch { /* malformed URL is rejected by the health checker */ }
+  if (legacySynthesized && product.affiliateUrlSource !== 'provider_api' && product.deepLinkSupported !== true) {
+    return { supported: false, reason: 'Nhà cung cấp không cho phép deep-link.' };
+  }
+  if (product.affiliateLinkReason === 'provider_deeplink_not_supported') {
+    return { supported: false, reason: 'Nhà cung cấp không cho phép deep-link.' };
+  }
+  return { supported: true };
+}
+
 async function recheckHealth(job: AutomationJob) {
   const products = await selectedProducts(job.payload);
   const requestedTarget = stringValue(job.payload.healthTarget, 20);
@@ -227,17 +260,28 @@ async function recheckHealth(job: AutomationJob) {
       + Number(checkImages && Boolean(item.imageUrl)), 0),
     businessDataChanged: false,
   };
-  let checked = 0; let failed = 0; let circuitSkipped = 0; let fallbackImages = 0; let retryScheduled = 0; let externalRequests = 0;
+  let checked = 0; let valid = 0; let blocked = 0; let failed = 0; let quarantined = 0;
+  let circuitSkipped = 0; let fallbackImages = 0; let retryScheduled = 0; let externalRequests = 0;
   for (const product of products) {
     const updates: Partial<Product> = {};
     try {
       await assertJobMayContinue(job);
       const retryTimes: string[] = [];
       const failureReasons: string[] = [];
+      const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+      let productUrlHealthy = !checkLinks && goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || ''));
+      let affiliateUrlHealthy = !checkAffiliate && goodHealth.has(String(product.affiliateHealthStatus || ''));
       if (checkLinks && product.originalUrl) {
         const checkedLink = await checkLinkWithDomainCircuit(product.originalUrl);
         const result = checkedLink.result;
+        productUrlHealthy = result.ok;
         updates.linkHealthStatus = result.status as Product['linkHealthStatus']; updates.linkLastCheckedAt = new Date().toISOString();
+        updates.productUrlHttpStatus = result.statusCode;
+        updates.productUrlFinalUrl = result.finalUrl;
+        updates.productUrlFinalDomain = finalDomain(result.finalUrl || product.originalUrl);
+        updates.productUrlHealthReason = result.reason.slice(0, 500);
+        updates.productUrlErrorCode = result.errorCode;
+        updates.productUrlTimedOut = result.timedOut === true;
         if (!result.ok) {
           failed += 1;
           failureReasons.push(`link:${result.status}`);
@@ -246,21 +290,44 @@ async function recheckHealth(job: AutomationJob) {
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
         else externalRequests += 1;
         await assertJobMayContinue(job);
+      } else if (checkLinks) {
+        failed += 1;
+        updates.linkHealthStatus = 'error';
+        updates.linkLastCheckedAt = new Date().toISOString();
+        updates.productUrlHealthReason = 'Thiếu product URL hợp lệ.';
+        updates.productUrlErrorCode = 'MISSING_PRODUCT_URL';
+        failureReasons.push('link:error');
       }
       if (checkAffiliate && product.affiliateUrl) {
         const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl);
         const result = checkedLink.result;
-        updates.affiliateHealthStatus = result.status as Product['affiliateHealthStatus'];
+        const support = accessTradeAffiliateSupport(product);
+        affiliateUrlHealthy = result.ok && support.supported;
+        updates.affiliateHealthStatus = (affiliateUrlHealthy ? result.status : support.supported ? result.status : 'not_allowed') as Product['affiliateHealthStatus'];
         updates.affiliateLastCheckedAt = new Date().toISOString();
-        updates.affiliateLinkErrors = result.ok ? undefined : result.reason.slice(0, 500);
-        if (!result.ok) {
+        updates.affiliateUrlHttpStatus = result.statusCode;
+        updates.affiliateUrlFinalUrl = result.finalUrl;
+        updates.affiliateUrlFinalDomain = finalDomain(result.finalUrl || product.affiliateUrl);
+        updates.affiliateUrlHealthReason = (support.reason || result.reason).slice(0, 500);
+        updates.affiliateUrlErrorCode = support.supported ? result.errorCode : 'DEEPLINK_NOT_SUPPORTED';
+        updates.affiliateUrlTimedOut = result.timedOut === true;
+        updates.affiliateLinkErrors = affiliateUrlHealthy ? undefined : (support.reason || result.reason).slice(0, 500);
+        if (!affiliateUrlHealthy) {
           failed += 1;
-          failureReasons.push(`affiliate:${result.status}`);
+          failureReasons.push(`affiliate:${support.supported ? result.status : 'deeplink_not_supported'}`);
           if (result.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
         else externalRequests += 1;
         await assertJobMayContinue(job);
+      } else if (checkAffiliate) {
+        failed += 1;
+        updates.affiliateHealthStatus = 'error';
+        updates.affiliateLastCheckedAt = new Date().toISOString();
+        updates.affiliateUrlHealthReason = 'Nhà cung cấp không trả về tracking URL/deep-link.';
+        updates.affiliateUrlErrorCode = 'MISSING_AFFILIATE_URL';
+        updates.affiliateLinkErrors = 'Nhà cung cấp không trả về tracking URL/deep-link.';
+        failureReasons.push('affiliate:error');
       }
       if (checkImages && product.imageUrl) {
         const rawCandidates = Array.isArray((product as Product & { imageCandidates?: unknown[] }).imageCandidates)
@@ -286,6 +353,47 @@ async function recheckHealth(job: AutomationJob) {
         externalRequests += checkedImages.resolution.attempts;
         await assertJobMayContinue(job);
       }
+      const support = accessTradeAffiliateSupport(product);
+      if (!support.supported) affiliateUrlHealthy = false;
+      const isThirtyShine = urlContainsDomain(product.originalUrl, '30shinestore.com')
+        || urlContainsDomain(product.affiliateUrl, '30shinestore.com');
+      const urlBlockers = (product.publicBlockReasons || []).filter(reason => ![
+        'product_url_unhealthy', 'affiliate_url_unhealthy', 'merchant_quarantined_30shinestore',
+      ].includes(reason));
+      if (!productUrlHealthy) urlBlockers.push('product_url_unhealthy');
+      if (!affiliateUrlHealthy) urlBlockers.push('affiliate_url_unhealthy');
+      if (isThirtyShine) urlBlockers.push('merchant_quarantined_30shinestore');
+      const urlUnsafe = !productUrlHealthy || !affiliateUrlHealthy || isThirtyShine;
+      const urlReason = !support.supported
+        ? support.reason
+        : !productUrlHealthy
+          ? updates.productUrlHealthReason || 'Product URL không hợp lệ.'
+          : !affiliateUrlHealthy
+            ? updates.affiliateUrlHealthReason || 'Affiliate URL không hợp lệ.'
+            : isThirtyShine
+              ? 'Record 30shinestore được lưu trữ an toàn và không được Safe Publish.'
+              : undefined;
+      updates.publicBlockReasons = [...new Set(urlBlockers)];
+      updates.publicBlocked = urlUnsafe || urlBlockers.length > 0;
+      if (urlUnsafe) {
+        blocked += 1;
+        updates.publicHidden = true;
+        updates.needsVerification = true;
+        updates.autoPublishEligible = false;
+        updates.publicDecision = isThirtyShine ? 'archived' : 'blocked';
+        updates.publicBlockReason = urlReason;
+        updates.unpublishedReason = urlReason;
+      } else {
+        valid += 1;
+        updates.publicBlockReason = urlBlockers[0];
+      }
+      if (isThirtyShine) {
+        quarantined += 1;
+        updates.status = 'archived';
+        updates.lifecycleState = 'QUARANTINED';
+        updates.archivedReason = 'merchant_quarantined_30shinestore';
+        updates.quarantineReasons = [...new Set([...(product.quarantineReasons || []), 'merchant_quarantined_30shinestore'])];
+      }
       if (failureReasons.length) {
         updates.sourceHealthReason = failureReasons.join(',').slice(0, 500);
         const retryAt = latestTimestamp(retryTimes);
@@ -306,7 +414,11 @@ async function recheckHealth(job: AutomationJob) {
   }
   return {
     checked,
+    inspected: checked,
+    valid,
+    blocked,
     failed,
+    quarantined,
     circuitSkipped,
     fallbackImages,
     retryScheduled,
@@ -337,13 +449,20 @@ async function capturePrices(job: AutomationJob) {
 async function prepareDrafts(job: AutomationJob) {
   const products = await selectedProducts(job.payload);
   if (job.dryRun) return { preview: true, inspected: products.length, localTemplate: true, aiRequests: 0, businessDataChanged: false };
-  let created = 0;
+  const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+  let created = 0; let blockedByUrlHealth = 0;
   for (const product of products) {
     await assertJobMayContinue(job);
+    if (product.publicBlocked === true
+      || !goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || ''))
+      || !goodHealth.has(String(product.affiliateHealthStatus || ''))) {
+      blockedByUrlHealth += 1;
+      continue;
+    }
     await createLocalContentDraft(product.id, job.requestedBy);
     created += 1;
   }
-  return { inspected: products.length, created, provider: 'local', aiRequests: 0, businessDataChanged: created > 0 };
+  return { inspected: products.length, created, blockedByUrlHealth, provider: 'local', aiRequests: 0, businessDataChanged: created > 0 };
 }
 
 async function editorialChecks(job: AutomationJob) {

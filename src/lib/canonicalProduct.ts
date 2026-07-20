@@ -37,7 +37,7 @@ export function stableProductHash(product: Partial<Product>): string {
 
 export function normalizeCanonicalProduct(input: Partial<Product>, now = new Date().toISOString()): Product {
   const legacyPublished = input.status === 'published';
-  const safelyPublished = legacyPublished && input.publicHidden === false && input.needsVerification === false;
+  const safelyPublished = legacyPublished && input.publicHidden === false && input.needsVerification === false && input.publicBlocked !== true;
   const kind = VALID_KINDS.has(String(input.kind)) ? input.kind! : 'unknown';
   const status = VALID_STATUSES.has(String(input.status)) ? input.status! : 'needs_review';
   const reviewContent = normalizeReviewContent(input.reviewContent, input.sourceHash || input.contentHash || '');
@@ -66,6 +66,7 @@ export function normalizeCanonicalProduct(input: Partial<Product>, now = new Dat
     duplicateStatus: input.duplicateStatus || (input.duplicateGroupId ? 'POSSIBLE' : safelyPublished ? 'CLEAR' : 'UNRESOLVED'),
     claimValidationStatus: input.claimValidationStatus || 'MISSING_EVIDENCE',
     publicHidden: safelyPublished ? false : input.publicHidden !== false,
+    publicBlocked: safelyPublished ? false : input.publicBlocked === true,
     publicDecision: safelyPublished ? 'published' : (input.publicDecision || 'needs_review'),
     publicBlockReasons: Array.isArray(input.publicBlockReasons)
       ? [...new Set(input.publicBlockReasons.map(String).filter(Boolean))]
