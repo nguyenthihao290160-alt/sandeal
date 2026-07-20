@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
-import { BusinessOverview } from '@/components/dashboard/business-overview';
 import styles from './dashboard.module.css';
 
 type Range = 'today' | '7d' | '30d';
@@ -16,6 +15,7 @@ type RoleDiagnostic = { processStatus: string; activeRole: boolean; roleState: s
 type KeywordYield = { keyword: string; requests: number; found: number; valid: number; ready: number; published: number; noResult: number; timeout: number; rateLimited: number; costPerValidCandidate: number | null; lastUsedAt?: string; nextEligibleAt?: string };
 type DashboardData = {
   updatedAt: string; range: Range;
+  release: { buildId: string; releaseId: string; commitSha: string | null; runtimeReleaseId: string; releaseMismatch: boolean; releaseSource: string };
   kpis: { productsProcessed: number; running: number; waiting: number; waitingApproval: number; completionRate: number | null; systemErrors: number };
   activity: ActivityPoint[];
   sourcePerformance: Array<{ name: string; total: number; valid: number; rate: number }>;
@@ -25,14 +25,15 @@ type DashboardData = {
   aiUsage: { requests: number; requestLimit: number; tokens: number; tokenLimit: number; blocked: number; freeOnly: boolean };
   circuits: Array<{ provider: string; state: string }>;
   runtime: {
-    web: { status: string; checkedAt: string | null };
+    web: { status: string; checkedAt: string | null; buildAvailable?: boolean; buildId?: string | null; releaseMatchesBuild?: boolean | null };
+    storage: { status: string; checkedAt: string | null };
     worker: RoleDiagnostic;
     scheduler: RoleDiagnostic & { lastContenderState: string; rejectedOwner: string | null; rejectedAt: string | null; historicalErrorLabel: string | null; lastSuccessfulTickAt: string | null; nextRunAt: string | null };
     guardianCheckedAt: string | null; reasons: string[];
   };
   control: { mode: string; effectiveMode: string; publishPaused: boolean; ingestionPaused: boolean; workerPaused: boolean; schedulerPaused: boolean; killSwitch: boolean; launchEnabled: boolean; reason: string | null; safePublish: { state: string; reasons: string[] } };
   pipeline: { sourceRequests: number; sourceFound: number; candidateQueued: number; duplicateRejected: number; validationRejected: number; productCreated: number; productUpdated: number; publishEligible: number; publishBlocked: number; quarantined: number; failed: number; durationMs: number };
-  jobs: { productScan: JobDiagnostic | null; autoPilot: JobDiagnostic | null; runtimeGuardian: JobDiagnostic | null; latestError: JobDiagnostic | null };
+  jobs: { productScan: JobDiagnostic | null; productHealth: JobDiagnostic | null; autoPilot: JobDiagnostic | null; runtimeGuardian: JobDiagnostic | null; latestError: JobDiagnostic | null };
   providers: Array<{ id: string; status: string; configured: boolean | null; ready: boolean; degraded: boolean; checkedAt: string | null }>;
   business: { publicProducts: number; freshPrice: number; stalePrice: number; healthyAffiliateLinks: number; brokenLinks: number; outboundClicks: number; degradedProviders: string[] };
   inventory: {
@@ -293,31 +294,47 @@ export default function DashboardPage() {
 
   const maxQueue = useMemo(() => data ? Math.max(1, data.queue.PENDING || 0, data.queue.RUNNING || 0, data.queue.WAITING_APPROVAL || 0, data.queue.FAILED || 0, data.queue.BLOCKED || 0) : 1, [data]);
   const populatedKpis: Array<{ label: string; value: string | number; help: string; icon: DashboardIconName; tone: string }> = data ? [
-    { label: 'Sản phẩm đã xử lý', value: data.kpis.productsProcessed, help: 'Tổng sản phẩm trong kho dữ liệu', icon: 'product', tone: 'indigo' },
-    { label: 'Tác vụ đang chạy', value: data.kpis.running, help: 'Tác vụ đã được bộ xử lý nền nhận', icon: 'worker', tone: 'cyan' },
-    { label: 'Tác vụ đang chờ', value: data.kpis.waiting, help: 'Gồm chờ xử lý và chờ chạy lại', icon: 'queue', tone: 'amber' },
-    { label: 'Chờ phê duyệt', value: data.kpis.waitingApproval, help: 'Tác vụ rủi ro cao cần quản trị viên duyệt', icon: 'approval', tone: 'purple' },
-    { label: 'Tỷ lệ hoàn thành', value: data.kpis.completionRate === null ? 'Chưa đủ dữ liệu' : `${data.kpis.completionRate}%`, help: 'Tác vụ hoàn thành trên tổng tác vụ đã kết thúc', icon: 'check', tone: data.kpis.completionRate === null ? 'neutral' : 'green' },
-    { label: 'Lỗi hệ thống', value: data.kpis.systemErrors, help: 'Tác vụ thất bại trong hàng chờ', icon: 'warning', tone: 'red' },
+    { label: 'Tổng record', value: data.inventory.diagnostic.totalProductRecords, help: 'Tổng record sản phẩm trong FileStorage hiện tại', icon: 'product', tone: 'cyan' },
+    { label: 'Đủ điều kiện', value: data.inventory.diagnostic.readyForLaunchCount, help: 'Candidate vượt các cổng readiness hiện tại', icon: 'check', tone: 'green' },
+    { label: 'Đang bị block', value: data.inventory.diagnostic.publishBlockedCount, help: 'Record chưa đạt cổng publish', icon: 'warning', tone: 'red' },
+    { label: 'Quarantine', value: data.inventory.diagnostic.quarantineCount, help: 'Record được giữ lại nhưng khóa public', icon: 'security', tone: 'purple' },
+    { label: 'Job chạy / lỗi', value: `${data.kpis.running} / ${data.kpis.systemErrors}`, help: 'Job RUNNING và FAILED trong durable queue', icon: 'worker', tone: data.kpis.systemErrors ? 'red' : 'cyan' },
+    { label: 'Quota còn lại', value: Math.max(0, data.aiUsage.requestLimit - data.aiUsage.requests), help: 'Số request miễn phí còn lại theo quota đã ghi nhận', icon: 'analytics', tone: 'amber' },
   ] : [];
-  const zeroDataKpis: typeof populatedKpis = data ? [
-    { label: 'Sản phẩm', value: data.groups.dataReadiness.products, help: 'Dữ liệu sản phẩm hiện có', icon: 'product', tone: 'indigo' },
-    { label: 'Nguồn đang bật', value: data.groups.dataReadiness.enabledSources, help: 'Nguồn đã thiết lập server-side', icon: 'source', tone: 'cyan' },
-    { label: 'Tác vụ đang chờ', value: data.kpis.waiting, help: 'Gồm queue và manual input', icon: 'queue', tone: 'amber' },
-    { label: 'Bước bị chặn', value: data.onboarding.summary.blocked, help: 'Cần hoàn tất bước phụ thuộc trước', icon: 'warning', tone: 'red' },
+  const kpis = populatedKpis;
+  const systemItems = data ? [
+    { label: 'Web app', status: data.runtime.web.status, detail: data.runtime.web.checkedAt },
+    { label: 'Worker', status: data.worker.status, detail: data.worker.heartbeatAt },
+    { label: 'Scheduler', status: data.scheduler.status, detail: data.scheduler.lastRunAt },
+    { label: 'FileStorage', status: data.runtime.storage.status, detail: data.runtime.storage.checkedAt },
+    { label: 'AccessTrade', status: data.providers.find(item => item.id.toLowerCase() === 'accesstrade')?.status || 'unverified', detail: data.providers.find(item => item.id.toLowerCase() === 'accesstrade')?.checkedAt || null },
+    { label: 'Product Health Scanner', status: data.jobs.productHealth?.status || 'unverified', detail: data.jobs.productHealth?.updatedAt || null },
   ] : [];
-  const kpis = data?.zeroData ? zeroDataKpis : populatedKpis;
+  const workItems = data ? [
+    data.release.releaseMismatch ? { severity: 'critical', text: 'Release env không khớp build đang chạy.', href: '/dashboard/app-health' } : null,
+    data.scheduler.status === 'stale' ? { severity: 'critical', text: 'Scheduler mất tín hiệu hoặc quá hạn lần chạy.', href: '/dashboard/automation' } : null,
+    data.jobs.latestError ? { severity: 'critical', text: `Job gần nhất lỗi: ${data.jobs.latestError.lastErrorCode || data.jobs.latestError.status}.`, href: '/dashboard/ai-bots' } : null,
+    data.business.degradedProviders.length ? { severity: 'warning', text: `Provider suy giảm: ${data.business.degradedProviders.join(', ')}.`, href: '/dashboard/app-health' } : null,
+    data.business.brokenLinks ? { severity: 'warning', text: `${data.business.brokenLinks} record có link lỗi.`, href: '/dashboard/products?pipelineStage=blocked' } : null,
+    data.inventory.diagnostic.quarantineCount ? { severity: 'warning', text: `${data.inventory.diagnostic.quarantineCount} record đang quarantine.`, href: '/dashboard/products?pipelineStage=blocked' } : null,
+    data.kpis.waitingApproval ? { severity: 'attention', text: `${data.kpis.waitingApproval} job chờ phê duyệt.`, href: '/dashboard/queue' } : null,
+  ].filter((item): item is { severity: string; text: string; href: string } => item !== null) : [];
+  const systemDegraded = Boolean(data && (data.control.killSwitch || data.runtime.reasons.length > 0
+    || ['stale', 'missing', 'crashed', 'unverified'].includes(data.worker.status)
+    || ['stale', 'missing', 'crashed', 'unverified'].includes(data.scheduler.status)));
+  const modeLabel = data ? (MODE_LABELS[data.control.effectiveMode] || data.control.effectiveMode) : 'Đang kiểm tra';
 
   return <div className={styles.page} aria-busy={loading}>
     {toast && <div className={styles.toast} role="status"><span>{toast}</span><button type="button" onClick={() => setToast('')} aria-label="Đóng thông báo">×</button></div>}
-    <header className={styles.header}><div><div className={styles.headerStatus}><span className={data?.control.killSwitch ? styles.dangerDot : styles.okDot} />{data?.control.killSwitch ? 'Dừng khẩn cấp đang bật' : data ? 'Hệ thống sẵn sàng' : 'Đang kiểm tra'}</div><h1>Bảng điều khiển</h1><p>Theo dõi hoạt động bot, tác vụ, nguồn dữ liệu và tình trạng hệ thống.</p>{data && <div className={styles.updated}>Cập nhật gần nhất: {new Date(data.updatedAt).toLocaleString('vi-VN')}</div>}</div><div className={styles.headerActions}><label><span>Khoảng thời gian</span><select value={range} onChange={event => setRange(event.target.value as Range)}><option value="today">Hôm nay</option><option value="7d">7 ngày</option><option value="30d">30 ngày</option></select></label><button type="button" onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />{loading ? 'Đang làm mới' : 'Làm mới'}</button></div></header>
+    <header className={styles.header}><div><div className={styles.headerStatus}><span className={systemDegraded ? styles.dangerDot : styles.okDot} />{systemDegraded ? 'Có tín hiệu cần xử lý' : data ? 'Không có cảnh báo runtime hiện tại' : 'Đang kiểm tra'}</div><h1>Trung tâm điều hành</h1><p>Operational truth của sản phẩm, job và runtime trong một màn hình.</p>{data && <div className={styles.headerMeta}><span>Mode: <strong>{modeLabel}</strong></span><span>Release: <code>{(data.release.commitSha || data.release.buildId).slice(0, 12)}</code></span><span>Làm mới: {new Date(data.updatedAt).toLocaleString('vi-VN')}</span></div>}</div><div className={styles.headerActions}><label><span>Khoảng thời gian</span><select value={range} onChange={event => setRange(event.target.value as Range)}><option value="today">Hôm nay</option><option value="7d">7 ngày</option><option value="30d">30 ngày</option></select></label><button type="button" onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />{loading ? 'Đang làm mới' : 'Làm mới'}</button><Link href="/dashboard/product-sources">Quét & kiểm tra</Link></div></header>
     {error && <section className={styles.error}><h2>Không thể tải bảng điều khiển</h2><p>{error} Dữ liệu hiện tại không bị thay đổi.</p><button type="button" onClick={() => void load()}>Thử lại</button></section>}
     {loading && !data && <div className={styles.skeleton}><span /><span /><span /></div>}
-    {data && !data.zeroData && <BusinessOverview />}
+    {pendingControl && <section className={styles.inlineConfirm} role="alertdialog" aria-labelledby="control-title"><div><h2 id="control-title">{pendingControl.title}</h2><p>Thao tác thay đổi trạng thái vận hành và được ghi audit. Nhập lý do tối thiểu 8 ký tự.</p></div><label><span>Lý do</span><textarea autoFocus rows={2} value={reason} onChange={event => setReason(event.target.value)} /></label><div className={styles.modalActions}><button type="button" onClick={() => { setPendingControl(null); setReason(''); }} disabled={submitting}>Hủy</button><button type="button" className={pendingControl.danger ? styles.dangerButton : ''} onClick={() => void applyControl()} disabled={submitting || reason.trim().length < 8}>{submitting ? 'Đang cập nhật' : 'Xác nhận'}</button></div></section>}
     {data && <>
       <section className={styles.kpis} aria-label="Chỉ số chính">{kpis.map(item => <article key={item.label} className={styles[item.tone]} title={item.help}><div className={styles.kpiTop}><span className={styles.kpiIcon}><DashboardIcon name={item.icon} size={22} /></span><span>{item.label}</span></div><strong>{item.value}</strong><small>{item.help}</small></article>)}</section>
+      <section className={styles.operationsGrid} aria-label="Trạng thái hệ thống"><article className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="health" size={19} />Trạng thái hệ thống</h2><p>Chỉ đánh dấu tốt khi có heartbeat, probe hoặc snapshot thực.</p></div><Link href="/dashboard/app-health">Chi tiết</Link></div><div className={styles.systemGrid}>{systemItems.map(item => { const healthy = ['ready', 'active', 'healthy', 'SUCCEEDED'].includes(item.status); return <div key={item.label}><span className={healthy ? styles.statusHealthy : styles.statusAttention}>{healthy ? 'OK' : '!'}</span><span><strong>{item.label}</strong><small>{RUNTIME_LABELS[item.status] || STATUS_LABELS[item.status] || item.status} · {formatTime(item.detail)}</small></span></div>; })}</div></article><article className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="warning" size={19} />Việc cần xử lý</h2><p>Ưu tiên từ dữ liệu hiện tại, không tạo cảnh báo giả.</p></div><Link href="/dashboard/today">Mở danh sách việc</Link></div>{workItems.length ? <div className={styles.workList}>{workItems.slice(0, 6).map(item => <Link href={item.href} key={`${item.severity}:${item.text}`}><span className={styles[`severity${item.severity}`]}>{item.severity === 'critical' ? 'P0' : item.severity === 'warning' ? 'P1' : 'P2'}</span><span>{item.text}</span><DashboardIcon name="chevronRight" size={15} /></Link>)}</div> : <p className={styles.mutedText}>Không có việc khẩn cấp được suy ra từ snapshot hiện tại.</p>}</article></section>
       <section className={styles.onboarding} aria-labelledby="onboarding-title"><div className={styles.panelHeader}><div><h2 id="onboarding-title"><DashboardIcon name="today" size={19} />{data.onboarding.compact ? 'Việc nên làm tiếp theo' : 'Bắt đầu vận hành SanDeal'}</h2><p>{data.onboarding.summary.completed}/{data.onboarding.summary.total} bước đã hoàn thành, trạng thái được suy ra từ backend.</p></div><Link href="/dashboard/today">Xem việc hôm nay</Link></div><div className={styles.onboardingList}>{(data.onboarding.compact ? data.onboarding.recommendations : data.onboarding.steps).map(item => <article key={item.id} className={styles.onboardingStep}><div><span className={styles[`step${item.status}`]}>{item.status === 'COMPLETED' ? 'Hoàn thành' : item.status === 'IN_PROGRESS' ? 'Đang thực hiện' : item.status === 'BLOCKED' ? 'Bị chặn' : 'Chưa bắt đầu'}</span><h3>{item.title}</h3></div><p>{item.reason}</p>{hasCompletionCriteria(item) && <small>Hoàn thành khi: {item.completionCriteria}</small>}<Link href={item.route}>{item.cta}</Link></article>)}</div></section>
-      <OwnerDiagnostics data={data} selectedMode={selectedMode} setSelectedMode={setSelectedMode} openControl={setPendingControl} runDry={() => void createDryRun()} submitting={submitting} />
+      <details className={styles.advancedDiagnostics}><summary><span><DashboardIcon name="tools" size={18} />Chẩn đoán chuyên sâu và điều khiển</span><small>Mở khi cần xem funnel, lease, keyword và policy chi tiết.</small></summary><OwnerDiagnostics data={data} selectedMode={selectedMode} setSelectedMode={setSelectedMode} openControl={setPendingControl} runDry={() => void createDryRun()} submitting={submitting} /></details>
       {!data.zeroData && <>
       <section className={styles.mainGrid}><article className={`${styles.panel} ${styles.chartPanel}`}><div className={styles.panelHeader}><div><h2><DashboardIcon name="task" size={19} />Hoạt động xử lý theo thời gian</h2><p>Dữ liệu tác vụ thực tế trong khoảng đã chọn.</p></div></div>{data.activity.length ? <ActivityChart points={data.activity} /> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={24} /></span><h3>Chưa có hoạt động trong khoảng này</h3><p>Hãy tạo một tác vụ chạy thử an toàn để bắt đầu ghi nhận dữ liệu.</p><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Chạy thử an toàn</button></div>}</article>
         <aside className={styles.panel}><div className={styles.panelHeader}><div><h2>Hiệu suất nổi bật</h2><p>Nguồn sản phẩm theo dữ liệu hợp lệ.</p></div></div>{data.sourcePerformance.length ? <div className={styles.ranking}>{data.sourcePerformance.map(source => <div key={source.name}><div><strong>{source.name}</strong><span>{source.valid}/{source.total} hợp lệ</span></div><div className={styles.progress}><span style={{ width: `${source.rate}%` }} /></div><small>{source.rate}%</small></div>)}</div> : <div className={styles.emptySmall}>Chưa đủ dữ liệu để xếp hạng nguồn.</div>}</aside>
@@ -331,6 +348,5 @@ export default function DashboardPage() {
       <section className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="task" size={19} />Lịch sử hoạt động gần đây</h2><p>Tác vụ và kết quả đã được lưu bền vững.</p></div><Link href="/dashboard/ai-bots">Xem tất cả tác vụ</Link></div>{data.recentActivity.length ? <div className={styles.tableWrap}><table><thead><tr><th>Thời gian</th><th>Tác vụ</th><th>Người thực hiện</th><th>Kết quả</th><th>Mức rủi ro</th><th>Thời gian xử lý</th><th>Mã thao tác</th></tr></thead><tbody>{data.recentActivity.map(item => <tr key={item.id}><td>{new Date(item.updatedAt).toLocaleString('vi-VN')}</td><td>{TYPE_LABELS[item.type] || item.type}</td><td>{item.requestedBy === 'scheduler' ? 'Lịch tự động' : 'Quản trị viên'}</td><td>{STATUS_LABELS[item.status] || item.status}</td><td>{RISK_LABELS[item.riskLevel] || item.riskLevel}</td><td>{item.durationMs === null ? 'Chưa có' : `${Math.round(item.durationMs / 1000)} giây`}</td><td><code>{item.operationId}</code></td></tr>)}</tbody></table></div> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={24} /></span><h3>Chưa có lịch sử hoạt động</h3><p>Tạo một tác vụ chạy thử để xác minh hàng chờ và bắt đầu ghi nhận lịch sử.</p><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Tạo tác vụ chạy thử</button></div>}</section>
       </>}
     </>}
-    {pendingControl && <div className={styles.modalBackdrop}><section className={styles.modal} role="alertdialog" aria-modal="true" aria-labelledby="control-title"><h2 id="control-title">{pendingControl.title}</h2><p>Thao tác này thay đổi trạng thái vận hành và sẽ được ghi vào nhật ký kiểm soát.</p><label><span>Lý do</span><textarea autoFocus rows={3} value={reason} onChange={event => setReason(event.target.value)} /></label><div className={styles.modalActions}><button type="button" onClick={() => { setPendingControl(null); setReason(''); }} disabled={submitting}>Đóng</button><button type="button" className={pendingControl.danger ? styles.dangerButton : ''} onClick={() => void applyControl()} disabled={submitting || reason.trim().length < 8}>{submitting ? 'Đang cập nhật' : 'Xác nhận'}</button></div></section></div>}
   </div>;
 }

@@ -169,7 +169,7 @@ export default async function DealDetailPage({
                       target="_blank"
                       rel="sponsored noopener noreferrer"
                     >
-                      Xem tại nhà bán <PublicIcon name="external" size={16} />
+                      Xem giá tại {detail.sourceLabel} <PublicIcon name="external" size={16} />
                     </a>
                   ) : <span className={styles.warningBox}>Liên kết mua đang chờ xác minh lại.</span>}
                   <ComparisonToggle productId={detail.id} selectedIds={selectedComparisonIds} />
@@ -203,17 +203,17 @@ export default async function DealDetailPage({
                     <p>{review.reviewVerdict}</p>
                   </article>
                 ) : null}
-                {strengths.length > 0 ? (
-                  <article className={styles.contentCard}><h3>Điểm mạnh có bằng chứng</h3><ul className={styles.evidenceList}>{strengths.map((item) => <li key={item}>{item}</li>)}</ul></article>
-                ) : null}
-                {limitations.length > 0 ? (
-                  <article className={styles.contentCard}><h3>Hạn chế cần cân nhắc</h3><ul className={styles.evidenceList}>{limitations.map((item) => <li key={item}>{item}</li>)}</ul></article>
-                ) : null}
                 {review.suitableFor.length > 0 ? (
                   <article className={styles.contentCard}><h3>Phù hợp với ai</h3><ul className={styles.evidenceList}>{review.suitableFor.map((item) => <li key={item}>{item}</li>)}</ul></article>
                 ) : null}
                 {review.notSuitableFor.length > 0 ? (
                   <article className={styles.contentCard}><h3>Chưa phù hợp với ai</h3><ul className={styles.evidenceList}>{review.notSuitableFor.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {strengths.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Điểm mạnh có bằng chứng</h3><ul className={styles.evidenceList}>{strengths.map((item) => <li key={item}>{item}</li>)}</ul></article>
+                ) : null}
+                {limitations.length > 0 ? (
+                  <article className={styles.contentCard}><h3>Hạn chế cần cân nhắc</h3><ul className={styles.evidenceList}>{limitations.map((item) => <li key={item}>{item}</li>)}</ul></article>
                 ) : null}
                 {review.buyingConsiderations.length > 0 ? (
                   <article className={styles.contentCard}><h3>Lưu ý mua hàng</h3><ul className={styles.evidenceList}>{review.buyingConsiderations.map((item) => <li key={item}>{item}</li>)}</ul></article>

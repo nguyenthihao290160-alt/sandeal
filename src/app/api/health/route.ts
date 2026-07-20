@@ -1,4 +1,7 @@
 // ===========================================
+
+import { config } from '@/lib/config';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 // GET /api/health
 // Safe public health check for uptime monitoring
 // Does NOT trigger bots. Does NOT expose secrets.
@@ -21,14 +24,14 @@ export async function GET() {
 
   return Response.json({
     ok: true,
-    app: 'sandeal',
-    service: 'SanDeal / ReviewPilot AI',
+    ...getReleaseIdentity(),
+    service: 'SanDeal',
     environment,
     time: now.toISOString(),
     uptimeSeconds,
     safeMode: true,
     freeOnly: true,
-    autoPilot: true,
-    safePublish: true,
+    autoPilot: config.autoPublishEnabled,
+    safePublish: config.allowPublishingApi,
   });
 }

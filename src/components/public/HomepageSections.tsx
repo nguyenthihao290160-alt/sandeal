@@ -15,26 +15,18 @@ export function HeroSection({
   verifiedSourceCount: number;
   featuredProduct?: PublicDealCardData;
 }) {
-  const metrics: Array<{ icon: PublicIconName; title: string; detail: string }> = [
+  const metrics: Array<{ icon: PublicIconName; title: string }> = [
     {
       icon: 'shield',
       title: publicProductCount > 0 ? `${publicProductCount.toLocaleString('vi-VN')} sản phẩm đủ điều kiện` : 'Đang cập nhật sản phẩm',
-      detail: 'Chỉ hiển thị dữ liệu vượt qua cổng an toàn công khai.',
     },
     {
       icon: 'source',
       title: verifiedSourceCount > 0 ? `${verifiedSourceCount.toLocaleString('vi-VN')} nguồn đã xác minh` : 'Nguồn được ghi rõ',
-      detail: 'Mỗi sản phẩm cho biết nguồn và trạng thái xác minh hiện có.',
     },
     {
       icon: 'price',
-      title: 'Giá có thời điểm kiểm tra',
-      detail: 'Mức giá được xem như dữ liệu tham khảo, không phải cam kết của nhà bán.',
-    },
-    {
-      icon: 'compare',
-      title: 'So sánh theo dữ liệu có sẵn',
-      detail: 'Không tự điền thông số còn thiếu hoặc tạo nhận xét giả.',
+      title: 'Giá có mốc cập nhật',
     },
   ];
 
@@ -46,25 +38,24 @@ export function HeroSection({
         </div>
       ) : null}
       <div className={`${styles.container} ${styles.heroContent}`}>
-          <span className={styles.eyebrow}><PublicIcon name="shield" size={15} /> Deal và bằng chứng trong cùng một nơi</span>
-          <h1>Kiểm tra deal rõ ràng trước khi quyết định</h1>
+          <span className={styles.eyebrow}><PublicIcon name="shield" size={15} /> Giá, nguồn và bằng chứng trong cùng một nơi</span>
+          <h1>Kiểm tra giá và độ tin cậy trước khi mua</h1>
           <p className={styles.heroLead}>
-            SanDeal giúp bạn xem giá, nguồn, thời điểm cập nhật và lý do chấm điểm.
-            Thông tin còn thiếu được ghi rõ thay vì được suy đoán.
+            Tìm sản phẩm, xem giá, nguồn và thời điểm kiểm tra. Dữ liệu chưa đủ điều kiện được ghi rõ và không xuất hiện như một deal đã xác minh.
           </p>
           <div className={styles.heroActions}>
             <Link className={styles.primaryButton} href="/deals">
-              Khám phá deal <PublicIcon name="arrowRight" size={16} />
+              Tìm sản phẩm <PublicIcon name="arrowRight" size={16} />
             </Link>
-            <Link className={styles.secondaryButton} href="/review-methodology">
-              Cách SanDeal kiểm tra
+            <Link className={styles.secondaryButton} href="/deals?verifiedSource=true&sort=updated_desc">
+              Xem deal đã xác minh
             </Link>
           </div>
         <div className={styles.heroFacts} aria-label="Điểm tin cậy của SanDeal">
           {metrics.map((metric) => (
             <div className={styles.heroFact} key={metric.title}>
               <span className={styles.heroMetricIcon}><PublicIcon name={metric.icon} size={20} /></span>
-              <span><strong>{metric.title}</strong><small>{metric.detail}</small></span>
+              <span><strong>{metric.title}</strong></span>
             </div>
           ))}
         </div>

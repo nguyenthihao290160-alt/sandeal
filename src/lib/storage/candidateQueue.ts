@@ -14,6 +14,12 @@ export interface CandidatePayload {
   platform: Product['platform'];
   originalUrl: string;
   affiliateUrl: string;
+  affiliateUrlSource?: 'provider_api' | 'none';
+  affiliateUrlProvider?: 'accesstrade';
+  affiliateUrlSourceEndpoint?: 'datafeed' | 'offers';
+  affiliateUrlSourceField?: string;
+  affiliateUrlCampaignId?: string;
+  affiliateUrlFetchedAt?: string;
   imageUrl: string;
   imageCandidates?: string[];
   price?: number;

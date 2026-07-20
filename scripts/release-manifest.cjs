@@ -65,6 +65,8 @@ function create() {
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const commitSha = git('rev-parse', 'HEAD');
+  const buildId = fs.readFileSync(path.join(root, '.next', 'BUILD_ID'), 'utf8').trim();
+  if (!buildId) throw new Error('.next/BUILD_ID is empty.');
   const branch = git('branch', '--show-current');
   const sourceState = readSourceState();
   const sourceSuffix = sourceState.workingTreeDirty ? `-dirty-${sourceState.sourceChangesChecksum.slice(0, 12)}` : '';
@@ -77,7 +79,9 @@ function create() {
   const manifest = {
     format: 'sandeal-release-manifest-v1',
     releaseVersion: packageJson.version,
+    releaseId: commitSha,
     commitSha,
+    buildId,
     branch,
     sourceState,
     buildTimestamp: new Date().toISOString(),
@@ -88,9 +92,9 @@ function create() {
     migrations: [],
     migrationStatus: 'Khong yeu cau migration cho release nay.',
     environmentRequirements: {
-      web: ['NEXT_PUBLIC_SITE_URL', 'BASIC_AUTH_ENABLED', 'BASIC_AUTH_USER', 'BASIC_AUTH_PASSWORD', 'TOKEN_VAULT_SECRET_KEY'],
-      worker: ['SANDEAL_DATA_DIR', 'TZ'],
-      scheduler: ['SANDEAL_DATA_DIR', 'TZ'],
+      web: ['SANDEAL_RELEASE_ID', 'NEXT_PUBLIC_SITE_URL', 'BASIC_AUTH_ENABLED', 'BASIC_AUTH_USER', 'BASIC_AUTH_PASSWORD', 'TOKEN_VAULT_SECRET_KEY'],
+      worker: ['SANDEAL_RELEASE_ID', 'SANDEAL_DATA_DIR', 'TZ'],
+      scheduler: ['SANDEAL_RELEASE_ID', 'SANDEAL_DATA_DIR', 'TZ'],
       optionalProviders: ['GEMINI_API_KEY', 'ACCESS_TRADE_API_KEY'],
     },
     validation: { tests: 'passed', build: 'passed', typecheck: option('typecheck', 'passed'), secretScan: option('secret-scan', 'passed'), backupRestore: option('backup-restore', 'passed') },
@@ -113,9 +117,10 @@ function validate() {
   if (!fs.existsSync(manifestPath) || !fs.existsSync(checksumPath)) throw new Error('Thieu manifest hoac checksum manifest.');
   if (checksum(manifestPath) !== fs.readFileSync(checksumPath, 'utf8').trim()) throw new Error('Checksum manifest khong khop.');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  const required = ['releaseVersion', 'commitSha', 'branch', 'sourceState', 'buildTimestamp', 'nodeVersion', 'packageLockChecksum', 'artifact', 'storage', 'migrations', 'validation', 'knownLimitations'];
+  const required = ['releaseVersion', 'releaseId', 'commitSha', 'buildId', 'branch', 'sourceState', 'buildTimestamp', 'nodeVersion', 'packageLockChecksum', 'artifact', 'storage', 'migrations', 'validation', 'knownLimitations'];
   for (const key of required) if (manifest[key] === undefined || manifest[key] === '') throw new Error(`Manifest thieu ${key}.`);
   if (!/^[0-9a-f]{40}$/i.test(manifest.commitSha)) throw new Error('Commit SHA khong hop le.');
+  if (manifest.releaseId !== manifest.commitSha) throw new Error('Release identity khong khop commit SHA.');
   const currentSourceState = readSourceState();
   if (
     manifest.sourceState.workingTreeDirty !== currentSourceState.workingTreeDirty

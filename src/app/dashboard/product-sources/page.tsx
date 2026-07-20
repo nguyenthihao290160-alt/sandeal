@@ -864,16 +864,18 @@ export default function ProductSourcesPage() {
       }
       showToast('info', 'Đã bắt đầu quét');
       const job = await pollScanJob({ jobId });
+      const result = job.result || {};
+      setScanResult({ ...result, completedAt: new Date().toISOString() });
+      // A failed job may still have persisted earlier records. Always reload
+      // terminal truth instead of leaving the dashboard on its pre-scan data.
+      await loadRecent();
       if (job.status !== 'SUCCEEDED') {
         throw new Error(job.lastErrorMessage || job.lastErrorCode || `Tác vụ kết thúc với trạng thái ${job.status}.`);
       }
-      const result = job.result || {};
-      setScanResult({ ...result, completedAt: new Date().toISOString() });
       showToast(
           'success',
-          `Quét hoàn tất: đã kiểm tra ${result.checked || result.inspected || 0}, hợp lệ ${result.valid || 0}, bị chặn ${result.blocked || 0}, lỗi ${result.failed || 0}.`,
+          `Quét hoàn tất: ${result.processed || 0}/${result.total || 0} đã lưu, khỏe ${result.healthy || 0}, chưa khỏe ${result.unhealthy || 0}, quarantine ${result.quarantined || 0}, lỗi xử lý ${result.failed || 0}.`,
       );
-      await loadRecent();
     } catch (err) {
       showToast(
           'error',
@@ -1237,8 +1239,9 @@ export default function ProductSourcesPage() {
           {scanResult && (
               <div className="disclosure-banner" style={{ alignSelf: 'center', textAlign: 'left' }}>
                 <strong>Kết quả quét gần nhất:</strong>{' '}
-                đã kiểm tra {scanResult.checked || scanResult.inspected || 0}, hợp lệ {scanResult.valid || 0},
-                {' '}bị chặn {scanResult.blocked || 0}, lỗi {scanResult.failed || 0}.
+                đã lưu {scanResult.processed || 0}/{scanResult.total || 0}, khỏe {scanResult.healthy || 0},
+                {' '}chưa khỏe {scanResult.unhealthy || 0}, quarantine {scanResult.quarantined || 0},
+                {' '}không đổi {scanResult.unchanged || 0}, lỗi xử lý {scanResult.failed || 0}.
                 {' '}Cập nhật {new Date(scanResult.completedAt).toLocaleString('vi-VN')}.
               </div>
           )}
@@ -1561,9 +1564,9 @@ export default function ProductSourcesPage() {
                         className="btn btn-accent"
                         onClick={() => void handleProductHealthScan()}
                         disabled={runningBot || !atConfigured}
-                        title={!atConfigured ? 'Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : 'Tạo tác vụ quét nguồn an toàn'}
+                      title={!atConfigured ? 'Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : 'Kiểm tra lại link, ảnh và dữ liệu của sản phẩm đã lưu'}
                     >
-                      {runningBot ? 'Đang chạy...' : 'Cho bot quét sản phẩm thật'}
+                      {runningBot ? 'Đang chạy...' : 'Kiểm tra sản phẩm đã lưu'}
                     </button>
 
                     <Link href="/dashboard/products" className="btn btn-secondary">

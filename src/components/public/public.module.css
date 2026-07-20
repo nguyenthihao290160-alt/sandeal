@@ -292,10 +292,10 @@
   position: relative;
   isolation: isolate;
   display: flex;
-  min-height: min(620px, 65svh);
-  align-items: flex-end;
+  min-height: min(430px, 52svh);
+  align-items: center;
   overflow: hidden;
-  padding: 52px 0 42px;
+  padding: 38px 0 32px;
   background: #e9eef5;
 }
 
@@ -327,8 +327,8 @@
 
 .heroContent {
   display: grid;
-  gap: 20px;
-  align-content: end;
+  gap: 16px;
+  align-content: center;
 }
 
 .eyebrow {
@@ -348,8 +348,8 @@
   max-width: 780px;
   margin: 0;
   color: var(--public-text);
-  font-size: 3.65rem;
-  line-height: 1.02;
+  font-size: 3.35rem;
+  line-height: 1.05;
   letter-spacing: 0;
 }
 
@@ -373,7 +373,7 @@
 }
 
 .heroActions {
-  margin-top: 28px;
+  margin-top: 8px;
 }
 
 .primaryButton,
@@ -422,19 +422,19 @@
 
 .heroFacts {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
   max-width: 1120px;
-  padding-block: 14px;
+  padding-block: 10px;
   border-block: 1px solid rgba(49, 65, 88, 0.2);
 }
 
 .heroFact {
   display: flex;
   min-width: 0;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
-  padding: 4px 18px;
+  padding: 2px 18px;
   border-left: 1px solid rgba(49, 65, 88, 0.18);
 }
 

@@ -13,6 +13,7 @@ import { createAppHealthChecker } from '@/lib/bots/appHealth';
 import { getBotRunsStats } from '@/lib/storage/botRuns';
 import { getLinkHealthStats } from '@/lib/storage/linkHealth';
 import { getContentPackageStats } from '@/lib/storage/contentPackages';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 export const dynamic = 'force-dynamic';
 
@@ -37,6 +38,7 @@ export async function GET(request: NextRequest) {
     const contentStats = await getContentPackageStats();
 
     const health = {
+      release: getReleaseIdentity(),
       app: {
         name: config.appName,
         engine: config.engineName,

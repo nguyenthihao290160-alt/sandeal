@@ -3,6 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { buildAutomationDashboard } from '@/lib/automation/dashboard';
 import { getPrimaryCredential } from '@/lib/storage/tokenVault';
 import { getLatestRuntimeHealth, providerHealth } from '@/lib/automation/runtimeGuardian';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 export async function GET(request: NextRequest) {
   const authError = await requireAuth(request); if (authError) return authError;
@@ -20,6 +21,7 @@ export async function GET(request: NextRequest) {
       accessTrade: runtime?.providers.accessTrade || providerHealth({ configured: accessTradeConfigured, adapterAvailable: true }),
     };
     return NextResponse.json({ ok: true, code: 'OK', message: 'Đã kiểm tra hệ thống tự động hóa.', data: {
+      release: getReleaseIdentity(),
       web: runtime?.web || { status: 'alive', buildAvailable: process.env.NODE_ENV !== 'production', publicRouteHealthy: null },
       readiness: data.control.killSwitch || data.control.publishPaused ? 'paused' : runtime?.publishSafe === false ? 'degraded' : 'unverified',
       worker: data.worker, scheduler: data.scheduler,

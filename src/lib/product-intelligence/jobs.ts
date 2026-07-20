@@ -4,10 +4,13 @@ import type { Product } from '@/lib/types';
 import { getAllProducts, getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import {
   checkLinkHealth,
+  productImageValidationState,
   resolveHealthyImageCandidate,
   type ImageCandidateResolution,
   type LinkCheckResult,
 } from '@/lib/bots/productHealthCheck';
+import { ACCESS_TRADE_AFFILIATE_URL_FIELDS } from '@/lib/integrations/accesstrade';
+import { eligibilityBlockerMessage, evaluateProductEligibility } from '@/lib/productEligibility';
 import { getDomainCircuitDecision, recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import { applyImportBatch, escapeCsvCell, getImportBatch } from './importer';
@@ -229,6 +232,11 @@ function urlContainsDomain(value: string | undefined, domain: string): boolean {
 export function accessTradeAffiliateSupport(product: Partial<Product>): { supported: boolean; reason?: string } {
   if (product.source !== 'accesstrade' && product.platform !== 'accesstrade') return { supported: true };
   if (!product.affiliateUrl) return { supported: false, reason: 'Nhà cung cấp không trả về tracking URL/deep-link.' };
+  if (product.affiliateUrlSource !== 'provider_api'
+    || !product.affiliateUrlSourceField
+    || !(ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(product.affiliateUrlSourceField)) {
+    return { supported: false, reason: 'Affiliate URL AccessTrade không có provenance API/field trong allowlist.' };
+  }
   let legacySynthesized = false;
   try {
     const parsed = new URL(product.affiliateUrl);
@@ -243,16 +251,64 @@ export function accessTradeAffiliateSupport(product: Partial<Product>): { suppor
   return { supported: true };
 }
 
+function operationalHealthSignature(product: Partial<Product>): string {
+  return JSON.stringify({
+    linkHealthStatus: product.linkHealthStatus,
+    productUrlHttpStatus: product.productUrlHttpStatus,
+    productUrlFinalUrl: product.productUrlFinalUrl,
+    productUrlFinalDomain: product.productUrlFinalDomain,
+    productUrlErrorCode: product.productUrlErrorCode,
+    productUrlTimedOut: product.productUrlTimedOut,
+    affiliateHealthStatus: product.affiliateHealthStatus,
+    affiliateUrlHttpStatus: product.affiliateUrlHttpStatus,
+    affiliateUrlFinalUrl: product.affiliateUrlFinalUrl,
+    affiliateUrlFinalDomain: product.affiliateUrlFinalDomain,
+    affiliateUrlErrorCode: product.affiliateUrlErrorCode,
+    affiliateUrlTimedOut: product.affiliateUrlTimedOut,
+    imageUrl: product.imageUrl,
+    imageHealthStatus: product.imageHealthStatus,
+    imageValidationState: product.imageValidationState,
+    publicHidden: product.publicHidden,
+    publicBlocked: product.publicBlocked,
+    publicBlockReason: product.publicBlockReason,
+    publicBlockReasons: [...(product.publicBlockReasons || [])].sort(),
+    lifecycleState: product.lifecycleState,
+    status: product.status,
+  });
+}
+
+export class ProductHealthPersistenceError extends Error {
+  readonly code = 'STORAGE_ERROR';
+  constructor(readonly result: Record<string, unknown>) {
+    super('Product health persistence failed; terminal success is not allowed.');
+    this.name = 'ProductHealthPersistenceError';
+  }
+}
+
 async function recheckHealth(job: AutomationJob) {
+  const startedAt = Date.now();
   const products = await selectedProducts(job.payload);
   const requestedTarget = stringValue(job.payload.healthTarget, 20);
   const narrowedTarget = new Set(['link', 'affiliate', 'image']).has(requestedTarget);
   const checkLinks = !narrowedTarget || requestedTarget === 'link';
   const checkAffiliate = !narrowedTarget || requestedTarget === 'affiliate';
   const checkImages = !narrowedTarget || requestedTarget === 'image';
+  const total = products.length;
   if (job.dryRun) return {
     preview: true,
-    inspected: products.length,
+    total,
+    processed: 0,
+    healthy: 0,
+    unhealthy: 0,
+    quarantined: 0,
+    unchanged: 0,
+    skipped: total,
+    failed: 0,
+    durationMs: Date.now() - startedAt,
+    checked: 0,
+    inspected: total,
+    valid: 0,
+    blocked: 0,
     healthTarget: requestedTarget || 'all',
     estimatedRequests: products.reduce((sum, item) => sum
       + Number(checkLinks && Boolean(item.originalUrl))
@@ -260,8 +316,34 @@ async function recheckHealth(job: AutomationJob) {
       + Number(checkImages && Boolean(item.imageUrl)), 0),
     businessDataChanged: false,
   };
-  let checked = 0; let valid = 0; let blocked = 0; let failed = 0; let quarantined = 0;
+
+  let processed = 0; let healthy = 0; let unhealthy = 0; let failed = 0; let quarantined = 0; let unchanged = 0; const skipped = 0;
   let circuitSkipped = 0; let fallbackImages = 0; let retryScheduled = 0; let externalRequests = 0;
+  const persistenceErrors: string[] = [];
+
+  const resultSnapshot = () => ({
+    total,
+    processed,
+    healthy,
+    unhealthy,
+    quarantined,
+    unchanged,
+    skipped,
+    failed,
+    durationMs: Date.now() - startedAt,
+    checked: processed,
+    inspected: processed,
+    valid: healthy,
+    blocked: unhealthy,
+    circuitSkipped,
+    fallbackImages,
+    retryScheduled,
+    externalRequests,
+    healthTarget: requestedTarget || 'all',
+    persistenceErrors: persistenceErrors.slice(0, 20),
+    businessDataChanged: processed > unchanged,
+  });
+
   for (const product of products) {
     const updates: Partial<Product> = {};
     try {
@@ -269,66 +351,71 @@ async function recheckHealth(job: AutomationJob) {
       const retryTimes: string[] = [];
       const failureReasons: string[] = [];
       const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
-      let productUrlHealthy = !checkLinks && goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || ''));
       let affiliateUrlHealthy = !checkAffiliate && goodHealth.has(String(product.affiliateHealthStatus || ''));
+
       if (checkLinks && product.originalUrl) {
         const checkedLink = await checkLinkWithDomainCircuit(product.originalUrl);
-        const result = checkedLink.result;
-        productUrlHealthy = result.ok;
-        updates.linkHealthStatus = result.status as Product['linkHealthStatus']; updates.linkLastCheckedAt = new Date().toISOString();
-        updates.productUrlHttpStatus = result.statusCode;
-        updates.productUrlFinalUrl = result.finalUrl;
-        updates.productUrlFinalDomain = finalDomain(result.finalUrl || product.originalUrl);
-        updates.productUrlHealthReason = result.reason.slice(0, 500);
-        updates.productUrlErrorCode = result.errorCode;
-        updates.productUrlTimedOut = result.timedOut === true;
-        if (!result.ok) {
-          failed += 1;
-          failureReasons.push(`link:${result.status}`);
-          if (result.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
+        const linkResult = checkedLink.result;
+        updates.linkHealthStatus = linkResult.status as Product['linkHealthStatus'];
+        updates.linkLastCheckedAt = new Date().toISOString();
+        updates.productUrlHttpStatus = linkResult.statusCode;
+        updates.productUrlFinalUrl = linkResult.finalUrl;
+        updates.productUrlFinalDomain = finalDomain(linkResult.finalUrl || product.originalUrl);
+        updates.productUrlHealthReason = linkResult.reason.slice(0, 500);
+        updates.productUrlErrorCode = linkResult.errorCode;
+        updates.productUrlTimedOut = linkResult.timedOut === true;
+        if (!linkResult.ok) {
+          failureReasons.push(`link:${linkResult.status}`);
+          if (linkResult.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
         else externalRequests += 1;
         await assertJobMayContinue(job);
       } else if (checkLinks) {
-        failed += 1;
         updates.linkHealthStatus = 'error';
         updates.linkLastCheckedAt = new Date().toISOString();
         updates.productUrlHealthReason = 'Thiếu product URL hợp lệ.';
         updates.productUrlErrorCode = 'MISSING_PRODUCT_URL';
-        failureReasons.push('link:error');
+        updates.productUrlTimedOut = false;
+        failureReasons.push('link:missing');
       }
+
+      const support = accessTradeAffiliateSupport(product);
       if (checkAffiliate && product.affiliateUrl) {
         const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl);
-        const result = checkedLink.result;
-        const support = accessTradeAffiliateSupport(product);
-        affiliateUrlHealthy = result.ok && support.supported;
-        updates.affiliateHealthStatus = (affiliateUrlHealthy ? result.status : support.supported ? result.status : 'not_allowed') as Product['affiliateHealthStatus'];
+        const linkResult = checkedLink.result;
+        affiliateUrlHealthy = linkResult.ok && support.supported;
+        const affiliateReason = support.reason || linkResult.reason;
+        updates.affiliateHealthStatus = (affiliateUrlHealthy ? linkResult.status : support.supported ? linkResult.status : 'not_allowed') as Product['affiliateHealthStatus'];
         updates.affiliateLastCheckedAt = new Date().toISOString();
-        updates.affiliateUrlHttpStatus = result.statusCode;
-        updates.affiliateUrlFinalUrl = result.finalUrl;
-        updates.affiliateUrlFinalDomain = finalDomain(result.finalUrl || product.affiliateUrl);
-        updates.affiliateUrlHealthReason = (support.reason || result.reason).slice(0, 500);
-        updates.affiliateUrlErrorCode = support.supported ? result.errorCode : 'DEEPLINK_NOT_SUPPORTED';
-        updates.affiliateUrlTimedOut = result.timedOut === true;
-        updates.affiliateLinkErrors = affiliateUrlHealthy ? undefined : (support.reason || result.reason).slice(0, 500);
+        updates.affiliateUrlHttpStatus = linkResult.statusCode;
+        updates.affiliateUrlFinalUrl = linkResult.finalUrl;
+        updates.affiliateUrlFinalDomain = finalDomain(linkResult.finalUrl || product.affiliateUrl);
+        updates.affiliateUrlHealthReason = affiliateReason.slice(0, 500);
+        updates.affiliateUrlErrorCode = support.supported ? linkResult.errorCode : 'AFFILIATE_PROVENANCE_REQUIRED';
+        updates.affiliateUrlTimedOut = linkResult.timedOut === true;
+        updates.affiliateUrlVerifiedAt = affiliateUrlHealthy ? new Date().toISOString() : undefined;
+        updates.affiliateLinkErrors = affiliateUrlHealthy ? undefined : affiliateReason.slice(0, 500);
         if (!affiliateUrlHealthy) {
-          failed += 1;
-          failureReasons.push(`affiliate:${support.supported ? result.status : 'deeplink_not_supported'}`);
-          if (result.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
+          failureReasons.push(`affiliate:${support.supported ? linkResult.status : 'provenance_required'}`);
+          if (linkResult.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
         else externalRequests += 1;
         await assertJobMayContinue(job);
       } else if (checkAffiliate) {
-        failed += 1;
+        affiliateUrlHealthy = false;
         updates.affiliateHealthStatus = 'error';
         updates.affiliateLastCheckedAt = new Date().toISOString();
         updates.affiliateUrlHealthReason = 'Nhà cung cấp không trả về tracking URL/deep-link.';
         updates.affiliateUrlErrorCode = 'MISSING_AFFILIATE_URL';
+        updates.affiliateUrlTimedOut = false;
         updates.affiliateLinkErrors = 'Nhà cung cấp không trả về tracking URL/deep-link.';
-        failureReasons.push('affiliate:error');
+        failureReasons.push('affiliate:missing');
+      } else if (!support.supported) {
+        affiliateUrlHealthy = false;
       }
+
       if (checkImages && product.imageUrl) {
         const rawCandidates = Array.isArray((product as Product & { imageCandidates?: unknown[] }).imageCandidates)
           ? (product as Product & { imageCandidates?: unknown[] }).imageCandidates!.map(value => String(value || ''))
@@ -338,62 +425,74 @@ async function recheckHealth(job: AutomationJob) {
           ...rawCandidates,
           ...(product.gallery || []),
         ]);
-        const result = checkedImages.resolution.result;
-        updates.imageHealthStatus = (result.ok ? 'ok' : result.status) as Product['imageHealthStatus']; updates.imageLastCheckedAt = new Date().toISOString();
-        if (checkedImages.resolution.selectedUrl && checkedImages.resolution.selectedUrl !== product.imageUrl) {
+        const imageResult = checkedImages.resolution.result;
+        const fallbackUsed = Boolean(checkedImages.resolution.selectedUrl && checkedImages.resolution.selectedUrl !== product.imageUrl);
+        updates.imageHealthStatus = (imageResult.ok ? 'ok' : imageResult.status) as Product['imageHealthStatus'];
+        updates.imageLastCheckedAt = new Date().toISOString();
+        updates.imageValidationState = productImageValidationState(imageResult, fallbackUsed);
+        updates.imageContentType = imageResult.contentType;
+        updates.imageWidth = imageResult.width;
+        updates.imageHeight = imageResult.height;
+        updates.imageDimensionsVerified = imageResult.dimensionsVerified;
+        if (fallbackUsed && checkedImages.resolution.selectedUrl) {
           updates.imageUrl = checkedImages.resolution.selectedUrl;
           fallbackImages += 1;
         }
-        if (!result.ok) {
-          failed += 1;
-          failureReasons.push(`image:${result.status}`);
-          if (result.retryable && checkedImages.retryAt) retryTimes.push(checkedImages.retryAt);
+        if (!imageResult.ok) {
+          failureReasons.push(`image:${imageResult.status}`);
+          if (imageResult.retryable && checkedImages.retryAt) retryTimes.push(checkedImages.retryAt);
         }
         circuitSkipped += checkedImages.circuitSkipped;
         externalRequests += checkedImages.resolution.attempts;
         await assertJobMayContinue(job);
+      } else if (checkImages) {
+        updates.imageHealthStatus = 'error';
+        updates.imageLastCheckedAt = new Date().toISOString();
+        updates.imageValidationState = 'BROKEN';
+        failureReasons.push('image:missing');
       }
-      const support = accessTradeAffiliateSupport(product);
-      if (!support.supported) affiliateUrlHealthy = false;
+
       const isThirtyShine = urlContainsDomain(product.originalUrl, '30shinestore.com')
         || urlContainsDomain(product.affiliateUrl, '30shinestore.com');
-      const urlBlockers = (product.publicBlockReasons || []).filter(reason => ![
-        'product_url_unhealthy', 'affiliate_url_unhealthy', 'merchant_quarantined_30shinestore',
-      ].includes(reason));
-      if (!productUrlHealthy) urlBlockers.push('product_url_unhealthy');
-      if (!affiliateUrlHealthy) urlBlockers.push('affiliate_url_unhealthy');
-      if (isThirtyShine) urlBlockers.push('merchant_quarantined_30shinestore');
-      const urlUnsafe = !productUrlHealthy || !affiliateUrlHealthy || isThirtyShine;
-      const urlReason = !support.supported
-        ? support.reason
-        : !productUrlHealthy
-          ? updates.productUrlHealthReason || 'Product URL không hợp lệ.'
-          : !affiliateUrlHealthy
-            ? updates.affiliateUrlHealthReason || 'Affiliate URL không hợp lệ.'
-            : isThirtyShine
-              ? 'Record 30shinestore được lưu trữ an toàn và không được Safe Publish.'
-              : undefined;
-      updates.publicBlockReasons = [...new Set(urlBlockers)];
-      updates.publicBlocked = urlUnsafe || urlBlockers.length > 0;
-      if (urlUnsafe) {
-        blocked += 1;
+      const eligibility = evaluateProductEligibility({ ...product, ...updates }, Date.now());
+      const blockers = eligibility.criticalBlockers;
+      const operationalBlockers = blockers.filter(reason => ![
+        'auto_publish_ineligible', 'human_review_required', 'prohibited_product',
+      ].includes(reason) && !reason.startsWith('stored:'));
+      const healthUnsafe = operationalBlockers.length > 0;
+      const publishUnsafe = blockers.length > 0;
+      const healthReason = blockers.length ? blockers.map(eligibilityBlockerMessage).join(' · ').slice(0, 500) : undefined;
+
+      updates.eligibility = eligibility;
+      updates.reviewQuality = eligibility.reviewQuality;
+      updates.publicBlockReasons = blockers;
+      updates.publicBlocked = publishUnsafe;
+      updates.publicBlockReason = healthReason;
+      if (publishUnsafe) {
         updates.publicHidden = true;
         updates.needsVerification = true;
         updates.autoPublishEligible = false;
         updates.publicDecision = isThirtyShine ? 'archived' : 'blocked';
-        updates.publicBlockReason = urlReason;
-        updates.unpublishedReason = urlReason;
-      } else {
-        valid += 1;
-        updates.publicBlockReason = urlBlockers[0];
+        updates.unpublishedReason = healthReason;
+        if (healthUnsafe && !isThirtyShine && (product.status === 'published' || ['PUBLISHED', 'DEGRADED', 'RECHECKING'].includes(String(product.lifecycleState || '')))) {
+          const permanentFailure = ['broken', 'image_broken', 'invalid_image', 'placeholder'].some(status => [
+            updates.linkHealthStatus,
+            updates.affiliateHealthStatus,
+            updates.imageHealthStatus,
+          ].includes(status as Product['linkHealthStatus']));
+          updates.lifecycleState = permanentFailure ? 'CONFIRMED_BROKEN' : 'DEGRADED';
+          updates.lifecycleUpdatedAt = new Date().toISOString();
+        }
       }
+
       if (isThirtyShine) {
-        quarantined += 1;
         updates.status = 'archived';
         updates.lifecycleState = 'QUARANTINED';
+        updates.lifecycleUpdatedAt = new Date().toISOString();
         updates.archivedReason = 'merchant_quarantined_30shinestore';
         updates.quarantineReasons = [...new Set([...(product.quarantineReasons || []), 'merchant_quarantined_30shinestore'])];
       }
+
       if (failureReasons.length) {
         updates.sourceHealthReason = failureReasons.join(',').slice(0, 500);
         const retryAt = latestTimestamp(retryTimes);
@@ -401,31 +500,28 @@ async function recheckHealth(job: AutomationJob) {
           updates.sourceHealthCooldownUntil = retryAt;
           retryScheduled += 1;
         }
-      } else if (Object.keys(updates).length) {
+      } else {
         updates.sourceHealthReason = undefined;
         updates.sourceHealthCooldownUntil = undefined;
       }
-      if (Object.keys(updates).length) await saveCanonicalProduct(product.id, updates);
-      checked += 1;
+
+      const beforeSignature = operationalHealthSignature(product);
+      const persisted = await saveCanonicalProduct(product.id, updates);
+      if (!persisted) throw new Error(`STORAGE_ERROR: product ${product.id} disappeared before health persistence`);
+      if (operationalHealthSignature(persisted) === beforeSignature) unchanged += 1;
+      if (healthUnsafe) unhealthy += 1;
+      else healthy += 1;
+      if (isThirtyShine) quarantined += 1;
+      processed += 1;
     } catch (error) {
       if (isJobStop(error)) throw error;
       failed += 1;
+      persistenceErrors.push(`${product.id}:${error instanceof Error ? error.message : String(error)}`.slice(0, 500));
     }
   }
-  return {
-    checked,
-    inspected: checked,
-    valid,
-    blocked,
-    failed,
-    quarantined,
-    circuitSkipped,
-    fallbackImages,
-    retryScheduled,
-    externalRequests,
-    healthTarget: requestedTarget || 'all',
-    businessDataChanged: checked > 0,
-  };
+
+  if (failed > 0) throw new ProductHealthPersistenceError(resultSnapshot());
+  return resultSnapshot();
 }
 
 async function capturePrices(job: AutomationJob) {

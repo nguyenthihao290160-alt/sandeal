@@ -5,11 +5,12 @@ import { getDataDir, readCollection, runTransaction } from '@/lib/storage/adapte
 import { DEFAULT_CONTROL, getAllAutomationJobs, getAutomationControl, updateAutomationControl } from './store';
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases } from './runtimeRoles';
 import { applyAutomationErrorBudget } from './sloErrorBudget';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 const HEALTH_COLLECTION = 'runtime-health';
 export const RUNTIME_GUARDIAN_RULE_VERSION = 'runtime-guardian-v1';
 
-export type WebHealthStatus = 'alive' | 'ready' | 'unhealthy' | 'build_missing';
+export type WebHealthStatus = 'alive' | 'ready' | 'unhealthy' | 'build_missing' | 'build_mismatch';
 export type WorkerHealthStatus = 'active' | 'paused' | 'stale' | 'missing' | 'crashed' | 'unverified';
 export type SchedulerHealthStatus = 'active' | 'paused' | 'disabled' | 'stale' | 'missing' | 'crashed' | 'unverified';
 export type ProviderHealthStatus = 'not_configured' | 'configured' | 'adapter_unavailable' | 'ready' | 'degraded' | 'circuit_open' | 'rate_limited' | 'invalid_credential' | 'quota_exhausted' | 'last_check_failed';
@@ -18,7 +19,7 @@ export interface RuntimeHealthSnapshot {
   schemaVersion: number;
   id: string;
   ruleVersion: string;
-  web: { status: WebHealthStatus; buildAvailable: boolean; publicRouteHealthy: boolean | null };
+  web: { status: WebHealthStatus; buildAvailable: boolean; publicRouteHealthy: boolean | null; buildId: string | null; releaseId: string; releaseMatchesBuild: boolean | null };
   worker: { status: WorkerHealthStatus; holderId?: string; heartbeatAt?: string };
   scheduler: { status: SchedulerHealthStatus; holderId?: string; heartbeatAt?: string };
   providers: Record<string, ProviderHealthStatus>;
@@ -94,13 +95,24 @@ export async function runRuntimeGuardian(options: {
     listRuntimeRoleLeases().catch(() => []),
     listRecentRuntimeRoleConflicts(now - 2 * 60_000).catch(() => []),
   ]);
+  const release = getReleaseIdentity();
   let buildAvailable = false;
-  try { await fs.access(path.join(process.cwd(), '.next', 'BUILD_ID')); buildAvailable = true; } catch { /* development/test runtime */ }
+  let artifactBuildId: string | null = null;
+  try {
+    artifactBuildId = (await fs.readFile(path.join(process.cwd(), '.next', 'BUILD_ID'), 'utf8')).trim() || null;
+    buildAvailable = artifactBuildId !== null;
+  } catch { /* development/test runtime */ }
+  // BUILD_ID is opaque Next.js artifact identity. The Git release match is
+  // determined from the commit embedded at build time versus the runtime env.
+  const releaseMatchesBuild = process.env.NODE_ENV === 'production' && buildAvailable
+    ? Boolean(release.commitSha) && !release.releaseMismatch
+    : null;
   const workerLease = roles.find(item => item.role === 'WORKER');
   const schedulerLease = roles.find(item => item.role === 'SCHEDULER');
   const workerStatus = roleStatus({ role: 'WORKER', paused: control.workerPaused, lease: workerLease, controlHeartbeat: control.workerHeartbeatAt, now }) as WorkerHealthStatus;
   const schedulerStatus = roleStatus({ role: 'SCHEDULER', paused: control.schedulerPaused, enabled: options.schedulerEnabled, lease: schedulerLease, controlHeartbeat: control.schedulerHeartbeatAt, now }) as SchedulerHealthStatus;
   const webStatus: WebHealthStatus = !buildAvailable && process.env.NODE_ENV === 'production' ? 'build_missing'
+    : releaseMatchesBuild === false || release.releaseMismatch ? 'build_mismatch'
     : options.webAlive === false || options.publicRouteHealthy === false ? 'unhealthy'
       : options.webAlive === true && options.publicRouteHealthy === true ? 'ready' : 'alive';
   const staleJobs = jobs.filter(job => job.status === 'RUNNING' && (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= now)).length;
@@ -115,7 +127,7 @@ export async function runRuntimeGuardian(options: {
   const reasons: string[] = [];
   if (!['active', 'paused'].includes(workerStatus)) reasons.push(`WORKER_${workerStatus.toUpperCase()}`);
   if (!['active', 'paused', 'disabled'].includes(schedulerStatus)) reasons.push(`SCHEDULER_${schedulerStatus.toUpperCase()}`);
-  if (webStatus === 'unhealthy' || webStatus === 'build_missing') reasons.push(`WEB_${webStatus.toUpperCase()}`);
+  if (['unhealthy', 'build_missing', 'build_mismatch'].includes(webStatus)) reasons.push(`WEB_${webStatus.toUpperCase()}`);
   if (storage.status !== 'healthy') reasons.push(`STORAGE_${storage.status.toUpperCase()}`);
   if (staleJobs) reasons.push('STALE_JOB');
   if (stuck) reasons.push('QUEUE_STUCK');
@@ -125,7 +137,7 @@ export async function runRuntimeGuardian(options: {
   const publishSafe = reasons.length === 0;
   const snapshot: RuntimeHealthSnapshot = {
     schemaVersion: 1, id: `runtime-health:${Math.floor(now / 30_000)}`, ruleVersion: RUNTIME_GUARDIAN_RULE_VERSION,
-    web: { status: webStatus, buildAvailable, publicRouteHealthy: options.publicRouteHealthy ?? null },
+    web: { status: webStatus, buildAvailable, publicRouteHealthy: options.publicRouteHealthy ?? null, buildId: artifactBuildId, releaseId: release.releaseId, releaseMatchesBuild },
     worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt },
     scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt },
     providers: options.providers || {},

@@ -153,14 +153,17 @@ const MAX_BODY_BYTES = 8_192; // 8KB — enough to detect error text, not downlo
  * Common error patterns in destination pages. If body contains one of
  * these, the link is considered broken / blocked.
  */
-const BODY_ERROR_PATTERNS: Array<{ pattern: RegExp; status: LinkCheckStatus }> = [
-  { pattern: /not\s+allowed!?/i, status: 'not_allowed' },
-  { pattern: /forbidden/i, status: 'forbidden' },
-  { pattern: /access\s+denied/i, status: 'forbidden' },
-  { pattern: /not\s+found/i, status: 'broken' },
-  { pattern: /\b404\b/, status: 'broken' },
-  { pattern: /unavailable/i, status: 'broken' },
-  { pattern: /\bblocked\b/i, status: 'forbidden' },
+const BODY_ERROR_PATTERNS: Array<{ pattern: RegExp; status: LinkCheckStatus; errorCode: string }> = [
+  { pattern: /not\s+allowed!?/i, status: 'not_allowed', errorCode: 'DEEPLINK_NOT_SUPPORTED' },
+  { pattern: /deep\s*link\s+(?:is\s+)?not\s+supported/i, status: 'not_allowed', errorCode: 'DEEPLINK_NOT_SUPPORTED' },
+  { pattern: /invalid\s+campaign/i, status: 'not_allowed', errorCode: 'PROVIDER_CAMPAIGN_INVALID' },
+  { pattern: /forbidden/i, status: 'forbidden', errorCode: 'DESTINATION_FORBIDDEN' },
+  { pattern: /access\s+denied/i, status: 'forbidden', errorCode: 'ACCESS_DENIED' },
+  { pattern: /provider\s+error/i, status: 'server_error', errorCode: 'PROVIDER_ERROR_PAGE' },
+  { pattern: /not\s+found/i, status: 'broken', errorCode: 'DESTINATION_NOT_FOUND' },
+  { pattern: /\b404\b/, status: 'broken', errorCode: 'DESTINATION_NOT_FOUND' },
+  { pattern: /unavailable/i, status: 'broken', errorCode: 'DESTINATION_UNAVAILABLE' },
+  { pattern: /\bblocked\b/i, status: 'forbidden', errorCode: 'DESTINATION_BLOCKED' },
 ];
 
 /** Known AccessTrade redirect hosts; response-body errors still take precedence. */
@@ -450,11 +453,12 @@ async function readLimitedBody(response: Response, maxBytes: number): Promise<st
   }
 }
 
-function matchBodyError(body: string): { status: LinkCheckStatus; reason: string } | null {
-  for (const { pattern, status } of BODY_ERROR_PATTERNS) {
+function matchBodyError(body: string): { status: LinkCheckStatus; reason: string; errorCode: string } | null {
+  for (const { pattern, status, errorCode } of BODY_ERROR_PATTERNS) {
     if (pattern.test(body)) {
       return {
         status,
+        errorCode,
         reason: `Trang đích chứa nội dung lỗi: "${body.match(pattern)?.[0] ?? pattern.source}"`,
       };
     }
@@ -493,7 +497,7 @@ function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: 
   }
 
   if (error.message.includes('Too many redirects')) {
-    return { status: 'error', reason: 'Quá nhiều redirect', isSsrf: false };
+    return { status: 'error', reason: 'Quá nhiều redirect', isSsrf: false, errorCode: 'REDIRECT_LIMIT_EXCEEDED' };
   }
 
   const reset = errorCode === 'ECONNRESET' || msg.includes('socket hang up') || msg.includes('connection reset');
@@ -619,6 +623,7 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
         reason: bodyMatch.reason,
         statusCode: getResponse.status,
         finalUrl: getResponse.url || url,
+        errorCode: bodyMatch.errorCode,
       };
     }
 

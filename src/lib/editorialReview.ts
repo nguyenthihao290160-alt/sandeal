@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import type { EditorialClaim, Product, ReviewContent, VerifiedProductFact } from './types';
 
-export const REVIEW_DISCLOSURE = 'Bài viết được SanDeal tổng hợp và đánh giá tự động dựa trên dữ liệu sản phẩm, giá, liên kết và hình ảnh tại thời điểm kiểm tra. SanDeal chưa trực tiếp thử nghiệm sản phẩm này, trừ khi bài viết ghi rõ có thử nghiệm thực tế.';
+export const REVIEW_DISCLOSURE = 'Bài viết được SanDeal tổng hợp và đánh giá tự động dựa trên dữ liệu sản phẩm, giá, liên kết và hình ảnh tại thời điểm kiểm tra. SanDeal chưa trực tiếp thử nghiệm sản phẩm này, trừ khi bài viết ghi rõ có thử nghiệm thực tế. SanDeal có thể nhận hoa hồng affiliate qua một số liên kết; việc này không làm thay đổi giá người mua thanh toán.';
 export const REVIEW_THRESHOLDS = { contentQualityScore: 75, originalityScore: 70, seoReadinessScore: 80 } as const;
 
 // V2: reviewVersion constant

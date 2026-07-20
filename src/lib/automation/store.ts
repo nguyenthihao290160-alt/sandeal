@@ -343,6 +343,11 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
         response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
         return undefined;
       }
+      const equivalentActive = items.find(item => isEquivalentActiveScan(item, job));
+      if (equivalentActive) {
+        response = { job: equivalentActive, created: false, code: 'IN_PROGRESS' };
+        return undefined;
+      }
       items.push(job);
       response = { job, created: true, code: 'CREATED' };
       return items;
@@ -360,6 +365,32 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       reasons: input.approvalReason ? [input.approvalReason] : [], dryRun: response.job.dryRun, attempts: 0 });
   }
   return response;
+}
+
+const ACTIVE_SCAN_STATUSES = new Set<AutomationJobStatus>([
+  'PENDING',
+  'WAITING_APPROVAL',
+  'WAITING_FOR_MANUAL_INPUT',
+  'WAITING_CHILDREN',
+  'RUNNING',
+  'RETRY_SCHEDULED',
+  'PAUSED',
+]);
+
+function payloadProductIds(payload: Record<string, unknown>): Set<string> {
+  if (!Array.isArray(payload.productIds)) return new Set();
+  return new Set(payload.productIds.map(value => String(value || '').trim()).filter(Boolean));
+}
+
+/** Prevent overlapping health/source scans even when callers use different time-based keys. */
+export function isEquivalentActiveScan(existing: AutomationJob, requested: AutomationJob): boolean {
+  if (!ACTIVE_SCAN_STATUSES.has(existing.status) || existing.dryRun !== requested.dryRun) return false;
+  if (existing.type === 'PRODUCT_SCAN' && requested.type === 'PRODUCT_SCAN') return true;
+  if (existing.type !== 'RECHECK_PRODUCT_HEALTH' || requested.type !== 'RECHECK_PRODUCT_HEALTH') return false;
+  const existingIds = payloadProductIds(existing.payload);
+  const requestedIds = payloadProductIds(requested.payload);
+  if (!existingIds.size || !requestedIds.size) return true;
+  return [...requestedIds].some(id => existingIds.has(id));
 }
 
 export async function getAutomationJob(id: string): Promise<AutomationJob | null> {
@@ -706,6 +737,31 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
       attempts: Number(rejected.job.attemptCount || 0),
     });
   }
+  for (const job of claimed) {
+    try {
+      await appendAutomationAudit({
+        correlationId: job.correlationId || job.operationId,
+        operationId: job.operationId,
+        jobId: job.id,
+        operationType: 'JOB_CLAIMED',
+        actor: workerId,
+        previousState: 'PENDING',
+        nextState: 'RUNNING',
+        risk: job.riskLevel,
+        reasons: [],
+        dryRun: job.dryRun,
+        attempts: job.attemptCount,
+      });
+    } catch (error) {
+      // Claim already committed: an activity-log failure must not strand the
+      // business job in RUNNING until its lease expires.
+      console.error(JSON.stringify({
+        type: 'automation_job_claim_audit_failed',
+        jobId: job.id,
+        code: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+      }));
+    }
+  }
   return claimed;
 }
 
@@ -741,7 +797,7 @@ export async function completeAutomationJob(id: string, workerId: string, result
   return completedJob;
 }
 
-export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string; errorCategory?: AutomationErrorCategory } = {}): Promise<AutomationJob | null> {
+export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string; errorCategory?: AutomationErrorCategory; result?: Record<string, unknown> } = {}): Promise<AutomationJob | null> {
   let failed: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
@@ -755,13 +811,15 @@ export async function failAutomationJob(id: string, workerId: string, code: stri
       : undefined;
     job.lastErrorCode = code; job.lastErrorCategory = options.errorCategory || defaultErrorCategory(code);
     job.lastErrorMessage = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
+    if (options.result) job.result = sanitizeAutomationData(options.result) as Record<string, unknown>;
     job.retryable = retry;
     job.deadLetterReason = retry ? undefined : `${job.lastErrorCategory}:${code}`.slice(0, 240);
     job.leaseExpiresAt = undefined; job.updatedAt = now; if (!retry) job.completedAt = now; failed = { ...job }; return items;
   });
   const failedJob = failed as AutomationJob | null;
   if (failedJob) await appendAutomationAudit({ correlationId: failedJob.operationId, operationId: failedJob.operationId, jobId: failedJob.id, operationType: failedJob.type,
-    actor: workerId, previousState: 'RUNNING', nextState: failedJob.status, risk: failedJob.riskLevel, reasons: [failedJob.lastErrorMessage || code], dryRun: failedJob.dryRun, attempts: failedJob.attemptCount });
+    actor: workerId, previousState: 'RUNNING', nextState: failedJob.status, risk: failedJob.riskLevel, result: options.result,
+    reasons: [failedJob.lastErrorMessage || code], dryRun: failedJob.dryRun, attempts: failedJob.attemptCount });
   return failedJob;
 }
 

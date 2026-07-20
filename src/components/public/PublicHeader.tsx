@@ -23,16 +23,15 @@ export function PublicHeader({ search = '' }: { search?: string }) {
           <nav className={styles.nav} aria-label="Điều hướng công khai">
             <Link href="/deals">Danh mục</Link>
             <Link href="/deals?verifiedSource=true&sort=updated_desc">Mới xác minh</Link>
-            <Link href="/deals?priceTrend=down&sort=price_drop_desc">Giá vừa giảm</Link>
+            <Link href="/compare">So sánh</Link>
             <Link href="/review-methodology">Phương pháp</Link>
-            <Link href="/#affiliate-disclosure">Minh bạch affiliate</Link>
           </nav>
           <details className={styles.mobileNav}>
             <summary><PublicIcon name="menu" size={17} /> Menu</summary>
             <nav aria-label="Điều hướng công khai trên thiết bị di động">
               <Link href="/deals">Danh mục</Link>
               <Link href="/deals?verifiedSource=true&sort=updated_desc">Mới xác minh</Link>
-              <Link href="/deals?priceTrend=down&sort=price_drop_desc">Giá vừa giảm</Link>
+              <Link href="/compare">So sánh</Link>
               <Link href="/review-methodology">Phương pháp</Link>
               <Link href="/#affiliate-disclosure">Minh bạch affiliate</Link>
             </nav>

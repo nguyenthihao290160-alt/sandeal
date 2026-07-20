@@ -47,6 +47,7 @@ function product(overrides = {}) {
   const health = require('../src/lib/bots/productHealthCheck.ts');
   const accessTrade = require('../src/lib/integrations/accesstrade.ts');
   const safety = require('../src/lib/safePublish.ts');
+  const eligibility = require('../src/lib/productEligibility.ts');
   const polling = require('../src/lib/dashboard/scanPolling.ts');
   const adapter = require('../src/lib/storage/adapter.ts');
   const products = require('../src/lib/storage/products.ts');
@@ -58,6 +59,7 @@ function product(overrides = {}) {
       fetchImpl: async () => new Response('<html><body>Not Allowed!</body></html>', { status: 200, headers: { 'content-type': 'text/html' } }),
     });
     equal(result.ok, false); equal(result.status, 'not_allowed'); equal(result.statusCode, 200);
+    equal(result.errorCode, 'DEEPLINK_NOT_SUPPORTED');
   });
 
   await test('redirect giới hạn đến trang sản phẩm hợp lệ và lưu final URL', async () => {
@@ -66,6 +68,7 @@ function product(overrides = {}) {
       : new Response('<html><title>Product SKU 1</title></html>', { status: 200, headers: { 'content-type': 'text/html' } });
     const result = await health.checkLinkHealth('https://tracking.example/click', { resolveDns: false, fetchImpl });
     equal(result.ok, true); equal(result.finalUrl, 'https://merchant.example/products/sku-1');
+    equal(new URL(result.finalUrl).hostname, 'merchant.example');
   });
 
   await test('timeout và connection reset được phân loại rõ', async () => {
@@ -83,14 +86,59 @@ function product(overrides = {}) {
     assert(!JSON.stringify(resolved).includes('go.isclix.com'));
   });
 
+  await test('chỉ field provider trong allowlist tạo affiliate provenance', () => {
+    const direct = accessTrade.resolveAccessTradeAffiliateUrl({
+      campaign_id: 'campaign-1',
+      aff_link: 'https://tracking.example/direct-provider-link',
+      click_url: 'https://untrusted.example/not-allowlisted',
+    });
+    equal(direct.source, 'provider_api'); equal(direct.field, 'aff_link');
+    equal(direct.affiliateUrl, 'https://tracking.example/direct-provider-link');
+    equal(direct.deepLinkSupported, undefined);
+    const now = new Date().toISOString();
+    const directEligibility = eligibility.evaluateProductEligibility(product({
+      affiliateUrl: direct.affiliateUrl,
+      affiliateUrlSource: direct.source,
+      affiliateUrlSourceField: direct.field,
+      deepLinkSupported: direct.deepLinkSupported,
+      linkLastCheckedAt: now,
+      affiliateLastCheckedAt: now,
+      imageLastCheckedAt: now,
+      priceObservedAt: now,
+      priceTruthState: 'FRESH',
+    }));
+    assert(!directEligibility.criticalBlockers.includes('affiliate_provenance_missing'));
+    const unknown = accessTrade.resolveAccessTradeAffiliateUrl({ click_url: 'https://untrusted.example/not-allowlisted' });
+    equal(unknown.source, 'none'); equal(unknown.affiliateUrl, '');
+    equal(jobs.accessTradeAffiliateSupport(product({ affiliateUrlSourceField: 'aff_link' })).supported, true);
+    equal(jobs.accessTradeAffiliateSupport(product({ affiliateUrlSourceField: 'click_url' })).supported, false);
+  });
+
+  await test('product URL khỏe không làm affiliate thiếu trở thành publishable', () => {
+    const evaluation = eligibility.evaluateProductEligibility(product({
+      affiliateUrl: undefined,
+      affiliateUrlSource: 'none',
+      affiliateHealthStatus: 'unknown',
+      affiliateLastCheckedAt: undefined,
+      affiliateUrlSourceField: undefined,
+    }));
+    assert(!evaluation.criticalBlockers.includes('product_url_unhealthy'));
+    assert(evaluation.criticalBlockers.includes('missing_affiliate_url'));
+    assert(evaluation.criticalBlockers.includes('affiliate_url_unhealthy'));
+    equal(evaluation.eligibleForPublish, false);
+  });
+
   await test('nút scan khóa khi chạy và polling SUCCEEDED trả counters', async () => {
     const pageSource = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/product-sources/page.tsx'), 'utf8');
     assert(pageSource.includes('disabled={runningBot}'));
     assert(pageSource.includes('handleProductHealthScan'));
     assert(pageSource.includes('pollScanJob({ jobId })'));
-    const sequence = [envelope({ id: 'scan-1', status: 'RUNNING' }), envelope({ id: 'scan-1', status: 'SUCCEEDED', result: { checked: 52, valid: 15, blocked: 37, failed: 2 } })];
+    const sequence = [envelope({ id: 'scan-1', status: 'RUNNING' }), envelope({ id: 'scan-1', status: 'SUCCEEDED', result: { total: 52, processed: 52, healthy: 15, unhealthy: 37, quarantined: 2, unchanged: 4, skipped: 0, failed: 0, durationMs: 1250 } })];
     const result = await polling.pollScanJob({ jobId: 'scan-1', fetchImpl: async () => sequence.shift(), wait: async () => {}, intervalMs: 0, maximumPolls: 3 });
-    equal(result.status, 'SUCCEEDED'); equal(result.result.blocked, 37);
+    equal(result.status, 'SUCCEEDED'); equal(result.result.unhealthy, 37); equal(result.result.processed, 52);
+    const pollIndex = pageSource.indexOf('pollScanJob({ jobId })');
+    const reloadIndex = pageSource.indexOf('await loadRecent()', pollIndex);
+    assert(pollIndex >= 0 && reloadIndex > pollIndex, 'terminal polling must refresh product records');
   });
 
   await test('nút scan polling FAILED giữ và hiển thị lý do lỗi', async () => {

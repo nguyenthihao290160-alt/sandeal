@@ -1,7 +1,23 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const cwd = __dirname;
+const GIT_SHA = /^[0-9a-f]{40}$/i;
+
+function resolveReleaseId() {
+  const explicit = String(process.env.SANDEAL_RELEASE_ID || '').trim().toLowerCase();
+  let gitCommit = '';
+  try { gitCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim().toLowerCase(); } catch { /* an artifact without .git must inject the release id */ }
+  if (explicit && !GIT_SHA.test(explicit)) throw new Error('SANDEAL_RELEASE_ID must be a full Git SHA.');
+  if (gitCommit && !GIT_SHA.test(gitCommit)) throw new Error('Cannot resolve a valid Git SHA for this checkout.');
+  if (explicit && gitCommit && explicit !== gitCommit) throw new Error('SANDEAL_RELEASE_ID does not match the checked-out Git commit.');
+  const releaseId = explicit || gitCommit;
+  if (!releaseId) throw new Error('SANDEAL_RELEASE_ID is required when .git is unavailable.');
+  return releaseId;
+}
+
+const releaseId = resolveReleaseId();
 const dataDir = path.resolve(cwd, process.env.SANDEAL_DATA_DIR || '.data');
 const prompt10RuntimeEnabled = process.env.SANDEAL_ENABLE_PROMPT10_RUNTIME === 'true';
 const shared = {
@@ -19,6 +35,10 @@ const shared = {
   env: {
     NODE_ENV: 'production',
     SANDEAL_DATA_DIR: dataDir,
+    SANDEAL_RELEASE_ID: releaseId,
+    SANDEAL_BUILD_COMMIT: releaseId,
+    NEXT_PUBLIC_SANDEAL_RELEASE_ID: releaseId,
+    GIT_COMMIT_SHA: releaseId,
   },
 };
 

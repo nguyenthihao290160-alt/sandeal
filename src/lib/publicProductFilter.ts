@@ -4,6 +4,7 @@ import {
   looksLikeVoucherOrCampaign,
 } from './sourceItemClassifier';
 import { PRODUCT_INTELLIGENCE_CONFIG } from './product-intelligence/config';
+import { eligibilityBlockerMessage, evaluateProductEligibility } from './productEligibility';
 
 const DEMO_TITLES = [
   'Tai nghe Bluetooth TWS Pro Max',
@@ -1027,6 +1028,13 @@ export function getPublicProductBlockReason(
       (Array.isArray(review.reviewBlockReasons) && review.reviewBlockReasons.length > 0)
   ) {
     return 'Nội dung đánh giá chưa vượt cổng chất lượng và SEO.';
+  }
+
+  const eligibility = evaluateProductEligibility(product);
+  if (!eligibility.eligibleForPublic) {
+    const blocker = eligibility.criticalBlockers[0]
+      || (product.publicHidden !== false ? 'public_hidden' : 'public_blocked');
+    return eligibilityBlockerMessage(blocker);
   }
 
   return '';

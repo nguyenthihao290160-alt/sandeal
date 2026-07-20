@@ -47,6 +47,11 @@ export interface NormalizedAccessTradeItem {
   canonicalProductUrl?: string; // Decoded from affiliate deeplink if available
   affiliateUrl: string;
   affiliateUrlSource?: 'provider_api' | 'none';
+  affiliateUrlProvider?: 'accesstrade';
+  affiliateUrlSourceEndpoint?: 'datafeed' | 'offers';
+  affiliateUrlSourceField?: string;
+  affiliateUrlCampaignId?: string;
+  affiliateUrlFetchedAt?: string;
   deepLinkSupported?: boolean;
   affiliateLinkReason?: string;
   price: number;
@@ -284,6 +289,7 @@ interface AccessTradeRawItem {
   __sandealEndpoint?: AccessTradeEndpointKind;
   __sandealSourceKind?: string;
   __sandealEndpointUrl?: string;
+  __sandealFetchedAt?: string;
 
   [key: string]: unknown;
 }
@@ -637,6 +643,11 @@ export function normalizeAccessTradeItem(
     canonicalProductUrl,
     affiliateUrl,
     affiliateUrlSource: affiliateResolution.source,
+    affiliateUrlProvider: affiliateUrl ? 'accesstrade' : undefined,
+    affiliateUrlSourceEndpoint: item.__sandealEndpoint,
+    affiliateUrlSourceField: affiliateResolution.field,
+    affiliateUrlCampaignId: getFirstText(item, ['campaign_id', 'campaignId']) || undefined,
+    affiliateUrlFetchedAt: item.__sandealFetchedAt,
     deepLinkSupported: affiliateResolution.deepLinkSupported,
     affiliateLinkReason: affiliateResolution.reason,
     price,
@@ -662,21 +673,28 @@ export function normalizeAccessTradeItem(
  * It intentionally never synthesizes a go.isclix.com/deep_link URL from a
  * campaign id and product URL.
  */
+export const ACCESS_TRADE_AFFILIATE_URL_FIELDS = [
+  'aff_link', 'affiliate_url', 'affiliateUrl', 'affiliate_link',
+  'affiliateLink', 'tracking_link', 'trackingLink', 'deep_link',
+  'deepLink', 'deeplink',
+] as const;
+
 export function resolveAccessTradeAffiliateUrl(
     item: Record<string, unknown>,
-): { affiliateUrl: string; source: 'provider_api' | 'none'; deepLinkSupported: boolean; reason?: string } {
-  const trackingFields = [
-    'aff_link', 'affiliate_url', 'affiliateUrl', 'affiliate_link',
-    'affiliateLink', 'tracking_link', 'trackingLink', 'deep_link',
-    'deepLink', 'deeplink',
-  ];
-  const affiliateUrl = getFirstText(item as AccessTradeRawItem, trackingFields);
+): { affiliateUrl: string; source: 'provider_api' | 'none'; deepLinkSupported?: boolean; field?: string; reason?: string } {
+  const affiliateUrl = getFirstText(item as AccessTradeRawItem, [...ACCESS_TRADE_AFFILIATE_URL_FIELDS]);
   if (affiliateUrl && isValidHttpUrl(affiliateUrl)) {
-    const field = trackingFields.find((name) => getFirstText(item as AccessTradeRawItem, [name]) === affiliateUrl) || '';
+    const field = ACCESS_TRADE_AFFILIATE_URL_FIELDS.find((name) => getFirstText(item as AccessTradeRawItem, [name]) === affiliateUrl);
     return {
       affiliateUrl,
       source: 'provider_api',
-      deepLinkSupported: /deep/i.test(field) || /\/deep[_-]?link(?:\/|$)/i.test(new URL(affiliateUrl).pathname),
+      field,
+      // A provider-supplied tracking URL is authoritative for this product,
+      // but it does not prove that the campaign supports arbitrary deep links.
+      // Keep that capability unknown unless the returned field/path says so.
+      deepLinkSupported: /deep/i.test(field || '') || /\/deep[_-]?link(?:\/|$)/i.test(new URL(affiliateUrl).pathname)
+        ? true
+        : undefined,
     };
   }
   return {
@@ -876,6 +894,11 @@ export function mapAccessTradeToProduct(
     originalUrl: item.originalUrl || undefined,
     affiliateUrl: item.affiliateUrl || undefined,
     affiliateUrlSource: item.affiliateUrlSource,
+    affiliateUrlProvider: item.affiliateUrlProvider,
+    affiliateUrlSourceEndpoint: item.affiliateUrlSourceEndpoint,
+    affiliateUrlSourceField: item.affiliateUrlSourceField,
+    affiliateUrlCampaignId: item.affiliateUrlCampaignId,
+    affiliateUrlFetchedAt: item.affiliateUrlFetchedAt,
     deepLinkSupported: item.deepLinkSupported,
     affiliateLinkReason: item.affiliateLinkReason,
     url: item.affiliateUrl || item.originalUrl || undefined,
@@ -1104,11 +1127,13 @@ async function fetchAccessTradeEndpoint(
       };
     }
 
+    const fetchedAt = new Date().toISOString();
     const items = extractRawItems(data).map((rawItem) => ({
       ...rawItem,
       __sandealEndpoint: endpoint,
       __sandealSourceKind: sourceKind,
       __sandealEndpointUrl: sanitizeEndpointUrl(url),
+      __sandealFetchedAt: fetchedAt,
     }));
     await recordDomainHealth(url.toString(), 'ok');
 

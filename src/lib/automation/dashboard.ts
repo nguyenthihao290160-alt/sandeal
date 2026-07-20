@@ -20,6 +20,7 @@ import type { AutomationJob } from './types';
 import { buildLaunchInventoryOverview } from './launchInventory';
 import { startOfVietnamDay, vietnamActivityLabel } from './timezone';
 import { getAutomationTruth } from './truth';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 export type DashboardRange = 'today' | '7d' | '30d';
 
@@ -205,6 +206,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
 
   return {
     updatedAt: new Date().toISOString(), range,
+    release: getReleaseIdentity(),
     truth,
     kpis: {
       productsProcessed: products.length,
@@ -218,7 +220,8 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     sourcePerformance: [...sourceMap.values()].sort((a, b) => b.valid - a.valid).slice(0, 6).map(item => ({ ...item, rate: item.total ? Math.min(100, Math.round(item.valid / item.total * 100)) : 0 })),
     queue,
     runtime: {
-      web: { status: runtimeHealth?.web.status || 'unverified', checkedAt: runtimeHealth?.checkedAt || null },
+      web: { ...(runtimeHealth?.web || { status: 'unverified', buildAvailable: false, publicRouteHealthy: null, buildId: null, releaseId: getReleaseIdentity().releaseId, releaseMatchesBuild: null }), checkedAt: runtimeHealth?.checkedAt || null },
+      storage: runtimeHealth?.storage ? { status: runtimeHealth.storage.status, checkedAt: runtimeHealth.checkedAt } : { status: 'unverified', checkedAt: null },
       worker: roleDiagnostic('WORKER', workerLease, workerRuntimeStatus, now),
       scheduler: {
         ...roleDiagnostic('SCHEDULER', schedulerLease, schedulerRuntimeStatus, now),
@@ -280,6 +283,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       productScan: jobDiagnostic(latestByType('PRODUCT_SCAN')),
       autoPilot: jobDiagnostic(latestByType('AUTO_PILOT')),
       runtimeGuardian: jobDiagnostic(latestByType('RUNTIME_GUARDIAN')),
+      productHealth: jobDiagnostic(latestByType('RECHECK_PRODUCT_HEALTH')),
       latestError: jobDiagnostic(latestError),
     },
     providers,

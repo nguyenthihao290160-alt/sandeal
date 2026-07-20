@@ -212,6 +212,35 @@ export interface ReviewContent {
   reviewContentHash: string;
 }
 
+export interface ReviewQualityAssessment {
+  qualityScore: number;
+  trustScore: number;
+  freshnessScore: number;
+  completenessScore: number;
+  usefulnessScore: number;
+  sourceCoverageScore: number;
+  balancedReviewScore: number;
+  criticalIssues: string[];
+  warnings: string[];
+  nextRequiredAction: string;
+  evaluatedAt: string;
+  reviewPolicyVersion: string;
+}
+
+export interface ProductEligibilitySnapshot {
+  eligibleForReview: boolean;
+  eligibleForCanary: boolean;
+  eligibleForPublish: boolean;
+  eligibleForPublic: boolean;
+  qualityScore: number;
+  criticalBlockers: string[];
+  warningBlockers: string[];
+  nextRequiredAction: string;
+  evaluatedAt: string;
+  policyVersion: string;
+  reviewQuality: ReviewQualityAssessment;
+}
+
 export type ProductScoreLabel =
   | "Bỏ qua"
   | "Cần xem xét"
@@ -232,6 +261,12 @@ export interface Product {
   originalUrl?: string;
   affiliateUrl?: string;
   affiliateUrlSource?: 'provider_api' | 'manual' | 'none';
+  affiliateUrlProvider?: 'accesstrade' | 'manual';
+  affiliateUrlSourceEndpoint?: string;
+  affiliateUrlSourceField?: string;
+  affiliateUrlCampaignId?: string;
+  affiliateUrlFetchedAt?: string;
+  affiliateUrlVerifiedAt?: string;
   deepLinkSupported?: boolean;
   affiliateLinkReason?: string;
   imageUrl?: string;
@@ -366,6 +401,8 @@ export interface Product {
   mpn?: string;
   specifications?: Record<string, string | number>;
   reviewContent?: ReviewContent;
+  reviewQuality?: ReviewQualityAssessment;
+  eligibility?: ProductEligibilitySnapshot;
   reviewGeneration?: { provider: 'gemini' | 'local'; modelId?: string; promptVersion: string; generationFingerprint: string; responseHash?: string; generatedAt: string; validationResult: 'approved' | 'fallback_local' };
 
   // Prompt 10 migration-safe autonomous commerce fields.

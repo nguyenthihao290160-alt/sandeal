@@ -6,6 +6,7 @@ import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { readCollection } from '@/lib/storage/adapter';
 import { getProductById } from '@/lib/storage/products';
 import type { Product } from '@/lib/types';
+import { evaluateProductEligibility } from '@/lib/productEligibility';
 
 export type ProductAdminActionType = 'reviewed' | 'data_verified' | 'canary_ready' | 'safe_publish_requested' | 'publish_approved';
 export interface ProductAdminActionRecord {
@@ -42,31 +43,24 @@ export function buildProductPipelineTruth(input: {
 }) {
   const { product, now } = input;
   const classification = product.classification || classifyRecord(product as unknown as Record<string, unknown>);
+  const eligibility = evaluateProductEligibility(product, now);
   const actions = input.actions.filter(item => item.productId === product.id);
   const hasAction = (action: ProductAdminActionType) => actions.some(item => item.action === action);
-  const blockers = [...new Set([
-    ...(product.quarantineReasons || []), ...(product.publicBlockReasons || []), ...(product.dataIssues || []),
-    ...(classification.recordType !== 'PRODUCT' ? [`record_type_${classification.recordType.toLowerCase()}`] : []),
-    ...(product.publicHidden !== false ? ['public_hidden'] : []),
-    ...(!product.verifiedSource && !product.sourceVerified ? ['source_unverified'] : []),
-    ...(!(Number(product.salePrice || product.price) > 0) ? ['price_missing'] : []),
-    ...(!product.originalUrl && !product.affiliateUrl ? ['link_missing'] : []),
-    ...(!product.imageUrl ? ['image_missing'] : []),
-  ])];
-  const criticalBlockers = blockers.filter(item => /record_type|quarant|broken|missing|unverified|conflict|invalid|block/i.test(item));
+  const criticalBlockers = eligibility.criticalBlockers;
+  const blockers = [...new Set([...criticalBlockers, ...eligibility.warningBlockers, ...(product.dataIssues || [])])];
   const productJobs = input.jobs.filter(job => jobTargetsProduct(job, product)).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const activeJob = productJobs.find(job => ['PENDING', 'RUNNING', 'RETRY_SCHEDULED', 'WAITING_APPROVAL', 'WAITING_FOR_MANUAL_INPUT', 'WAITING_CHILDREN'].includes(job.status)) || productJobs[0];
   const staleRunning = Boolean(activeJob?.status === 'RUNNING' && (!activeJob.leaseExpiresAt || Date.parse(activeJob.leaseExpiresAt) <= now || (activeJob.heartbeatAt && now - Date.parse(activeJob.heartbeatAt) > 90_000)));
   const status = staleRunning ? 'STALE' : activeJob?.status || null;
   const reviewed = hasAction('reviewed');
   const dataVerified = hasAction('data_verified');
-  const canaryReady = hasAction('canary_ready') && criticalBlockers.length === 0;
+  const canaryReady = hasAction('canary_ready') && eligibility.eligibleForCanary;
   const safePublishRequested = hasAction('safe_publish_requested');
   const publishApproved = hasAction('publish_approved');
   const publishingEnabled = config.allowPublishingApi && config.autoPublishEnabled && input.launchEnabled && ['CANARY', 'AUTONOMOUS'].includes(input.effectiveMode);
-  const published = product.status === 'published' && product.publicHidden === false && Boolean(product.publishedAt || product.publicationEffectKey);
+  const published = eligibility.eligibleForPublic && Boolean(product.publishedAt || product.publicationEffectKey);
   const requiredAction = classification.recordType !== 'PRODUCT' ? 'MANUAL_CLASSIFICATION_DECISION'
-    : criticalBlockers.length ? 'FIX_CRITICAL_BLOCKERS'
+    : criticalBlockers.length ? eligibility.nextRequiredAction
       : !reviewed ? 'MARK_REVIEWED'
         : !dataVerified ? 'VERIFY_DATA'
           : !canaryReady ? 'MARK_CANARY_READY'
@@ -86,7 +80,9 @@ export function buildProductPipelineTruth(input: {
       lastProcessedAt: activeJob?.updatedAt || product.updatedAt || null,
     },
     health: {
-      link: health(product.linkHealthStatus, Boolean(product.originalUrl || product.affiliateUrl)),
+      link: health(product.linkHealthStatus, Boolean(product.originalUrl)),
+      productLink: health(product.linkHealthStatus, Boolean(product.originalUrl)),
+      affiliateLink: health(product.affiliateHealthStatus, Boolean(product.affiliateUrl)),
       image: health(product.imageHealthStatus, Boolean(product.imageUrl)),
       price: health(product.priceTruthState, Number(product.salePrice || product.price) > 0),
       source: product.verifiedSource || product.sourceVerified ? 'HEALTHY' : 'UNVERIFIED',
@@ -94,7 +90,12 @@ export function buildProductPipelineTruth(input: {
     },
     requiredAction,
     humanActionRequired: Boolean(requiredAction && !['FIX_CRITICAL_BLOCKERS'].includes(requiredAction)),
-    remediationAvailable: Boolean(activeJob?.status === 'FAILED' && activeJob.attemptCount < activeJob.maxAttempts) || ['UNHEALTHY', 'UNVERIFIED'].some(value => [health(product.linkHealthStatus, Boolean(product.originalUrl || product.affiliateUrl)), health(product.imageHealthStatus, Boolean(product.imageUrl))].includes(value)),
+    eligibility,
+    remediationAvailable: Boolean(activeJob?.status === 'FAILED' && activeJob.attemptCount < activeJob.maxAttempts) || ['UNHEALTHY', 'UNVERIFIED'].some(value => [
+      health(product.linkHealthStatus, Boolean(product.originalUrl)),
+      health(product.affiliateHealthStatus, Boolean(product.affiliateUrl)),
+      health(product.imageHealthStatus, Boolean(product.imageUrl)),
+    ].includes(value)),
     safety: { publishingEnabled, launchEnabled: input.launchEnabled, effectiveMode: input.effectiveMode },
   };
 }

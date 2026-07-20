@@ -100,6 +100,10 @@ function disclosure(
 }
 
 function errorCode(error: unknown): string {
+  const explicitCode = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+    ? String((error as { code: string }).code).trim()
+    : '';
+  if (explicitCode) return explicitCode.slice(0, 80);
   const message = error instanceof Error ? error.message : String(error);
   if (/429|rate.?limit/i.test(message)) return 'PROVIDER_RATE_LIMIT';
   if (/timeout|abort|TEMPORARY_ERROR/i.test(message)) return 'PROVIDER_TIMEOUT';
@@ -609,6 +613,10 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       await failAutomationJob(job.id, workerId, code, error, {
         errorCategory: errorCategory(code),
         nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
+        result: error && typeof error === 'object' && (error as { result?: unknown }).result
+          && typeof (error as { result?: unknown }).result === 'object'
+          ? (error as { result: Record<string, unknown> }).result
+          : undefined,
       });
       result.failed += 1;
     } finally {

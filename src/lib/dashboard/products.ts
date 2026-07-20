@@ -1,4 +1,5 @@
 import { isPublicSafeProduct, getPublicProductBlockReason } from '@/lib/publicProductFilter';
+import { eligibilityBlockerMessage, evaluateProductEligibility } from '@/lib/productEligibility';
 import type {
   Product,
   ProductKind,
@@ -73,6 +74,8 @@ export interface DashboardProductItem {
     productUrlValid: boolean;
     affiliateUrlValid: boolean;
     finalDomain: string | null;
+    productFinalDomain: string | null;
+    affiliateFinalDomain: string | null;
     productUrlHttpStatus: number | null;
     affiliateUrlHttpStatus: number | null;
     productUrlError: string | null;
@@ -185,22 +188,27 @@ export function parseDashboardProductQuery(searchParams: URLSearchParams):
 
 function safePublishStatus(product: Product): SafePublishStatus {
   if (product.status === 'archived') return 'archived';
-  if (isPublicSafeProduct(product)) return product.status === 'published' ? 'published' : 'qualified';
-  if (product.status === 'needs_review' || product.riskLevel === 'high') return 'needs_review';
+  const eligibility = evaluateProductEligibility(product);
+  if (eligibility.eligibleForPublic) return 'published';
+  if (eligibility.eligibleForPublish) return 'qualified';
+  if (eligibility.eligibleForReview || product.status === 'needs_review' || product.riskLevel === 'high') return 'needs_review';
   return 'blocked';
 }
 
 function publicMessage(product: Product, eligible: boolean): string {
+  const eligibility = evaluateProductEligibility(product);
   if (eligible) return product.status === 'published'
     ? 'Sản phẩm đang được hiển thị công khai.'
     : 'Sản phẩm đã vượt qua kiểm tra đăng an toàn.';
   if (product.status === 'archived') return 'Sản phẩm đã được lưu trữ.';
-  return getPublicProductBlockReason(product) || product.publicBlockReason ||
+  return eligibility.criticalBlockers.map(eligibilityBlockerMessage).join(' · ')
+    || getPublicProductBlockReason(product) || product.publicBlockReason ||
     'Sản phẩm cần được kiểm tra thêm trước khi đăng.';
 }
 
 export function toDashboardProductItem(product: Product): DashboardProductItem {
-  const eligible = isPublicSafeProduct(product);
+  const eligibility = evaluateProductEligibility(product);
+  const eligible = eligibility.eligibleForPublish;
   const message = publicMessage(product, eligible);
   const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
   const finalUrl = product.affiliateUrlFinalUrl || product.productUrlFinalUrl || product.affiliateUrl || product.originalUrl;
@@ -238,6 +246,8 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
       productUrlValid: goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || '')),
       affiliateUrlValid: goodHealth.has(String(product.affiliateHealthStatus || '')) && product.publicBlockReasons?.includes('affiliate_url_unhealthy') !== true,
       finalDomain,
+      productFinalDomain: product.productUrlFinalDomain || null,
+      affiliateFinalDomain: product.affiliateUrlFinalDomain || null,
       productUrlHttpStatus: product.productUrlHttpStatus ?? null,
       affiliateUrlHttpStatus: product.affiliateUrlHttpStatus ?? null,
       productUrlError: product.productUrlErrorCode || product.productUrlHealthReason || null,
@@ -276,9 +286,9 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
     if (query.pipelineStage === 'image_valid') return imageValid;
     if (query.pipelineStage === 'price_valid') return priceValid;
     if (query.pipelineStage === 'deduped') return deduped;
-    if (query.pipelineStage === 'ready') return classified && product.lifecycleState === 'READY_FOR_PUBLISH' && !isPublicSafeProduct(product);
+    if (query.pipelineStage === 'ready') return classified && evaluateProductEligibility(product).eligibleForPublish;
     if (query.pipelineStage === 'published') return isPublicSafeProduct(product);
-    return classified && product.lifecycleState !== 'READY_FOR_PUBLISH' && !isPublicSafeProduct(product);
+    return classified && !evaluateProductEligibility(product).eligibleForPublish;
   };
   const filtered = products.filter(matchesPipeline).map(toDashboardProductItem).filter((item) => {
     if (query.q && !includesSearch(item, query.q)) return false;

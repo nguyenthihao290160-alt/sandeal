@@ -1,4 +1,11 @@
 export interface ScanJobResult {
+  total?: number;
+  processed?: number;
+  healthy?: number;
+  unhealthy?: number;
+  unchanged?: number;
+  skipped?: number;
+  durationMs?: number;
   checked?: number;
   inspected?: number;
   valid?: number;

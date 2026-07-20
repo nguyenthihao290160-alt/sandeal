@@ -18,16 +18,23 @@ import { getPublicHomepageData } from '@/lib/product-intelligence/publicProducts
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  title: 'SanDeal — Kiểm tra deal, giá và nguồn sản phẩm',
-  description: 'Khám phá sản phẩm có nguồn, thời điểm cập nhật, Deal Score và dữ kiện được SanDeal kiểm tra trước khi công khai.',
+  title: 'SanDeal — Kiểm tra giá và độ tin cậy trước khi mua',
+  description: 'Kiểm tra giá, nguồn, link và bằng chứng sản phẩm trước khi truy cập nhà bán.',
   alternates: { canonical: '/' },
   openGraph: {
-    title: 'SanDeal — Kiểm tra deal trước khi quyết định',
-    description: 'Xem giá, nguồn, thời điểm cập nhật và lý do chấm điểm bằng dữ liệu hiện có.',
+    title: 'SanDeal — Kiểm tra giá và độ tin cậy trước khi mua',
+    description: 'Kiểm tra giá, nguồn, link và bằng chứng sản phẩm trước khi truy cập nhà bán.',
     url: '/',
     type: 'website',
     locale: 'vi_VN',
     siteName: 'SanDeal',
+    images: [{ url: '/opengraph-image', width: 1200, height: 630, alt: 'SanDeal' }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'SanDeal — Kiểm tra giá và độ tin cậy trước khi mua',
+    description: 'Kiểm tra giá, nguồn, link và bằng chứng sản phẩm trước khi truy cập nhà bán.',
+    images: ['/opengraph-image'],
   },
 };
 

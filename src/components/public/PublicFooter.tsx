@@ -29,13 +29,11 @@ export function PublicFooter() {
             </ul>
           </div>
           <div>
-            <h3>Lưu ý</h3>
+            <h3>Pháp lý & liên hệ</h3>
             <ul className={styles.footerLinks}>
-              <li><Link href="/review-methodology">Nguồn và bằng chứng</Link></li>
-              <li><Link href="/deals?sort=updated_desc">Mới cập nhật</Link></li>
               <li><Link href="/thong-tin/chinh-sach-bao-mat">Chính sách bảo mật</Link></li>
               <li><Link href="/thong-tin/dieu-khoan-su-dung">Điều khoản sử dụng</Link></li>
-              <li><Link href="/thong-tin/lien-he">Liên hệ / sửa gỡ dữ liệu</Link></li>
+              <li><Link href="/thong-tin/lien-he">Liên hệ / báo lỗi dữ liệu</Link></li>
             </ul>
           </div>
         </div>

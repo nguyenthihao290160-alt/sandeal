@@ -224,6 +224,14 @@ function isValidHttpUrl(value: unknown): boolean {
   }
 }
 
+function getFinalDomain(value: string | undefined): string | undefined {
+  try {
+    return new URL(value || '').hostname.toLowerCase().replace(/^www\./, '') || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeComparableUrl(value: unknown): string {
   const text = getText(value);
 
@@ -1088,7 +1096,21 @@ export class SourceScoutBot {
             if (productDraft.price && productDraft.price !== existingProduct.price) newData.price = productDraft.price;
             if (productDraft.salePrice && productDraft.salePrice !== existingProduct.salePrice) newData.salePrice = productDraft.salePrice;
             if (productDraft.imageUrl && isValidHttpUrl(productDraft.imageUrl) && productDraft.imageUrl !== existingProduct.imageUrl) newData.imageUrl = productDraft.imageUrl;
-            if (productDraft.affiliateUrl && isValidHttpUrl(productDraft.affiliateUrl) && productDraft.affiliateUrl !== existingProduct.affiliateUrl) newData.affiliateUrl = productDraft.affiliateUrl;
+            if (productDraft.affiliateUrl && isValidHttpUrl(productDraft.affiliateUrl) && (
+              productDraft.affiliateUrl !== existingProduct.affiliateUrl
+              || productDraft.affiliateUrlSource !== existingProduct.affiliateUrlSource
+              || productDraft.affiliateUrlSourceField !== existingProduct.affiliateUrlSourceField
+            )) {
+              newData.affiliateUrl = productDraft.affiliateUrl;
+              newData.affiliateUrlSource = productDraft.affiliateUrlSource;
+              newData.affiliateUrlProvider = productDraft.affiliateUrlProvider;
+              newData.affiliateUrlSourceEndpoint = productDraft.affiliateUrlSourceEndpoint;
+              newData.affiliateUrlSourceField = productDraft.affiliateUrlSourceField;
+              newData.affiliateUrlCampaignId = productDraft.affiliateUrlCampaignId;
+              newData.affiliateUrlFetchedAt = productDraft.affiliateUrlFetchedAt;
+              newData.deepLinkSupported = productDraft.deepLinkSupported;
+              newData.affiliateLinkReason = productDraft.affiliateLinkReason;
+            }
             if (productDraft.originalUrl && isValidHttpUrl(productDraft.originalUrl) && productDraft.originalUrl !== existingProduct.originalUrl) newData.originalUrl = productDraft.originalUrl;
             
             // Mark a flag to track if we need to call updateProduct
@@ -1229,34 +1251,46 @@ export class SourceScoutBot {
             const autoDecision = decideSafeAutoPublish(canonical as unknown as MutableProductDraft);
 
             if (autoDecision.allowed && isRealProduct) {
-              if (!affiliateUrl && !originalUrl) {
-                blockReason = 'Thiếu cả Product URL và Affiliate URL';
+              if (!originalUrl) {
+                blockReason = 'Thiếu Product URL hợp lệ';
                 blockedBy = 'link';
+              } else if (!affiliateUrl) {
+                blockReason = 'Nhà cung cấp không trả về Affiliate URL hợp lệ';
+                blockedBy = 'affiliate_link';
               } else if (!imageUrl && imageCandidatesList.length === 0) {
                 blockReason = 'Thiếu Ảnh (imageUrl)';
                 blockedBy = 'image';
               } else {
-                // 4. Check affiliate URL first (this is what users click — always prefer this)
-                // For AccessTrade deeplinks, affiliate URL returning HTML 200 is NORMAL
-                const primaryLinkUrl = affiliateUrl || originalUrl!;
-                const linkResult = await checkLinkHealth(primaryLinkUrl);
-                healthUpdates.linkHealthStatus = linkResult.status as Product['linkHealthStatus'];
-                healthUpdates.affiliateHealthStatus = linkResult.status as Product['linkHealthStatus'];
+                // 4. Product URL and provider-returned affiliate URL are independent gates.
+                const checkedAt = new Date().toISOString();
+                const productResult = await checkLinkHealth(originalUrl);
+                const affiliateResult = await checkLinkHealth(affiliateUrl);
+                const productUrlOk = productResult.ok;
+                const affiliateUrlOk = affiliateResult.ok
+                  && canonical.affiliateUrlSource === 'provider_api';
 
-                // 5. Also check product URL (originalUrl) for reference only — timeout here does NOT block
-                let productUrlOk = true;
-                if (originalUrl && originalUrl !== affiliateUrl) {
-                  const prodResult = await checkLinkHealth(originalUrl);
-                  // Only block on definitive errors (404 = 'broken', 403 = 'not_allowed') — timeout/error is recoverable
-                  if (prodResult.status === 'broken' || prodResult.status === 'not_allowed') {
-                    productUrlOk = false;
-                    healthUpdates.linkHealthStatus = prodResult.status as Product['linkHealthStatus'];
-                  } else if (prodResult.ok) {
-                    // If product URL is also ok, note it
-                    healthUpdates.linkHealthStatus = 'ok' as Product['linkHealthStatus'];
-                  }
-                  // timeout, error, unknown => don't override affiliate's ok status
-                }
+                healthUpdates.linkHealthStatus = productResult.status as Product['linkHealthStatus'];
+                healthUpdates.linkLastCheckedAt = checkedAt;
+                healthUpdates.productUrlHttpStatus = productResult.statusCode;
+                healthUpdates.productUrlFinalUrl = productResult.finalUrl;
+                healthUpdates.productUrlFinalDomain = getFinalDomain(productResult.finalUrl || originalUrl);
+                healthUpdates.productUrlHealthReason = productResult.reason;
+                healthUpdates.productUrlErrorCode = productResult.errorCode;
+                healthUpdates.productUrlTimedOut = productResult.timedOut === true;
+
+                healthUpdates.affiliateHealthStatus = (affiliateUrlOk ? affiliateResult.status : 'not_allowed') as Product['affiliateHealthStatus'];
+                healthUpdates.affiliateLastCheckedAt = checkedAt;
+                healthUpdates.affiliateUrlHttpStatus = affiliateResult.statusCode;
+                healthUpdates.affiliateUrlFinalUrl = affiliateResult.finalUrl;
+                healthUpdates.affiliateUrlFinalDomain = getFinalDomain(affiliateResult.finalUrl || affiliateUrl);
+                healthUpdates.affiliateUrlHealthReason = canonical.affiliateUrlSource === 'provider_api'
+                  ? affiliateResult.reason
+                  : 'Affiliate URL không có provenance provider_api.';
+                healthUpdates.affiliateUrlErrorCode = canonical.affiliateUrlSource === 'provider_api'
+                  ? affiliateResult.errorCode
+                  : 'AFFILIATE_PROVENANCE_REQUIRED';
+                healthUpdates.affiliateUrlTimedOut = affiliateResult.timedOut === true;
+                healthUpdates.affiliateUrlVerifiedAt = affiliateUrlOk ? checkedAt : undefined;
 
                 // 6. Image health with candidate fallback
                 let resolvedImageUrl = imageUrl;
@@ -1289,14 +1323,9 @@ export class SourceScoutBot {
                       }
                     }
                     if (!imageOk) {
-                      // All images failed — but if only timeout, don't mark as hard broken
-                      const isTimeoutOnly = (imageResult.status as string) === 'timeout';
-                      if (!isTimeoutOnly) {
-                        blockReason = `Ảnh lỗi: ${imageResult.reason} (đã thử ${imageCandidatesList.length + 1} ảnh)`;
-                        blockedBy = 'image';
-                        Object.assign(healthUpdates, markSourceCooldown(healthUpdates, imageResult.status));
-                      }
-                      // For timeout-only image failures: don't block, allow publish with warning
+                      blockReason = `Ảnh lỗi: ${imageResult.reason} (đã thử ${imageCandidatesList.length + 1} ảnh)`;
+                      blockedBy = 'image';
+                      Object.assign(healthUpdates, markSourceCooldown(healthUpdates, imageResult.status));
                     }
                   }
                 } else if (imageCandidatesList.length > 0) {
@@ -1318,45 +1347,23 @@ export class SourceScoutBot {
                   }
                 }
 
-                // Evaluate overall health result
-                if (!linkResult.ok) {
-                  // Classify link failure by severity
-                  const linkStatus = linkResult.status as string;
-                  const isDefinitelyDead = linkStatus === 'broken'; // 404/410 only
-                  const isRecoverable =
-                    linkStatus === 'timeout' ||
-                    linkStatus === 'dns_error' ||
-                    linkStatus === 'server_error' ||
-                    linkStatus === 'rate_limited' ||
-                    linkStatus === 'not_allowed' ||  // 403 anti-bot — not necessarily dead
-                    linkStatus === 'forbidden' ||    // legacy alias
-                    linkStatus === 'error';
-
-                  if (isRecoverable && productUrlOk) {
-                    // Recoverable: affiliate had transient error but product URL is accessible
-                    // Allow publish — set cooldown to re-check later, but don't block now
-                    healthUpdates.affiliateLinkErrors = `Affiliate link tạm thời lỗi (${linkStatus}, recoverable): ${linkResult.reason}`;
-                    Object.assign(healthUpdates, markSourceCooldown({}, linkResult.status));
-                    // isHealthOk will be evaluated below based on blockReason
-                  } else if (isDefinitelyDead) {
-                    // 404/410: definitively dead — block and set long cooldown
-                    blockReason = `Affiliate/Link chết (404/410): ${linkResult.reason}`;
-                    blockedBy = 'link';
-                    Object.assign(healthUpdates, markSourceCooldown(healthUpdates, linkResult.status));
-                    healthUpdates.affiliateLinkErrors = `Affiliate link chết: ${linkResult.reason}`;
-                  } else {
-                    // Recoverable but no product URL fallback — block with short cooldown
-                    blockReason = `Affiliate/Link lỗi (${linkStatus}): ${linkResult.reason}`;
-                    blockedBy = 'link';
-                    Object.assign(healthUpdates, markSourceCooldown(healthUpdates, linkResult.status));
-                    healthUpdates.affiliateLinkErrors = `Affiliate link lỗi: ${linkResult.reason}`;
-                  }
+                // Fail closed: a healthy product URL never substitutes for affiliate health.
+                if (!productUrlOk) {
+                  blockReason = `Product URL lỗi (${productResult.status}): ${productResult.reason}`;
+                  blockedBy = 'link';
+                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, productResult.status));
+                } else if (!affiliateUrlOk) {
+                  blockReason = canonical.affiliateUrlSource === 'provider_api'
+                    ? `Affiliate URL lỗi (${affiliateResult.status}): ${affiliateResult.reason}`
+                    : 'Affiliate URL không có provenance provider_api.';
+                  blockedBy = 'affiliate_link';
+                  Object.assign(healthUpdates, markSourceCooldown(healthUpdates, affiliateResult.status));
+                  healthUpdates.affiliateLinkErrors = blockReason;
                 } else {
                   healthUpdates.affiliateLinkErrors = undefined;
                 }
 
-
-                if (!blockReason && (imageOk || (!imageUrl && imageCandidatesList.length === 0))) {
+                if (!blockReason && productUrlOk && affiliateUrlOk && imageOk) {
                   isHealthOk = true;
                 }
               }

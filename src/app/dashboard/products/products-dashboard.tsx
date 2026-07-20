@@ -272,7 +272,13 @@ export default function ProductsDashboard() {
       if (!response.ok || !body?.data) throw new Error(body?.message || 'Không thể cập nhật trạng thái tác vụ.');
       const next = toDashboardOperation(body.data);
       setOperation(next);
-      if (['completed', 'failed', 'cancelled', 'blocked'].includes(next.status)) { if (next.status === 'completed') refresh(); return; }
+      if (['completed', 'failed', 'cancelled', 'blocked'].includes(next.status)) {
+        refresh();
+        showToast(next.status === 'completed' ? 'success' : 'error', next.status === 'completed'
+          ? 'Tác vụ đã hoàn tất; danh sách sản phẩm đang được làm mới.'
+          : next.message || `Tác vụ kết thúc với trạng thái ${next.status}.`);
+        return;
+      }
     }
     if (!controller.signal.aborted) setOperation((current) => current ? { ...current, message: 'Tác vụ vẫn đang xử lý. Việc theo dõi tự động đã dừng sau thời gian giới hạn; dữ liệu không bị thay đổi bởi thao tác theo dõi.' } : current);
   };
@@ -288,8 +294,8 @@ export default function ProductsDashboard() {
       }) });
       const body = await response.json().catch(() => null) as Envelope<SafeAutomationJob> | null;
       if (!response.ok || !body?.ok || !body.data) throw new Error(body?.message || 'Không thể tạo tác vụ. Dữ liệu chưa được thay đổi.');
-      setOperation(toDashboardOperation(body.data)); setOperationDialog(null); showToast('success', body.message);
-      if (dryRun) void pollOperation(body.data.id).catch((reason) => setOperation((current) => current ? { ...current, errorCode: 'STATUS_UNAVAILABLE', message: reason instanceof Error ? reason.message : 'Tạm thời không thể cập nhật trạng thái tác vụ.' } : current));
+      setOperation(toDashboardOperation(body.data)); setOperationDialog(null); showToast('info', body.message);
+      void pollOperation(body.data.id).catch((reason) => setOperation((current) => current ? { ...current, errorCode: 'STATUS_UNAVAILABLE', message: reason instanceof Error ? reason.message : 'Tạm thời không thể cập nhật trạng thái tác vụ.' } : current));
     } catch (reason) { showToast('error', reason instanceof Error ? reason.message : 'Không thể thực hiện tác vụ. Dữ liệu hiện tại không bị thay đổi.'); }
     finally { setOperationBusy(false); }
   };
@@ -342,16 +348,18 @@ export default function ProductsDashboard() {
             <p>Theo dõi sản phẩm đã quét, kết quả kiểm tra an toàn và trạng thái đăng từ dữ liệu backend hiện tại.</p>
           </div>
         </div>
-        <button type="button" className={styles.primaryButton} onClick={() => { setDryRun(true); setOperationDialog('source_scan'); }}><DashboardIcon name="product" size={16} />Quét và kiểm tra sản phẩm</button>
+        <button type="button" className={styles.primaryButton} onClick={() => { setDryRun(true); setOperationDialog('source_scan'); }}><DashboardIcon name="product" size={16} />Quét nguồn sản phẩm</button>
       </header>
 
       <div className={styles.actionBar}>
-        <button type="button" className={styles.secondaryButton} onClick={() => { setDryRun(true); setOperationDialog('full_safe_run'); }}><DashboardIcon name="ai" size={16} />Chạy chế độ tự động</button>
+        <button type="button" className={styles.secondaryButton} onClick={() => { setDryRun(true); setOperationDialog('full_safe_run'); }}><DashboardIcon name="ai" size={16} />Chạy thử pipeline an toàn</button>
         <button type="button" className={styles.secondaryButton} onClick={() => setSourceDialog(true)}><DashboardIcon name="source" size={16} />Thêm nguồn sản phẩm</button>
         <button type="button" className={styles.ghostButton} onClick={openPublic}><DashboardIcon name="external" size={16} />Xem trang công khai</button>
         <button type="button" className={styles.ghostButton} onClick={refresh} disabled={refreshing}><DashboardIcon name="refresh" size={16} />{refreshing ? 'Đang làm mới' : 'Làm mới'}</button>
         <span className={styles.sourceCount}>{sourceCount} nguồn đã lưu</span>
       </div>
+
+      {operationDialog && <section className={`${styles.modal} ${styles.operationPanel}`} role="region" aria-labelledby="operation-title"><div><h2 id="operation-title">{operationDialog === 'source_scan' ? 'Quét nguồn sản phẩm' : 'Chạy thử pipeline an toàn'}</h2><p>{operationDialog === 'source_scan' ? 'Tác vụ này đọc nguồn đã cấu hình và đưa candidate vào hàng chờ; không thay cho nút kiểm tra health ở trang Nguồn sản phẩm.' : 'Pipeline xử lý số lượng giới hạn và vẫn tôn trọng toàn bộ blocker.'}</p></div><label><span>Số lượng giới hạn</span><input ref={dialogFocusRef} type="number" min={1} max={30} value={limit} onChange={(e) => setLimit(Math.max(1, Math.min(30, Number(e.target.value) || 1)))} /></label><label className={styles.checkbox}><input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} /><span>Chạy thử an toàn, không thay đổi dữ liệu</span></label>{!dryRun && <div className={styles.warningBox}>Tác vụ có thể cập nhật candidate và dữ liệu nội bộ nhưng không được tự publish hoặc bỏ blocker.</div>}<div className={styles.modalNote}>Tác vụ được lưu bền vững và do worker xử lý. Polling tiếp tục đến trạng thái terminal rồi làm mới danh sách.</div><div className={styles.modalActions}><button type="button" className={styles.ghostButton} disabled={operationBusy} onClick={() => setOperationDialog(null)}>Đóng</button><button type="button" className={styles.primaryButton} disabled={operationBusy} onClick={() => void submitOperation()}>{operationBusy ? 'Đang gửi' : dryRun ? 'Bắt đầu chạy thử' : 'Bắt đầu có kiểm soát'}</button></div></section>}
 
       {operation && <TaskStatus operation={operation} />}
       <section className={styles.noticeBand} aria-label="Chế độ vận hành">
@@ -423,8 +431,6 @@ export default function ProductsDashboard() {
         )}
         {data && data.pagination.totalItems > 0 && <nav className={styles.pagination} aria-label="Phân trang"><button type="button" disabled={page <= 1} onClick={() => updateQuery({ page: String(page - 1) })}>Trang trước</button><span>Trang {page} / {totalPages}</span><button type="button" disabled={page >= totalPages} onClick={() => updateQuery({ page: String(page + 1) })}>Trang sau</button></nav>}
       </section>}
-
-      {operationDialog && <div className={styles.modalBackdrop} onMouseDown={(e) => { if (e.currentTarget === e.target && !operationBusy) setOperationDialog(null); }}><section className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="operation-title"><h2 id="operation-title">{operationDialog === 'source_scan' ? 'Quét và kiểm tra sản phẩm' : 'Chạy chế độ tự động'}</h2><p>{operationDialog === 'source_scan' ? 'Hệ thống sẽ kiểm tra sản phẩm, đánh giá độ an toàn và đưa sản phẩm đủ điều kiện vào hàng chờ.' : 'Bot sẽ xử lý số lượng giới hạn trong chế độ an toàn.'}</p><label><span>Số lượng giới hạn</span><input ref={dialogFocusRef} type="number" min={1} max={30} value={limit} onChange={(e) => setLimit(Math.max(1, Math.min(30, Number(e.target.value) || 1)))} /></label><label className={styles.checkbox}><input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} /><span>Chạy thử an toàn, không thay đổi dữ liệu</span></label>{!dryRun && <div className={styles.warningBox}>Tác vụ có thể thay đổi dữ liệu nên sẽ chuyển sang Hàng chờ phê duyệt. Quy tắc đăng an toàn vẫn chặn sản phẩm không đủ điều kiện.</div>}<div className={styles.modalNote}>Tác vụ được lưu bền vững và do bộ xử lý nền thực hiện. Tác vụ không chạy khi dừng khẩn cấp đang bật.</div><div className={styles.modalActions}><button type="button" className={styles.ghostButton} disabled={operationBusy} onClick={() => setOperationDialog(null)}>Đóng</button><button type="button" className={styles.primaryButton} disabled={operationBusy} onClick={() => void submitOperation()}>{operationBusy ? 'Đang gửi' : dryRun ? 'Bắt đầu chạy thử' : 'Gửi để phê duyệt'}</button></div></section></div>}
 
       {sourceDialog && <div className={styles.modalBackdrop} onMouseDown={(e) => { if (e.currentTarget === e.target && !sourceBusy) setSourceDialog(false); }}><form className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="source-title" onSubmit={submitSource}><h2 id="source-title">Thêm nguồn sản phẩm</h2><div className={styles.formGrid}><label><span>Tên nguồn</span><input ref={dialogFocusRef} value={sourceForm.name} onChange={(e) => setSourceForm({ ...sourceForm, name: e.target.value })} aria-invalid={Boolean(sourceFields.name)} aria-describedby={sourceFields.name ? 'source-name-error' : undefined} />{sourceFields.name && <small id="source-name-error" className={styles.fieldError}>{sourceFields.name}</small>}</label><label><span>Địa chỉ nguồn</span><input type="url" placeholder="https://" value={sourceForm.url} onChange={(e) => setSourceForm({ ...sourceForm, url: e.target.value })} aria-invalid={Boolean(sourceFields.url)} aria-describedby={sourceFields.url ? 'source-url-error' : undefined} />{sourceFields.url && <small id="source-url-error" className={styles.fieldError}>{sourceFields.url}</small>}</label><label><span>Nền tảng</span><select value={sourceForm.platform} onChange={(e) => setSourceForm({ ...sourceForm, platform: e.target.value })}>{Object.entries(PLATFORM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Loại dữ liệu</span><select value={sourceForm.kind} onChange={(e) => setSourceForm({ ...sourceForm, kind: e.target.value })}>{Object.entries(TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Lịch quét (không bắt buộc)</span><input value={sourceForm.scanSchedule} onChange={(e) => setSourceForm({ ...sourceForm, scanSchedule: e.target.value })} placeholder="Ví dụ: mỗi ngày lúc 08:00" /></label><label className={styles.fullField}><span>Mô tả</span><textarea rows={3} value={sourceForm.description} onChange={(e) => setSourceForm({ ...sourceForm, description: e.target.value })} /></label></div><label className={styles.checkbox}><input type="checkbox" checked={sourceForm.enabled} onChange={(e) => setSourceForm({ ...sourceForm, enabled: e.target.checked })} /><span>Bật nguồn sau khi lưu</span></label><p className={styles.modalNote}>Không nhập khóa kết nối hoặc thông tin đăng nhập vào các trường này. Thông tin nhạy cảm phải được lưu trong Kết nối bảo mật.</p><div className={styles.modalActions}><button type="button" className={styles.ghostButton} disabled={sourceBusy} onClick={() => setSourceDialog(false)}>Đóng</button><button type="submit" className={styles.primaryButton} disabled={sourceBusy}>{sourceBusy ? 'Đang lưu' : 'Lưu nguồn'}</button></div></form></div>}
 

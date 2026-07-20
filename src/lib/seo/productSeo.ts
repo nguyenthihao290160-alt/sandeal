@@ -37,6 +37,7 @@ export function buildProductMetadata(product?: Product | null): Metadata {
   const title = review?.reviewTitle || `${product.title} | Thông tin đang được xác minh`;
   const description = review?.reviewSummary || `Thông tin về ${product.title} đang được SanDeal kiểm tra và chưa đủ điều kiện lập chỉ mục.`;
   const canonical = canonicalProductUrl(product);
+  const previewImage = indexing.indexable ? `${canonical}/opengraph-image` : new URL('/opengraph-image', config.siteUrl).toString();
   return {
     title,
     description: description.slice(0, 160),
@@ -44,10 +45,10 @@ export function buildProductMetadata(product?: Product | null): Metadata {
     robots: { index: indexing.indexable, follow: true, googleBot: { index: indexing.indexable, follow: true } },
     openGraph: {
       title, description: description.slice(0, 200), url: canonical, siteName: 'SanDeal', locale: 'vi_VN', type: 'article',
-      images: product.imageUrl ? [{ url: product.imageUrl, alt: product.title }] : [],
+      images: [{ url: previewImage, alt: indexing.indexable ? `${product.title} — SanDeal` : 'SanDeal' }],
       modifiedTime: review?.contentUpdatedAt || product.updatedAt,
     },
-    twitter: { card: product.imageUrl ? 'summary_large_image' : 'summary', title, description: description.slice(0, 200), images: product.imageUrl ? [product.imageUrl] : [] },
+    twitter: { card: 'summary_large_image', title, description: description.slice(0, 200), images: [previewImage] },
   };
 }
 
