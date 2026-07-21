@@ -103,12 +103,19 @@ function requestsPublicProductState(updates: Partial<Product>): boolean {
   return updates.status === 'published' || updates.publicHidden === false || updates.autoPublished === true;
 }
 
-function invalidateChangedUrlHealth(previous: Product, updates: Partial<Product>): Partial<Product> {
-  const productUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'originalUrl')
+function invalidateChangedUrlHealth(
+  previous: Product,
+  updates: Partial<Product>,
+  verifiedHealthUpdate = false,
+): Partial<Product> {
+  const originalUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'originalUrl')
     && updates.originalUrl !== previous.originalUrl;
+  const canonicalUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'canonicalProductUrl')
+    && updates.canonicalProductUrl !== previous.canonicalProductUrl;
+  const productUrlChanged = originalUrlChanged || canonicalUrlChanged;
   const affiliateUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'affiliateUrl')
     && updates.affiliateUrl !== previous.affiliateUrl;
-  if (!productUrlChanged && !affiliateUrlChanged) return updates;
+  if ((!productUrlChanged && !affiliateUrlChanged) || verifiedHealthUpdate) return updates;
   const reasons = new Set(previous.publicBlockReasons || []);
   if (productUrlChanged) reasons.add('product_url_unhealthy');
   if (affiliateUrlChanged) reasons.add('affiliate_url_unhealthy');
@@ -128,6 +135,8 @@ function invalidateChangedUrlHealth(previous: Product, updates: Partial<Product>
       productUrlHealthReason: reason,
       productUrlErrorCode: 'URL_CHANGED_RECHECK_REQUIRED',
       productUrlTimedOut: false,
+      canonicalUrlVerifiedAt: undefined,
+      canonicalUrlStatus: updates.canonicalProductUrl || updates.originalUrl ? 'unverified' as const : 'unavailable' as const,
     } : {}),
     ...(affiliateUrlChanged ? {
       affiliateHealthStatus: 'unknown' as const,
@@ -138,6 +147,8 @@ function invalidateChangedUrlHealth(previous: Product, updates: Partial<Product>
       affiliateUrlHealthReason: reason,
       affiliateUrlErrorCode: 'URL_CHANGED_RECHECK_REQUIRED',
       affiliateUrlTimedOut: false,
+      affiliateUrlVerifiedAt: undefined,
+      affiliateUrlStatus: updates.affiliateUrl ? 'unverified' as const : 'unavailable' as const,
     } : {}),
     status: previous.status === 'archived' ? 'archived' : 'needs_review',
     publicHidden: true,
@@ -183,7 +194,7 @@ export async function updateProduct(id: string, updates: Partial<Product>): Prom
 export async function saveCanonicalProduct(
   id: string,
   updates: Partial<Product>,
-  options: { evaluate?: boolean } = {},
+  options: { evaluate?: boolean; verifiedHealthUpdate?: boolean } = {},
 ): Promise<Product | null> {
   if (options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
@@ -193,7 +204,7 @@ export async function saveCanonicalProduct(
     const alreadyPublic = products[index].status === 'published' && products[index].publicHidden === false;
     if (requestsPublicProductState(updates) && !alreadyPublic) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
     const now = new Date().toISOString();
-    const guardedUpdates = invalidateChangedUrlHealth(products[index], updates);
+    const guardedUpdates = invalidateChangedUrlHealth(products[index], updates, options.verifiedHealthUpdate === true);
     const merged = { ...products[index], ...guardedUpdates, id, updatedAt: now };
     const before = JSON.stringify({ ...products[index], updatedAt: undefined });
     const after = JSON.stringify({ ...merged, updatedAt: undefined });
@@ -208,7 +219,7 @@ export async function saveCanonicalProduct(
 
 export async function upsertCanonicalProduct(
   draft: Partial<Product>,
-  options: { evaluate?: boolean } = {},
+  options: { evaluate?: boolean; verifiedHealthUpdate?: boolean } = {},
 ): Promise<{ product: Product; created: boolean; unchanged: boolean }> {
   if (requestsPublicProductState(draft) || options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
@@ -229,7 +240,7 @@ export async function upsertCanonicalProduct(
       const staleReview = sourceChanged && products[index].reviewContent
         ? { ...products[index].reviewContent, reviewStatus: 'stale' as const }
         : products[index].reviewContent;
-      const guardedDraft = invalidateChangedUrlHealth(products[index], draft);
+      const guardedDraft = invalidateChangedUrlHealth(products[index], draft, options.verifiedHealthUpdate === true);
       const merged = { ...products[index], ...guardedDraft, reviewContent: draft.reviewContent || staleReview, id: products[index].id, sourceHash: hash, contentHash: hash, updatedAt: now };
       products[index] = options.evaluate ? evaluateCanonicalProduct(merged, now) : normalizeCanonicalProduct(merged, now);
       await writeCollection(COLLECTION, products);

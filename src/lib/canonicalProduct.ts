@@ -27,7 +27,9 @@ export function stableProductHash(product: Partial<Product>): string {
   const value = JSON.stringify({
     source: product.source || '', sourceId: product.sourceId || product.externalId || '',
     title: String(product.title || '').trim(), price: product.price || 0,
-    salePrice: product.salePrice || 0, originalUrl: product.originalUrl || '',
+    salePrice: product.salePrice || 0,
+    canonicalProductUrl: product.canonicalProductUrl || product.originalUrl || '',
+    originalUrl: product.originalUrl || product.canonicalProductUrl || '',
     affiliateUrl: product.affiliateUrl || '', imageUrl: product.imageUrl || '',
     category: product.category || '', brand: product.brand || '', sku: product.sku || '',
     gtin: product.gtin || '', mpn: product.mpn || '', specifications: product.specifications || {},
@@ -41,6 +43,8 @@ export function normalizeCanonicalProduct(input: Partial<Product>, now = new Dat
   const kind = VALID_KINDS.has(String(input.kind)) ? input.kind! : 'unknown';
   const status = VALID_STATUSES.has(String(input.status)) ? input.status! : 'needs_review';
   const reviewContent = normalizeReviewContent(input.reviewContent, input.sourceHash || input.contentHash || '');
+  const canonicalProductUrl = input.canonicalProductUrl || input.originalUrl || undefined;
+  const originalUrl = input.originalUrl || canonicalProductUrl;
   return {
     ...input,
     schemaVersion: 2,
@@ -50,6 +54,11 @@ export function normalizeCanonicalProduct(input: Partial<Product>, now = new Dat
     kind,
     platform: input.platform || 'other',
     source: input.source || 'other',
+    canonicalProductUrl,
+    originalUrl,
+    canonicalUrlSource: input.canonicalUrlSource || (canonicalProductUrl ? 'legacy' : 'none'),
+    canonicalUrlStatus: input.canonicalUrlStatus || (canonicalProductUrl ? 'unverified' : 'unavailable'),
+    affiliateUrlStatus: input.affiliateUrlStatus || (input.affiliateUrl ? 'unverified' : 'unavailable'),
     currency: 'VND',
     tags: Array.isArray(input.tags) ? input.tags : [],
     benefits: Array.isArray(input.benefits) ? input.benefits : [],

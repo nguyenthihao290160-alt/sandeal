@@ -23,6 +23,7 @@ function resolveBuildCommit(): string {
 const buildCommit = resolveBuildCommit();
 
 const nextConfig: NextConfig = {
+    deploymentId: buildCommit,
     env: {
         SANDEAL_BUILD_COMMIT: buildCommit,
         NEXT_PUBLIC_SANDEAL_RELEASE_ID: buildCommit,

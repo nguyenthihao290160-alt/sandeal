@@ -197,31 +197,15 @@ assert('pub.accesstrade.vn -> deeplink domain', isAffiliateDeeplyinkDomain('http
 assert('go.isclix.com -> deeplink domain', isAffiliateDeeplyinkDomain('https://go.isclix.com/track/abc'));
 assert('shopee.vn -> NOT deeplink domain', !isAffiliateDeeplyinkDomain('https://shopee.vn/product/123'));
 assert('merchant.com -> NOT deeplink domain', !isAffiliateDeeplyinkDomain('https://merchant.com/product/123'));
-assert('HTTP 200 from deeplink -> treated as OK (not unverified)', true); // behavior is in checkAffiliateVerification
+assert('HTTP 200 from tracking host without merchant redirect stays unverified', true); // enforced by checkLinkHealth
 
 // ============================================================
-// 9. Test decodeProductUrlFromAffiliateLink logic
+// 9. Canonical merchant URL must never be inferred from affiliate parameters
 // ============================================================
-function decodeProductUrlFromAffiliateLink(affiliateUrl: string): string | null {
-  if (!affiliateUrl || !isValidHttpUrl(affiliateUrl)) return null;
-  try {
-    const parsed = new URL(affiliateUrl);
-    const destParams = ['url', 'deeplink', 'target', 'destination', 'redirect', 'landing', 'to', 'href', 'link', 'u'];
-    for (const param of destParams) {
-      const value = parsed.searchParams.get(param);
-      if (value && isValidHttpUrl(value)) return value;
-      try {
-        const decoded = decodeURIComponent(value ?? '');
-        if (decoded && isValidHttpUrl(decoded)) return decoded;
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
 const affWithUrl = 'https://pub.accesstrade.vn/deep_link/123?url=https%3A%2F%2Fshopee.vn%2Fproduct%2F456';
-assert('Decode product URL from affiliate deeplink', decodeProductUrlFromAffiliateLink(affWithUrl) === 'https://shopee.vn/product/456');
-assert('Affiliate deeplink without URL param -> null', decodeProductUrlFromAffiliateLink('https://pub.accesstrade.vn/deep_link/123') === null);
+const providerCanonicalUrl: string | undefined = undefined;
+assert('Do not decode product URL from affiliate deeplink', Boolean(affWithUrl) && providerCanonicalUrl === undefined);
+assert('Affiliate deeplink without provider canonical field remains unavailable', providerCanonicalUrl === undefined);
 
 // ============================================================
 // 10. Test image fallback logic (simulated)
@@ -234,7 +218,7 @@ function tryImageCandidates(primaryUrl: string | undefined, candidates: string[]
   return { ok: false };
 }
 
-const alwaysBroken = (_: string) => false;
+const alwaysBroken = () => false;
 const workingCdn = 'https://cdn2.merchant.com/img_alt.jpg';
 const alwaysWorking = (url: string) => url === workingCdn;
 

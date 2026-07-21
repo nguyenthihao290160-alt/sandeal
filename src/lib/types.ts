@@ -258,7 +258,16 @@ export interface Product {
   platform: ProductPlatform;
   source: ProductSource;
 
+  /** Canonical merchant product URL. `originalUrl` remains the legacy alias. */
   originalUrl?: string;
+  canonicalProductUrl?: string;
+  canonicalUrlSource?: 'provider_api' | 'manual' | 'legacy' | 'none';
+  canonicalUrlProvider?: 'accesstrade' | 'manual';
+  canonicalUrlSourceEndpoint?: string;
+  canonicalUrlSourceField?: string;
+  canonicalUrlFetchedAt?: string;
+  canonicalUrlVerifiedAt?: string;
+  canonicalUrlStatus?: 'available' | 'unavailable' | 'unverified' | 'verified' | 'invalid';
   affiliateUrl?: string;
   affiliateUrlSource?: 'provider_api' | 'manual' | 'none';
   affiliateUrlProvider?: 'accesstrade' | 'manual';
@@ -267,6 +276,14 @@ export interface Product {
   affiliateUrlCampaignId?: string;
   affiliateUrlFetchedAt?: string;
   affiliateUrlVerifiedAt?: string;
+  affiliateUrlStatus?: 'available' | 'unavailable' | 'unverified' | 'verified' | 'invalid';
+  quarantinedAffiliateUrl?: {
+    url: string;
+    reason: string;
+    quarantinedAt: string;
+    provider?: string;
+    sourceField?: string;
+  };
   deepLinkSupported?: boolean;
   affiliateLinkReason?: string;
   imageUrl?: string;
@@ -323,6 +340,9 @@ export interface Product {
   affiliateUrlTimedOut?: boolean;
   imageHealthStatus?: LinkHealthStatus;
   imageLastCheckedAt?: string;
+  imageUrlHttpStatus?: number;
+  imageUrlFinalUrl?: string;
+  imageUrlHealthReason?: string;
   imageValidationState?: 'VALID' | 'BROKEN' | 'HOTLINK_BLOCKED' | 'TIMEOUT' | 'INVALID_CONTENT_TYPE' | 'TOO_SMALL' | 'DARK_IMAGE_SUSPECTED' | 'PLACEHOLDER' | 'FALLBACK_USED';
   imageWidth?: number;
   imageHeight?: number;
@@ -441,6 +461,8 @@ export interface Product {
   lastHealthyAt?: string;
   hiddenAt?: string;
   hiddenReason?: string;
+  lastReprocessOperationId?: string;
+  lastReprocessedAt?: string;
 
   createdAt: string;
   updatedAt: string;

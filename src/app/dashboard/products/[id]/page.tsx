@@ -18,6 +18,51 @@ type PipelineTruth = {
   safety: { publishingEnabled: boolean; launchEnabled: boolean; effectiveMode: string };
 };
 
+const HEALTHY_LINK = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
+const LINK_VERIFICATION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+
+function verificationIsFresh(value?: string): boolean {
+  const checkedAt = Date.parse(value || '');
+  const now = Date.now();
+  return Number.isFinite(checkedAt) && checkedAt <= now + 60_000 && now - checkedAt <= LINK_VERIFICATION_MAX_AGE_MS;
+}
+
+function isPublicHttpUrl(value?: string): boolean {
+  try {
+    const parsed = new URL(value || '');
+    const host = parsed.hostname.toLowerCase();
+    if (!['http:', 'https:'].includes(parsed.protocol) || !host || parsed.username || parsed.password) return false;
+    if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return false;
+    if (/^(?:127|10|0|169\.254)\./.test(host) || /^192\.168\./.test(host) || /^172\.(?:1[6-9]|2\d|3[01])\./.test(host)) return false;
+    if (/^\[?(?:::1|fc|fd|fe8|fe9|fea|feb)/i.test(host)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function friendlyBlocker(value: string): string {
+  const labels: Record<string, string> = {
+    missing_product_url: 'Thiếu đường dẫn sản phẩm chính thức',
+    product_url_unhealthy: 'Đường dẫn sản phẩm chưa hoạt động',
+    product_health_stale: 'Kết quả kiểm tra link sản phẩm đã cũ',
+    canonical_provenance_missing: 'Chưa xác minh nguồn của link sản phẩm',
+    canonical_url_unverified: 'Link sản phẩm chưa được xác minh',
+    missing_affiliate_url: 'Provider chưa cung cấp link affiliate',
+    affiliate_url_unhealthy: 'Link affiliate chưa hoạt động',
+    affiliate_health_stale: 'Kết quả kiểm tra affiliate đã cũ',
+    affiliate_provenance_missing: 'Chưa xác minh nguồn của link affiliate',
+    affiliate_url_unverified: 'Link affiliate chưa được xác minh',
+    missing_image: 'Thiếu ảnh sản phẩm',
+    image_unhealthy: 'Ảnh chưa hoạt động',
+    image_http_not_200: 'Ảnh không trả về HTTP 200',
+    image_content_type_invalid: 'Phản hồi ảnh không đúng định dạng',
+    missing_price: 'Thiếu giá hợp lệ',
+    source_unverified: 'Nguồn dữ liệu chưa được xác minh',
+  };
+  return labels[value] || value.replace(/^stored:/, '').replace(/_/g, ' ');
+}
+
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [product, setProduct] = useState<Product | null>(null);
@@ -111,7 +156,7 @@ export default function ProductDetailPage() {
           <div className="empty-state">
             <div className="empty-state-icon">❌</div>
             <div className="empty-state-title">Không tìm thấy sản phẩm</div>
-            <div className="empty-state-desc">Sản phẩm này có thể đã bị xoá hoặc không tồn tại.</div>
+            <div className="empty-state-desc">Sản phẩm này có thể đã được lưu trữ hoặc không tồn tại.</div>
             <Link href="/dashboard/products" className="btn btn-primary" style={{ marginTop: 'var(--space-lg)' }}>← Quay lại danh sách</Link>
           </div>
         </div>
@@ -121,6 +166,40 @@ export default function ProductDetailPage() {
 
   const inferredKind = product.kind || classifyProductKind(product);
   const statusLabel = product.status === 'approved' ? 'Đã duyệt' : product.status === 'needs_review' ? 'Cần xem xét' : product.status === 'draft' ? 'Nháp' : product.status === 'published' ? 'Đã xuất bản' : product.status;
+  const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
+  const canonicalProvenanceValid = product.source !== 'accesstrade'
+    || (product.canonicalUrlSource === 'provider_api' && product.canonicalUrlProvider === 'accesstrade'
+      && product.canonicalUrlSourceEndpoint === 'datafeed' && Boolean(product.canonicalUrlSourceField));
+  const canonicalLinkEnabled = isPublicHttpUrl(canonicalUrl)
+    && HEALTHY_LINK.has(String(product.linkHealthStatus || product.productHealthStatus || ''))
+    && product.canonicalUrlStatus === 'verified'
+    && verificationIsFresh(product.canonicalUrlVerifiedAt)
+    && verificationIsFresh(product.linkLastCheckedAt)
+    && canonicalProvenanceValid;
+  const affiliateProvenanceValid = product.source !== 'accesstrade'
+    || (product.affiliateUrlSource === 'provider_api' && product.affiliateUrlProvider === 'accesstrade'
+      && product.affiliateUrlSourceEndpoint === 'datafeed' && Boolean(product.affiliateUrlSourceField)
+      && product.deepLinkSupported !== false);
+  const affiliateLinkEnabled = isPublicHttpUrl(product.affiliateUrl)
+    && HEALTHY_LINK.has(String(product.affiliateHealthStatus || ''))
+    && product.affiliateUrlStatus === 'verified'
+    && verificationIsFresh(product.affiliateUrlVerifiedAt)
+    && verificationIsFresh(product.affiliateLastCheckedAt)
+    && affiliateProvenanceValid;
+  const canonicalLinkReason = !canonicalUrl ? 'Provider chưa cung cấp đường dẫn sản phẩm.'
+    : !isPublicHttpUrl(canonicalUrl) ? 'Đường dẫn sản phẩm không hợp lệ.'
+      : !canonicalProvenanceValid ? 'Chưa xác minh được nguồn của đường dẫn sản phẩm.'
+        : !verificationIsFresh(product.canonicalUrlVerifiedAt) || !verificationIsFresh(product.linkLastCheckedAt)
+          ? 'Kết quả xác minh đường dẫn sản phẩm đã cũ hoặc chưa có.'
+          : product.canonicalUrlStatus !== 'verified' || !HEALTHY_LINK.has(String(product.linkHealthStatus || product.productHealthStatus || ''))
+          ? 'Đường dẫn sản phẩm chưa vượt qua kiểm tra an toàn.' : '';
+  const affiliateLinkReason = !product.affiliateUrl ? 'Provider chưa cung cấp link affiliate hợp lệ.'
+    : !isPublicHttpUrl(product.affiliateUrl) ? 'Link affiliate không hợp lệ.'
+      : !affiliateProvenanceValid ? 'Chưa xác minh được provenance của link affiliate.'
+        : !verificationIsFresh(product.affiliateUrlVerifiedAt) || !verificationIsFresh(product.affiliateLastCheckedAt)
+          ? 'Kết quả xác minh link affiliate đã cũ hoặc chưa có.'
+          : product.affiliateUrlStatus !== 'verified' || !HEALTHY_LINK.has(String(product.affiliateHealthStatus || ''))
+          ? 'Link affiliate chưa vượt qua kiểm tra an toàn.' : '';
   const blockers = pipelineTruth?.lifecycle.blockers || [];
   const blockerGroups = blockers.reduce<Record<string, string[]>>((groups, blocker) => {
     const group = /link|url/i.test(blocker) ? 'Liên kết' : /image|ảnh/i.test(blocker) ? 'Hình ảnh' : /price|giá/i.test(blocker) ? 'Giá'
@@ -145,7 +224,14 @@ export default function ProductDetailPage() {
           <p>{product.description || 'Chưa có mô tả sản phẩm.'}</p>
           <div className={styles.priceRow}><strong>{formatPrice(product.salePrice || product.price)}</strong>{product.salePrice && product.price && product.price !== product.salePrice && <del>{formatPrice(product.price)}</del>}{product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}</div>
           <dl className={styles.heroFacts}><div><dt>Nguồn</dt><dd>{product.source || '—'}</dd></div><div><dt>Danh mục</dt><dd>{product.category || '—'}</dd></div><div><dt>Trạng thái public</dt><dd>{pipelineTruth?.lifecycle.publicHidden === false ? 'Đang hiển thị' : 'Đang ẩn'}</dd></div><div><dt>Rủi ro</dt><dd>{product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa rõ'}</dd></div></dl>
-          <div className={styles.linkRow}>{product.affiliateUrl && <a href={product.affiliateUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm">Mở link affiliate</a>}{product.originalUrl && <a href={product.originalUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm">Mở link gốc</a>}</div>
+          <div className={styles.linkActions} aria-label="Liên kết sản phẩm đã kiểm tra">
+            <div data-link-state={affiliateLinkEnabled ? 'enabled' : 'disabled'}><span>Affiliate</span>{affiliateLinkEnabled
+              ? <a href={product.affiliateUrl!} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm">Mở link affiliate</a>
+              : <button type="button" className="btn btn-primary btn-sm" disabled aria-disabled="true">Link affiliate bị khóa</button>}<small>{affiliateLinkEnabled ? 'Đã xác minh và sẵn sàng mở.' : affiliateLinkReason}</small></div>
+            <div data-link-state={canonicalLinkEnabled ? 'enabled' : 'disabled'}><span>Sản phẩm</span>{canonicalLinkEnabled
+              ? <a href={canonicalUrl!} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm">Mở trang sản phẩm</a>
+              : <button type="button" className="btn btn-secondary btn-sm" disabled aria-disabled="true">Link sản phẩm bị khóa</button>}<small>{canonicalLinkEnabled ? 'Đã xác minh và sẵn sàng mở.' : canonicalLinkReason}</small></div>
+          </div>
         </div>
         <aside className={styles.scoreSummary}><span>Điểm đánh giá</span><strong className={product.score != null && product.score >= 75 ? styles.goodScore : product.score != null && product.score >= 45 ? styles.mediumScore : styles.lowScore}>{product.score ?? '—'}</strong><small>{product.scoreLabel || 'Chưa có nhãn điểm'}</small><button className="btn btn-accent btn-sm" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>{actionBusy === 'score' ? 'Đang chấm…' : 'Chấm điểm lại'}</button></aside>
       </section>
@@ -156,11 +242,11 @@ export default function ProductDetailPage() {
           {pipelineTruth ? <>
             <dl className={styles.truthGrid}><div><dt>Phân loại</dt><dd>{pipelineTruth.classification.type}</dd></div><div><dt>Lifecycle</dt><dd>{pipelineTruth.lifecycle.stage}</dd></div><div><dt>Job hiện tại</dt><dd>{pipelineTruth.automation.status || 'Không có'}</dd></div><div><dt>Worker owner</dt><dd>{pipelineTruth.automation.workerOwner || 'Không có owner active'}</dd></div><div><dt>Retry</dt><dd>{pipelineTruth.automation.attempts}/{pipelineTruth.automation.maxAttempts ?? '—'}</dd></div><div><dt>Publishing</dt><dd>{pipelineTruth.safety.publishingEnabled ? 'Enabled' : 'Disabled'}</dd></div></dl>
             <div className={styles.healthStrip}>
-              <span>Link gốc <strong>{pipelineTruth.health.productLink}</strong><small>{product.productUrlFinalDomain || 'Chưa có final domain'} · {product.productUrlHttpStatus ? `HTTP ${product.productUrlHttpStatus}` : product.productUrlErrorCode || 'Chưa có HTTP status'} · {product.linkLastCheckedAt ? new Date(product.linkLastCheckedAt).toLocaleString('vi-VN') : 'Chưa kiểm tra'}</small></span>
+              <span>Link sản phẩm <strong>{pipelineTruth.health.productLink}</strong><small>{product.productUrlFinalDomain || 'Chưa có final domain'} · {product.productUrlHttpStatus ? `HTTP ${product.productUrlHttpStatus}` : product.productUrlErrorCode || 'Chưa có HTTP status'} · {product.canonicalUrlSourceField || 'chưa có provenance'} · {product.linkLastCheckedAt ? new Date(product.linkLastCheckedAt).toLocaleString('vi-VN') : 'Chưa kiểm tra'}</small></span>
               <span>Affiliate <strong>{pipelineTruth.health.affiliateLink}</strong><small>{product.affiliateUrlFinalDomain || 'Chưa có final domain'} · {product.affiliateUrlHttpStatus ? `HTTP ${product.affiliateUrlHttpStatus}` : product.affiliateUrlErrorCode || 'Chưa có HTTP status'} · {product.affiliateUrlVerifiedAt ? new Date(product.affiliateUrlVerifiedAt).toLocaleString('vi-VN') : 'Chưa xác minh'}</small></span>
-              <span>Ảnh <strong>{pipelineTruth.health.image}</strong></span><span>Giá <strong>{pipelineTruth.health.price}</strong></span><span>Nguồn <strong>{pipelineTruth.health.source}</strong></span>
+              <span>Ảnh <strong>{pipelineTruth.health.image}</strong><small>{product.imageUrlHttpStatus ? `HTTP ${product.imageUrlHttpStatus}` : 'Chưa có HTTP status'} · {product.imageContentType || 'Chưa có Content-Type'}</small></span><span>Giá <strong>{pipelineTruth.health.price}</strong></span><span>Nguồn <strong>{pipelineTruth.health.source}</strong></span>
             </div>
-            {blockers.length ? <div className={styles.blockerGroups}>{Object.entries(blockerGroups).map(([group, items]) => <div key={group}><strong>{group}</strong><div>{items.map(blocker => <span key={blocker} className={styles.blockerBadge}>{blocker}</span>)}</div></div>)}</div> : <p className={styles.clearState}>Không có blocker được ghi nhận trong snapshot hiện tại.</p>}<p className={styles.requiredAction}>Hành động cần thiết: <strong>{pipelineTruth.requiredAction || 'Không có'}</strong></p>
+            {blockers.length ? <div className={styles.blockerGroups}>{Object.entries(blockerGroups).map(([group, items]) => <div key={group}><strong>{group}</strong><div>{items.map(blocker => <span key={blocker} className={styles.blockerBadge} title={blocker}>{friendlyBlocker(blocker)}</span>)}</div></div>)}</div> : <p className={styles.clearState}>Không có blocker được ghi nhận trong snapshot hiện tại.</p>}<p className={styles.requiredAction}>Hành động cần thiết: <strong>{pipelineTruth.requiredAction ? friendlyBlocker(pipelineTruth.requiredAction) : 'Không có'}</strong></p>
           </> : <p className={styles.clearState}>Chưa tải được operational truth. Các hành động nhạy cảm vẫn bị khóa.</p>}
         </article>
 

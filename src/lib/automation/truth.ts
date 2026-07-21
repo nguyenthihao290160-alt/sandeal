@@ -28,6 +28,7 @@ export interface AutomationTruthInput {
 }
 
 const HEARTBEAT_FRESH_MS = 90_000;
+const WORKER_HEARTBEAT_FRESH_MS = 45_000;
 
 function parsed(value?: string): number | null {
   const result = Date.parse(value || '');
@@ -55,6 +56,10 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
   // still requires the lease below.
   const schedulerHeartbeatAt = schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt || null;
   const schedulerHeartbeatFresh = parsed(schedulerHeartbeatAt || undefined) !== null && now - parsed(schedulerHeartbeatAt || undefined)! <= HEARTBEAT_FRESH_MS;
+  const schedulerHeartbeatAgeMs = parsed(schedulerHeartbeatAt || undefined) === null
+    ? null : Math.max(0, now - parsed(schedulerHeartbeatAt || undefined)!);
+  const schedulerHeartbeatSource = schedulerLease?.heartbeatAt ? 'role_lease'
+    : control.schedulerHeartbeatAt ? 'control_store' : 'none';
   const lastTickAt = control.schedulerLastRunAt || null;
   const nextRunAt = control.schedulerNextRunAt || null;
   const tickRecent = parsed(lastTickAt || undefined) !== null && now - parsed(lastTickAt || undefined)! <= Math.max(2 * 60 * 60_000, settings.intervalHours * 2 * 60 * 60_000);
@@ -65,14 +70,19 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
     && (!schedulerLease?.instanceId || item.activeInstanceId === schedulerLease.instanceId));
   const fencingValid = Boolean(schedulerLease && Number.isInteger(schedulerLease.fencingToken) && schedulerLease.fencingToken > 0);
   const schedulerActive = settings.enabled && !control.schedulerPaused && schedulerLeaseFresh && schedulerHeartbeatFresh
-    && fencingValid && Boolean(schedulerLease?.ownerId) && (tickRecent || nextRunValid) && !recentSchedulerConflict && schedulerLeases.length === 1;
+    && fencingValid && Boolean(schedulerLease?.ownerId) && !recentSchedulerConflict && schedulerLeases.length === 1;
 
   const freshWorkers = workerLeases.filter(lease => parsed(lease.leaseExpiresAt) !== null && parsed(lease.leaseExpiresAt)! > now
-    && parsed(lease.heartbeatAt) !== null && now - parsed(lease.heartbeatAt)! <= HEARTBEAT_FRESH_MS
+    && parsed(lease.heartbeatAt) !== null && now - parsed(lease.heartbeatAt)! <= WORKER_HEARTBEAT_FRESH_MS
     && Number.isInteger(lease.fencingToken) && lease.fencingToken > 0);
   const staleWorkers = workerLeases.filter(lease => !freshWorkers.includes(lease));
-  const controlWorkerFresh = parsed(control.workerHeartbeatAt) !== null && now - parsed(control.workerHeartbeatAt)! <= HEARTBEAT_FRESH_MS;
+  const controlWorkerFresh = parsed(control.workerHeartbeatAt) !== null && now - parsed(control.workerHeartbeatAt)! <= WORKER_HEARTBEAT_FRESH_MS;
   const activeWorkers = freshWorkers.length || (workerLeases.length === 0 && controlWorkerFresh ? 1 : 0);
+  const workerHeartbeatAt = newest([...workerLeases.map(item => item.heartbeatAt), control.workerHeartbeatAt]);
+  const workerHeartbeatAgeMs = parsed(workerHeartbeatAt || undefined) === null
+    ? null : Math.max(0, now - parsed(workerHeartbeatAt || undefined)!);
+  const workerHeartbeatSource = freshWorkers[0]?.heartbeatAt || workerLeases[0]?.heartbeatAt ? 'role_lease'
+    : control.workerHeartbeatAt ? 'control_store' : 'none';
 
   const pending = jobs.filter(job => job.status === 'PENDING').length;
   const running = jobs.filter(job => job.status === 'RUNNING').length;
@@ -86,11 +96,11 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
 
   if (settings.enabled && !control.schedulerPaused && !schedulerActive) inconsistencies.push(inconsistency(
     'SCHEDULE_ENABLED_RUNTIME_INACTIVE', 'CRITICAL', 'Lịch được bật nhưng runtime scheduler chưa chứng minh ACTIVE.',
-    { leaseFresh: schedulerLeaseFresh, heartbeatFresh: schedulerHeartbeatFresh, fencingValid, tickRecent, nextRunValid }, now));
+    { leaseFresh: schedulerLeaseFresh, heartbeatFresh: schedulerHeartbeatFresh, fencingValid }, now));
   if (!control.schedulerPaused && schedulerLeaseFresh && schedulerHeartbeatFresh && !tickRecent && !nextRunValid) inconsistencies.push(inconsistency(
     'SCHEDULER_NO_RECENT_TICK', 'WARNING', 'Scheduler có lease nhưng tick gần nhất và lịch kế tiếp đều không hợp lệ.', { lastTickAt, nextRunAt }, now));
   if (!control.schedulerPaused && parsed(nextRunAt || undefined) !== null && parsed(nextRunAt || undefined)! < now - HEARTBEAT_FRESH_MS) inconsistencies.push(inconsistency(
-    'NEXT_RUN_OVERDUE', 'CRITICAL', 'nextRunAt đã ở quá khứ quá ngưỡng cho phép.', { nextRunAt, overdueMs: now - parsed(nextRunAt || undefined)! }, now));
+    'NEXT_RUN_OVERDUE', 'WARNING', 'nextRunAt đã ở quá khứ quá ngưỡng cho phép.', { nextRunAt, overdueMs: now - parsed(nextRunAt || undefined)! }, now));
   if ((pending + retrying) > 0 && activeWorkers === 0) inconsistencies.push(inconsistency(
     'QUEUE_PENDING_WORKER_INACTIVE', 'CRITICAL', 'Hàng đợi có việc nhưng không có worker ACTIVE.', { pending, retrying }, now));
   if (schedulerLeases.length > 1) inconsistencies.push(inconsistency(
@@ -130,9 +140,18 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
     timezone: AUTOMATION_TIMEZONE,
     scheduler: {
       state: schedulerActive ? 'ACTIVE' : control.schedulerPaused ? 'PAUSED' : settings.enabled ? 'INACTIVE' : 'DISABLED',
+      runtimeState: schedulerActive ? 'ACTIVE' : control.schedulerPaused ? 'PAUSED' : settings.enabled ? 'INACTIVE' : 'DISABLED',
+      scheduleState: control.schedulerPaused ? 'PAUSED' : !settings.enabled ? 'DISABLED'
+        : parsed(nextRunAt || undefined) === null ? 'UNVERIFIED'
+          : !nextRunValid ? 'OVERDUE' : 'HEALTHY',
       ownerId: schedulerLease?.ownerId || null,
       heartbeatAt: schedulerHeartbeatAt,
+      heartbeatAgeMs: schedulerHeartbeatAgeMs,
+      heartbeatSource: schedulerHeartbeatSource,
+      staleAgeMs: schedulerHeartbeatAgeMs !== null && schedulerHeartbeatAgeMs > HEARTBEAT_FRESH_MS
+        ? schedulerHeartbeatAgeMs - HEARTBEAT_FRESH_MS : null,
       leaseExpiresAt: schedulerLease?.leaseExpiresAt || null,
+      releaseId: schedulerLease?.releaseId || null,
       fencingToken: schedulerLease?.fencingToken || null,
       nextRunAt,
       lastTickAt,
@@ -141,7 +160,12 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
     worker: {
       state: activeWorkers > 0 ? 'ACTIVE' : control.workerPaused ? 'PAUSED' : 'INACTIVE',
       ownerIds: freshWorkers.map(item => item.ownerId).slice(0, 20),
-      latestHeartbeatAt: newest([...workerLeases.map(item => item.heartbeatAt), control.workerHeartbeatAt]),
+      latestHeartbeatAt: workerHeartbeatAt,
+      heartbeatAgeMs: workerHeartbeatAgeMs,
+      heartbeatSource: workerHeartbeatSource,
+      staleAgeMs: workerHeartbeatAgeMs !== null && workerHeartbeatAgeMs > WORKER_HEARTBEAT_FRESH_MS
+        ? workerHeartbeatAgeMs - WORKER_HEARTBEAT_FRESH_MS : null,
+      releaseIds: [...new Set(freshWorkers.map(item => item.releaseId).filter((value): value is string => Boolean(value)))],
       activeWorkers,
       staleWorkers: staleWorkers.length,
     },

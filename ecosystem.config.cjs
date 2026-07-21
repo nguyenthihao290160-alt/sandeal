@@ -38,6 +38,7 @@ const shared = {
     SANDEAL_RELEASE_ID: releaseId,
     SANDEAL_BUILD_COMMIT: releaseId,
     NEXT_PUBLIC_SANDEAL_RELEASE_ID: releaseId,
+    NEXT_DEPLOYMENT_ID: releaseId,
     GIT_COMMIT_SHA: releaseId,
   },
 };

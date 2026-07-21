@@ -12,3 +12,20 @@ export function isBuildMismatchMessage(value: unknown): boolean {
 export function isComparableBuildId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && !['development', 'unavailable'].includes(value);
 }
+
+export type RequestErrorClassification = 'STALE_CLIENT_ACTION_MISMATCH' | 'CURRENT_SERVER_ERROR';
+
+export function classifyRequestError(value: unknown, routeType?: string): {
+  classification: RequestErrorClassification;
+  currentIncident: boolean;
+  severity: 'INFO' | 'ERROR';
+} {
+  if (routeType === 'action' && isBuildMismatchMessage(value)) {
+    return {
+      classification: 'STALE_CLIENT_ACTION_MISMATCH',
+      currentIncident: false,
+      severity: 'INFO',
+    };
+  }
+  return { classification: 'CURRENT_SERVER_ERROR', currentIncident: true, severity: 'ERROR' };
+}

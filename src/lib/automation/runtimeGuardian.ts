@@ -20,8 +20,8 @@ export interface RuntimeHealthSnapshot {
   id: string;
   ruleVersion: string;
   web: { status: WebHealthStatus; buildAvailable: boolean; publicRouteHealthy: boolean | null; buildId: string | null; releaseId: string; releaseMatchesBuild: boolean | null };
-  worker: { status: WorkerHealthStatus; holderId?: string; heartbeatAt?: string };
-  scheduler: { status: SchedulerHealthStatus; holderId?: string; heartbeatAt?: string };
+  worker: { status: WorkerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
+  scheduler: { status: SchedulerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
   providers: Record<string, ProviderHealthStatus>;
   queue: { pending: number; running: number; stuck: number; staleJobs: number };
   storage: { status: 'healthy' | 'degraded' | 'blocked'; staleLocks: number; freeBytes: number | null; criticalCollections: CriticalStorageInspection };
@@ -138,8 +138,8 @@ export async function runRuntimeGuardian(options: {
   const snapshot: RuntimeHealthSnapshot = {
     schemaVersion: 1, id: `runtime-health:${Math.floor(now / 30_000)}`, ruleVersion: RUNTIME_GUARDIAN_RULE_VERSION,
     web: { status: webStatus, buildAvailable, publicRouteHealthy: options.publicRouteHealthy ?? null, buildId: artifactBuildId, releaseId: release.releaseId, releaseMatchesBuild },
-    worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt },
-    scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt },
+    worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt, releaseId: workerLease?.releaseId },
+    scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt, releaseId: schedulerLease?.releaseId },
     providers: options.providers || {},
     queue: { pending: jobs.filter(job => job.status === 'PENDING').length, running: jobs.filter(job => job.status === 'RUNNING').length, stuck, staleJobs },
     storage, duplicateRoles, publishSafe, reasons,

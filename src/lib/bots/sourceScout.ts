@@ -16,9 +16,12 @@ import { BotContext } from './context';
 import { listProducts, createProduct, updateProduct, getAllProducts, getProductById } from '../storage/products';
 import { looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import {
+  ACCESS_TRADE_AFFILIATE_URL_FIELDS,
+  ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
   isAccessTradeConfigured,
   mapAccessTradeToProduct,
   searchAccessTrade,
+  isAccessTradeTrackingUrl,
   type NormalizedAccessTradeItem,
 } from '../integrations/accesstrade';
 import { checkLinkHealth, checkImageHealth, checkSourcePreflight } from './productHealthCheck';
@@ -329,7 +332,7 @@ function getDraftPrice(productDraft: MutableProductDraft): number | undefined {
 
 function getDraftUrl(productDraft: MutableProductDraft): string {
   const candidates = [
-    productDraft.affiliateUrl,
+    productDraft.canonicalProductUrl,
     productDraft.originalUrl,
     productDraft.url,
   ];
@@ -522,7 +525,7 @@ function buildAccessTradeProductDraft(
       ? item.originalUrl
       : undefined;
 
-  const finalUrl = affiliateUrl || originalUrl;
+  const finalUrl = originalUrl;
   const imageUrl = isValidHttpUrl(item.imageUrl)
       ? item.imageUrl
       : undefined;
@@ -1038,6 +1041,12 @@ export class SourceScoutBot {
             keyword,
             count: items.length,
             summary: searchResult.summary,
+            providerPayloadFields: searchResult.requests.map(request => ({
+              endpoint: request.endpoint,
+              resultType: request.resultType,
+              observedCanonicalUrlFields: request.observedCanonicalUrlFields || [],
+              observedAffiliateUrlFields: request.observedAffiliateUrlFields || [],
+            })),
           });
         } catch (error) {
           counters.skipped += 1;
@@ -1110,8 +1119,38 @@ export class SourceScoutBot {
               newData.affiliateUrlFetchedAt = productDraft.affiliateUrlFetchedAt;
               newData.deepLinkSupported = productDraft.deepLinkSupported;
               newData.affiliateLinkReason = productDraft.affiliateLinkReason;
+              newData.affiliateUrlStatus = 'unverified';
+            } else if (productDraft.affiliateUrlStatus === 'unavailable') {
+              if (existingProduct.affiliateUrl) {
+                newData.quarantinedAffiliateUrl = {
+                  url: existingProduct.affiliateUrl,
+                  reason: 'provider_affiliate_url_unavailable',
+                  quarantinedAt: new Date().toISOString(),
+                  provider: existingProduct.affiliateUrlProvider,
+                  sourceField: existingProduct.affiliateUrlSourceField,
+                };
+              }
+              newData.affiliateUrl = undefined;
+              newData.affiliateUrlSource = 'none';
+              newData.affiliateUrlProvider = undefined;
+              newData.affiliateUrlSourceField = undefined;
+              newData.affiliateUrlStatus = 'unavailable';
+              newData.deepLinkSupported = false;
+              newData.affiliateLinkReason = productDraft.affiliateLinkReason || 'provider_deeplink_not_supported';
             }
-            if (productDraft.originalUrl && isValidHttpUrl(productDraft.originalUrl) && productDraft.originalUrl !== existingProduct.originalUrl) newData.originalUrl = productDraft.originalUrl;
+            if (productDraft.originalUrl && isValidHttpUrl(productDraft.originalUrl) && (
+              productDraft.originalUrl !== existingProduct.originalUrl
+              || productDraft.canonicalUrlSourceField !== existingProduct.canonicalUrlSourceField
+            )) {
+              newData.originalUrl = productDraft.originalUrl;
+              newData.canonicalProductUrl = productDraft.canonicalProductUrl || productDraft.originalUrl;
+              newData.canonicalUrlSource = productDraft.canonicalUrlSource;
+              newData.canonicalUrlProvider = productDraft.canonicalUrlProvider;
+              newData.canonicalUrlSourceEndpoint = productDraft.canonicalUrlSourceEndpoint;
+              newData.canonicalUrlSourceField = productDraft.canonicalUrlSourceField;
+              newData.canonicalUrlFetchedAt = productDraft.canonicalUrlFetchedAt;
+              newData.canonicalUrlStatus = 'unverified';
+            }
             
             // Mark a flag to track if we need to call updateProduct
             productDraft._hasChanges = Object.keys(newData).length > 0;
@@ -1228,14 +1267,15 @@ export class SourceScoutBot {
             const canonical = saved;
 
             const isRealProduct = isProductLikeKind(kind);
-            const originalUrl = isValidHttpUrl(canonical.originalUrl || '') ? canonical.originalUrl : undefined;
+            const originalUrl = isValidHttpUrl(canonical.canonicalProductUrl || canonical.originalUrl || '')
+              ? canonical.canonicalProductUrl || canonical.originalUrl : undefined;
             const affiliateUrl = isValidHttpUrl(canonical.affiliateUrl || '') ? canonical.affiliateUrl : undefined;
             const imageUrl = isValidHttpUrl(canonical.imageUrl || '') ? canonical.imageUrl : undefined;
             // Image candidates from AT item for fallback
             const imageCandidatesList: string[] = Array.isArray(item.imageCandidates)
               ? item.imageCandidates.filter((u: string) => isValidHttpUrl(u))
               : [];
-            // Canonical product URL decoded from affiliate deeplink (if available)
+            // Canonical merchant URL returned by an explicit provider product field.
             const canonicalProductUrl: string | undefined =
               item.canonicalProductUrl && isValidHttpUrl(item.canonicalProductUrl)
                 ? item.canonicalProductUrl
@@ -1254,9 +1294,14 @@ export class SourceScoutBot {
               if (!originalUrl) {
                 blockReason = 'Thiếu Product URL hợp lệ';
                 blockedBy = 'link';
+                healthUpdates.canonicalUrlStatus = 'unavailable';
               } else if (!affiliateUrl) {
                 blockReason = 'Nhà cung cấp không trả về Affiliate URL hợp lệ';
                 blockedBy = 'affiliate_link';
+                healthUpdates.affiliateUrlStatus = 'unavailable';
+                healthUpdates.affiliateHealthStatus = 'error';
+                healthUpdates.affiliateUrlHealthReason = blockReason;
+                healthUpdates.affiliateUrlErrorCode = 'MISSING_AFFILIATE_URL';
               } else if (!imageUrl && imageCandidatesList.length === 0) {
                 blockReason = 'Thiếu Ảnh (imageUrl)';
                 blockedBy = 'image';
@@ -1265,18 +1310,32 @@ export class SourceScoutBot {
                 const checkedAt = new Date().toISOString();
                 const productResult = await checkLinkHealth(originalUrl);
                 const affiliateResult = await checkLinkHealth(affiliateUrl);
-                const productUrlOk = productResult.ok;
+                const canonicalProvenanceOk = canonical.canonicalUrlSource === 'provider_api'
+                  && canonical.canonicalUrlProvider === 'accesstrade'
+                  && canonical.canonicalUrlSourceEndpoint === 'datafeed'
+                  && Boolean(canonical.canonicalUrlSourceField)
+                  && (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[])
+                    .includes(canonical.canonicalUrlSourceField || '');
+                const productUrlOk = productResult.ok && canonicalProvenanceOk
+                  && !isAccessTradeTrackingUrl(productResult.finalUrl || originalUrl);
                 const affiliateUrlOk = affiliateResult.ok
-                  && canonical.affiliateUrlSource === 'provider_api';
+                  && canonical.affiliateUrlSource === 'provider_api'
+                  && canonical.affiliateUrlProvider === 'accesstrade'
+                  && canonical.affiliateUrlSourceEndpoint === 'datafeed'
+                  && Boolean(canonical.affiliateUrlSourceField)
+                  && (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[])
+                    .includes(canonical.affiliateUrlSourceField || '');
 
                 healthUpdates.linkHealthStatus = productResult.status as Product['linkHealthStatus'];
                 healthUpdates.linkLastCheckedAt = checkedAt;
                 healthUpdates.productUrlHttpStatus = productResult.statusCode;
                 healthUpdates.productUrlFinalUrl = productResult.finalUrl;
                 healthUpdates.productUrlFinalDomain = getFinalDomain(productResult.finalUrl || originalUrl);
-                healthUpdates.productUrlHealthReason = productResult.reason;
-                healthUpdates.productUrlErrorCode = productResult.errorCode;
+                healthUpdates.productUrlHealthReason = canonicalProvenanceOk ? productResult.reason : 'Canonical URL không có provenance provider_api.';
+                healthUpdates.productUrlErrorCode = canonicalProvenanceOk ? productResult.errorCode : 'CANONICAL_PROVENANCE_REQUIRED';
                 healthUpdates.productUrlTimedOut = productResult.timedOut === true;
+                healthUpdates.canonicalUrlVerifiedAt = productUrlOk ? checkedAt : undefined;
+                healthUpdates.canonicalUrlStatus = productUrlOk ? 'verified' : productResult.retryable ? 'unverified' : 'invalid';
 
                 healthUpdates.affiliateHealthStatus = (affiliateUrlOk ? affiliateResult.status : 'not_allowed') as Product['affiliateHealthStatus'];
                 healthUpdates.affiliateLastCheckedAt = checkedAt;
@@ -1291,6 +1350,7 @@ export class SourceScoutBot {
                   : 'AFFILIATE_PROVENANCE_REQUIRED';
                 healthUpdates.affiliateUrlTimedOut = affiliateResult.timedOut === true;
                 healthUpdates.affiliateUrlVerifiedAt = affiliateUrlOk ? checkedAt : undefined;
+                healthUpdates.affiliateUrlStatus = affiliateUrlOk ? 'verified' : affiliateResult.retryable ? 'unverified' : 'invalid';
 
                 // 6. Image health with candidate fallback
                 let resolvedImageUrl = imageUrl;
@@ -1301,8 +1361,14 @@ export class SourceScoutBot {
                   if (imageResult.ok) {
                     imageOk = true;
                     healthUpdates.imageHealthStatus = 'ok' as Product['imageHealthStatus'];
+                    healthUpdates.imageUrlHttpStatus = imageResult.statusCode;
+                    healthUpdates.imageUrlFinalUrl = imageResult.finalUrl || resolvedImageUrl;
+                    healthUpdates.imageUrlHealthReason = imageResult.reason;
                   } else {
                     healthUpdates.imageHealthStatus = imageResult.status as Product['imageHealthStatus'];
+                    healthUpdates.imageUrlHttpStatus = imageResult.statusCode;
+                    healthUpdates.imageUrlFinalUrl = imageResult.finalUrl || resolvedImageUrl;
+                    healthUpdates.imageUrlHealthReason = imageResult.reason;
                     // Try fallback image candidates
                     for (const candidateUrl of imageCandidatesList) {
                       if (candidateUrl === resolvedImageUrl) continue; // already tried
@@ -1312,6 +1378,9 @@ export class SourceScoutBot {
                         resolvedImageUrl = candidateUrl;
                         healthUpdates.imageUrl = candidateUrl;
                         healthUpdates.imageHealthStatus = 'ok' as Product['imageHealthStatus'];
+                        healthUpdates.imageUrlHttpStatus = candidateResult.statusCode;
+                        healthUpdates.imageUrlFinalUrl = candidateResult.finalUrl || candidateUrl;
+                        healthUpdates.imageUrlHealthReason = candidateResult.reason;
                         counters.needsImageFallback += 1;
                         await this.ctx.info('Image fallback succeeded', {
                           keyword,
@@ -1337,6 +1406,9 @@ export class SourceScoutBot {
                       resolvedImageUrl = candidateUrl;
                       healthUpdates.imageUrl = candidateUrl;
                       healthUpdates.imageHealthStatus = 'ok' as Product['imageHealthStatus'];
+                      healthUpdates.imageUrlHttpStatus = candidateResult.statusCode;
+                      healthUpdates.imageUrlFinalUrl = candidateResult.finalUrl || candidateUrl;
+                      healthUpdates.imageUrlHealthReason = candidateResult.reason;
                       counters.needsImageFallback += 1;
                       break;
                     }
@@ -1460,7 +1532,7 @@ export class SourceScoutBot {
                   imageHealthStatus: getText(finalRecord.imageHealthStatus) || null,
                   qualityScore: finalRecord.qualityScore ?? null,
                   imageCandidatesCount: imageCandidatesList.length,
-                  canonicalProductUrlDecoded: canonicalProductUrl || null,
+                  canonicalProductUrl: canonicalProductUrl || null,
                   returnedToPipeline: isProductLikeKind(kind),
                   isDuplicateRefresh: Boolean(existingProduct),
                 },

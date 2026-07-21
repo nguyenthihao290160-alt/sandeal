@@ -211,7 +211,13 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
   const eligible = eligibility.eligibleForPublish;
   const message = publicMessage(product, eligible);
   const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
-  const finalUrl = product.affiliateUrlFinalUrl || product.productUrlFinalUrl || product.affiliateUrl || product.originalUrl;
+  const productUrlValid = goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || ''))
+    && product.canonicalUrlStatus === 'verified';
+  const affiliateUrlValid = goodHealth.has(String(product.affiliateHealthStatus || ''))
+    && product.affiliateUrlStatus === 'verified'
+    && product.publicBlockReasons?.includes('affiliate_url_unhealthy') !== true;
+  const finalUrl = affiliateUrlValid ? product.affiliateUrlFinalUrl || product.affiliateUrl
+    : productUrlValid ? product.productUrlFinalUrl || product.canonicalProductUrl || product.originalUrl : undefined;
   let finalDomain: string | null = null;
   try { finalDomain = new URL(finalUrl || '').hostname.toLowerCase().replace(/^www\./, '') || null; } catch { /* invalid URL */ }
   return {
@@ -224,7 +230,8 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
     safePublishStatus: safePublishStatus(product),
     riskLevel: product.riskLevel || 'unknown',
     image: product.imageUrl || null,
-    url: product.affiliateUrl || product.originalUrl || null,
+    url: affiliateUrlValid ? product.affiliateUrl || null
+      : productUrlValid ? product.canonicalProductUrl || product.originalUrl || null : null,
     price: Number.isFinite(product.salePrice) ? product.salePrice! : Number.isFinite(product.price) ? product.price! : null,
     originalPrice: Number.isFinite(product.price) ? product.price! : null,
     createdAt: product.createdAt,
@@ -243,8 +250,8 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
       link: product.linkHealthStatus || null,
       affiliate: product.affiliateHealthStatus || null,
       image: product.imageHealthStatus || null,
-      productUrlValid: goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || '')),
-      affiliateUrlValid: goodHealth.has(String(product.affiliateHealthStatus || '')) && product.publicBlockReasons?.includes('affiliate_url_unhealthy') !== true,
+      productUrlValid,
+      affiliateUrlValid,
       finalDomain,
       productFinalDomain: product.productUrlFinalDomain || null,
       affiliateFinalDomain: product.affiliateUrlFinalDomain || null,

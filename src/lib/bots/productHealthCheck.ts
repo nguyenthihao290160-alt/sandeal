@@ -65,6 +65,7 @@ export interface ImageCheckResult {
   ok: boolean;
   reason: string;
   statusCode?: number;
+  finalUrl?: string;
   contentType?: string;
   contentLength?: number;
   width?: number;
@@ -234,17 +235,15 @@ function buildRequestHeaders(method: 'HEAD' | 'GET'): Record<string, string> {
 /**
  * Standard browser-like headers for image health check requests.
  */
-function buildImageRequestHeaders(method: 'HEAD' | 'GET'): Record<string, string> {
+function buildImageRequestHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
     'Cache-Control': 'no-cache',
   };
-  if (method === 'GET') {
-    // Limit download for GET probe
-    headers['Range'] = `bytes=0-${MAX_IMAGE_PROBE_BYTES - 1}`;
-  }
+  // Do not send Range for image verification. Public eligibility requires an
+  // exact HTTP 200 response. The capped body reader cancels the remaining stream.
   return headers;
 }
 
@@ -257,6 +256,7 @@ async function fetchSafeRedirects(
 ): Promise<Response> {
   let currentUrl = url;
   let redirects = 0;
+  const deadline = Date.now() + timeoutMs;
   const visited = new Set<string>();
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   // Injected transports can disable DNS for isolated tests; runtime requests resolve every hop.
@@ -281,11 +281,13 @@ async function fetchSafeRedirects(
       }
     }
     const headers = customHeaders || (method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : undefined);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new DOMException('Request timeout', 'TimeoutError');
     const res = await fetchImpl(currentUrl, {
       method,
       headers,
       redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: AbortSignal.timeout(remainingMs)
     });
     if (res.status >= 300 && res.status < 400 && res.headers.has('location')) {
       const location = res.headers.get('location');
@@ -496,6 +498,10 @@ function classifyFetchError(error: unknown): { status: LinkCheckStatus; reason: 
     return { status: 'dns_error', reason: `DNS lỗi: ${error.message}`, isSsrf: false, errorCode: errorCode || 'DNS_ERROR' };
   }
 
+  if (error.message.includes('redirect loop')) {
+    return { status: 'error', reason: 'Redirect loop', isSsrf: false, errorCode: 'REDIRECT_LOOP' };
+  }
+
   if (error.message.includes('Too many redirects')) {
     return { status: 'error', reason: 'Quá nhiều redirect', isSsrf: false, errorCode: 'REDIRECT_LIMIT_EXCEEDED' };
   }
@@ -520,11 +526,20 @@ function retryAfterIso(value: string | null, now = Date.now()): string | undefin
 }
 
 function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResult | null {
+  if (status >= 300 && status < 400) {
+    return {
+      status: 'error', ok: false, retryable: false,
+      reason: `HTTP ${status} redirect without a valid Location header`,
+      statusCode: status,
+      errorCode: 'REDIRECT_LOCATION_MISSING',
+    };
+  }
   if (PERMANENTLY_DEAD_CODES.has(status)) {
     return {
       status: 'broken', ok: false, retryable: false,
       reason: `HTTP ${status} — không tìm thấy trang`,
       statusCode: status,
+      errorCode: status === 404 ? 'HTTP_NOT_FOUND' : 'HTTP_GONE',
     };
   }
   if (status === 401) {
@@ -532,6 +547,7 @@ function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResu
       status: 'not_allowed', ok: false, retryable: true,
       reason: 'HTTP 401 — Yêu cầu xác thực, không thể xác minh link (có thể do anti-bot)',
       statusCode: status,
+      errorCode: 'HTTP_UNAUTHORIZED',
     };
   }
   if (status === 403) {
@@ -539,6 +555,7 @@ function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResu
       status: 'not_allowed', ok: false, retryable: true,
       reason: 'HTTP 403 — Link bị từ chối truy cập (anti-bot hoặc IP bị chặn). KHÔNG phải link chết.',
       statusCode: status,
+      errorCode: 'HTTP_FORBIDDEN',
     };
   }
   if (status === 405) {
@@ -546,6 +563,7 @@ function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResu
       status: 'not_allowed', ok: false, retryable: true,
       reason: 'HTTP 405 — Phương thức không được phép, có thể do anti-bot',
       statusCode: status,
+      errorCode: 'HTTP_METHOD_NOT_ALLOWED',
     };
   }
   if (status === 429) {
@@ -553,6 +571,7 @@ function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResu
       status: 'rate_limited', ok: false, retryable: true,
       reason: 'HTTP 429 — Rate limit, cần thử lại sau 1 giờ',
       statusCode: status,
+      errorCode: 'HTTP_RATE_LIMITED',
       retryAfter,
     };
   }
@@ -561,6 +580,7 @@ function classifyGetResponse(status: number, retryAfter?: string): LinkCheckResu
       status: 'server_error', ok: false, retryable: true,
       reason: `Server error HTTP ${status} — tạm thời, có thể phục hồi`,
       statusCode: status,
+      errorCode: 'HTTP_SERVER_ERROR',
     };
   }
   if (status >= 400) {
@@ -624,6 +644,19 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
         statusCode: getResponse.status,
         finalUrl: getResponse.url || url,
         errorCode: bodyMatch.errorCode,
+      };
+    }
+
+    const finalUrl = getResponse.url || url;
+    if (isAffiliateDeeplyinkDomain(url) && isAffiliateDeeplyinkDomain(finalUrl)) {
+      return {
+        status: 'unknown',
+        ok: false,
+        retryable: true,
+        reason: 'Tracking URL did not resolve to a public merchant destination',
+        statusCode: getResponse.status,
+        finalUrl,
+        errorCode: 'TRACKING_DESTINATION_UNVERIFIED',
       };
     }
 
@@ -693,9 +726,9 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
     let headContentType: string | null = null;
 
     try {
-      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('HEAD'), options);
+      const headResponse = await fetchSafeRedirects(imageUrl, 'HEAD', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders(), options);
 
-      if (headResponse.status >= 400) {
+      if (headResponse.status !== 200) {
         // HEAD 404/410 — still try GET to confirm
         if (PERMANENTLY_DEAD_CODES.has(headResponse.status)) {
           // Fall through to GET for confirmation
@@ -714,6 +747,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             reason: `Content-Type không phải ảnh: ${headContentType}`,
             contentType: headContentType,
             statusCode: headResponse.status,
+            finalUrl: headResponse.url || imageUrl,
           };
         }
 
@@ -726,6 +760,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
               contentType: headContentType,
               contentLength: headContentLength,
               statusCode: headResponse.status,
+              finalUrl: headResponse.url || imageUrl,
             };
           }
           if (!inspectImageBody) {
@@ -736,6 +771,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
               contentLength: headContentLength,
               dimensionsVerified: false,
               statusCode: headResponse.status,
+              finalUrl: headResponse.url || imageUrl,
             };
           }
         }
@@ -751,15 +787,16 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
 
     // Step 2: GET fallback (if HEAD didn't resolve or had issues)
     if (!headOk || !headContentType || inspectImageBody) {
-      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders('GET'), options);
+      const getResponse = await fetchSafeRedirects(imageUrl, 'GET', IMAGE_CHECK_TIMEOUT_MS, buildImageRequestHeaders(), options);
 
-      if (getResponse.status >= 400) {
+      if (getResponse.status !== 200) {
         // Definitively dead
         if (PERMANENTLY_DEAD_CODES.has(getResponse.status)) {
           return {
             status: 'image_broken', ok: false, retryable: false,
             reason: `HTTP ${getResponse.status} — ảnh không tồn tại`,
             statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
 
@@ -769,6 +806,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             status: 'hotlink_blocked', ok: false, retryable: true,
             reason: `HTTP ${getResponse.status} — Ảnh bị từ chối truy cập, có thể là anti-bot`,
             statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
 
@@ -777,6 +815,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             status: 'not_allowed', ok: false, retryable: true,
             reason: 'HTTP 405 — Phương thức không được phép, không thể xác minh ảnh',
             statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
 
@@ -786,6 +825,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             status: 'rate_limited', ok: false, retryable: true,
             reason: 'HTTP 429 — Rate limit, ảnh tạm thời không thể truy cập',
             statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
 
@@ -795,6 +835,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             status: 'server_error', ok: false, retryable: true,
             reason: `Server error HTTP ${getResponse.status} — tạm thời`,
             statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
 
@@ -803,6 +844,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
           status: 'error', ok: false, retryable: false,
           reason: `HTTP ${getResponse.status}`,
           statusCode: getResponse.status,
+          finalUrl: getResponse.url || imageUrl,
         };
       }
 
@@ -819,6 +861,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             : 'Không có Content-Type header',
           contentType: contentType || undefined,
           statusCode: getResponse.status,
+          finalUrl: getResponse.url || imageUrl,
         };
       }
 
@@ -831,6 +874,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
           contentType,
           contentLength: getContentLength,
           statusCode: getResponse.status,
+          finalUrl: getResponse.url || imageUrl,
         };
       }
 
@@ -842,6 +886,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             status: 'invalid_image', ok: false, retryable: false,
             reason: 'Image payload signature does not match a supported image format',
             contentType, contentLength: getContentLength, statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
         if (metadata.width && metadata.height && (metadata.width < MIN_PRODUCT_IMAGE_DIMENSION || metadata.height < MIN_PRODUCT_IMAGE_DIMENSION)) {
@@ -850,6 +895,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             reason: `Image dimensions too small: ${metadata.width}x${metadata.height}`,
             contentType, contentLength: getContentLength, width: metadata.width, height: metadata.height,
             dimensionsVerified: true, statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
         if (metadata.darkSuspected) {
@@ -858,6 +904,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
             reason: 'Image payload is uniformly dark in the format that can be inspected safely',
             contentType, contentLength: getContentLength, width: metadata.width, height: metadata.height,
             dimensionsVerified: Boolean(metadata.width && metadata.height), statusCode: getResponse.status,
+            finalUrl: getResponse.url || imageUrl,
           };
         }
         return {
@@ -865,6 +912,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
           reason: metadata.width && metadata.height ? `Image OK (${metadata.width}x${metadata.height})` : 'Image signature OK; dimensions unavailable for this encoded format',
           contentType, contentLength: getContentLength, width: metadata.width, height: metadata.height,
           dimensionsVerified: Boolean(metadata.width && metadata.height), statusCode: getResponse.status,
+          finalUrl: getResponse.url || imageUrl,
         };
       }
 
@@ -877,6 +925,7 @@ export async function checkImageHealth(imageUrl: string, options: HealthCheckReq
         contentLength: getContentLength,
         dimensionsVerified: false,
         statusCode: getResponse.status,
+        finalUrl: getResponse.url || imageUrl,
       };
     }
 
@@ -1114,13 +1163,13 @@ async function checkAffiliateVerification(
       };
     }
 
-    // For affiliate deeplink domains, a clean 2xx/3xx response can be accepted.
-    // These domains redirect via JavaScript, not HTTP 30x
+    // A tracking host that never resolves to a merchant destination remains
+    // unverified. JavaScript behavior is not sufficient evidence for publish.
     if (isDeeplinkDomain) {
       if (response.ok || (response.status >= 200 && response.status < 400)) {
         return {
-          status: 'ok',
-          reason: `Affiliate deeplink OK (HTTP ${response.status}) — redirect via JS`,
+          status: 'unverified',
+          reason: `Tracking URL did not resolve to a merchant destination (HTTP ${response.status})`,
         };
       }
       return {

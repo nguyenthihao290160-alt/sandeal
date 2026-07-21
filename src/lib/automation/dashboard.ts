@@ -75,6 +75,8 @@ function roleDiagnostic(role: RuntimeRole, lease: RuntimeRoleLease | undefined, 
   const expiresAtMs = Date.parse(lease?.expiresAt || lease?.leaseExpiresAt || '');
   const acquiredAtMs = Date.parse(lease?.acquiredAt || lease?.startedAt || '');
   const active = lease?.status === 'ACTIVE' && Number.isFinite(expiresAtMs) && expiresAtMs > now;
+  const heartbeatAtMs = Date.parse(lease?.heartbeatAt || '');
+  const heartbeatAgeMs = Number.isFinite(heartbeatAtMs) ? Math.max(0, now - heartbeatAtMs) : null;
   return {
     role,
     status: processStatus,
@@ -85,12 +87,65 @@ function roleDiagnostic(role: RuntimeRole, lease: RuntimeRoleLease | undefined, 
     instanceId: lease?.instanceId || null,
     pid: lease?.pid || null,
     heartbeatAt: lease?.heartbeatAt || null,
+    heartbeatAgeMs,
+    heartbeatSource: lease?.heartbeatAt ? 'role_lease' : 'none',
+    staleAgeMs: heartbeatAgeMs !== null && heartbeatAgeMs > 90_000 ? heartbeatAgeMs - 90_000 : null,
     acquiredAt: lease?.acquiredAt || lease?.startedAt || null,
     leaseAgeMs: Number.isFinite(acquiredAtMs) ? Math.max(0, now - acquiredAtMs) : null,
     expiresAt: Number.isFinite(expiresAtMs) ? new Date(expiresAtMs).toISOString() : null,
     fencingToken: lease?.fencingToken || null,
     takeoverCount: lease?.takeoverCount || 0,
+    releaseId: lease?.releaseId || null,
   };
+}
+
+export function summarizeDashboardErrors(
+  jobs: AutomationJob[],
+  start: number,
+  inconsistencies: Array<{ code: string; severity: string }> = [],
+) {
+  const failedJobs = jobs.filter(job => job.status === 'FAILED');
+  const inRange = (job: AutomationJob) => Date.parse(job.completedAt || job.updatedAt || job.createdAt) >= start;
+  const currentRuntime = inconsistencies.filter(item => item.severity === 'CRITICAL');
+  return {
+    failedJobsInRange: failedJobs.filter(inRange).length,
+    historicalFailedJobs: failedJobs.filter(job => !inRange(job)).length,
+    currentRuntimeErrors: currentRuntime.map(item => item.code),
+  };
+}
+
+const CURRENT_GUARDIAN_MAX_AGE_MS = 3 * 60_000;
+const ROLE_SNAPSHOT_REASON = /^(?:WORKER_|SCHEDULER_|DUPLICATE_PROCESS_ROLE$)/;
+
+export function partitionGuardianReasons(
+  reasons: string[],
+  checkedAt: string | undefined,
+  now = Date.now(),
+): { current: string[]; historical: string[]; fresh: boolean } {
+  const checkedAtMs = Date.parse(checkedAt || '');
+  const fresh = Number.isFinite(checkedAtMs) && checkedAtMs <= now + 60_000
+    && now - checkedAtMs <= CURRENT_GUARDIAN_MAX_AGE_MS;
+  if (!fresh) return { current: [], historical: [...new Set(reasons)], fresh: false };
+  const current = [...new Set(reasons.filter(reason => !ROLE_SNAPSHOT_REASON.test(reason)))];
+  return {
+    current,
+    historical: [...new Set(reasons.filter(reason => !current.includes(reason)))],
+    fresh: true,
+  };
+}
+
+export function schedulerRuntimeStatusFromTruth(input: {
+  paused: boolean;
+  enabled: boolean;
+  active: boolean;
+  heartbeatAt: string | null;
+  snapshotStatus?: string;
+}): string {
+  if (input.paused) return 'paused';
+  if (!input.enabled) return 'disabled';
+  if (input.active) return 'active';
+  if (input.heartbeatAt) return 'stale';
+  return input.snapshotStatus === 'crashed' ? 'crashed' : 'unverified';
 }
 
 export async function buildAutomationDashboard(range: DashboardRange) {
@@ -102,15 +157,12 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     buildLaunchInventoryOverview(), getAutomationTruth(now),
   ]);
   const start = rangeStart(range);
+  const release = getReleaseIdentity();
   const onboarding = await buildOperationsOnboarding();
-  const current = jobs.filter(job => Date.parse(job.createdAt) >= start);
+  const current = jobs.filter(job => Date.parse(job.completedAt || job.updatedAt || job.createdAt) >= start);
+  const guardianReasons = partitionGuardianReasons(runtimeHealth?.reasons || [], runtimeHealth?.checkedAt, now);
   const terminal = current.filter(job => ['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED'].includes(job.status));
   const completed = current.filter(job => job.status === 'SUCCEEDED' && job.outcomeStatus !== 'PARTIALLY_COMPLETED');
-  const workerHeartbeatMs = control.workerHeartbeatAt ? Date.parse(control.workerHeartbeatAt) : Number.NaN;
-  const workerFresh = Number.isFinite(workerHeartbeatMs) && now - workerHeartbeatMs < 45_000;
-  const schedulerHeartbeatMs = control.schedulerHeartbeatAt ? Date.parse(control.schedulerHeartbeatAt) : Number.NaN;
-  const schedulerFresh = Number.isFinite(schedulerHeartbeatMs) && now - schedulerHeartbeatMs < 90_000;
-
   const pipeline = {
     sourceRequests: 0, sourceFound: 0, candidateQueued: 0, duplicateRejected: 0,
     validationRejected: 0, productCreated: 0, productUpdated: 0,
@@ -136,34 +188,50 @@ export async function buildAutomationDashboard(range: DashboardRange) {
 
   const sortedJobs = [...jobs].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const latestByType = (type: AutomationJob['type']) => sortedJobs.find(job => job.type === type);
-  const latestError = sortedJobs.find(job => job.status === 'FAILED' || job.status === 'BLOCKED' || Boolean(job.lastErrorCode));
+  const latestError = [...current].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .find(job => job.status === 'FAILED' || job.status === 'BLOCKED' || Boolean(job.lastErrorCode));
+  const latestHistoricalError = sortedJobs.find(job => Date.parse(job.completedAt || job.updatedAt || job.createdAt) < start
+    && (job.status === 'FAILED' || job.status === 'BLOCKED' || Boolean(job.lastErrorCode)));
   const latestSchedulerJob = sortedJobs.find(job => job.requestedBy === 'scheduler');
   const latestSchedulerSuccess = sortedJobs.find(job => job.requestedBy === 'scheduler' && job.status === 'SUCCEEDED');
   const workerLease = roleLeases.find(item => item.role === 'WORKER');
   const schedulerLease = roleLeases.find(item => item.role === 'SCHEDULER');
+  const releaseRuntimeReasons = [
+    truth.worker.state === 'ACTIVE' && !workerLease?.releaseId ? 'WORKER_RELEASE_UNVERIFIED' : '',
+    workerLease?.releaseId && workerLease.releaseId !== release.releaseId ? 'WORKER_RELEASE_MISMATCH' : '',
+    truth.scheduler.active && !schedulerLease?.releaseId ? 'SCHEDULER_RELEASE_UNVERIFIED' : '',
+    schedulerLease?.releaseId && schedulerLease.releaseId !== release.releaseId ? 'SCHEDULER_RELEASE_MISMATCH' : '',
+  ].filter(Boolean);
+  const currentRuntimeReasons = [...new Set([
+    ...truth.inconsistencies.filter(item => item.severity === 'CRITICAL').map(item => item.code),
+    ...guardianReasons.current,
+    ...releaseRuntimeReasons,
+  ])];
+  const baseErrorSummary = summarizeDashboardErrors(jobs, start, truth.inconsistencies);
+  const errorSummary = { ...baseErrorSummary, currentRuntimeErrors: currentRuntimeReasons };
   const schedulerStartedAt = Date.parse(schedulerLease?.processStartedAt || schedulerLease?.acquiredAt || '');
   const schedulerConflicts = [...roleConflicts].filter(item => item.role === 'SCHEDULER').sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt));
   const latestSchedulerConflict = schedulerConflicts.find(item => Date.parse(item.observedAt) >= Math.max(now - 5 * 60_000, Number.isFinite(schedulerStartedAt) ? schedulerStartedAt : 0)
     && (!schedulerLease?.instanceId || item.activeInstanceId === schedulerLease.instanceId));
   const historicalSchedulerConflict = schedulerConflicts.find(item => item !== latestSchedulerConflict);
-  const workerLeaseFresh = workerLease?.status === 'ACTIVE' && Date.parse(workerLease.leaseExpiresAt) > now;
-  const schedulerLeaseFresh = schedulerLease?.status === 'ACTIVE' && Date.parse(schedulerLease.leaseExpiresAt) > now;
   const nextRunMs = Date.parse(control.schedulerNextRunAt || '');
   const schedulerNextRunOverdue = !control.schedulerPaused && Number.isFinite(nextRunMs) && now - nextRunMs > 90_000;
   const workerRuntimeStatus = control.workerPaused ? 'paused'
-    : workerLeaseFresh || workerFresh ? 'active'
-      : workerLease || control.workerHeartbeatAt ? 'stale'
+    : truth.worker.state === 'ACTIVE' ? 'active'
+      : truth.worker.latestHeartbeatAt ? 'stale'
         : runtimeHealth?.worker.status === 'crashed' ? 'crashed' : 'unverified';
-  const schedulerRuntimeStatus = control.schedulerPaused ? 'paused'
-    : !settings.enabled ? 'disabled'
-      : schedulerNextRunOverdue ? 'stale'
-        : schedulerLeaseFresh || schedulerFresh ? 'active'
-          : schedulerLease || control.schedulerHeartbeatAt ? 'stale'
-            : runtimeHealth?.scheduler.status === 'crashed' ? 'crashed' : 'unverified';
+  const schedulerRuntimeStatus = schedulerRuntimeStatusFromTruth({
+    paused: control.schedulerPaused,
+    enabled: settings.enabled,
+    active: truth.scheduler.active,
+    heartbeatAt: truth.scheduler.heartbeatAt,
+    snapshotStatus: runtimeHealth?.scheduler.status,
+  });
   const schedulerBlockReason = schedulerRuntimeStatus === 'stale'
-    ? schedulerNextRunOverdue ? 'NEXT_RUN_OVERDUE' : 'HEARTBEAT_OR_LEASE_STALE'
+    ? 'HEARTBEAT_OR_LEASE_STALE'
     : schedulerRuntimeStatus === 'paused' ? 'SCHEDULER_PAUSED'
       : schedulerRuntimeStatus === 'disabled' ? 'SCHEDULER_DISABLED' : null;
+  const schedulerScheduleWarning = schedulerNextRunOverdue ? 'NEXT_RUN_OVERDUE' : null;
   const providerNames = new Set(['accessTrade', 'gemini', ...Object.keys(runtimeHealth?.providers || {})]);
   const providers = [...providerNames].map(id => {
     const stored = runtimeHealth?.providers[id] || runtimeHealth?.providers[id.toLowerCase()] || 'unverified';
@@ -206,7 +274,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
 
   return {
     updatedAt: new Date().toISOString(), range,
-    release: getReleaseIdentity(),
+    release,
     truth,
     kpis: {
       productsProcessed: products.length,
@@ -214,17 +282,29 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT + queue.WAITING_CHILDREN,
       waitingApproval: queue.WAITING_APPROVAL,
       completionRate: terminal.length ? Math.round((completed.length / terminal.length) * 100) : null,
-      systemErrors: queue.FAILED,
+      systemErrors: errorSummary.failedJobsInRange,
     },
     activity: [...activityMap.values()],
     sourcePerformance: [...sourceMap.values()].sort((a, b) => b.valid - a.valid).slice(0, 6).map(item => ({ ...item, rate: item.total ? Math.min(100, Math.round(item.valid / item.total * 100)) : 0 })),
     queue,
     runtime: {
-      web: { ...(runtimeHealth?.web || { status: 'unverified', buildAvailable: false, publicRouteHealthy: null, buildId: null, releaseId: getReleaseIdentity().releaseId, releaseMatchesBuild: null }), checkedAt: runtimeHealth?.checkedAt || null },
+      web: { ...(runtimeHealth?.web || { status: 'unverified', buildAvailable: false, publicRouteHealthy: null, buildId: null, releaseId: release.releaseId, releaseMatchesBuild: null }), checkedAt: runtimeHealth?.checkedAt || null },
       storage: runtimeHealth?.storage ? { status: runtimeHealth.storage.status, checkedAt: runtimeHealth.checkedAt } : { status: 'unverified', checkedAt: null },
-      worker: roleDiagnostic('WORKER', workerLease, workerRuntimeStatus, now),
+      worker: {
+        ...roleDiagnostic('WORKER', workerLease, workerRuntimeStatus, now),
+        heartbeatAt: truth.worker.latestHeartbeatAt,
+        heartbeatAgeMs: truth.worker.heartbeatAgeMs,
+        heartbeatSource: truth.worker.heartbeatSource,
+        staleAgeMs: truth.worker.staleAgeMs,
+        releaseMatchesWeb: workerLease?.releaseId ? workerLease.releaseId === release.releaseId : null,
+      },
       scheduler: {
         ...roleDiagnostic('SCHEDULER', schedulerLease, schedulerRuntimeStatus, now),
+        heartbeatAt: truth.scheduler.heartbeatAt,
+        heartbeatAgeMs: truth.scheduler.heartbeatAgeMs,
+        heartbeatSource: truth.scheduler.heartbeatSource,
+        staleAgeMs: truth.scheduler.staleAgeMs,
+        releaseMatchesWeb: schedulerLease?.releaseId ? schedulerLease.releaseId === release.releaseId : null,
         lastContenderState: latestSchedulerConflict ? 'rejected' : historicalSchedulerConflict ? 'recovered' : 'none',
         rejectedOwner: (latestSchedulerConflict || historicalSchedulerConflict)?.rejectedHolderId || null,
         rejectedAt: (latestSchedulerConflict || historicalSchedulerConflict)?.observedAt || null,
@@ -232,17 +312,25 @@ export async function buildAutomationDashboard(range: DashboardRange) {
         lastSuccessfulTickAt: control.schedulerLastRunAt || null,
         nextRunAt: control.schedulerNextRunAt || null,
         blockReason: schedulerBlockReason,
+        scheduleState: truth.scheduler.scheduleState,
+        scheduleWarning: schedulerScheduleWarning,
         lastJobCreatedAt: latestSchedulerJob?.createdAt || null,
         lastSuccessAt: latestSchedulerSuccess?.completedAt || latestSchedulerSuccess?.updatedAt || null,
         backlog: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT + queue.WAITING_CHILDREN,
         errorRate: terminal.length ? Number((terminal.filter(job => job.status === 'FAILED').length / terminal.length).toFixed(4)) : null,
       },
       guardianCheckedAt: runtimeHealth?.checkedAt || null,
-      reasons: runtimeHealth?.reasons || [],
+      guardianFresh: guardianReasons.fresh,
+      reasons: currentRuntimeReasons,
+      historicalReasons: guardianReasons.historical,
     },
     worker: {
       status: workerRuntimeStatus,
-      heartbeatAt: control.workerHeartbeatAt || null,
+      heartbeatAt: truth.worker.latestHeartbeatAt,
+      heartbeatAgeMs: truth.worker.heartbeatAgeMs,
+      heartbeatSource: truth.worker.heartbeatSource,
+      staleAgeMs: truth.worker.staleAgeMs,
+      releaseId: workerLease?.releaseId || null,
       workerId: control.workerId || null,
       currentJobId: control.workerCurrentJobId || null,
     },
@@ -252,6 +340,20 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       nextRunAt: control.schedulerNextRunAt || null,
       timezone: control.timezone,
       blockReason: schedulerBlockReason,
+      scheduleState: truth.scheduler.scheduleState,
+      scheduleWarning: schedulerScheduleWarning,
+      heartbeatAt: truth.scheduler.heartbeatAt,
+      heartbeatAgeMs: truth.scheduler.heartbeatAgeMs,
+      heartbeatSource: truth.scheduler.heartbeatSource,
+      staleAgeMs: truth.scheduler.staleAgeMs,
+      releaseId: schedulerLease?.releaseId || null,
+    },
+    errors: {
+      range,
+      failedJobsInRange: errorSummary.failedJobsInRange,
+      currentRuntimeErrors: errorSummary.currentRuntimeErrors,
+      historicalFailedJobs: errorSummary.historicalFailedJobs,
+      historicalSchedulerConflicts: schedulerConflicts.filter(item => item !== latestSchedulerConflict).length,
     },
     aiUsage: { ...usage, freeOnly: settings.freeOnly },
     policy: {
@@ -285,6 +387,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       runtimeGuardian: jobDiagnostic(latestByType('RUNTIME_GUARDIAN')),
       productHealth: jobDiagnostic(latestByType('RECHECK_PRODUCT_HEALTH')),
       latestError: jobDiagnostic(latestError),
+      latestHistoricalError: jobDiagnostic(latestHistoricalError),
     },
     providers,
     inventory,
@@ -301,7 +404,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     zeroData: !onboarding.hasOperationalData,
     onboarding,
     groups: {
-      workItems: { waitingApproval: queue.WAITING_APPROVAL, waitingManual: queue.WAITING_FOR_MANUAL_INPUT, failed: queue.FAILED, openAlerts: onboarding.facts.openAlerts },
+      workItems: { waitingApproval: queue.WAITING_APPROVAL, waitingManual: queue.WAITING_FOR_MANUAL_INPUT, failed: errorSummary.failedJobsInRange, openAlerts: onboarding.facts.openAlerts },
       dataReadiness: { products: onboarding.facts.products, enabledSources: onboarding.facts.sources, pendingSources: onboarding.facts.pendingSources, unscored: onboarding.facts.unscored },
       qualityContent: { scored: onboarding.facts.scored, drafts: onboarding.facts.drafts, editorialChecked: onboarding.facts.editorialChecked },
       botOperations: { running: queue.RUNNING, waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_CHILDREN, waitingManual: queue.WAITING_FOR_MANUAL_INPUT },

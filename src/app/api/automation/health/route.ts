@@ -23,10 +23,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ok: true, code: 'OK', message: 'Đã kiểm tra hệ thống tự động hóa.', data: {
       release: getReleaseIdentity(),
       web: runtime?.web || { status: 'alive', buildAvailable: process.env.NODE_ENV !== 'production', publicRouteHealthy: null },
-      readiness: data.control.killSwitch || data.control.publishPaused ? 'paused' : runtime?.publishSafe === false ? 'degraded' : 'unverified',
+      readiness: data.control.killSwitch || data.control.publishPaused ? 'paused'
+        : data.runtime.reasons.length ? 'degraded' : 'active',
       worker: data.worker, scheduler: data.scheduler,
       queue: data.queue, aiUsage: data.aiUsage, circuits: data.circuits, policy: data.policy,
-      providers, runtime: runtime ? { publishSafe: runtime.publishSafe, reasons: runtime.reasons, storage: runtime.storage, duplicateRoles: runtime.duplicateRoles, checkedAt: runtime.checkedAt } : null,
+      providers, runtime: runtime ? { publishSafe: runtime.publishSafe, reasons: data.runtime.reasons, historicalReasons: runtime.reasons, storage: runtime.storage, duplicateRoles: runtime.duplicateRoles, checkedAt: runtime.checkedAt } : null,
       killSwitch: data.control.killSwitch, updatedAt: data.updatedAt,
     } });
   } catch {

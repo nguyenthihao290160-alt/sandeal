@@ -27,7 +27,7 @@ async function test(name, work) {
 }
 
 function product(id, overrides = {}) {
-  const now = '2026-07-14T00:00:00.000Z';
+  const now = new Date().toISOString();
   return {
     id,
     title: `San pham chinh hang ${id}`,
@@ -37,7 +37,14 @@ function product(id, overrides = {}) {
     platform: 'website',
     source: 'website',
     originalUrl: `https://merchant.example/${id}`,
+    canonicalProductUrl: `https://merchant.example/${id}`,
+    canonicalUrlSource: 'manual',
+    canonicalUrlStatus: 'verified',
+    canonicalUrlVerifiedAt: now,
     affiliateUrl: `https://merchant.example/${id}?aff_id=local-test`,
+    affiliateUrlSource: 'manual',
+    affiliateUrlStatus: 'verified',
+    affiliateUrlVerifiedAt: now,
     imageUrl: `https://merchant.example/${id}.jpg`,
     price: 100_000,
     salePrice: 90_000,
@@ -56,6 +63,8 @@ function product(id, overrides = {}) {
     linkHealthStatus: 'ok',
     affiliateHealthStatus: 'ok',
     imageHealthStatus: 'ok',
+    imageUrlHttpStatus: 200,
+    imageContentType: 'image/jpeg',
     linkLastCheckedAt: now,
     affiliateLastCheckedAt: now,
     imageLastCheckedAt: now,

@@ -1,12 +1,20 @@
 import { createHash, randomUUID } from 'crypto';
-import { AccessTradeRequestError, mapAccessTradeToProduct, type AccessTradeResultType, type NormalizedAccessTradeItem } from '../integrations/accesstrade';
+import {
+  ACCESS_TRADE_AFFILIATE_URL_FIELDS,
+  ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
+  AccessTradeRequestError,
+  isAccessTradeTrackingUrl,
+  mapAccessTradeToProduct,
+  type AccessTradeResultType,
+  type NormalizedAccessTradeItem,
+} from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
 import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
 import { readCollection, runTransaction, writeCollection } from '../storage/adapter';
 import { createAutomationJob, getAutomationControl } from '../automation/store';
 import { completeJournalEffect } from '../automation/operationJournal';
-import { checkImageHealth, checkLinkHealth, productImageValidationState, type ImageCheckResult } from './productHealthCheck';
+import { checkImageHealth, checkLinkHealth, productImageValidationState, type ImageCheckResult, type LinkCheckResult } from './productHealthCheck';
 import type { Product, ProductLifecycleState, ProductOffer, ReviewContent } from '../types';
 import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
 import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
@@ -151,7 +159,7 @@ function isLoopbackSmokeUrl(value: string): boolean {
   catch { return false; }
 }
 
-function checkCandidateLink(url: string) {
+function checkCandidateLink(url: string): Promise<LinkCheckResult> {
   if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, finalUrl: url });
   return withDomainConcurrency(url, () => checkLinkHealth(url));
 }
@@ -164,6 +172,13 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
   return {
     title: item.name, description: item.description || undefined, kind: item.kind,
     platform: item.platform, originalUrl: item.canonicalProductUrl || item.originalUrl,
+    canonicalProductUrl: item.canonicalProductUrl || item.originalUrl,
+    canonicalUrlSource: item.canonicalUrlSource,
+    canonicalUrlProvider: item.canonicalUrlProvider,
+    canonicalUrlSourceEndpoint: item.canonicalUrlSourceEndpoint,
+    canonicalUrlSourceField: item.canonicalUrlSourceField,
+    canonicalUrlFetchedAt: item.canonicalUrlFetchedAt,
+    canonicalUrlStatus: item.canonicalUrlStatus,
     affiliateUrl: item.affiliateUrl,
     affiliateUrlSource: item.affiliateUrlSource,
     affiliateUrlProvider: item.affiliateUrlProvider,
@@ -171,13 +186,14 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
     affiliateUrlSourceField: item.affiliateUrlSourceField,
     affiliateUrlCampaignId: item.affiliateUrlCampaignId,
     affiliateUrlFetchedAt: item.affiliateUrlFetchedAt,
+    affiliateUrlStatus: item.affiliateUrlStatus,
     imageUrl: item.imageUrl,
     imageCandidates: item.imageCandidates.filter(Boolean).slice(0, 6),
     price: item.price || undefined, salePrice: item.salePrice || undefined,
     currency: 'VND', category: item.category || undefined,
     rawSourceKind: item.rawSourceKind, nonProductReason: item.nonProductReason,
     campaignName: item.campaignName, commissionRate: item.commissionRate,
-    merchant: merchantFromUrl(item.canonicalProductUrl || item.originalUrl || item.affiliateUrl),
+    merchant: merchantFromUrl(item.canonicalProductUrl || item.originalUrl),
     verifiedSource: item.verifiedSource, autoPublishEligible: item.autoPublishEligible,
     sourceQualityScore: item.qualityScore,
   };
@@ -584,7 +600,13 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     imageUrl: payload.imageUrl,
     imageCandidates: payload.imageCandidates || [payload.imageUrl],
     originalUrl: payload.originalUrl,
-    canonicalProductUrl: payload.originalUrl,
+    canonicalProductUrl: payload.canonicalProductUrl || payload.originalUrl,
+    canonicalUrlSource: payload.canonicalUrlSource,
+    canonicalUrlProvider: payload.canonicalUrlProvider,
+    canonicalUrlSourceEndpoint: payload.canonicalUrlSourceEndpoint,
+    canonicalUrlSourceField: payload.canonicalUrlSourceField,
+    canonicalUrlFetchedAt: payload.canonicalUrlFetchedAt,
+    canonicalUrlStatus: payload.canonicalUrlStatus,
     affiliateUrl: payload.affiliateUrl,
     affiliateUrlSource: payload.affiliateUrlSource,
     affiliateUrlProvider: payload.affiliateUrlProvider,
@@ -592,6 +614,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     affiliateUrlSourceField: payload.affiliateUrlSourceField,
     affiliateUrlCampaignId: payload.affiliateUrlCampaignId,
     affiliateUrlFetchedAt: payload.affiliateUrlFetchedAt,
+    affiliateUrlStatus: payload.affiliateUrlStatus,
     price: payload.price || 0,
     salePrice: payload.salePrice || 0,
     category: payload.category || '',
@@ -927,13 +950,13 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       return { status: 'delayed', terminal: false, nextRetryAt, reason: 'domain_circuit_open' };
     }
     const fixture = process.env.NODE_ENV === 'test' ? payload.isolatedHealthFixture : undefined;
-    const fixtureLink = fixture === 'healthy'
-      ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture' }
+    const fixtureLink: LinkCheckResult = fixture === 'healthy'
+      ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', statusCode: 200 }
       : fixture === 'confirmed_broken'
         ? { status: 'broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
         : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
-    const fixtureImage = fixture === 'healthy'
-      ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', contentType: 'image/jpeg' }
+    const fixtureImage: ImageCheckResult = fixture === 'healthy'
+      ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', statusCode: 200, contentType: 'image/jpeg' }
       : fixture === 'confirmed_broken'
         ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
         : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
@@ -950,23 +973,49 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
         if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
       }
     }
-    const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+    const canonicalProvenanceValid = payload.canonicalUrlSource === 'provider_api'
+      && payload.canonicalUrlProvider === 'accesstrade'
+      && payload.canonicalUrlSourceEndpoint === 'datafeed'
+      && Boolean(payload.canonicalUrlSourceField)
+      && (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(payload.canonicalUrlSourceField || '')
+      && !isAccessTradeTrackingUrl(productHealth.finalUrl || payload.canonicalProductUrl || payload.originalUrl);
+    const affiliateProvenanceValid = payload.affiliateUrlSource === 'provider_api'
+      && payload.affiliateUrlProvider === 'accesstrade'
+      && payload.affiliateUrlSourceEndpoint === 'datafeed'
+      && Boolean(payload.affiliateUrlSourceField)
+      && (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(payload.affiliateUrlSourceField || '');
+    const canonicalVerified = productHealth.ok && canonicalProvenanceValid;
+    const affiliateVerified = affiliateHealth.ok && affiliateProvenanceValid;
+    const imageVerified = imageHealth.ok && imageHealth.statusCode === 200
+      && String(imageHealth.contentType || '').toLowerCase().startsWith('image/');
+    const statuses = [
+      canonicalVerified ? productHealth.status : canonicalProvenanceValid ? productHealth.status : 'canonical_provenance_required',
+      affiliateVerified ? affiliateHealth.status : affiliateProvenanceValid ? affiliateHealth.status : 'affiliate_provenance_required',
+      imageVerified ? imageHealth.status : imageHealth.status === 'ok' ? 'image_verification_required' : imageHealth.status,
+    ];
     await recordCandidateHealthQuality({
       item,
-      productHealthy: productHealth.ok,
-      affiliateHealthy: affiliateHealth.ok,
-      imageHealthy: imageHealth.ok,
+      productHealthy: canonicalVerified,
+      affiliateHealthy: affiliateVerified,
+      imageHealthy: imageVerified,
       imageChecks,
       statuses,
       externalRequests: fixture ? 0 : 2 + imageChecks,
     });
     await recordDomainHealth(payload.originalUrl, productHealth.status); await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status); await recordDomainHealth(imageUrl, imageHealth.status);
-    const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
+    const healthy = canonicalVerified && affiliateVerified && imageVerified;
     const now = new Date().toISOString();
     const mapped = mapAccessTradeToProduct({
       id: item.sourceId, name: payload.title, description: payload.description || '', kind: payload.kind,
       sourceItemKind: payload.kind, platform: payload.platform, imageUrl, imageCandidates: payload.imageCandidates || [imageUrl],
-      originalUrl: payload.originalUrl, canonicalProductUrl: payload.originalUrl, affiliateUrl: payload.affiliateUrl,
+      originalUrl: payload.originalUrl, canonicalProductUrl: payload.canonicalProductUrl || payload.originalUrl,
+      canonicalUrlSource: payload.canonicalUrlSource, canonicalUrlProvider: payload.canonicalUrlProvider,
+      canonicalUrlSourceEndpoint: payload.canonicalUrlSourceEndpoint, canonicalUrlSourceField: payload.canonicalUrlSourceField,
+      canonicalUrlFetchedAt: payload.canonicalUrlFetchedAt, canonicalUrlStatus: payload.canonicalUrlStatus,
+      affiliateUrl: payload.affiliateUrl, affiliateUrlSource: payload.affiliateUrlSource,
+      affiliateUrlProvider: payload.affiliateUrlProvider, affiliateUrlSourceEndpoint: payload.affiliateUrlSourceEndpoint,
+      affiliateUrlSourceField: payload.affiliateUrlSourceField, affiliateUrlCampaignId: payload.affiliateUrlCampaignId,
+      affiliateUrlFetchedAt: payload.affiliateUrlFetchedAt, affiliateUrlStatus: payload.affiliateUrlStatus,
       price: payload.price || 0, salePrice: payload.salePrice || 0, category: payload.category || '', rawSourceKind: 'product_feed',
       needsVerification: !payload.autoPublishEligible, verifiedSource: payload.verifiedSource, publicHidden: true,
       autoPublishEligible: payload.autoPublishEligible, publicDecision: payload.autoPublishEligible ? 'public_candidate' : 'needs_review',
@@ -974,17 +1023,29 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
     });
     const draft = {
       ...mapped, sourceId: item.sourceId, sourceHash: item.sourceHash, contentHash: item.contentHash,
-      imageUrl, linkHealthStatus: productHealth.status === 'ok' ? 'ok' : productHealth.status,
-      productHealthStatus: productHealth.status, affiliateHealthStatus: affiliateHealth.status,
+      imageUrl, linkHealthStatus: canonicalVerified ? productHealth.status === 'ok' ? 'ok' : productHealth.status : 'unknown',
+      productHealthStatus: canonicalVerified ? productHealth.status : 'unknown',
+      affiliateHealthStatus: affiliateVerified ? affiliateHealth.status : 'not_allowed',
       imageHealthStatus: imageHealth.status === 'ok' ? 'ok' : imageHealth.status,
-      linkLastCheckedAt: now, affiliateLastCheckedAt: now, imageLastCheckedAt: now,
+      linkLastCheckedAt: now, canonicalUrlVerifiedAt: canonicalVerified ? now : undefined,
+      canonicalUrlStatus: canonicalVerified ? 'verified' : 'unverified',
+      productUrlHttpStatus: productHealth.statusCode, productUrlFinalUrl: productHealth.finalUrl,
+      productUrlHealthReason: canonicalProvenanceValid ? productHealth.reason : 'Canonical URL không có provenance AccessTrade hợp lệ.',
+      productUrlErrorCode: canonicalProvenanceValid ? productHealth.errorCode : 'CANONICAL_PROVENANCE_REQUIRED',
+      affiliateLastCheckedAt: now, affiliateUrlVerifiedAt: affiliateVerified ? now : undefined,
+      affiliateUrlStatus: affiliateVerified ? 'verified' : 'unverified',
+      affiliateUrlHttpStatus: affiliateHealth.statusCode, affiliateUrlFinalUrl: affiliateHealth.finalUrl,
+      affiliateUrlHealthReason: affiliateProvenanceValid ? affiliateHealth.reason : 'Affiliate URL không có provenance AccessTrade hợp lệ.',
+      affiliateUrlErrorCode: affiliateProvenanceValid ? affiliateHealth.errorCode : 'AFFILIATE_PROVENANCE_REQUIRED',
+      imageLastCheckedAt: now, imageUrlHttpStatus: imageHealth.statusCode,
+      imageUrlHealthReason: imageHealth.reason,
       imageContentType: imageHealth.contentType,
       sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses, item.attempts)).toISOString(),
       sourceHealthReason: healthy ? undefined : statuses.join(','),
       publicBlockReason: healthy ? '' : statuses.join(','),
       status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
     } as Partial<Product>;
-    const canonical = await upsertCanonicalProduct(draft, { evaluate: false });
+    const canonical = await upsertCanonicalProduct(draft, { evaluate: false, verifiedHealthUpdate: true });
     if (canonical.product.reviewContent?.reviewStatus === 'stale') counters.reviewStale++;
     let finalProduct = canonical.product;
     if (shouldRegenerateReview(canonical.product)) {

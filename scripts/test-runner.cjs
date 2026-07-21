@@ -50,7 +50,17 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
   const payload = (o = {}) => ({ title: 'Sản phẩm chính hãng đầy đủ', kind: 'product', platform: 'accesstrade', originalUrl: 'https://shop.test/p/1', affiliateUrl: 'https://go.test/a/1', imageUrl: 'https://img.test/1.jpg', price: 100000, currency: 'VND', verifiedSource: true, autoPublishEligible: true, ...o });
   const enqueue = (id, o = {}) => queue.enqueueCandidate({ source: 'accesstrade', sourceId: id, priority: 100, contentHash: `h-${id}`, sourceHash: `h-${id}`, payload: payload(o) });
   const baseProduct = (o = {}) => ({ id: 'p1', title: 'Sản phẩm chính hãng đầy đủ', slug: 'san-pham', kind: 'product', platform: 'accesstrade', source: 'accesstrade', originalUrl: 'https://shop.test/p/1', affiliateUrl: 'https://go.test/a/1', affiliateUrlSource: 'provider_api', affiliateUrlProvider: 'accesstrade', affiliateUrlSourceEndpoint: 'datafeed', affiliateUrlSourceField: 'aff_link', affiliateUrlFetchedAt: fixtureLinkCheckedAt, deepLinkSupported: true, imageUrl: 'https://img.test/1.jpg', price: 100000, currency: 'VND', tags: [], benefits: [], warnings: [], riskLevel: 'low', status: 'needs_review', verifiedSource: true, sourceVerified: true, autoPublishEligible: true, linkHealthStatus: 'ok', affiliateHealthStatus: 'ok', imageHealthStatus: 'ok', linkLastCheckedAt: fixtureLinkCheckedAt, affiliateLastCheckedAt: fixtureLinkCheckedAt, imageLastCheckedAt: fixtureLinkCheckedAt, productUrlFinalDomain: 'shop.test', affiliateUrlFinalDomain: 'go.test', priceObservedAt: fixtureLinkCheckedAt, priceTruthState: 'FRESH', duplicateStatus: 'CLEAR', sourceHash: 'source-ready', createdAt: '2026-07-12T00:00:00.000Z', updatedAt: '2026-07-12T00:00:00.000Z', ...o });
-  const indexableProduct = (o = {}) => { const base = baseProduct({ category: 'Thiết bị thử nghiệm', brand: 'SanDeal Test', ...o }); const reviewContent = editorial.generateEditorialReview(base, []); return safe.applySafePublishDecision({ ...base, reviewContent }); };
+  const verifiedBaseProduct = (o = {}) => baseProduct({
+    canonicalProductUrl: 'https://shop.test/p/1',
+    canonicalUrlSource: 'provider_api', canonicalUrlProvider: 'accesstrade',
+    canonicalUrlSourceEndpoint: 'datafeed', canonicalUrlSourceField: 'url',
+    canonicalUrlFetchedAt: fixtureLinkCheckedAt, canonicalUrlStatus: 'verified', canonicalUrlVerifiedAt: fixtureLinkCheckedAt,
+    affiliateUrlStatus: 'verified', affiliateUrlVerifiedAt: fixtureLinkCheckedAt,
+    productUrlHttpStatus: 200, affiliateUrlHttpStatus: 200,
+    imageUrlHttpStatus: 200, imageContentType: 'image/jpeg',
+    ...o,
+  });
+  const indexableProduct = (o = {}) => { const base = verifiedBaseProduct({ category: 'Thiết bị thử nghiệm', brand: 'SanDeal Test', ...o }); const reviewContent = editorial.generateEditorialReview(base, []); return safe.applySafePublishDecision({ ...base, reviewContent }); };
 
   await test('1. bootstrap dưới 100 public', () => equal(pipeline.selectOperationMode(99), 'bootstrap'));
   await test('2. steady từ 100 public', () => equal(pipeline.selectOperationMode(100), 'steady'));
@@ -176,8 +186,9 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
       status: 200, headers: { 'content-type': 'text/html' }
     });
     const result = await health.checkLinkHealth('https://pub.accesstrade.vn/deep/link/123');
-    equal(result.status, 'ok');
-    equal(result.ok, true);
+    equal(result.status, 'unknown');
+    equal(result.ok, false);
+    equal(result.errorCode, 'TRACKING_DESTINATION_UNVERIFIED');
   });
 
   await test('V2-10. Image HEAD 429, GET image 200 => image ok', async () => {

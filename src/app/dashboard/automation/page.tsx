@@ -27,8 +27,8 @@ type ScheduleState = {
 
 type AutomationTruth = {
   status: 'HEALTHY' | 'DEGRADED' | 'INCONSISTENT' | 'INACTIVE'; checkedAt: string; timezone: 'Asia/Ho_Chi_Minh';
-  scheduler: { state: string; ownerId: string | null; heartbeatAt: string | null; leaseExpiresAt: string | null; fencingToken: number | null; nextRunAt: string | null; lastTickAt: string | null; active: boolean };
-  worker: { state: string; ownerIds: string[]; latestHeartbeatAt: string | null; activeWorkers: number; staleWorkers: number };
+  scheduler: { state: string; runtimeState: string; scheduleState: string; ownerId: string | null; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; releaseId: string | null; leaseExpiresAt: string | null; fencingToken: number | null; nextRunAt: string | null; lastTickAt: string | null; active: boolean };
+  worker: { state: string; ownerIds: string[]; latestHeartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; releaseIds: string[]; activeWorkers: number; staleWorkers: number };
   queue: { pending: number; running: number; retrying: number; failed: number; deadLetter: number; completedRecent: number; oldestPendingAt: string | null };
   dailyUsage: { day: string; processed: number; limit: number | null; remaining: number | null };
   runs: { latestSafeRun: SafeRunLifecycle | null };
@@ -42,6 +42,12 @@ type SafeRunLifecycle = {
 };
 type DialogAction = 'enable_schedule' | 'save_settings';
 type ToastState = { tone: 'success' | 'warning' | 'error' | 'info'; message: string };
+
+function formatAge(value: number | null | undefined): string {
+  if (value === null || value === undefined) return 'Chưa có';
+  if (value < 60_000) return `${Math.max(0, Math.round(value / 1000))} giây`;
+  return `${Math.round(value / 60_000)} phút`;
+}
 
 const STATUS_LABELS: Record<string, string> = {
   active: 'Đang hoạt động', paused: 'Đã tạm dừng', not_configured: 'Chưa cấu hình',
@@ -189,7 +195,7 @@ export default function AutomationDashboard() {
 
   const schedulerStatus = truth?.scheduler.state === 'PAUSED' ? 'paused'
     : truth?.scheduler.active ? 'active'
-      : truth?.status === 'INCONSISTENT' ? 'stale'
+      : truth?.scheduler.state === 'INACTIVE' ? 'stale'
         : (state?.settings.enabled ? 'unverified' : 'not_configured');
   const schedulerAction = !state?.settings.enabled ? 'enable_schedule' : schedulerStatus === 'paused' ? 'resume_scheduler' : 'pause_scheduler';
   const actionLabel = schedulerAction === 'enable_schedule' ? 'Bật lịch tự động' : schedulerAction === 'resume_scheduler' ? 'Tiếp tục lịch tự động' : 'Tạm dừng lịch tự động';
@@ -208,6 +214,9 @@ export default function AutomationDashboard() {
           <div className={styles.panelHeader}><h2><DashboardIcon name="scheduler" size={19} />Lịch chạy tự động</h2><span className={`${styles.badge} ${schedulerStatus === 'active' ? styles.success : schedulerStatus === 'stale' ? styles.error : styles.warning}`}>{STATUS_LABELS[schedulerStatus] || 'Không thể xác minh'}</span></div>
           <div className={styles.healthList}>
             <div className={styles.healthRow}><span>Lần chạy tiếp theo</span><strong>{schedulerStatus === 'paused' ? 'Lịch đang tạm dừng' : formatTime(truth?.scheduler.nextRunAt || state.nextRunAt)}</strong></div>
+            <div className={styles.healthRow}><span>Runtime hiện tại</span><strong>{truth?.scheduler.runtimeState || 'Chưa xác minh'}</strong></div>
+            <div className={styles.healthRow}><span>Heartbeat gần nhất</span><strong>{formatTime(truth?.scheduler.heartbeatAt)} · {formatAge(truth?.scheduler.heartbeatAgeMs)} · {truth?.scheduler.heartbeatSource || 'none'}</strong></div>
+            <div className={styles.healthRow}><span>Trạng thái lịch</span><strong>{truth?.scheduler.scheduleState || 'UNVERIFIED'}</strong></div>
             <div className={styles.healthRow}><span>Đã xử lý hôm nay</span><strong>{truth?.dailyUsage.processed ?? state.dailyUsage}/{truth?.dailyUsage.limit ?? state.settings.maxItemsPerDay}</strong></div>
             <div className={styles.healthRow}><span>Tác vụ đang chờ</span><strong>{truth ? truth.queue.pending + truth.queue.retrying : (state.queue?.pending || 0) + (state.queue?.delayed || 0)}</strong></div>
             <div className={styles.healthRow}><span>Timezone</span><strong>{truth?.timezone || 'Asia/Ho_Chi_Minh'}</strong></div>

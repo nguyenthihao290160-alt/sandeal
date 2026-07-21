@@ -35,10 +35,11 @@ function product(overrides = {}) {
   return {
     id: 'at-product', title: 'Sản phẩm AccessTrade kiểm thử', slug: 'access-trade-test', kind: 'product',
     platform: 'accesstrade', source: 'accesstrade', originalUrl: 'https://merchant.example/product/1',
-    affiliateUrl: 'https://tracking.example/click/1', affiliateUrlSource: 'provider_api', deepLinkSupported: true,
+    canonicalProductUrl: 'https://merchant.example/product/1', canonicalUrlSource: 'provider_api', canonicalUrlProvider: 'accesstrade', canonicalUrlSourceEndpoint: 'datafeed', canonicalUrlSourceField: 'url', canonicalUrlStatus: 'verified', canonicalUrlVerifiedAt: now,
+    affiliateUrl: 'https://tracking.example/click/1', affiliateUrlSource: 'provider_api', affiliateUrlProvider: 'accesstrade', affiliateUrlSourceEndpoint: 'datafeed', affiliateUrlSourceField: 'aff_link', affiliateUrlStatus: 'verified', affiliateUrlVerifiedAt: now, deepLinkSupported: true,
     imageUrl: 'https://images.example/product.jpg', price: 100000, currency: 'VND', tags: [], benefits: [], warnings: [],
     riskLevel: 'low', status: 'needs_review', verifiedSource: true, sourceVerified: true, autoPublishEligible: true,
-    linkHealthStatus: 'ok', affiliateHealthStatus: 'ok', imageHealthStatus: 'ok', publicHidden: true,
+    linkHealthStatus: 'ok', affiliateHealthStatus: 'ok', imageHealthStatus: 'ok', imageUrlHttpStatus: 200, imageContentType: 'image/jpeg', linkLastCheckedAt: now, affiliateLastCheckedAt: now, imageLastCheckedAt: now, priceObservedAt: now, priceTruthState: 'FRESH', publicHidden: true,
     publicBlocked: false, needsVerification: true, createdAt: now, updatedAt: now, ...overrides,
   };
 }
@@ -80,10 +81,74 @@ function product(overrides = {}) {
     equal(disconnected.status, 'error'); equal(disconnected.errorCode, 'ECONNRESET');
   });
 
+  await test('401/403/404/429/5xx và redirect loop đều fail closed', async () => {
+    const cases = [[401, 'not_allowed', 'HTTP_UNAUTHORIZED'], [403, 'not_allowed', 'HTTP_FORBIDDEN'], [404, 'broken', 'HTTP_NOT_FOUND'], [429, 'rate_limited', 'HTTP_RATE_LIMITED'], [503, 'server_error', 'HTTP_SERVER_ERROR']];
+    for (const [statusCode, status, errorCode] of cases) {
+      const result = await health.checkLinkHealth(`https://merchant.example/${statusCode}`, {
+        resolveDns: false,
+        fetchImpl: async () => new Response('', { status: statusCode }),
+      });
+      equal(result.ok, false); equal(result.status, status); equal(result.errorCode, errorCode);
+    }
+    const loop = await health.checkLinkHealth('https://merchant.example/loop', {
+      resolveDns: false,
+      fetchImpl: async () => new Response('', { status: 302, headers: { location: '/loop' } }),
+    });
+    equal(loop.ok, false); equal(loop.errorCode, 'REDIRECT_LOOP');
+  });
+
+  await test('tracking host không redirect và ảnh HTTP 206 không được đánh dấu healthy', async () => {
+    const tracking = await health.checkLinkHealth('https://go.isclix.com/deep_link/clean', {
+      resolveDns: false,
+      fetchImpl: async () => new Response('<html>clean page</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+    });
+    equal(tracking.ok, false); equal(tracking.errorCode, 'TRACKING_DESTINATION_UNVERIFIED');
+    const image = await health.checkImageHealth('https://images.example/partial.jpg', {
+      resolveDns: false,
+      inspectImageBody: true,
+      fetchImpl: async (_input, init) => init?.method === 'HEAD'
+        ? new Response('', { status: 200, headers: { 'content-type': 'image/jpeg', 'content-length': '10000' } })
+        : new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { status: 206, headers: { 'content-type': 'image/jpeg' } }),
+    });
+    equal(image.ok, false); equal(image.statusCode, 206);
+  });
+
   await test('không tự ghép affiliate URL khi provider không trả deep-link', () => {
     const resolved = accessTrade.resolveAccessTradeAffiliateUrl({ campaign_id: 'campaign-1', product_url: 'https://merchant.example/product/1' });
     equal(resolved.affiliateUrl, ''); equal(resolved.deepLinkSupported, false); equal(resolved.reason, 'provider_deeplink_not_supported');
     assert(!JSON.stringify(resolved).includes('go.isclix.com'));
+    const canonical = accessTrade.resolveAccessTradeCanonicalProductUrl({
+      aff_link: 'https://go.isclix.com/deep_link/campaign?url=https%3A%2F%2Fmerchant.example%2Fp%2F1',
+    });
+    equal(canonical.canonicalProductUrl, '');
+    equal(canonical.status, 'unavailable');
+    const duplicatedTrackingValue = accessTrade.resolveAccessTradeCanonicalProductUrl({
+      url: 'https://unknown-tracker.example/click/1',
+      aff_link: 'https://unknown-tracker.example/click/1',
+    });
+    equal(duplicatedTrackingValue.canonicalProductUrl, '');
+    equal(duplicatedTrackingValue.status, 'unavailable');
+  });
+
+  await test('payload datafeed chính thức giữ riêng url và aff_link', () => {
+    const fetchedAt = new Date().toISOString();
+    const raw = {
+      __sandealEndpoint: 'datafeed', __sandealFetchedAt: fetchedAt,
+      product_id: 'provider-product-1', name: 'Sản phẩm datafeed chính thức',
+      url: 'https://merchant.example/products/provider-product-1',
+      aff_link: 'https://go.isclix.com/deep_link/campaign?url=https%3A%2F%2Fmerchant.example%2Fproducts%2Fprovider-product-1',
+      image: 'https://images.example/provider-product-1.jpg', price: 120000, discount: 99000,
+    };
+    const normalized = accessTrade.normalizeAccessTradeItem(raw);
+    equal(normalized.canonicalProductUrl, raw.url);
+    equal(normalized.canonicalUrlSourceField, 'url');
+    equal(normalized.canonicalUrlSourceEndpoint, 'datafeed');
+    equal(normalized.affiliateUrl, raw.aff_link);
+    equal(normalized.affiliateUrlSourceField, 'aff_link');
+    equal(normalized.affiliateUrlSourceEndpoint, 'datafeed');
+    const observed = accessTrade.observeAccessTradePayload({ data: [raw] }, [raw]);
+    assert(observed.observedCanonicalUrlFields.includes('url'));
+    assert(observed.observedAffiliateUrlFields.includes('aff_link'));
   });
 
   await test('chỉ field provider trong allowlist tạo affiliate provenance', () => {
@@ -149,6 +214,16 @@ function product(overrides = {}) {
     equal(result.status, 'FAILED'); equal(result.lastErrorCode, 'NETWORK_ERROR');
   });
 
+  await test('UI không tạo href khi link chưa verified/healthy', () => {
+    const detailSource = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/products/[id]/page.tsx'), 'utf8');
+    assert(detailSource.includes("data-link-state={affiliateLinkEnabled ? 'enabled' : 'disabled'}"));
+    assert(detailSource.includes('disabled aria-disabled="true">Link affiliate bị khóa'));
+    assert(detailSource.includes("product.affiliateUrlStatus === 'verified'"));
+    assert(detailSource.includes('verificationIsFresh(product.affiliateLastCheckedAt)'));
+    assert(detailSource.includes('verificationIsFresh(product.linkLastCheckedAt)'));
+    assert(!detailSource.includes('product.affiliateUrl && <a'));
+  });
+
   await test('Safe Publish bị khóa nếu product URL hoặc affiliate URL không hợp lệ', () => {
     const badProduct = safety.evaluateSafePublish(product({ linkHealthStatus: 'timeout' }));
     const badAffiliate = safety.evaluateSafePublish(product({ affiliateHealthStatus: 'not_allowed' }));
@@ -171,8 +246,9 @@ function product(overrides = {}) {
   await test('record 30shinestore được quarantine mềm, không bị xóa', async () => {
     await adapter.writeCollection('products', [product({
       originalUrl: 'https://30shinestore.com/products/item-1',
+      canonicalProductUrl: 'https://30shinestore.com/products/item-1',
       affiliateUrl: 'https://go.isclix.com/deep_link/legacy?url=https%3A%2F%2F30shinestore.com%2Fproducts%2Fitem-1',
-      affiliateUrlSource: undefined, deepLinkSupported: undefined,
+      affiliateUrlSource: undefined, affiliateUrlProvider: undefined, affiliateUrlSourceField: undefined, affiliateUrlStatus: 'unverified', deepLinkSupported: undefined,
     })]);
     const originalFetch = global.fetch;
     global.fetch = async (input) => String(input).includes('isclix')
@@ -183,6 +259,7 @@ function product(overrides = {}) {
     } finally { global.fetch = originalFetch; }
     const stored = await products.getProductById('at-product');
     assert(stored, 'record must remain stored'); equal(stored.status, 'archived'); equal(stored.lifecycleState, 'QUARANTINED');
+    equal(stored.canonicalProductUrl, 'https://30shinestore.com/products/item-1');
     equal(stored.publicHidden, true); equal(stored.publicBlocked, true);
     assert(stored.publicBlockReasons.includes('product_url_unhealthy'));
     assert(stored.publicBlockReasons.includes('affiliate_url_unhealthy'));

@@ -33,6 +33,12 @@ function health(value: string | undefined, hasValue: boolean): string {
   return 'UNVERIFIED';
 }
 
+function verifiedUrlHealth(value: string | undefined, hasValue: boolean, verified: boolean): string {
+  if (!hasValue) return 'MISSING';
+  if (!verified) return 'UNVERIFIED';
+  return health(value, true);
+}
+
 export function buildProductPipelineTruth(input: {
   product: Product;
   jobs: AutomationJob[];
@@ -59,6 +65,9 @@ export function buildProductPipelineTruth(input: {
   const publishApproved = hasAction('publish_approved');
   const publishingEnabled = config.allowPublishingApi && config.autoPublishEnabled && input.launchEnabled && ['CANARY', 'AUTONOMOUS'].includes(input.effectiveMode);
   const published = eligibility.eligibleForPublic && Boolean(product.publishedAt || product.publicationEffectKey);
+  const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
+  const productLinkHealth = verifiedUrlHealth(product.linkHealthStatus, Boolean(canonicalUrl), product.canonicalUrlStatus === 'verified');
+  const affiliateLinkHealth = verifiedUrlHealth(product.affiliateHealthStatus, Boolean(product.affiliateUrl), product.affiliateUrlStatus === 'verified');
   const requiredAction = classification.recordType !== 'PRODUCT' ? 'MANUAL_CLASSIFICATION_DECISION'
     : criticalBlockers.length ? eligibility.nextRequiredAction
       : !reviewed ? 'MARK_REVIEWED'
@@ -80,9 +89,9 @@ export function buildProductPipelineTruth(input: {
       lastProcessedAt: activeJob?.updatedAt || product.updatedAt || null,
     },
     health: {
-      link: health(product.linkHealthStatus, Boolean(product.originalUrl)),
-      productLink: health(product.linkHealthStatus, Boolean(product.originalUrl)),
-      affiliateLink: health(product.affiliateHealthStatus, Boolean(product.affiliateUrl)),
+      link: productLinkHealth,
+      productLink: productLinkHealth,
+      affiliateLink: affiliateLinkHealth,
       image: health(product.imageHealthStatus, Boolean(product.imageUrl)),
       price: health(product.priceTruthState, Number(product.salePrice || product.price) > 0),
       source: product.verifiedSource || product.sourceVerified ? 'HEALTHY' : 'UNVERIFIED',
@@ -92,8 +101,8 @@ export function buildProductPipelineTruth(input: {
     humanActionRequired: Boolean(requiredAction && !['FIX_CRITICAL_BLOCKERS'].includes(requiredAction)),
     eligibility,
     remediationAvailable: Boolean(activeJob?.status === 'FAILED' && activeJob.attemptCount < activeJob.maxAttempts) || ['UNHEALTHY', 'UNVERIFIED'].some(value => [
-      health(product.linkHealthStatus, Boolean(product.originalUrl)),
-      health(product.affiliateHealthStatus, Boolean(product.affiliateUrl)),
+      productLinkHealth,
+      affiliateLinkHealth,
       health(product.imageHealthStatus, Boolean(product.imageUrl)),
     ].includes(value)),
     safety: { publishingEnabled, launchEnabled: input.launchEnabled, effectiveMode: input.effectiveMode },

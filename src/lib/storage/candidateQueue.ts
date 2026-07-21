@@ -13,6 +13,13 @@ export interface CandidatePayload {
   kind: Product['kind'];
   platform: Product['platform'];
   originalUrl: string;
+  canonicalProductUrl?: string;
+  canonicalUrlSource?: 'provider_api' | 'none';
+  canonicalUrlProvider?: 'accesstrade';
+  canonicalUrlSourceEndpoint?: 'datafeed' | 'offers';
+  canonicalUrlSourceField?: string;
+  canonicalUrlFetchedAt?: string;
+  canonicalUrlStatus?: 'available' | 'unavailable';
   affiliateUrl: string;
   affiliateUrlSource?: 'provider_api' | 'none';
   affiliateUrlProvider?: 'accesstrade';
@@ -20,6 +27,7 @@ export interface CandidatePayload {
   affiliateUrlSourceField?: string;
   affiliateUrlCampaignId?: string;
   affiliateUrlFetchedAt?: string;
+  affiliateUrlStatus?: 'available' | 'unavailable';
   imageUrl: string;
   imageCandidates?: string[];
   price?: number;

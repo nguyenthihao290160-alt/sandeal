@@ -1,8 +1,9 @@
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 const ROLE_COLLECTION = 'runtime-role-leases';
 const CONFLICT_COLLECTION = 'runtime-role-conflicts';
-export const RUNTIME_ROLE_SCHEMA_VERSION = 2;
+export const RUNTIME_ROLE_SCHEMA_VERSION = 3;
 export const DEFAULT_ROLE_LEASE_MS = 45_000;
 
 export type RuntimeRole = 'WEB' | 'WORKER' | 'SCHEDULER';
@@ -16,6 +17,7 @@ export interface RuntimeRoleLease {
   holderId: string;
   hostname?: string;
   pid?: number;
+  releaseId?: string;
   status: 'ACTIVE' | 'RELEASED';
   processStartedAt?: string;
   acquiredAt: string;
@@ -95,6 +97,7 @@ export async function acquireRuntimeRole(input: {
   hostname?: string;
   pid?: number;
   processStartedAt?: string;
+  releaseId?: string;
   leaseMs?: number;
   now?: number;
 }): Promise<{
@@ -142,6 +145,7 @@ export async function acquireRuntimeRole(input: {
       holderId: ownerId,
       hostname: input.hostname,
       pid: input.pid,
+      releaseId: input.releaseId || getReleaseIdentity().releaseId,
       status: 'ACTIVE',
       processStartedAt: input.processStartedAt,
       acquiredAt: sameInstance ? existing.acquiredAt : now,
@@ -185,6 +189,7 @@ export async function heartbeatRuntimeRole(
     const lease = leases.find(item => item.role === role);
     if (!lease || lease.status !== 'ACTIVE' || !ownsLease(lease, ownership) || Date.parse(expiryOf(lease)) <= nowMs) return undefined;
     lease.heartbeatAt = new Date(nowMs).toISOString();
+    lease.releaseId = getReleaseIdentity().releaseId;
     lease.expiresAt = new Date(nowMs + Math.max(5_000, Math.min(5 * 60_000, leaseMs))).toISOString();
     lease.leaseExpiresAt = lease.expiresAt;
     lease.updatedAt = lease.heartbeatAt;

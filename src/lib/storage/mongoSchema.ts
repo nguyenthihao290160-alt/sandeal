@@ -46,6 +46,7 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'product-alerts',
   'product-admin-actions',
   'product-lifecycle-events',
+  'product-reprocess-audit',
   'product-sources',
   'products',
   'publication-audit',

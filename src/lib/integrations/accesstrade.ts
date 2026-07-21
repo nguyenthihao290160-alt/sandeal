@@ -44,7 +44,13 @@ export interface NormalizedAccessTradeItem {
   imageUrl: string;
   imageCandidates: string[];   // All image URLs from raw payload, ordered by priority
   originalUrl: string;
-  canonicalProductUrl?: string; // Decoded from affiliate deeplink if available
+  canonicalProductUrl?: string;
+  canonicalUrlSource?: 'provider_api' | 'none';
+  canonicalUrlProvider?: 'accesstrade';
+  canonicalUrlSourceEndpoint?: 'datafeed' | 'offers';
+  canonicalUrlSourceField?: string;
+  canonicalUrlFetchedAt?: string;
+  canonicalUrlStatus?: 'available' | 'unavailable';
   affiliateUrl: string;
   affiliateUrlSource?: 'provider_api' | 'none';
   affiliateUrlProvider?: 'accesstrade';
@@ -52,6 +58,7 @@ export interface NormalizedAccessTradeItem {
   affiliateUrlSourceField?: string;
   affiliateUrlCampaignId?: string;
   affiliateUrlFetchedAt?: string;
+  affiliateUrlStatus?: 'available' | 'unavailable';
   deepLinkSupported?: boolean;
   affiliateLinkReason?: string;
   price: number;
@@ -111,6 +118,10 @@ export interface AccessTradeRequestLog {
   itemCount: number;
   retryAfter?: string;
   attempts?: number;
+  observedEnvelopeFields?: string[];
+  observedItemFields?: string[];
+  observedCanonicalUrlFields?: string[];
+  observedAffiliateUrlFields?: string[];
 }
 
 export class AccessTradeRequestError extends Error {
@@ -130,6 +141,8 @@ interface AccessTradeFetchResult {
   error?: string;
   request?: AccessTradeRequestLog;
   attempts?: number;
+  payloadObservation?: Pick<AccessTradeRequestLog,
+    'observedEnvelopeFields' | 'observedItemFields' | 'observedCanonicalUrlFields' | 'observedAffiliateUrlFields'>;
 }
 
 function toRequestLog(result: AccessTradeFetchResult): AccessTradeRequestLog {
@@ -141,6 +154,7 @@ function toRequestLog(result: AccessTradeFetchResult): AccessTradeRequestLog {
     resultType: result.ok ? (result.items.length ? 'success_with_results' : 'success_empty') : 'malformed_response',
     itemCount: result.items.length,
     attempts: result.attempts ?? 1,
+    ...result.payloadObservation,
   };
 }
 
@@ -476,21 +490,8 @@ export function normalizeAccessTradeItem(
     }
   }
 
-  const originalUrl = getFirstText(item, [
-    'productUrl',
-    'product_url',
-    'originalUrl',
-    'original_url',
-    'final_url',
-    'finalUrl',
-    'url',
-    'link',
-    'landingPage',
-    'landing_page',
-    'merchantUrl',
-    'merchant_url',
-  ]);
-
+  const canonicalResolution = resolveAccessTradeCanonicalProductUrl(item);
+  const originalUrl = canonicalResolution.canonicalProductUrl;
   const affiliateResolution = resolveAccessTradeAffiliateUrl(item);
   const affiliateUrl = affiliateResolution.affiliateUrl;
 
@@ -623,9 +624,6 @@ export function normalizeAccessTradeItem(
   const autoPublishEligible = publicDecision === 'public_candidate';
   const needsVerification = !autoPublishEligible;
 
-  // Try to decode real product URL from affiliate deeplink query params
-  const canonicalProductUrl = decodeProductUrlFromAffiliateLink(affiliateUrl) || undefined;
-
   // Integration layer never exposes an item directly.
   // SourceScout must run link + image health checks before publicHidden can become false.
   const publicHidden = true;
@@ -640,7 +638,13 @@ export function normalizeAccessTradeItem(
     imageUrl,
     imageCandidates,
     originalUrl,
-    canonicalProductUrl,
+    canonicalProductUrl: originalUrl || undefined,
+    canonicalUrlSource: canonicalResolution.source,
+    canonicalUrlProvider: originalUrl ? 'accesstrade' : undefined,
+    canonicalUrlSourceEndpoint: item.__sandealEndpoint,
+    canonicalUrlSourceField: canonicalResolution.field,
+    canonicalUrlFetchedAt: item.__sandealFetchedAt,
+    canonicalUrlStatus: canonicalResolution.status,
     affiliateUrl,
     affiliateUrlSource: affiliateResolution.source,
     affiliateUrlProvider: affiliateUrl ? 'accesstrade' : undefined,
@@ -648,6 +652,7 @@ export function normalizeAccessTradeItem(
     affiliateUrlSourceField: affiliateResolution.field,
     affiliateUrlCampaignId: getFirstText(item, ['campaign_id', 'campaignId']) || undefined,
     affiliateUrlFetchedAt: item.__sandealFetchedAt,
+    affiliateUrlStatus: affiliateResolution.status,
     deepLinkSupported: affiliateResolution.deepLinkSupported,
     affiliateLinkReason: affiliateResolution.reason,
     price,
@@ -674,25 +679,80 @@ export function normalizeAccessTradeItem(
  * campaign id and product URL.
  */
 export const ACCESS_TRADE_AFFILIATE_URL_FIELDS = [
-  'aff_link', 'affiliate_url', 'affiliateUrl', 'affiliate_link',
-  'affiliateLink', 'tracking_link', 'trackingLink', 'deep_link',
-  'deepLink', 'deeplink',
+  'aff_link',
 ] as const;
+
+export const ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS = [
+  'url', 'link',
+] as const;
+
+const ACCESS_TRADE_TRACKING_HOSTS = new Set([
+  'go.isclix.com',
+  'accesstrade.vn',
+  'pub.accesstrade.vn',
+  'click.accesstrade.vn',
+]);
+
+export function isAccessTradeTrackingUrl(value: unknown): boolean {
+  const text = stringifyValue(value);
+  if (!isValidHttpUrl(text)) return false;
+  const hostname = new URL(text).hostname.toLowerCase().replace(/\.$/, '');
+  return [...ACCESS_TRADE_TRACKING_HOSTS].some(host => hostname === host || hostname.endsWith(`.${host}`));
+}
+
+function firstProviderUrl(
+    item: AccessTradeRawItem,
+    fields: readonly string[],
+    accept: (value: string) => boolean = () => true,
+): { url: string; field?: string } {
+  for (const field of fields) {
+    const value = getFirstText(item, [field]);
+    if (value && isValidHttpUrl(value) && accept(value)) return { url: value, field };
+  }
+  return { url: '' };
+}
+
+/** Canonical merchant URLs must come from a provider product/landing field. */
+export function resolveAccessTradeCanonicalProductUrl(
+    item: Record<string, unknown>,
+): { canonicalProductUrl: string; source: 'provider_api' | 'none'; status: 'available' | 'unavailable'; field?: string; reason?: string } {
+  const affiliateValues = new Set(ACCESS_TRADE_AFFILIATE_URL_FIELDS
+    .map(field => getFirstText(item as AccessTradeRawItem, [field]))
+    .filter(isValidHttpUrl)
+    .map(value => new URL(value).href));
+  const resolved = firstProviderUrl(
+      item as AccessTradeRawItem,
+      ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
+      value => !isAccessTradeTrackingUrl(value) && !affiliateValues.has(new URL(value).href),
+  );
+  if (resolved.url) return {
+    canonicalProductUrl: resolved.url,
+    source: 'provider_api',
+    status: 'available',
+    field: resolved.field,
+  };
+  return {
+    canonicalProductUrl: '',
+    source: 'none',
+    status: 'unavailable',
+    reason: 'provider_canonical_product_url_unavailable',
+  };
+}
 
 export function resolveAccessTradeAffiliateUrl(
     item: Record<string, unknown>,
-): { affiliateUrl: string; source: 'provider_api' | 'none'; deepLinkSupported?: boolean; field?: string; reason?: string } {
-  const affiliateUrl = getFirstText(item as AccessTradeRawItem, [...ACCESS_TRADE_AFFILIATE_URL_FIELDS]);
-  if (affiliateUrl && isValidHttpUrl(affiliateUrl)) {
-    const field = ACCESS_TRADE_AFFILIATE_URL_FIELDS.find((name) => getFirstText(item as AccessTradeRawItem, [name]) === affiliateUrl);
+): { affiliateUrl: string; source: 'provider_api' | 'none'; status: 'available' | 'unavailable'; deepLinkSupported?: boolean; field?: string; reason?: string } {
+  const resolved = firstProviderUrl(item as AccessTradeRawItem, ACCESS_TRADE_AFFILIATE_URL_FIELDS);
+  if (resolved.url) {
     return {
-      affiliateUrl,
+      affiliateUrl: resolved.url,
       source: 'provider_api',
-      field,
+      status: 'available',
+      field: resolved.field,
       // A provider-supplied tracking URL is authoritative for this product,
       // but it does not prove that the campaign supports arbitrary deep links.
       // Keep that capability unknown unless the returned field/path says so.
-      deepLinkSupported: /deep/i.test(field || '') || /\/deep[_-]?link(?:\/|$)/i.test(new URL(affiliateUrl).pathname)
+      deepLinkSupported: /deep/i.test(resolved.field || '') || /\/deep[_-]?link(?:\/|$)/i.test(new URL(resolved.url).pathname)
         ? true
         : undefined,
     };
@@ -700,53 +760,10 @@ export function resolveAccessTradeAffiliateUrl(
   return {
     affiliateUrl: '',
     source: 'none',
+    status: 'unavailable',
     deepLinkSupported: false,
     reason: 'provider_deeplink_not_supported',
   };
-}
-
-/**
- * Try to extract the actual product URL from an affiliate deeplink.
- * AccessTrade deeplinks often encode the target URL as a query parameter:
- * https://pub.accesstrade.vn/deep_link/xxx?url=https%3A%2F%2Fshopee.vn%2F...
- *
- * Returns the decoded URL if valid, or null if not decodable.
- */
-export function decodeProductUrlFromAffiliateLink(affiliateUrl: string): string | null {
-  if (!affiliateUrl || !isValidHttpUrl(affiliateUrl)) return null;
-
-  try {
-    const parsed = new URL(affiliateUrl);
-    // Common params that contain the real destination URL
-    const destParams = ['url', 'deeplink', 'target', 'destination', 'redirect', 'landing', 'to', 'href', 'link', 'u'];
-
-    for (const param of destParams) {
-      const value = parsed.searchParams.get(param);
-      if (value && isValidHttpUrl(value)) {
-        return value;
-      }
-      // Also try URL-decoded version
-      try {
-        const decoded = decodeURIComponent(value ?? '');
-        if (decoded && isValidHttpUrl(decoded)) {
-          return decoded;
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Some links encode destination in path: /deep_link/campaignId/productUrl
-    const pathParts = parsed.pathname.split('/').filter(Boolean);
-    for (const part of pathParts) {
-      try {
-        const decoded = decodeURIComponent(part);
-        if (isValidHttpUrl(decoded)) {
-          return decoded;
-        }
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-
-  return null;
 }
 
 export function detectAccessTradeItemKind(item: AccessTradeRawItem): ProductKind {
@@ -891,7 +908,14 @@ export function mapAccessTradeToProduct(
     sourceType: 'affiliate',
     rawSourceKind: item.rawSourceKind,
 
-    originalUrl: item.originalUrl || undefined,
+    originalUrl: item.canonicalProductUrl || item.originalUrl || undefined,
+    canonicalProductUrl: item.canonicalProductUrl || item.originalUrl || undefined,
+    canonicalUrlSource: item.canonicalUrlSource,
+    canonicalUrlProvider: item.canonicalUrlProvider,
+    canonicalUrlSourceEndpoint: item.canonicalUrlSourceEndpoint,
+    canonicalUrlSourceField: item.canonicalUrlSourceField,
+    canonicalUrlFetchedAt: item.canonicalUrlFetchedAt,
+    canonicalUrlStatus: item.canonicalUrlStatus === 'available' ? 'unverified' : 'unavailable',
     affiliateUrl: item.affiliateUrl || undefined,
     affiliateUrlSource: item.affiliateUrlSource,
     affiliateUrlProvider: item.affiliateUrlProvider,
@@ -899,9 +923,10 @@ export function mapAccessTradeToProduct(
     affiliateUrlSourceField: item.affiliateUrlSourceField,
     affiliateUrlCampaignId: item.affiliateUrlCampaignId,
     affiliateUrlFetchedAt: item.affiliateUrlFetchedAt,
+    affiliateUrlStatus: item.affiliateUrlStatus === 'available' ? 'unverified' : 'unavailable',
     deepLinkSupported: item.deepLinkSupported,
     affiliateLinkReason: item.affiliateLinkReason,
-    url: item.affiliateUrl || item.originalUrl || undefined,
+    url: item.canonicalProductUrl || item.originalUrl || undefined,
 
     imageUrl: item.imageUrl || undefined,
     gallery: [],
@@ -1128,7 +1153,9 @@ async function fetchAccessTradeEndpoint(
     }
 
     const fetchedAt = new Date().toISOString();
-    const items = extractRawItems(data).map((rawItem) => ({
+    const extractedItems = extractRawItems(data);
+    const payloadObservation = observeAccessTradePayload(data, extractedItems);
+    const items = extractedItems.map((rawItem) => ({
       ...rawItem,
       __sandealEndpoint: endpoint,
       __sandealSourceKind: sourceKind,
@@ -1143,6 +1170,7 @@ async function fetchAccessTradeEndpoint(
       items,
       status: response.status,
       attempts: attempt + 1,
+      payloadObservation,
     };
   }
   
@@ -1273,9 +1301,7 @@ function hasDatafeedProductSignals(item: AccessTradeRawItem): boolean {
       getFirstText(item, ['product_id', 'productId', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id']),
   );
 
-  const hasOfficialProductUrl = isValidHttpUrl(
-      getFirstText(item, ['productUrl', 'product_url', 'url', 'aff_link', 'affiliate_url', 'affiliateUrl']),
-  );
+  const hasOfficialProductUrl = Boolean(resolveAccessTradeCanonicalProductUrl(item).canonicalProductUrl);
 
   const hasOfficialProductImage = isValidHttpUrl(
       getFirstText(item, ['productImage', 'product_image', 'image', 'image_url', 'imageUrl', 'thumbnail']),
@@ -1421,7 +1447,7 @@ function getProductCompleteness(input: ProductCompletenessInput): ProductComplet
   return {
     hasTitle: Boolean(input.name && input.name.trim().length >= 5),
     hasImage: isValidHttpUrl(input.imageUrl),
-    hasUrl: isValidHttpUrl(input.affiliateUrl) || isValidHttpUrl(input.originalUrl),
+    hasUrl: isValidHttpUrl(input.originalUrl),
     hasAffiliateUrl: isValidHttpUrl(input.affiliateUrl),
     hasPrice: Boolean((input.price && input.price > 0) || (input.salePrice && input.salePrice > 0)),
   };
@@ -1464,6 +1490,9 @@ function getPublicBlockReason(input: {
   nonProductReason?: string;
   qualityScore: number;
 }): string {
+  if ((input.kind === 'product' || input.kind === 'deal') && !input.completeness.hasAffiliateUrl) {
+    return 'Provider did not return a valid affiliate/tracking URL.';
+  }
   if (input.kind === 'store_offer') return input.nonProductReason || 'Chưa phải sản phẩm cụ thể.';
   if (input.kind === 'voucher') return input.nonProductReason || 'Voucher/mã giảm giá không public như sản phẩm.';
   if (input.kind === 'campaign') return input.nonProductReason || 'Campaign/chương trình khuyến mãi không public như sản phẩm.';
@@ -1736,6 +1765,25 @@ function isCampaignText(title: string, description: string, rawSourceKind: strin
 }
 
 // ---- Raw extraction helpers ----
+
+export function observeAccessTradePayload(
+    data: unknown,
+    suppliedItems?: Array<Record<string, unknown>>,
+): Pick<AccessTradeRequestLog,
+  'observedEnvelopeFields' | 'observedItemFields' | 'observedCanonicalUrlFields' | 'observedAffiliateUrlFields'> {
+  const envelope = data && typeof data === 'object' && !Array.isArray(data)
+    ? Object.keys(data as Record<string, unknown>).sort().slice(0, 80)
+    : [];
+  const items = suppliedItems || extractRawItems(data);
+  const fields = [...new Set(items.slice(0, 25).flatMap(item => Object.keys(item)))].sort().slice(0, 120);
+  const present = (allowlist: readonly string[]) => allowlist.filter(field => fields.includes(field));
+  return {
+    observedEnvelopeFields: envelope,
+    observedItemFields: fields,
+    observedCanonicalUrlFields: present(ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS),
+    observedAffiliateUrlFields: present(ACCESS_TRADE_AFFILIATE_URL_FIELDS),
+  };
+}
 
 function extractRawItems(data: unknown): AccessTradeRawItem[] {
   if (Array.isArray(data)) {

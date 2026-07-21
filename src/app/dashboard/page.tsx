@@ -11,7 +11,7 @@ type ActivityPoint = { label: string; completed: number; failed: number; retried
 type OnboardingStep = { id: string; title: string; status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED'; reason: string; cta: string; route: string; completionCriteria: string; updatedAt: string };
 type OnboardingRecommendation = Pick<OnboardingStep, 'id' | 'title' | 'reason' | 'route' | 'cta' | 'status'>;
 type JobDiagnostic = { id: string; type: string; status: string; outcomeStatus: string | null; updatedAt: string; nextRetryAt: string | null; lastErrorCode: string | null; lastErrorMessage: string | null; reasons: string[]; schemaVersion: number; policyVersion: string; handlerVersion: string };
-type RoleDiagnostic = { processStatus: string; activeRole: boolean; roleState: string; owner: string | null; instanceId: string | null; heartbeatAt: string | null; acquiredAt: string | null; leaseAgeMs: number | null; expiresAt: string | null; fencingToken: number | null; takeoverCount: number };
+type RoleDiagnostic = { processStatus: string; activeRole: boolean; roleState: string; owner: string | null; instanceId: string | null; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; acquiredAt: string | null; leaseAgeMs: number | null; expiresAt: string | null; fencingToken: number | null; takeoverCount: number; releaseId: string | null; releaseMatchesWeb: boolean | null };
 type KeywordYield = { keyword: string; requests: number; found: number; valid: number; ready: number; published: number; noResult: number; timeout: number; rateLimited: number; costPerValidCandidate: number | null; lastUsedAt?: string; nextEligibleAt?: string };
 type DashboardData = {
   updatedAt: string; range: Range;
@@ -20,20 +20,21 @@ type DashboardData = {
   activity: ActivityPoint[];
   sourcePerformance: Array<{ name: string; total: number; valid: number; rate: number }>;
   queue: Record<string, number>;
-  worker: { status: string; heartbeatAt: string | null; workerId: string | null; currentJobId: string | null };
-  scheduler: { status: string; lastRunAt: string | null; nextRunAt: string | null; timezone: string };
+  worker: { status: string; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; releaseId: string | null; workerId: string | null; currentJobId: string | null };
+  scheduler: { status: string; lastRunAt: string | null; nextRunAt: string | null; timezone: string; scheduleState: string; scheduleWarning: string | null; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; releaseId: string | null };
   aiUsage: { requests: number; requestLimit: number; tokens: number; tokenLimit: number; blocked: number; freeOnly: boolean };
   circuits: Array<{ provider: string; state: string }>;
   runtime: {
     web: { status: string; checkedAt: string | null; buildAvailable?: boolean; buildId?: string | null; releaseMatchesBuild?: boolean | null };
     storage: { status: string; checkedAt: string | null };
     worker: RoleDiagnostic;
-    scheduler: RoleDiagnostic & { lastContenderState: string; rejectedOwner: string | null; rejectedAt: string | null; historicalErrorLabel: string | null; lastSuccessfulTickAt: string | null; nextRunAt: string | null };
-    guardianCheckedAt: string | null; reasons: string[];
+    scheduler: RoleDiagnostic & { lastContenderState: string; rejectedOwner: string | null; rejectedAt: string | null; historicalErrorLabel: string | null; lastSuccessfulTickAt: string | null; nextRunAt: string | null; scheduleState: string; scheduleWarning: string | null };
+    guardianCheckedAt: string | null; guardianFresh: boolean; reasons: string[]; historicalReasons: string[];
   };
   control: { mode: string; effectiveMode: string; publishPaused: boolean; ingestionPaused: boolean; workerPaused: boolean; schedulerPaused: boolean; killSwitch: boolean; launchEnabled: boolean; reason: string | null; safePublish: { state: string; reasons: string[] } };
   pipeline: { sourceRequests: number; sourceFound: number; candidateQueued: number; duplicateRejected: number; validationRejected: number; productCreated: number; productUpdated: number; publishEligible: number; publishBlocked: number; quarantined: number; failed: number; durationMs: number };
-  jobs: { productScan: JobDiagnostic | null; productHealth: JobDiagnostic | null; autoPilot: JobDiagnostic | null; runtimeGuardian: JobDiagnostic | null; latestError: JobDiagnostic | null };
+  jobs: { productScan: JobDiagnostic | null; productHealth: JobDiagnostic | null; autoPilot: JobDiagnostic | null; runtimeGuardian: JobDiagnostic | null; latestError: JobDiagnostic | null; latestHistoricalError: JobDiagnostic | null };
+  errors: { range: Range; failedJobsInRange: number; currentRuntimeErrors: string[]; historicalFailedJobs: number; historicalSchedulerConflicts: number };
   providers: Array<{ id: string; status: string; configured: boolean | null; ready: boolean; degraded: boolean; checkedAt: string | null }>;
   business: { publicProducts: number; freshPrice: number; stalePrice: number; healthyAffiliateLinks: number; brokenLinks: number; outboundClicks: number; degradedProviders: string[] };
   inventory: {
@@ -167,8 +168,15 @@ function OwnerDiagnostics({ data, selectedMode, setSelectedMode, openControl, ru
           <div><dt>Scheduler / vai trò</dt><dd>{RUNTIME_LABELS[data.runtime.scheduler.processStatus] || data.runtime.scheduler.processStatus} · {RUNTIME_LABELS[data.runtime.scheduler.roleState] || data.runtime.scheduler.roleState}</dd></div>
           <div><dt>Leader</dt><dd>{data.runtime.scheduler.owner || 'Chưa có leader'}</dd></div>
           <div><dt>Heartbeat / hết lease</dt><dd>{formatTime(data.runtime.scheduler.heartbeatAt)} · {formatTime(data.runtime.scheduler.expiresAt)}</dd></div>
+          <div><dt>Tuổi / nguồn heartbeat</dt><dd>{formatDuration(data.runtime.scheduler.heartbeatAgeMs)} · {data.runtime.scheduler.heartbeatSource}</dd></div>
+          {data.runtime.scheduler.staleAgeMs !== null && <div><dt>Đã stale</dt><dd>{formatDuration(data.runtime.scheduler.staleAgeMs)}</dd></div>}
           <div><dt>Tuổi lease</dt><dd>{formatDuration(data.runtime.scheduler.leaseAgeMs)}</dd></div>
           <div><dt>Scheduler tick / lần tới</dt><dd>{formatTime(data.runtime.scheduler.lastSuccessfulTickAt)} · {formatTime(data.runtime.scheduler.nextRunAt)}</dd></div>
+          <div><dt>Runtime / lịch</dt><dd>{RUNTIME_LABELS[data.scheduler.status] || data.scheduler.status} · {data.runtime.scheduler.scheduleState}</dd></div>
+          <div><dt>Release web / worker / scheduler</dt><dd><code>{data.release.releaseId.slice(0, 12)}</code> · <code>{data.runtime.worker.releaseId?.slice(0, 12) || 'chưa có'}</code> · <code>{data.runtime.scheduler.releaseId?.slice(0, 12) || 'chưa có'}</code></dd></div>
+          <div><dt>Lỗi job trong khoảng chọn</dt><dd>{data.errors.failedJobsInRange}</dd></div>
+          <div><dt>Lỗi runtime hiện tại</dt><dd>{data.errors.currentRuntimeErrors.length}</dd></div>
+          <div><dt>Lỗi lịch sử</dt><dd>{data.errors.historicalFailedJobs} job · {data.errors.historicalSchedulerConflicts} xung đột scheduler</dd></div>
         </dl>
         {data.runtime.scheduler.lastContenderState === 'rejected' && <div className={styles.degradedNotice} role="status">Một scheduler online đã bị từ chối vai trò vì leader <strong>{data.runtime.scheduler.owner || 'khác'}</strong> còn lease hợp lệ. Tiến trình online không đồng nghĩa đang active.</div>}
         {data.runtime.scheduler.lastContenderState === 'recovered' && <div className={styles.recoveredNotice} role="status"><strong>{data.runtime.scheduler.historicalErrorLabel || 'Lỗi cũ/đã phục hồi'}:</strong> xung đột thuộc instance trước, không làm trạng thái scheduler hiện tại thành lỗi{data.runtime.scheduler.rejectedAt ? ` · ${formatTime(data.runtime.scheduler.rejectedAt)}` : ''}.</div>}
@@ -298,21 +306,22 @@ export default function DashboardPage() {
     { label: 'Đủ điều kiện', value: data.inventory.diagnostic.readyForLaunchCount, help: 'Candidate vượt các cổng readiness hiện tại', icon: 'check', tone: 'green' },
     { label: 'Đang bị block', value: data.inventory.diagnostic.publishBlockedCount, help: 'Record chưa đạt cổng publish', icon: 'warning', tone: 'red' },
     { label: 'Quarantine', value: data.inventory.diagnostic.quarantineCount, help: 'Record được giữ lại nhưng khóa public', icon: 'security', tone: 'purple' },
-    { label: 'Job chạy / lỗi', value: `${data.kpis.running} / ${data.kpis.systemErrors}`, help: 'Job RUNNING và FAILED trong durable queue', icon: 'worker', tone: data.kpis.systemErrors ? 'red' : 'cyan' },
+    { label: 'Job chạy / lỗi trong kỳ', value: `${data.kpis.running} / ${data.kpis.systemErrors}`, help: 'RUNNING hiện tại và FAILED trong khoảng thời gian đã chọn', icon: 'worker', tone: data.kpis.systemErrors ? 'red' : 'cyan' },
     { label: 'Quota còn lại', value: Math.max(0, data.aiUsage.requestLimit - data.aiUsage.requests), help: 'Số request miễn phí còn lại theo quota đã ghi nhận', icon: 'analytics', tone: 'amber' },
   ] : [];
   const kpis = populatedKpis;
   const systemItems = data ? [
     { label: 'Web app', status: data.runtime.web.status, detail: data.runtime.web.checkedAt },
     { label: 'Worker', status: data.worker.status, detail: data.worker.heartbeatAt },
-    { label: 'Scheduler', status: data.scheduler.status, detail: data.scheduler.lastRunAt },
+    { label: 'Scheduler', status: data.scheduler.status, detail: data.scheduler.heartbeatAt },
     { label: 'FileStorage', status: data.runtime.storage.status, detail: data.runtime.storage.checkedAt },
     { label: 'AccessTrade', status: data.providers.find(item => item.id.toLowerCase() === 'accesstrade')?.status || 'unverified', detail: data.providers.find(item => item.id.toLowerCase() === 'accesstrade')?.checkedAt || null },
     { label: 'Product Health Scanner', status: data.jobs.productHealth?.status || 'unverified', detail: data.jobs.productHealth?.updatedAt || null },
   ] : [];
   const workItems = data ? [
     data.release.releaseMismatch ? { severity: 'critical', text: 'Release env không khớp build đang chạy.', href: '/dashboard/app-health' } : null,
-    data.scheduler.status === 'stale' ? { severity: 'critical', text: 'Scheduler mất tín hiệu hoặc quá hạn lần chạy.', href: '/dashboard/automation' } : null,
+    data.scheduler.status === 'stale' ? { severity: 'critical', text: `Scheduler mất heartbeat${data.scheduler.staleAgeMs !== null ? ` ${formatDuration(data.scheduler.staleAgeMs)}` : ''}.`, href: '/dashboard/automation' } : null,
+    data.scheduler.scheduleWarning === 'NEXT_RUN_OVERDUE' ? { severity: 'warning', text: 'Scheduler đang online nhưng lịch chạy kế tiếp đã quá hạn.', href: '/dashboard/automation' } : null,
     data.jobs.latestError ? { severity: 'critical', text: `Job gần nhất lỗi: ${data.jobs.latestError.lastErrorCode || data.jobs.latestError.status}.`, href: '/dashboard/ai-bots' } : null,
     data.business.degradedProviders.length ? { severity: 'warning', text: `Provider suy giảm: ${data.business.degradedProviders.join(', ')}.`, href: '/dashboard/app-health' } : null,
     data.business.brokenLinks ? { severity: 'warning', text: `${data.business.brokenLinks} record có link lỗi.`, href: '/dashboard/products?pipelineStage=blocked' } : null,
@@ -340,7 +349,7 @@ export default function DashboardPage() {
         <aside className={styles.panel}><div className={styles.panelHeader}><div><h2>Hiệu suất nổi bật</h2><p>Nguồn sản phẩm theo dữ liệu hợp lệ.</p></div></div>{data.sourcePerformance.length ? <div className={styles.ranking}>{data.sourcePerformance.map(source => <div key={source.name}><div><strong>{source.name}</strong><span>{source.valid}/{source.total} hợp lệ</span></div><div className={styles.progress}><span style={{ width: `${source.rate}%` }} /></div><small>{source.rate}%</small></div>)}</div> : <div className={styles.emptySmall}>Chưa đủ dữ liệu để xếp hạng nguồn.</div>}</aside>
       </section>
       <section className={styles.lowerGrid}>
-        <article className={`${styles.panel} ${styles.queuePanel}`}><h2><DashboardIcon name="queue" size={19} />Trạng thái hàng chờ</h2><div className={styles.queueBars}>{[['PENDING','Chờ xử lý'],['RUNNING','Đang xử lý'],['WAITING_APPROVAL','Chờ phê duyệt'],['FAILED','Thất bại'],['BLOCKED','Bị chặn']].map(([key,label]) => <div key={key}><span>{label}</span><div><i style={{ width: `${((data.queue[key] || 0) / maxQueue) * 100}%` }} /></div><strong>{data.queue[key] || 0}</strong></div>)}</div></article>
+        <article className={`${styles.panel} ${styles.queuePanel}`}><h2><DashboardIcon name="queue" size={19} />Trạng thái hàng chờ</h2><p className={styles.mutedText}>FAILED là tổng lịch sử còn lưu trong durable queue; lỗi trong khoảng chọn: {data.errors.failedJobsInRange}.</p><div className={styles.queueBars}>{[['PENDING','Chờ xử lý'],['RUNNING','Đang xử lý'],['WAITING_APPROVAL','Chờ phê duyệt'],['FAILED','Lỗi đã lưu'],['BLOCKED','Bị chặn']].map(([key,label]) => <div key={key}><span>{label}</span><div><i style={{ width: `${((data.queue[key] || 0) / maxQueue) * 100}%` }} /></div><strong>{data.queue[key] || 0}</strong></div>)}</div></article>
         <article className={`${styles.panel} ${styles.workerPanel}`}><h2><DashboardIcon name="worker" size={19} />Tình trạng bộ xử lý</h2><dl className={styles.details}><div><dt>Trạng thái</dt><dd>{STATUS_LABELS[data.worker.status] || data.worker.status}</dd></div><div><dt>Tín hiệu gần nhất</dt><dd>{data.worker.heartbeatAt ? new Date(data.worker.heartbeatAt).toLocaleString('vi-VN') : 'Chưa có tín hiệu'}</dd></div><div><dt>Tác vụ hiện tại</dt><dd>{data.worker.currentJobId || 'Không có'}</dd></div></dl></article>
         <article className={`${styles.panel} ${styles.aiPanel}`}><h2><DashboardIcon name="ai" size={19} />Hạn mức sử dụng AI</h2><dl className={styles.details}><div><dt>Yêu cầu đã dùng</dt><dd>{data.aiUsage.requests}/{data.aiUsage.requestLimit}</dd></div><div><dt>Token đã ghi nhận</dt><dd>{data.aiUsage.tokens.toLocaleString('vi-VN')}/{data.aiUsage.tokenLimit.toLocaleString('vi-VN')}</dd></div><div><dt>Bị chặn do hạn mức</dt><dd>{data.aiUsage.blocked}</dd></div><div><dt>Chính sách</dt><dd>{data.aiUsage.freeOnly ? 'Chỉ dùng dịch vụ miễn phí' : 'Cần kiểm tra'}</dd></div></dl></article>
         <article className={`${styles.panel} ${styles.controlPanel}`}><h2><DashboardIcon name="settings" size={19} />Điều khiển nhanh</h2><div className={styles.quickActions}><button type="button" onClick={() => void createDryRun()} disabled={submitting}>Chạy thử an toàn</button><button type="button" onClick={() => setPendingControl({ action: data.control.schedulerPaused ? 'resume_scheduler' : 'pause_scheduler', title: data.control.schedulerPaused ? 'Tiếp tục lịch tự động' : 'Tạm dừng lịch tự động' })}>{data.control.schedulerPaused ? 'Tiếp tục lịch tự động' : 'Tạm dừng lịch tự động'}</button><Link href="/dashboard/queue">Xem hàng chờ phê duyệt</Link><div className={styles.emergencyAction}><button type="button" className={styles.dangerButton} onClick={() => setPendingControl({ action: data.control.killSwitch ? 'disable_kill_switch' : 'enable_kill_switch', title: data.control.killSwitch ? 'Tắt dừng khẩn cấp' : 'Dừng khẩn cấp', danger: true })}><DashboardIcon name="emergency" size={16} />{data.control.killSwitch ? 'Tắt dừng khẩn cấp' : 'Dừng khẩn cấp'}</button></div></div></article>

@@ -1,10 +1,13 @@
 import type { Product, ProductEligibilitySnapshot } from './types';
 import { looksLikeVoucherOrCampaign } from './sourceItemClassifier';
 import { PRODUCT_INTELLIGENCE_CONFIG } from './product-intelligence/config';
-import { ACCESS_TRADE_AFFILIATE_URL_FIELDS } from './integrations/accesstrade';
+import {
+  ACCESS_TRADE_AFFILIATE_URL_FIELDS,
+  ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
+} from './integrations/accesstrade';
 import { evaluateReviewQuality } from './reviewQuality';
 
-export const PRODUCT_ELIGIBILITY_POLICY_VERSION = 'product-eligibility-v1';
+export const PRODUCT_ELIGIBILITY_POLICY_VERSION = 'product-eligibility-v2';
 
 const GOOD_HEALTH = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
 const PROHIBITED_TERMS = /(?:thuoc\s+ke\s+don|nicotine|vu\s+khi|chat\s+cam|hang\s+gia|co\s+bac)/i;
@@ -21,7 +24,12 @@ const RECALCULATED_REASONS = new Set([
   'price_invalid',
   'price_stale',
   'source_unverified',
+  'canonical_provenance_missing',
+  'canonical_url_unverified',
+  'affiliate_url_unverified',
   'review_quality_unready',
+  'image_http_not_200',
+  'image_content_type_invalid',
   'merchant_quarantined_30shinestore',
 ]);
 
@@ -66,7 +74,7 @@ function dataQualityScore(product: Partial<Product>): number {
   if (title.length >= 8) score += 12;
   if (title.length >= 16 && title.length <= 180) score += 8;
   if (price > 0 && product.currency === 'VND') score += 15;
-  if (validHttpUrl(product.originalUrl)) score += 10;
+  if (validHttpUrl(product.canonicalProductUrl || product.originalUrl)) score += 10;
   if (GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''))) score += 10;
   if (validHttpUrl(product.affiliateUrl)) score += 8;
   if (GOOD_HEALTH.has(String(product.affiliateHealthStatus || ''))) score += 8;
@@ -101,6 +109,13 @@ export function eligibilityBlockerMessage(reason: string): string {
     public_hidden: 'Record đang bị ẩn khỏi public.',
     public_blocked: 'Record đang bị chặn khỏi public.',
   };
+  Object.assign(messages, {
+    canonical_provenance_missing: 'Product URL AccessTrade thiếu provenance API/field hợp lệ.',
+    canonical_url_unverified: 'Product URL chưa được xác minh.',
+    affiliate_url_unverified: 'Affiliate URL chưa được xác minh.',
+    image_http_not_200: 'Ảnh không trả về HTTP 200.',
+    image_content_type_invalid: 'Phản hồi ảnh không có Content-Type image/*.',
+  });
   return messages[reason] || reason.replace(/_/g, ' ');
 }
 
@@ -113,7 +128,8 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   const policyText = `${title} ${product.category || ''} ${product.description || ''}`
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
   const reviewQuality = evaluateReviewQuality(product, now);
-  const isThirtyShine = urlContainsDomain(product.originalUrl, '30shinestore.com')
+  const canonicalProductUrl = product.canonicalProductUrl || product.originalUrl;
+  const isThirtyShine = urlContainsDomain(canonicalProductUrl, '30shinestore.com')
     || urlContainsDomain(product.affiliateUrl, '30shinestore.com');
 
   if (product.kind !== 'product' || (product.recordType && product.recordType !== 'PRODUCT') || looksLikeVoucherOrCampaign(product as Product)) dataBlockers.push('not_product');
@@ -123,14 +139,25 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (!String(product.slug || '').trim()) dataBlockers.push('invalid_slug');
   if (product.verifiedSource !== true && product.sourceVerified !== true) dataBlockers.push('source_unverified');
 
-  if (!validHttpUrl(product.originalUrl)) dataBlockers.push('missing_product_url');
+  if (!validHttpUrl(canonicalProductUrl)) dataBlockers.push('missing_product_url');
   if (!GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''))) dataBlockers.push('product_url_unhealthy');
   if (!checkedRecently(product.linkLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now)) dataBlockers.push('product_health_stale');
+  if (product.canonicalUrlStatus !== 'verified') dataBlockers.push('canonical_url_unverified');
+  if (isAccessTrade(product) && (
+    product.canonicalUrlSource !== 'provider_api'
+    || product.canonicalUrlProvider !== 'accesstrade'
+    || product.canonicalUrlSourceEndpoint !== 'datafeed'
+    || !product.canonicalUrlSourceField
+    || !(ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(product.canonicalUrlSourceField)
+  )) dataBlockers.push('canonical_provenance_missing');
   if (!validHttpUrl(product.affiliateUrl)) dataBlockers.push('missing_affiliate_url');
   if (!GOOD_HEALTH.has(String(product.affiliateHealthStatus || ''))) dataBlockers.push('affiliate_url_unhealthy');
   if (!checkedRecently(product.affiliateLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now)) dataBlockers.push('affiliate_health_stale');
+  if (product.affiliateUrlStatus !== 'verified') dataBlockers.push('affiliate_url_unverified');
   if (isAccessTrade(product) && (
     product.affiliateUrlSource !== 'provider_api'
+    || product.affiliateUrlProvider !== 'accesstrade'
+    || product.affiliateUrlSourceEndpoint !== 'datafeed'
     || !product.affiliateUrlSourceField
     || !(ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(product.affiliateUrlSourceField)
     || product.deepLinkSupported === false
@@ -139,6 +166,8 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (!validHttpUrl(product.imageUrl)) dataBlockers.push('missing_image');
   if (!GOOD_HEALTH.has(String(product.imageHealthStatus || ''))) dataBlockers.push('image_unhealthy');
   if (!checkedRecently(product.imageLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now)) dataBlockers.push('image_health_stale');
+  if (product.imageUrlHttpStatus !== 200) dataBlockers.push('image_http_not_200');
+  if (!String(product.imageContentType || '').toLowerCase().startsWith('image/')) dataBlockers.push('image_content_type_invalid');
 
   const price = Number(product.salePrice || product.price || 0);
   if (!Number.isFinite(price) || price <= 0 || product.currency !== 'VND') dataBlockers.push('missing_price');
