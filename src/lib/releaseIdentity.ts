@@ -3,7 +3,8 @@ const GIT_SHA = /^[0-9a-f]{40}$/i;
 
 function safeValue(value: string | undefined): string | undefined {
   const clean = String(value || '').trim();
-  return SAFE_RELEASE_ID.test(clean) ? clean : undefined;
+  if (!SAFE_RELEASE_ID.test(clean)) return undefined;
+  return GIT_SHA.test(clean) ? clean.toLowerCase() : clean;
 }
 
 /**

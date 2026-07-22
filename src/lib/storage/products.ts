@@ -89,6 +89,7 @@ function mergeDuplicateCandidate(existing: Product, candidate: CreateProductInpu
     'originalUrl', 'canonicalProductUrl', 'affiliateUrl', 'affiliateDestinationUrl',
     'imageUrl', 'price', 'salePrice', 'sourceId', 'sourceItemId', 'sourceEndpoint',
     'sourceFetchedAt', 'merchant', 'merchantDomain', 'rawSourceKind', 'sourceItemKind',
+    'shopId', 'shopName', 'sku', 'providerUpdatedAt', 'sourceNormalizationIssues',
     'canonicalUrlSource', 'canonicalUrlProvider', 'canonicalUrlSourceEndpoint',
     'canonicalUrlSourceField', 'canonicalUrlFetchedAt', 'affiliateUrlSource',
     'affiliateUrlProvider', 'affiliateUrlSourceEndpoint', 'affiliateUrlSourceField',
@@ -500,6 +501,15 @@ async function requireDurablePublishAuthorization(
   }
   if (job.dryRun || context.dryRun) throw new Error('DRY_RUN_PUBLISH_BLOCKED');
   if (job.claimedBy !== context.workerId) throw new Error('PUBLISH_WORKER_MISMATCH');
+  if (job.workerInstanceId && job.workerFencingToken) {
+    const { isRuntimeRoleOwner } = await import('../automation/runtimeRoles');
+    const ownsCurrentLease = await isRuntimeRoleOwner('WORKER', {
+      ownerId: job.workerOwnerId || '',
+      instanceId: job.workerInstanceId,
+      fencingToken: job.workerFencingToken,
+    });
+    if (!ownsCurrentLease) throw new Error('WORKER_FENCING_REJECTED');
+  }
   if (job.type === 'SAFE_PUBLISH') {
     if (job.approvalStatus !== 'APPROVED' || !job.approvedBy) throw new Error('APPROVAL_REQUIRED');
     if (job.approvalExpiresAt && Date.parse(job.approvalExpiresAt) <= Date.now()) throw new Error('APPROVAL_EXPIRED');

@@ -34,6 +34,64 @@ export type AccessTradePublicDecision =
     | 'blocked'
     | 'archived';
 
+export type AccessTradeDiagnosticState =
+  | 'RESULTS_RETURNED'
+  | 'PROVIDER_EMPTY'
+  | 'PROVIDER_DATA_REJECTED';
+
+export type AccessTradeRejectionReason =
+  | 'INVALID_RECORD'
+  | 'EXTRACTION_FAILED'
+  | 'NORMALIZATION_FAILED'
+  | 'MISSING_IDENTITY'
+  | 'MISSING_NAME'
+  | 'MISSING_CANONICAL_URL'
+  | 'INVALID_CANONICAL_URL'
+  | 'INVALID_AFFILIATE_URL'
+  | 'IMAGE_REQUIRED'
+  | 'AFFILIATE_REQUIRED'
+  | 'KIND_FILTERED'
+  | 'QUERY_FILTERED'
+  | 'CATEGORY_FILTERED'
+  | 'PLATFORM_FILTERED'
+  | 'DUPLICATE'
+  | 'RESULT_LIMIT'
+  | 'UNSUPPORTED_CLASSIFICATION'
+  | 'UNSAFE_PROVIDER_DATA';
+
+export type AccessTradeReviewReason =
+  | 'MISSING_NAME'
+  | 'MISSING_CANONICAL_URL'
+  | 'INVALID_CANONICAL_URL'
+  | 'MISSING_AFFILIATE_URL'
+  | 'INVALID_AFFILIATE_URL'
+  | 'MISSING_IMAGE'
+  | 'INVALID_IMAGE_URL'
+  | 'INVALID_PRICE'
+  | 'MISSING_PRICE';
+
+export interface AccessTradeSearchDiagnostics {
+  state: AccessTradeDiagnosticState;
+  providerStatusCode?: number;
+  providerResultType: AccessTradeResultType;
+  providerReportedItemCount: number;
+  rawItemCount: number;
+  extractedItemCount: number;
+  normalizedItemCount: number;
+  classifiedProductCount: number;
+  classifiedVoucherCount: number;
+  classifiedCampaignCount: number;
+  classifiedStoreOfferCount: number;
+  classifiedUnknownCount: number;
+  returnedCount: number;
+  rejectedCount: number;
+  duplicateCount: number;
+  filteredCount: number;
+  limitedCount: number;
+  rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>;
+  reviewByReason: Partial<Record<AccessTradeReviewReason, number>>;
+}
+
 export interface NormalizedAccessTradeItem {
   id: string;
   name: string;
@@ -69,10 +127,20 @@ export interface NormalizedAccessTradeItem {
   campaignName?: string;
   merchant?: string;
   merchantDomain?: string;
+  shopId?: string;
+  shopName?: string;
+  sku?: string;
+  providerUpdatedAt?: string;
+  discount?: number | string;
+  discountAmount?: number | string;
+  discountRate?: number | string;
+  discountStatus?: number | string;
   sourceEndpoint?: 'datafeed' | 'offers';
   sourceItemId?: string;
   fetchedAt?: string;
   rawSourceKind: string;
+  normalizationIssues?: AccessTradeReviewReason[];
+  fieldProvenance?: NonNullable<Product['fieldProvenance']>;
 
   needsVerification: boolean;
   verifiedSource: boolean;
@@ -110,6 +178,7 @@ export interface AccessTradeSearchResult {
     blockedFromPublic: number;
   };
   requests: AccessTradeRequestLog[];
+  diagnostics: AccessTradeSearchDiagnostics;
 }
 
 export type AccessTradeResultType =
@@ -147,6 +216,10 @@ interface AccessTradeFetchResult {
   error?: string;
   request?: AccessTradeRequestLog;
   attempts?: number;
+  rawItemCount?: number;
+  extractedItemCount?: number;
+  providerReportedItemCount?: number;
+  extractionRejectedByReason?: Partial<Record<AccessTradeRejectionReason, number>>;
   payloadObservation?: Pick<AccessTradeRequestLog,
     'observedEnvelopeFields' | 'observedItemFields' | 'observedCanonicalUrlFields' | 'observedAffiliateUrlFields'>;
 }
@@ -280,6 +353,8 @@ interface AccessTradeRawItem {
   advertiserName?: string;
   advertiser_name?: string;
   shop?: string;
+  shop_id?: string;
+  shopId?: string;
   shopName?: string;
   shop_name?: string;
   campaign?: string;
@@ -378,22 +453,108 @@ export async function searchAccessTrade(
     );
   }
 
-  const rawItems = dedupeRawItems(successfulResults.flatMap((result) => result.items));
+  return buildAccessTradeSearchResult(successfulResults, fetchResults.map(toRequestLog), params, limit);
+}
 
-  let items = rawItems.map(normalizeAccessTradeItem);
+interface ProcessAccessTradePayloadOptions {
+  endpoint?: AccessTradeEndpointKind;
+  sourceKind?: string;
+  statusCode?: number;
+  fetchedAt?: string;
+}
 
-  items = applySearchFilters(items, params);
-  items = applyRequestedKindFilter(items, params.kind);
+/**
+ * Pure provider-payload entry point used by regression tests and diagnostics.
+ * It deliberately performs no credential lookup and no provider request.
+ */
+export function processAccessTradePayload(
+    payload: unknown,
+    params: AccessTradeSearchParams = {},
+    options: ProcessAccessTradePayloadOptions = {},
+): AccessTradeSearchResult {
+  const endpoint = options.endpoint || 'datafeed';
+  const sourceKind = options.sourceKind || (endpoint === 'datafeed' ? 'product_feed' : 'offer_feed');
+  const statusCode = options.statusCode ?? 200;
+  const fetchedAt = options.fetchedAt || new Date(0).toISOString();
+  const extraction = extractAccessTradePayload(payload);
+  const observation = observeAccessTradePayload(payload, extraction.items);
+  const items = extraction.items.map((item) => ({
+    ...item,
+    __sandealEndpoint: endpoint,
+    __sandealSourceKind: sourceKind,
+    __sandealFetchedAt: fetchedAt,
+  }));
+  const request: AccessTradeRequestLog = {
+    endpoint,
+    durationMs: 0,
+    statusCode,
+    resultType: extraction.rawItemCount > 0 ? 'success_with_results' : 'success_empty',
+    itemCount: extraction.extractedItemCount,
+    attempts: 1,
+    ...observation,
+  };
+  const fetchResult: AccessTradeFetchResult = {
+    endpoint,
+    ok: true,
+    items,
+    status: statusCode,
+    request,
+    rawItemCount: extraction.rawItemCount,
+    extractedItemCount: extraction.extractedItemCount,
+    providerReportedItemCount: extraction.providerReportedItemCount,
+    extractionRejectedByReason: extraction.rejectedByReason,
+  };
+  const limit = Math.min(Math.max(params.limit || 20, 1), 50);
+  return buildAccessTradeSearchResult([fetchResult], [request], params, limit);
+}
 
-  if (params.imageOnly) {
-    items = items.filter((item) => Boolean(item.imageUrl));
+function buildAccessTradeSearchResult(
+    successfulResults: AccessTradeFetchResult[],
+    requests: AccessTradeRequestLog[],
+    params: AccessTradeSearchParams,
+    limit: number,
+): AccessTradeSearchResult {
+  const rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>> = {};
+  const reviewByReason: Partial<Record<AccessTradeReviewReason, number>> = {};
+  const increment = <T extends string>(bucket: Partial<Record<T, number>>, reason: T, amount = 1) => {
+    bucket[reason] = (bucket[reason] || 0) + amount;
+  };
+
+  for (const result of successfulResults) {
+    for (const [reason, count] of Object.entries(result.extractionRejectedByReason || {})) {
+      if (count) increment(rejectedByReason, reason as AccessTradeRejectionReason, count);
+    }
   }
 
-  if (params.affiliateLinkOnly) {
-    items = items.filter((item) => Boolean(item.affiliateUrl));
+  const normalized: NormalizedAccessTradeItem[] = [];
+  for (const rawItem of successfulResults.flatMap((result) => result.items)) {
+    if (!hasStableCandidateIdentity(rawItem)) {
+      increment(rejectedByReason, 'MISSING_IDENTITY');
+      continue;
+    }
+    try {
+      const item = normalizeAccessTradeItem(rawItem);
+      normalized.push(item);
+      for (const reason of item.normalizationIssues || []) increment(reviewByReason, reason);
+    } catch {
+      increment(rejectedByReason, 'NORMALIZATION_FAILED');
+    }
   }
 
-  items = sortAccessTradeItems(items).slice(0, limit);
+  const { items: uniqueItems, duplicateCount } = dedupeNormalizedItems(normalized);
+  if (duplicateCount) increment(rejectedByReason, 'DUPLICATE', duplicateCount);
+
+  const classifiedProductCount = uniqueItems.filter((item) => item.kind === 'product' || item.kind === 'deal').length;
+  const classifiedVoucherCount = uniqueItems.filter((item) => item.kind === 'voucher').length;
+  const classifiedCampaignCount = uniqueItems.filter((item) => item.kind === 'campaign').length;
+  const classifiedStoreOfferCount = uniqueItems.filter((item) => item.kind === 'store_offer').length;
+  const classifiedUnknownCount = uniqueItems.filter((item) => item.kind === 'unknown').length;
+
+  let items = filterAccessTradeItems(uniqueItems, params, rejectedByReason);
+  items = sortAccessTradeItems(items);
+  const limitedCount = Math.max(0, items.length - limit);
+  if (limitedCount) increment(rejectedByReason, 'RESULT_LIMIT', limitedCount);
+  items = items.slice(0, limit);
 
   const products = items.filter((item) => item.kind === 'product' || item.kind === 'deal');
   const vouchers = items.filter((item) => item.kind === 'voucher');
@@ -428,7 +589,93 @@ export async function searchAccessTrade(
       archived,
       blockedFromPublic: items.length - publicEligibleProducts,
     },
-    requests: fetchResults.map(toRequestLog),
+    requests,
+    diagnostics: buildAccessTradeDiagnostics({
+      successfulResults,
+      requests,
+      normalizedItemCount: normalized.length,
+      classifiedProductCount,
+      classifiedVoucherCount,
+      classifiedCampaignCount,
+      classifiedStoreOfferCount,
+      classifiedUnknownCount,
+      returnedCount: items.length,
+      duplicateCount,
+      limitedCount,
+      rejectedByReason,
+      reviewByReason,
+    }),
+  };
+}
+
+function buildAccessTradeDiagnostics(input: {
+  successfulResults: AccessTradeFetchResult[];
+  requests: AccessTradeRequestLog[];
+  normalizedItemCount: number;
+  classifiedProductCount: number;
+  classifiedVoucherCount: number;
+  classifiedCampaignCount: number;
+  classifiedStoreOfferCount: number;
+  classifiedUnknownCount: number;
+  returnedCount: number;
+  duplicateCount: number;
+  limitedCount: number;
+  rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>;
+  reviewByReason: Partial<Record<AccessTradeReviewReason, number>>;
+}): AccessTradeSearchDiagnostics {
+  const rawItemCount = input.successfulResults.reduce(
+      (sum, result) => sum + (result.rawItemCount ?? result.items.length),
+      0,
+  );
+  const extractedItemCount = input.successfulResults.reduce(
+      (sum, result) => sum + (result.extractedItemCount ?? result.items.length),
+      0,
+  );
+  const providerReportedItemCount = input.successfulResults.reduce(
+      (sum, result) => sum + (result.providerReportedItemCount ?? result.request?.itemCount ?? result.items.length),
+      0,
+  );
+  // A response limit is not a rejected provider record: it remains observable
+  // through limitedCount without inflating parser/filter rejection totals.
+  const rejectedCount = Object.entries(input.rejectedByReason)
+      .filter(([reason]) => reason !== 'RESULT_LIMIT')
+      .reduce((sum, [, value]) => sum + (value || 0), 0);
+  const filteredCount = [
+    'QUERY_FILTERED',
+    'CATEGORY_FILTERED',
+    'PLATFORM_FILTERED',
+    'KIND_FILTERED',
+    'IMAGE_REQUIRED',
+    'AFFILIATE_REQUIRED',
+  ].reduce((sum, reason) => sum + (input.rejectedByReason[reason as AccessTradeRejectionReason] || 0), 0);
+  const providerRequest = input.requests.find((request) => request.statusCode && request.statusCode >= 200 && request.statusCode < 300)
+    || input.requests[0];
+  const providerHasData = providerReportedItemCount > 0 || rawItemCount > 0 || extractedItemCount > 0;
+
+  return {
+    state: input.returnedCount > 0
+      ? 'RESULTS_RETURNED'
+      : providerHasData
+        ? 'PROVIDER_DATA_REJECTED'
+        : 'PROVIDER_EMPTY',
+    providerStatusCode: providerRequest?.statusCode,
+    providerResultType: providerRequest?.resultType || (providerHasData ? 'success_with_results' : 'success_empty'),
+    providerReportedItemCount,
+    rawItemCount,
+    extractedItemCount,
+    normalizedItemCount: input.normalizedItemCount,
+    classifiedProductCount: input.classifiedProductCount,
+    classifiedVoucherCount: input.classifiedVoucherCount,
+    classifiedCampaignCount: input.classifiedCampaignCount,
+    classifiedStoreOfferCount: input.classifiedStoreOfferCount,
+    classifiedUnknownCount: input.classifiedUnknownCount,
+    returnedCount: input.returnedCount,
+    rejectedCount,
+    duplicateCount: input.duplicateCount,
+    filteredCount,
+    limitedCount: input.limitedCount,
+    rejectedByReason: input.rejectedByReason,
+    reviewByReason: input.reviewByReason,
   };
 }
 
@@ -458,7 +705,7 @@ export function normalizeAccessTradeItem(
     'promotion',
   ]);
 
-  const imageUrl = normalizeAccessTradeImageUrl(getFirstText(item, [
+  const imageFields = [
     'productImage',
     'product_image',
     'image',
@@ -469,7 +716,10 @@ export function normalizeAccessTradeItem(
     'thumbnailUrl',
     'logo',
     'banner',
-  ]));
+  ] as const;
+  const rawImageUrl = getFirstText(item, imageFields);
+  const imageSourceField = imageFields.find((field) => Boolean(getFirstText(item, [field])));
+  const imageUrl = normalizeAccessTradeImageUrl(rawImageUrl);
 
   // Collect ALL image URL candidates from raw payload for fallback logic
   const imageCandidates: string[] = [];
@@ -503,6 +753,8 @@ export function normalizeAccessTradeItem(
   const affiliateResolution = resolveAccessTradeAffiliateUrl(item);
   const affiliateUrl = affiliateResolution.affiliateUrl;
   const affiliateDestinationUrl = extractAccessTradeAffiliateDestination(affiliateUrl);
+  const rawCanonicalUrl = getFirstText(item, ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS);
+  const rawAffiliateUrl = getFirstText(item, ACCESS_TRADE_AFFILIATE_URL_FIELDS);
 
   const category = getFirstText(item, [
     'cate',
@@ -519,6 +771,9 @@ export function normalizeAccessTradeItem(
     'campaignName',
     'campaign',
     'campaign_name_text',
+  ]);
+
+  const merchant = getFirstText(item, [
     'merchant',
     'merchantName',
     'merchant_name',
@@ -530,7 +785,21 @@ export function normalizeAccessTradeItem(
     'shop_name',
     'domain',
   ]);
+  const shopId = getFirstText(item, ['shop_id', 'shopId']);
+  const shopName = getFirstText(item, ['shop_name', 'shopName', 'shop']);
+  const sku = getFirstText(item, ['sku', 'skuId', 'sku_id']);
+  const providerUpdatedAt = getFirstText(item, ['update_time', 'updated_at']);
 
+  const priceFields = [
+    'price', 'currentPrice', 'current_price', 'originalPrice', 'original_price',
+    'listPrice', 'list_price', 'oldPrice', 'old_price', 'marketPrice', 'market_price',
+  ] as const;
+  const salePriceFields = [
+    'salePrice', 'sale_price', 'discountedPrice', 'discounted_price',
+    'discount_price', 'discountPrice', 'currentPrice', 'current_price',
+  ] as const;
+  const rawPriceValue = getFirstText(item, priceFields);
+  const rawSalePriceValue = getFirstText(item, salePriceFields);
   const price =
       parsePriceNumber(item.price) ||
       parsePriceNumber(item.currentPrice) ||
@@ -544,6 +813,7 @@ export function normalizeAccessTradeItem(
       parsePriceNumber(item.marketPrice) ||
       parsePriceNumber(item.market_price) ||
       0;
+  const priceSourceField = priceFields.find((field) => Boolean(parsePriceNumber(item[field])));
 
   const salePrice =
       parsePriceNumber(item.salePrice) ||
@@ -555,6 +825,7 @@ export function normalizeAccessTradeItem(
       parsePriceNumber(item.currentPrice) ||
       parsePriceNumber(item.current_price) ||
       0;
+  const salePriceSourceField = salePriceFields.find((field) => Boolean(parsePriceNumber(item[field])));
 
   const commissionRate =
       parseNumber(item.commission_rate) ||
@@ -633,6 +904,63 @@ export function normalizeAccessTradeItem(
   const autoPublishEligible = publicDecision === 'public_candidate';
   const needsVerification = !autoPublishEligible;
 
+  const normalizationIssues: AccessTradeReviewReason[] = [];
+  if (!name) normalizationIssues.push('MISSING_NAME');
+  if (!rawCanonicalUrl) normalizationIssues.push('MISSING_CANONICAL_URL');
+  else if (!originalUrl) normalizationIssues.push('INVALID_CANONICAL_URL');
+  if (!rawAffiliateUrl) normalizationIssues.push('MISSING_AFFILIATE_URL');
+  else if (!affiliateUrl) normalizationIssues.push('INVALID_AFFILIATE_URL');
+  if (!rawImageUrl) normalizationIssues.push('MISSING_IMAGE');
+  else if (!imageUrl) normalizationIssues.push('INVALID_IMAGE_URL');
+  if (!price && !salePrice) {
+    normalizationIssues.push(rawPriceValue || rawSalePriceValue ? 'INVALID_PRICE' : 'MISSING_PRICE');
+  }
+
+  const fetchedAt = item.__sandealFetchedAt;
+  const fieldProvenance: NonNullable<Product['fieldProvenance']> = {
+    title: {
+      value: name || undefined,
+      source: 'accesstrade',
+      sourceField: ['productName', 'product_name', 'title', 'name'].find((field) => Boolean(getFirstText(item, [field]))),
+      provider: 'accesstrade', endpoint: item.__sandealEndpoint, fetchedAt,
+      verificationStatus: name ? 'UNVERIFIED' : 'MISSING',
+    },
+    canonicalProductUrl: {
+      value: originalUrl || rawCanonicalUrl || undefined,
+      source: 'accesstrade', sourceField: canonicalResolution.field,
+      provider: 'accesstrade', endpoint: item.__sandealEndpoint, fetchedAt,
+      canonicalizedAt: originalUrl ? fetchedAt : undefined,
+      verificationStatus: originalUrl ? 'UNVERIFIED' : rawCanonicalUrl ? 'INVALID' : 'MISSING',
+      verificationReason: canonicalResolution.reason,
+    },
+    affiliateUrl: {
+      value: affiliateUrl || rawAffiliateUrl || undefined,
+      source: 'accesstrade', sourceField: affiliateResolution.field,
+      provider: 'accesstrade', endpoint: item.__sandealEndpoint, fetchedAt,
+      canonicalizedAt: affiliateUrl ? fetchedAt : undefined,
+      verificationStatus: affiliateUrl ? 'UNVERIFIED' : rawAffiliateUrl ? 'INVALID' : 'MISSING',
+      verificationReason: affiliateResolution.reason,
+    },
+    imageUrl: {
+      value: imageUrl || rawImageUrl || undefined,
+      source: 'accesstrade', sourceField: imageSourceField,
+      provider: 'accesstrade', endpoint: item.__sandealEndpoint, fetchedAt,
+      canonicalizedAt: imageUrl ? fetchedAt : undefined,
+      verificationStatus: imageUrl ? 'UNVERIFIED' : rawImageUrl ? 'INVALID' : 'MISSING',
+    },
+    price: {
+      value: salePrice || price || rawSalePriceValue || rawPriceValue || undefined,
+      source: 'accesstrade',
+      sourceField: salePriceSourceField || priceSourceField
+        || salePriceFields.find((field) => Boolean(getFirstText(item, [field])))
+        || priceFields.find((field) => Boolean(getFirstText(item, [field]))),
+      provider: 'accesstrade', endpoint: item.__sandealEndpoint, fetchedAt,
+      canonicalizedAt: salePrice || price ? fetchedAt : undefined,
+      verificationStatus: salePrice || price ? 'UNVERIFIED' : rawSalePriceValue || rawPriceValue ? 'INVALID' : 'MISSING',
+      verificationReason: salePrice || price ? undefined : rawSalePriceValue || rawPriceValue ? 'PRICE_FORMAT_INVALID' : 'PRICE_MISSING',
+    },
+  };
+
   // Integration layer never exposes an item directly.
   // SourceScout must run link + image health checks before publicHidden can become false.
   const publicHidden = true;
@@ -670,12 +998,23 @@ export function normalizeAccessTradeItem(
     category,
     commissionRate: commissionRate || undefined,
     campaignName: campaignName || undefined,
-    merchant: campaignName || undefined,
-    merchantDomain: safeHostname(originalUrl || affiliateDestinationUrl),
+    merchant: merchant || undefined,
+    merchantDomain: normalizeMerchantDomain(getFirstText(item, ['domain']))
+      || safeHostname(originalUrl || affiliateDestinationUrl),
+    shopId: shopId || undefined,
+    shopName: shopName || undefined,
+    sku: sku || undefined,
+    providerUpdatedAt: providerUpdatedAt || undefined,
+    discount: sanitizeScalar(item.discount),
+    discountAmount: sanitizeScalar(item.discount_amount),
+    discountRate: sanitizeScalar(item.discount_rate),
+    discountStatus: sanitizeScalar(item.status_discount),
     sourceEndpoint: item.__sandealEndpoint,
     sourceItemId: getItemId(item),
     fetchedAt: item.__sandealFetchedAt,
     rawSourceKind,
+    normalizationIssues,
+    fieldProvenance,
     needsVerification,
     verifiedSource,
     publicHidden,
@@ -684,7 +1023,7 @@ export function normalizeAccessTradeItem(
     publicBlockReason,
     nonProductReason,
     qualityScore,
-    rawData: item,
+    rawData: sanitizeAccessTradeRawMetadata(item),
   };
 }
 
@@ -718,12 +1057,10 @@ export function isAccessTradeTrackingUrl(value: unknown): boolean {
 export function normalizeAccessTradeImageUrl(value: unknown): string {
   const text = stringifyValue(value);
   if (!isValidHttpUrl(text)) return '';
-  const parsed = new URL(text);
-  // Never send mixed-content image requests from the dashboard. If the source
-  // host has no HTTPS endpoint, the bounded image checker will mark it broken
-  // and the UI will keep a local placeholder.
-  if (parsed.protocol === 'http:') parsed.protocol = 'https:';
-  return parsed.href;
+  // Preserve provider evidence exactly. The UI refuses insecure remote images
+  // and health checks decide whether an explicit HTTP source is usable; an
+  // arbitrary host must never be silently rewritten to HTTPS.
+  return new URL(text).href;
 }
 
 function safeHostname(value: unknown): string | undefined {
@@ -755,7 +1092,7 @@ function firstProviderUrl(
 ): { url: string; field?: string } {
   for (const field of fields) {
     const value = getFirstText(item, [field]);
-    if (value && isValidHttpUrl(value) && accept(value)) return { url: value, field };
+    if (value && isValidHttpUrl(value) && accept(value)) return { url: new URL(value).href, field };
   }
   return { url: '' };
 }
@@ -941,6 +1278,7 @@ export function mapAccessTradeToProduct(
   const isRealProduct = item.kind === 'product' || item.kind === 'deal';
   const shouldArchive = item.publicDecision === 'archived' || !isRealProduct;
   const status = shouldArchive ? 'archived' : 'needs_review';
+  const normalizationIssues = new Set(item.normalizationIssues || []);
 
   const product = {
     title: item.name,
@@ -963,7 +1301,9 @@ export function mapAccessTradeToProduct(
     canonicalUrlSourceEndpoint: item.canonicalUrlSourceEndpoint,
     canonicalUrlSourceField: item.canonicalUrlSourceField,
     canonicalUrlFetchedAt: item.canonicalUrlFetchedAt,
-    canonicalUrlStatus: item.canonicalUrlStatus === 'available' ? 'unverified' : 'unavailable',
+    canonicalUrlStatus: item.canonicalUrlStatus === 'available'
+      ? 'unverified'
+      : normalizationIssues.has('INVALID_CANONICAL_URL') ? 'invalid' : 'unavailable',
     affiliateUrl: item.affiliateUrl || undefined,
     affiliateDestinationUrl: item.affiliateDestinationUrl,
     affiliateUrlSource: item.affiliateUrlSource,
@@ -972,7 +1312,9 @@ export function mapAccessTradeToProduct(
     affiliateUrlSourceField: item.affiliateUrlSourceField,
     affiliateUrlCampaignId: item.affiliateUrlCampaignId,
     affiliateUrlFetchedAt: item.affiliateUrlFetchedAt,
-    affiliateUrlStatus: item.affiliateUrlStatus === 'available' ? 'unverified' : 'unavailable',
+    affiliateUrlStatus: item.affiliateUrlStatus === 'available'
+      ? 'unverified'
+      : normalizationIssues.has('INVALID_AFFILIATE_URL') ? 'invalid' : 'unavailable',
     deepLinkSupported: item.deepLinkSupported,
     affiliateLinkReason: item.affiliateLinkReason,
     url: item.canonicalProductUrl || item.originalUrl || undefined,
@@ -1011,6 +1353,11 @@ export function mapAccessTradeToProduct(
     sourceFetchedAt: item.fetchedAt,
     merchant: item.merchant,
     merchantDomain: item.merchantDomain,
+    shopId: item.shopId,
+    shopName: item.shopName,
+    sku: item.sku,
+    providerUpdatedAt: item.providerUpdatedAt,
+    sourceNormalizationIssues: item.normalizationIssues || [],
 
     verifiedSource: item.verifiedSource,
     sourceVerified: item.verifiedSource,
@@ -1035,35 +1382,12 @@ export function mapAccessTradeToProduct(
     nonProductReason: item.nonProductReason,
     qualityScore: item.qualityScore,
     sourceQualityScore: item.qualityScore,
-    priceVerificationStatus: item.price || item.salePrice ? 'UNVERIFIED' : 'MISSING',
+    priceVerificationStatus: item.price || item.salePrice
+      ? 'UNVERIFIED'
+      : normalizationIssues.has('INVALID_PRICE') ? 'INVALID' : 'MISSING',
     priceObservedAt: item.fetchedAt,
 
-    fieldProvenance: {
-      canonicalProductUrl: {
-        value: item.canonicalProductUrl || item.originalUrl || undefined,
-        source: 'accesstrade', provider: item.canonicalUrlProvider,
-        endpoint: item.canonicalUrlSourceEndpoint, sourceField: item.canonicalUrlSourceField,
-        fetchedAt: item.canonicalUrlFetchedAt, canonicalizedAt: item.canonicalUrlFetchedAt,
-        verificationStatus: item.canonicalProductUrl || item.originalUrl ? 'UNVERIFIED' : 'MISSING',
-      },
-      affiliateUrl: {
-        value: item.affiliateUrl || undefined,
-        source: 'accesstrade', provider: item.affiliateUrlProvider,
-        endpoint: item.affiliateUrlSourceEndpoint, sourceField: item.affiliateUrlSourceField,
-        fetchedAt: item.affiliateUrlFetchedAt, canonicalizedAt: item.affiliateUrlFetchedAt,
-        verificationStatus: item.affiliateUrl ? 'UNVERIFIED' : 'MISSING',
-      },
-      imageUrl: {
-        value: item.imageUrl || undefined, source: 'accesstrade', provider: 'accesstrade',
-        endpoint: item.sourceEndpoint, sourceField: 'image', fetchedAt: item.fetchedAt,
-        canonicalizedAt: item.fetchedAt, verificationStatus: item.imageUrl ? 'UNVERIFIED' : 'MISSING',
-      },
-      price: {
-        value: item.salePrice || item.price || undefined, source: 'accesstrade', provider: 'accesstrade',
-        endpoint: item.sourceEndpoint, sourceField: item.salePrice ? 'salePrice' : 'price', fetchedAt: item.fetchedAt,
-        canonicalizedAt: item.fetchedAt, verificationStatus: item.salePrice || item.price ? 'UNVERIFIED' : 'MISSING',
-      },
-    },
+    fieldProvenance: item.fieldProvenance,
 
     rawSourceType: 'accesstrade',
     rawData: item.rawData,
@@ -1236,9 +1560,9 @@ async function fetchAccessTradeEndpoint(
     }
 
     const fetchedAt = new Date().toISOString();
-    const extractedItems = extractRawItems(data);
-    const payloadObservation = observeAccessTradePayload(data, extractedItems);
-    const items = extractedItems.map((rawItem) => ({
+    const extraction = extractAccessTradePayload(data);
+    const payloadObservation = observeAccessTradePayload(data, extraction.items);
+    const items = extraction.items.map((rawItem) => ({
       ...rawItem,
       __sandealEndpoint: endpoint,
       __sandealSourceKind: sourceKind,
@@ -1254,6 +1578,19 @@ async function fetchAccessTradeEndpoint(
       status: response.status,
       attempts: attempt + 1,
       payloadObservation,
+      request: {
+        endpoint,
+        durationMs: Date.now() - startedAt,
+        statusCode: response.status,
+        resultType: extraction.rawItemCount > 0 ? 'success_with_results' : 'success_empty',
+        itemCount: extraction.extractedItemCount,
+        attempts: attempt + 1,
+        ...payloadObservation,
+      },
+      rawItemCount: extraction.rawItemCount,
+      extractedItemCount: extraction.extractedItemCount,
+      providerReportedItemCount: extraction.providerReportedItemCount,
+      extractionRejectedByReason: extraction.rejectedByReason,
     };
   }
   
@@ -1267,28 +1604,25 @@ async function fetchAccessTradeEndpoint(
 
 // ---- Filters and sort ----
 
-function applyRequestedKindFilter(
-    items: NormalizedAccessTradeItem[],
-    requestedKind?: AccessTradeSearchParams['kind'],
-): NormalizedAccessTradeItem[] {
-  if (!requestedKind || requestedKind === 'all') return items;
-
-  if (requestedKind === 'product') {
-    return items.filter((item) => item.kind === 'product' || item.kind === 'deal');
-  }
-
-  return items.filter((item) => item.kind === requestedKind);
-}
-
-function applySearchFilters(
+function filterAccessTradeItems(
     items: NormalizedAccessTradeItem[],
     params: AccessTradeSearchParams,
+    rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>,
 ): NormalizedAccessTradeItem[] {
   let filtered = items;
+  const applyFilter = (
+      reason: AccessTradeRejectionReason,
+      predicate: (item: NormalizedAccessTradeItem) => boolean,
+  ) => {
+    const before = filtered.length;
+    filtered = filtered.filter(predicate);
+    const removed = before - filtered.length;
+    if (removed) rejectedByReason[reason] = (rejectedByReason[reason] || 0) + removed;
+  };
 
   const keyword = normalizeText(params.keyword);
   if (keyword) {
-    filtered = filtered.filter((item) => {
+    applyFilter('QUERY_FILTERED', (item) => {
       const haystack = normalizeText(
           [
             item.name,
@@ -1312,7 +1646,7 @@ function applySearchFilters(
 
   const category = normalizeText(params.category);
   if (category) {
-    filtered = filtered.filter((item) => {
+    applyFilter('CATEGORY_FILTERED', (item) => {
       const haystack = normalizeText([item.category, item.name, item.description].join(' '));
       return matchesSearchQuery(haystack, category);
     });
@@ -1320,7 +1654,7 @@ function applySearchFilters(
 
   const platform = normalizeText(params.platform);
   if (platform && platform !== 'all' && platform !== 'accesstrade') {
-    filtered = filtered.filter((item) => {
+    applyFilter('PLATFORM_FILTERED', (item) => {
       const haystack = normalizeText(
           [
             item.platform,
@@ -1339,6 +1673,20 @@ function applySearchFilters(
 
       return haystack.includes(platform) || haystack.includes(platform.replace(/\s+/g, ''));
     });
+  }
+
+  if (params.kind && params.kind !== 'all') {
+    applyFilter('KIND_FILTERED', params.kind === 'product'
+      ? (item) => item.kind === 'product' || item.kind === 'deal'
+      : (item) => item.kind === params.kind);
+  }
+
+  if (params.imageOnly) {
+    applyFilter('IMAGE_REQUIRED', (item) => Boolean(item.imageUrl));
+  }
+
+  if (params.affiliateLinkOnly) {
+    applyFilter('AFFILIATE_REQUIRED', (item) => Boolean(item.affiliateUrl));
   }
 
   return filtered;
@@ -1383,14 +1731,11 @@ function hasDatafeedProductSignals(item: AccessTradeRawItem): boolean {
   const hasOfficialProductId = Boolean(
       getFirstText(item, ['product_id', 'productId', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id']),
   );
-
-  const hasOfficialProductUrl = Boolean(resolveAccessTradeCanonicalProductUrl(item).canonicalProductUrl);
-
-  const hasOfficialProductImage = isValidHttpUrl(
-      getFirstText(item, ['productImage', 'product_image', 'image', 'image_url', 'imageUrl', 'thumbnail']),
-  );
-
-  const hasOfficialProductPrice = Boolean(
+  const hasName = Boolean(getFirstText(item, ['productName', 'product_name', 'title', 'name']));
+  // A malformed URL is still useful source evidence. URL validity affects the
+  // review snapshot, not whether a provider datafeed row silently disappears.
+  const hasProviderProductUrl = Boolean(getFirstText(item, ['url', 'link', 'productUrl', 'product_url']));
+  const hasProviderProductPrice = Boolean(
       parsePriceNumber(item.price) ||
       parsePriceNumber(item.sale_price) ||
       parsePriceNumber(item.salePrice) ||
@@ -1400,16 +1745,9 @@ function hasDatafeedProductSignals(item: AccessTradeRawItem): boolean {
       parsePriceNumber(item.current_price),
   );
 
-  const title = getFirstText(item, ['productName', 'product_name', 'title', 'name']);
-  const rawSourceKind = getRawSourceKind(item);
-  const hardNonProductKind = getHardNonProductKind(item, title, '', rawSourceKind);
-
-  return (
-      hasOfficialProductId &&
-      hasOfficialProductUrl &&
-      hasOfficialProductImage &&
-      hasOfficialProductPrice &&
-      !hardNonProductKind
+  return Boolean(
+      (hasOfficialProductId && (hasName || hasProviderProductUrl || hasProviderProductPrice)) ||
+      (hasName && (hasProviderProductUrl || hasProviderProductPrice)),
   );
 }
 
@@ -1521,15 +1859,18 @@ interface ProductCompletenessInput {
 interface ProductCompleteness {
   hasTitle: boolean;
   hasImage: boolean;
+  hasSecureImage: boolean;
   hasUrl: boolean;
   hasAffiliateUrl: boolean;
   hasPrice: boolean;
 }
 
 function getProductCompleteness(input: ProductCompletenessInput): ProductCompleteness {
+  const hasImage = isValidHttpUrl(input.imageUrl);
   return {
     hasTitle: Boolean(input.name && input.name.trim().length >= 5),
-    hasImage: isValidHttpUrl(input.imageUrl),
+    hasImage,
+    hasSecureImage: hasImage && new URL(input.imageUrl).protocol === 'https:',
     hasUrl: isValidHttpUrl(input.originalUrl),
     hasAffiliateUrl: isValidHttpUrl(input.affiliateUrl),
     hasPrice: Boolean((input.price && input.price > 0) || (input.salePrice && input.salePrice > 0)),
@@ -1588,6 +1929,7 @@ function getPublicBlockReason(input: {
   if (!input.completeness.hasTitle) return 'Thiếu tên sản phẩm cụ thể.';
   if (!input.completeness.hasPrice) return 'Thiếu giá hoặc giá khuyến mãi.';
   if (!input.completeness.hasImage) return 'Thiếu ảnh sản phẩm hoặc URL ảnh không hợp lệ.';
+  if (!input.completeness.hasSecureImage) return 'Ảnh nguồn dùng HTTP nên chỉ được giữ làm bằng chứng; cần URL HTTPS đã kiểm tra trước khi public.';
   if (!input.completeness.hasUrl) return 'Thiếu link sản phẩm/affiliate hoặc URL không hợp lệ.';
   if (input.titleLooksUnsafe) return 'Tiêu đề giống voucher/campaign/store offer, cần kiểm tra thủ công.';
   if (!input.verifiedSource) return 'Nguồn chưa đủ tín hiệu xác minh sản phẩm thật.';
@@ -1680,7 +2022,7 @@ function getHardNonProductKind(
 
   const strongDatafeedProduct =
       item.__sandealEndpoint === 'datafeed' &&
-      hasProductSignalsWithoutNonProductCheck(item) &&
+      hasDatafeedProductSignals(item) &&
       Boolean(
           getFirstText(item, [
             'product_id',
@@ -1857,7 +2199,7 @@ export function observeAccessTradePayload(
   const envelope = data && typeof data === 'object' && !Array.isArray(data)
     ? Object.keys(data as Record<string, unknown>).sort().slice(0, 80)
     : [];
-  const items = suppliedItems || extractRawItems(data);
+  const items = suppliedItems || extractAccessTradePayload(data).items;
   const fields = [...new Set(items.slice(0, 25).flatMap(item => Object.keys(item)))].sort().slice(0, 120);
   const present = (allowlist: readonly string[]) => allowlist.filter(field => fields.includes(field));
   return {
@@ -1868,109 +2210,150 @@ export function observeAccessTradePayload(
   };
 }
 
-function extractRawItems(data: unknown): AccessTradeRawItem[] {
-  if (Array.isArray(data)) {
-    return data.filter(isRawItem);
+interface AccessTradePayloadExtraction {
+  items: AccessTradeRawItem[];
+  rawItemCount: number;
+  extractedItemCount: number;
+  providerReportedItemCount: number;
+  rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>;
+}
+
+const ACCESS_TRADE_ITEM_ARRAY_KEYS = [
+  'data',
+  'd',
+  'items',
+  'results',
+  'offers',
+  'products',
+  'vouchers',
+  'campaigns',
+] as const;
+
+const ACCESS_TRADE_WRAPPER_KEYS = [
+  'data',
+  'd',
+  'payload',
+  'response',
+  'result',
+  'body',
+] as const;
+
+/**
+ * Extract only through a small allowlist of provider envelope keys. This
+ * supports historical wrappers and data.data without recursively accepting an
+ * arbitrary array hidden elsewhere in a response.
+ */
+export function extractAccessTradePayload(data: unknown): AccessTradePayloadExtraction {
+  const array = findKnownAccessTradeItemArray(data, 0);
+  const providerReportedItemCount = findProviderReportedItemCount(data, 0)
+    ?? (array ? array.length : 0);
+
+  if (!array) {
+    return {
+      items: [],
+      rawItemCount: 0,
+      extractedItemCount: 0,
+      providerReportedItemCount,
+      rejectedByReason: providerReportedItemCount > 0
+        ? { EXTRACTION_FAILED: providerReportedItemCount }
+        : {},
+    };
   }
 
-  if (!data || typeof data !== 'object') {
-    return [];
+  const items = array.filter(isRawItem);
+  const invalidCount = array.length - items.length;
+  return {
+    items,
+    rawItemCount: array.length,
+    extractedItemCount: items.length,
+    providerReportedItemCount,
+    rejectedByReason: invalidCount > 0 ? { INVALID_RECORD: invalidCount } : {},
+  };
+}
+
+function findKnownAccessTradeItemArray(value: unknown, depth: number): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (depth >= 3 || !value || typeof value !== 'object') return undefined;
+
+  const record = value as Record<string, unknown>;
+  for (const key of ACCESS_TRADE_ITEM_ARRAY_KEYS) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
   }
-
-  const record = data as Record<string, unknown>;
-
-  const candidates = [
-    record.data,
-    record.d,
-    record.items,
-    record.results,
-    record.offers,
-    record.products,
-    record.vouchers,
-    record.campaigns,
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      return candidate.filter(isRawItem);
-    }
+  for (const key of ACCESS_TRADE_WRAPPER_KEYS) {
+    const nested = record[key];
+    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) continue;
+    const found = findKnownAccessTradeItemArray(nested, depth + 1);
+    if (found) return found;
   }
+  return undefined;
+}
 
-  if (record.data && typeof record.data === 'object') {
-    const nested = record.data as Record<string, unknown>;
-    const nestedCandidates = [
-      nested.items,
-      nested.results,
-      nested.offers,
-      nested.products,
-      nested.vouchers,
-      nested.campaigns,
-    ];
-
-    for (const candidate of nestedCandidates) {
-      if (Array.isArray(candidate)) {
-        return candidate.filter(isRawItem);
-      }
-    }
+function findProviderReportedItemCount(value: unknown, depth: number): number | undefined {
+  if (Array.isArray(value)) return value.length;
+  if (depth >= 3 || !value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ['total', 'total_count', 'totalCount', 'count']) {
+    const parsed = Number(record[key]);
+    if (Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 1_000_000) return parsed;
   }
-
-  return [];
+  for (const key of [...ACCESS_TRADE_WRAPPER_KEYS, 'meta', 'pagination'] as const) {
+    const nested = record[key];
+    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) continue;
+    const found = findProviderReportedItemCount(nested, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 function isRawItem(value: unknown): value is AccessTradeRawItem {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
-function dedupeRawItems(items: AccessTradeRawItem[]): AccessTradeRawItem[] {
+function hasStableCandidateIdentity(item: AccessTradeRawItem): boolean {
+  const officialId = getFirstText(item, [
+    'product_id', 'productId', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id',
+    'id', '_id', 'sourceId', 'source_id', 'externalId', 'external_id',
+    'campaignId', 'campaign_id', 'offerId', 'offer_id',
+  ]);
+  if (officialId) return true;
+
+  const name = getFirstText(item, ['productName', 'product_name', 'title', 'name', 'offerName', 'offer_name']);
+  const url = getFirstText(item, [
+    'url', 'link', 'productUrl', 'product_url', 'aff_link', 'affiliate_url', 'affiliateUrl',
+  ]);
+  const merchant = getFirstText(item, ['shop_id', 'shopId', 'merchant', 'shop_name', 'shopName', 'domain']);
+  const price = parsePriceNumber(item.price) || parsePriceNumber(item.sale_price) || parsePriceNumber(item.salePrice);
+  return Boolean((name && (url || merchant || price)) || (url && merchant));
+}
+
+function dedupeNormalizedItems(items: NormalizedAccessTradeItem[]): {
+  items: NormalizedAccessTradeItem[];
+  duplicateCount: number;
+} {
   const seen = new Set<string>();
-  const unique: AccessTradeRawItem[] = [];
-
+  const unique: NormalizedAccessTradeItem[] = [];
+  let duplicateCount = 0;
   for (const item of items) {
-    const key = getRawDedupeKey(item);
-
-    if (seen.has(key)) continue;
-
+    // AccessTrade product_id/sku is the provider identity. A merchant label is
+    // metadata and must not make the same provider item appear unique twice.
+    const key = normalizeText([
+      'accesstrade',
+      item.sourceEndpoint || 'unknown',
+      item.sourceItemId || item.id,
+    ].join('|'));
+    if (seen.has(key)) {
+      duplicateCount += 1;
+      continue;
+    }
     seen.add(key);
     unique.push(item);
   }
-
-  return unique;
-}
-
-function getRawDedupeKey(item: AccessTradeRawItem): string {
-  return normalizeText(
-      getFirstText(item, [
-        'product_id',
-        'productId',
-        'sku',
-        'skuId',
-        'sku_id',
-        'itemId',
-        'item_id',
-        'id',
-        '_id',
-        'sourceId',
-        'source_id',
-        'externalId',
-        'external_id',
-        'offerId',
-        'offer_id',
-        'aff_link',
-        'affiliate_url',
-        'affiliateUrl',
-        'url',
-        'link',
-        'productUrl',
-        'product_url',
-        'name',
-        'title',
-      ]) || JSON.stringify(item).slice(0, 160),
-  );
+  return { items: unique, duplicateCount };
 }
 
 // ---- Generic helpers ----
 
-function getFirstText(item: AccessTradeRawItem, keys: string[]): string {
+function getFirstText(item: AccessTradeRawItem, keys: readonly string[]): string {
   for (const key of keys) {
     const value = getPathValue(item, key);
     const text = stringifyValue(value);
@@ -2000,7 +2383,7 @@ function stringifyValue(value: unknown): string {
   if (value === null || value === undefined) return '';
 
   if (typeof value === 'string') {
-    return value.trim();
+    return decodeSafeHtmlEntities(value).replace(/\s+/g, ' ').trim().slice(0, 4096);
   }
 
   if (typeof value === 'number' || typeof value === 'boolean') {
@@ -2028,6 +2411,108 @@ function stringifyValue(value: unknown): string {
   return '';
 }
 
+function decodeSafeHtmlEntities(value: string): string {
+  return value
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;|&#39;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&#(\d{1,7});/g, (match, digits: string) => {
+        const codePoint = Number(digits);
+        return Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : match;
+      })
+      .replace(/&#x([\da-f]{1,6});/gi, (match, digits: string) => {
+        const codePoint = Number.parseInt(digits, 16);
+        return Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : match;
+      });
+}
+
+const ACCESS_TRADE_RAW_METADATA_FIELDS = new Set([
+  'id', '_id', 'sourceId', 'source_id', 'externalId', 'external_id',
+  'productId', 'product_id', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id',
+  'campaignId', 'campaign_id', 'offerId', 'offer_id',
+  'name', 'title', 'productName', 'product_name', 'voucherName', 'voucher_name',
+  'campaignName', 'campaign_name', 'offerName', 'offer_name',
+  'desc', 'description', 'shortDescription', 'short_description', 'summary', 'content', 'promotion',
+  'image', 'image_url', 'imageUrl', 'productImage', 'product_image', 'thumbnail', 'thumbnail_url', 'thumbnailUrl',
+  'url', 'link', 'final_url', 'finalUrl', 'originalUrl', 'original_url', 'productUrl', 'product_url',
+  'landingPage', 'landing_page', 'merchantUrl', 'merchant_url', 'aff_link', 'affiliate_url', 'affiliateUrl',
+  'price', 'sale_price', 'salePrice', 'currentPrice', 'current_price', 'discount', 'discount_price',
+  'discountPrice', 'discountedPrice', 'discounted_price', 'originalPrice', 'original_price', 'listPrice',
+  'list_price', 'oldPrice', 'old_price', 'marketPrice', 'market_price', 'discount_amount', 'discount_rate',
+  'status_discount', 'category', 'cate', 'categoryName', 'category_name', 'cat_name', 'vertical', 'industry',
+  'commission', 'commission_rate', 'commissionRate', 'merchant', 'merchantName', 'merchant_name',
+  'advertiser', 'advertiserName', 'advertiser_name', 'shop', 'shop_id', 'shopId', 'shopName', 'shop_name',
+  'campaign', 'campaign_name_text', 'domain', 'coupon_code', 'voucher_code', 'voucherCode', 'couponCode',
+  'type', 'kind', 'itemType', 'item_type', 'sourceType', 'source_type', 'categoryType', 'category_type',
+  'objectType', 'object_type', 'update_time', 'updated_at', 'created_at',
+  '__sandealEndpoint', '__sandealSourceKind', '__sandealFetchedAt',
+]);
+const ACCESS_TRADE_SECRET_FIELD = /token|secret|password|cookie|authorization|api[_-]?key|credential/i;
+const ACCESS_TRADE_RAW_METADATA_MAX_BYTES = 32 * 1024;
+
+function sanitizeAccessTradeRawMetadata(item: AccessTradeRawItem): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  let fields = 0;
+  let approximateBytes = 2;
+  for (const [key, value] of Object.entries(item)) {
+    if (!ACCESS_TRADE_RAW_METADATA_FIELDS.has(key) || fields >= 96) continue;
+    const sanitized = sanitizeProviderValue(value, 0);
+    if (sanitized === undefined) continue;
+    const entryBytes = Buffer.byteLength(JSON.stringify([key, sanitized]), 'utf8');
+    if (approximateBytes + entryBytes > ACCESS_TRADE_RAW_METADATA_MAX_BYTES) continue;
+    safe[key] = sanitized;
+    fields += 1;
+    approximateBytes += entryBytes;
+  }
+  return safe;
+}
+
+function sanitizeProviderValue(value: unknown, depth: number): unknown {
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return decodeSafeHtmlEntities(value).trim().slice(0, 4096);
+  if (depth >= 1) return undefined;
+  if (Array.isArray(value)) {
+    return value.slice(0, 12)
+        .map((entry) => sanitizeProviderValue(entry, depth + 1))
+        .filter((entry) => entry !== undefined);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !ACCESS_TRADE_SECRET_FIELD.test(key))
+        .slice(0, 16)
+        .map(([key, entry]) => [key.slice(0, 80), sanitizeProviderValue(entry, depth + 1)])
+        .filter(([, entry]) => entry !== undefined));
+  }
+  return undefined;
+}
+
+function sanitizeScalar(value: unknown): string | number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') {
+    const text = stringifyValue(value);
+    return text || undefined;
+  }
+  if (typeof value === 'boolean') return String(value);
+  return undefined;
+}
+
+function normalizeMerchantDomain(value: unknown): string | undefined {
+  const text = stringifyValue(value).toLowerCase().replace(/\.$/, '');
+  if (!text) return undefined;
+  if (isValidHttpUrl(text)) return safeHostname(text);
+  const hostname = text.replace(/^\/\//, '').split('/')[0].split(':')[0];
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(hostname)
+    ? hostname
+    : undefined;
+}
+
 function getItemId(item: AccessTradeRawItem): string {
   const officialId = getFirstText(item, [
     'product_id',
@@ -2049,18 +2534,24 @@ function getItemId(item: AccessTradeRawItem): string {
     'offer_id',
   ]);
 
-  if (officialId) return officialId;
+  if (officialId) {
+    return officialId.length <= 200
+      ? officialId
+      : `accesstrade-${stableHash(officialId)}`;
+  }
 
   const fingerprint = normalizeText(
       [
         item.__sandealEndpoint,
+        getFirstText(item, ['shop_id', 'shopId', 'merchant', 'shop_name', 'shopName', 'domain']),
         getFirstText(item, ['aff_link', 'affiliate_url', 'affiliateUrl']),
         getFirstText(item, ['productUrl', 'product_url', 'url', 'link']),
         getFirstText(item, ['productName', 'product_name', 'title', 'name']),
+        getFirstText(item, ['price', 'sale_price', 'salePrice']),
       ].join('|'),
   );
 
-  return `accesstrade-${stableHash(fingerprint || JSON.stringify(item).slice(0, 500))}`;
+  return `accesstrade-${stableHash(fingerprint || 'stable-empty-provider-record')}`;
 }
 
 function getRawSourceKind(item: AccessTradeRawItem): string {

@@ -45,20 +45,25 @@ function isPublicHttpUrl(value?: string): boolean {
 function friendlyBlocker(value: string): string {
   const labels: Record<string, string> = {
     missing_product_url: 'Thiếu đường dẫn sản phẩm chính thức',
+    invalid_product_url_source: 'Link sản phẩm từ nguồn không đúng định dạng',
     product_url_unhealthy: 'Đường dẫn sản phẩm chưa hoạt động',
     product_health_stale: 'Kết quả kiểm tra link sản phẩm đã cũ',
     canonical_provenance_missing: 'Chưa xác minh nguồn của link sản phẩm',
     canonical_url_unverified: 'Link sản phẩm chưa được xác minh',
     missing_affiliate_url: 'Provider chưa cung cấp link affiliate',
+    invalid_affiliate_url_source: 'Link affiliate từ nguồn không đúng định dạng',
     affiliate_url_unhealthy: 'Link affiliate chưa hoạt động',
     affiliate_health_stale: 'Kết quả kiểm tra affiliate đã cũ',
     affiliate_provenance_missing: 'Chưa xác minh nguồn của link affiliate',
     affiliate_url_unverified: 'Link affiliate chưa được xác minh',
     missing_image: 'Thiếu ảnh sản phẩm',
+    invalid_image_url_source: 'URL ảnh từ nguồn không đúng định dạng',
+    image_https_required: 'Ảnh nguồn dùng HTTP, cần URL HTTPS đã kiểm tra',
     image_unhealthy: 'Ảnh chưa hoạt động',
     image_http_not_200: 'Ảnh không trả về HTTP 200',
     image_content_type_invalid: 'Phản hồi ảnh không đúng định dạng',
     missing_price: 'Thiếu giá hợp lệ',
+    invalid_price_source: 'Giá từ nguồn không đúng định dạng',
     source_unverified: 'Nguồn dữ liệu chưa được xác minh',
   };
   return labels[value] || value.replace(/^stored:/, '').replace(/_/g, ' ');

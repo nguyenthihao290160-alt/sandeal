@@ -1,8 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
+import { buildIdempotencyKey } from '@/lib/automation/idempotency';
 import styles from './dashboard.module.css';
 
 type Range = 'today' | '7d' | '30d';
@@ -247,6 +248,24 @@ function ActivityChart({ points }: { points: ActivityPoint[] }) {
   );
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 15_000): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) forwardAbort();
+  else init.signal?.addEventListener('abort', forwardAbort, { once: true });
+  const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error('Yêu cầu quá thời gian; trạng thái backend chưa bị thay đổi.');
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    init.signal?.removeEventListener('abort', forwardAbort);
+  }
+}
+
 export default function DashboardPage() {
   const [range, setRange] = useState<Range>('7d');
   const [data, setData] = useState<DashboardData | null>(null);
@@ -257,18 +276,31 @@ export default function DashboardPage() {
   const [selectedMode, setSelectedMode] = useState('SHADOW');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const mountedRef = useRef(true);
+  const actionAbortRef = useRef<AbortController | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      actionAbortRef.current?.abort();
+      actionAbortRef.current = null;
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   const load = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true); setError('');
+    if (mountedRef.current) { setLoading(true); setError(''); }
     try {
-      const response = await fetch(`/api/automation/dashboard?range=${range}`, { cache: 'no-store', signal });
+      const response = await fetchWithTimeout(`/api/automation/dashboard?range=${range}`, { cache: 'no-store', signal });
       const body = await response.json() as Envelope<DashboardData>;
       if (!response.ok || !body.ok || !body.data) throw new Error(body.message || 'Không thể tải bảng điều khiển.');
-      setData(body.data);
+      if (mountedRef.current && !signal?.aborted) setData(body.data);
     } catch (issue) {
-      if (signal?.aborted) return;
+      if (signal?.aborted || !mountedRef.current) return;
       setError(issue instanceof Error ? issue.message : 'Không thể tải bảng điều khiển.');
-    } finally { if (!signal?.aborted) setLoading(false); }
+    } finally { if (mountedRef.current && !signal?.aborted) setLoading(false); }
   }, [range]);
 
   useEffect(() => {
@@ -277,27 +309,55 @@ export default function DashboardPage() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [load]);
   useEffect(() => { if (!pendingControl) return; const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !submitting) { setPendingControl(null); setReason(''); } }; window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close); }, [pendingControl, submitting]);
-  const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 5000); };
+  const notify = useCallback((message: string) => {
+    if (!mountedRef.current) return;
+    setToast(message);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      if (mountedRef.current) setToast('');
+    }, 5000);
+  }, []);
 
   const createDryRun = async () => {
+    const controller = new AbortController();
+    actionAbortRef.current?.abort();
+    actionAbortRef.current = controller;
     setSubmitting(true);
     try {
-      const response = await fetch('/api/automation/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        type: 'PRODUCT_SCAN', dryRun: true, idempotencyKey: `dashboard:dry:${Date.now()}`, payload: { limit: 10 },
+      const response = await fetchWithTimeout('/api/automation/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal, body: JSON.stringify({
+        type: 'PRODUCT_SCAN',
+        dryRun: true,
+        idempotencyKey: buildIdempotencyKey({ scope: 'dashboard:product-scan:dry', values: { limit: 10 } }),
+        payload: { limit: 10 },
       }) });
       const body = await response.json() as Envelope<unknown>; if (!response.ok || !body.ok) throw new Error(body.message);
-      notify('Đã tạo tác vụ chạy thử an toàn. Bộ xử lý nền sẽ thực hiện mà không thay đổi dữ liệu sản phẩm.'); await load();
-    } catch (issue) { notify(issue instanceof Error ? issue.message : 'Không thể tạo tác vụ.'); } finally { setSubmitting(false); }
+      if (!mountedRef.current || controller.signal.aborted) return;
+      notify('Đã tạo tác vụ chạy thử an toàn. Bộ xử lý nền sẽ thực hiện mà không thay đổi dữ liệu sản phẩm.'); await load(controller.signal);
+    } catch (issue) {
+      if (!controller.signal.aborted) notify(issue instanceof Error ? issue.message : 'Không thể tạo tác vụ.');
+    } finally {
+      if (actionAbortRef.current === controller) actionAbortRef.current = null;
+      if (mountedRef.current) setSubmitting(false);
+    }
   };
 
   const applyControl = async () => {
     if (!pendingControl || reason.trim().length < 8) return;
+    const controller = new AbortController();
+    actionAbortRef.current?.abort();
+    actionAbortRef.current = controller;
     setSubmitting(true);
     try {
-      const response = await fetch('/api/automation/control', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: pendingControl.action, mode: pendingControl.mode, profile: pendingControl.profile, reason: reason.trim(), confirmed: pendingControl.danger === true, confirmedAt: pendingControl.danger === true ? new Date().toISOString() : undefined }) });
+      const response = await fetchWithTimeout('/api/automation/control', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, signal: controller.signal, body: JSON.stringify({ action: pendingControl.action, mode: pendingControl.mode, profile: pendingControl.profile, reason: reason.trim(), confirmed: pendingControl.danger === true, confirmedAt: pendingControl.danger === true ? new Date().toISOString() : undefined }) });
       const body = await response.json() as Envelope<unknown>; if (!response.ok || !body.ok) throw new Error(body.message);
-      notify(body.message); setPendingControl(null); setReason(''); await load();
-    } catch (issue) { notify(issue instanceof Error ? issue.message : 'Không thể cập nhật trạng thái vận hành.'); } finally { setSubmitting(false); }
+      if (!mountedRef.current || controller.signal.aborted) return;
+      notify(body.message); setPendingControl(null); setReason(''); await load(controller.signal);
+    } catch (issue) {
+      if (!controller.signal.aborted) notify(issue instanceof Error ? issue.message : 'Không thể cập nhật trạng thái vận hành.');
+    } finally {
+      if (actionAbortRef.current === controller) actionAbortRef.current = null;
+      if (mountedRef.current) setSubmitting(false);
+    }
   };
 
   const maxQueue = useMemo(() => data ? Math.max(1, data.queue.PENDING || 0, data.queue.RUNNING || 0, data.queue.WAITING_APPROVAL || 0, data.queue.FAILED || 0, data.queue.BLOCKED || 0) : 1, [data]);

@@ -17,7 +17,7 @@ function safeHttpUrl(value: string | null | undefined): string | null {
   if (!value) return null;
   try {
     const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : null;
+    return parsed.protocol === 'https:' ? parsed.toString() : null;
   } catch { return value.startsWith('/') && !value.startsWith('//') ? value : null; }
 }
 

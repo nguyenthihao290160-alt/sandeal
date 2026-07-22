@@ -1298,7 +1298,39 @@ function buildCompactionSelection(
   const terminalJobs = jobs
     .filter(job => TERMINAL.has(job.status))
     .sort((left, right) => Date.parse(right.completedAt || right.updatedAt) - Date.parse(left.completedAt || left.updatedAt));
-  const protectedIds = new Set(terminalJobs.slice(0, minimumTerminalJobs).map(job => job.id));
+  const jobsById = new Map(jobs.map(job => [job.id, job]));
+  const childrenByParent = new Map<string, AutomationJob[]>();
+  for (const job of jobs) {
+    if (!job.parentJobId) continue;
+    const children = childrenByParent.get(job.parentJobId) || [];
+    children.push(job);
+    childrenByParent.set(job.parentJobId, children);
+  }
+
+  // Retention may remove old terminal history, but never a job connected to an
+  // active workflow. Protect both ancestors and descendants so reconciliation
+  // can still prove the complete durable execution tree after a long manual wait.
+  const workflowProtectedIds = new Set(jobs.filter(job => !TERMINAL.has(job.status)).map(job => job.id));
+  const pending = [...workflowProtectedIds];
+  let pendingIndex = 0;
+  while (pendingIndex < pending.length) {
+    const id = pending[pendingIndex++];
+    const parentId = jobsById.get(id)?.parentJobId;
+    if (parentId && jobsById.has(parentId) && !workflowProtectedIds.has(parentId)) {
+      workflowProtectedIds.add(parentId);
+      pending.push(parentId);
+    }
+    for (const child of childrenByParent.get(id) || []) {
+      if (workflowProtectedIds.has(child.id)) continue;
+      workflowProtectedIds.add(child.id);
+      pending.push(child.id);
+    }
+  }
+
+  const protectedIds = new Set([
+    ...terminalJobs.slice(0, minimumTerminalJobs).map(job => job.id),
+    ...workflowProtectedIds,
+  ]);
   const removable = new Set(terminalJobs
     .filter(job => !protectedIds.has(job.id) && Date.parse(job.completedAt || job.updatedAt) < Date.parse(cutoffAt))
     .map(job => job.id));

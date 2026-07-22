@@ -359,6 +359,10 @@ export interface Product {
   importedFrom?: string;
   merchant?: string;
   merchantDomain?: string;
+  shopId?: string;
+  shopName?: string;
+  providerUpdatedAt?: string;
+  sourceNormalizationIssues?: string[];
   rawData?: Record<string, unknown>;
   fieldProvenance?: Record<string, ProductFieldProvenance>;
 

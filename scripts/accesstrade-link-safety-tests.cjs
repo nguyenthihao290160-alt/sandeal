@@ -54,6 +54,223 @@ function product(overrides = {}) {
   const products = require('../src/lib/storage/products.ts');
   const jobs = require('../src/lib/product-intelligence/jobs.ts');
 
+  function datafeedRecord(index = 1, overrides = {}) {
+    return {
+      product_id: `provider-product-${index}`,
+      name: `Tai nghe Bluetooth Model X${index}`,
+      price: 120000 + index,
+      url: `https://merchant.example/products/provider-product-${index}`,
+      aff_link: `https://go.isclix.com/deep_link/campaign?url=https%3A%2F%2Fmerchant.example%2Fproducts%2Fprovider-product-${index}`,
+      image: `https://images.example/provider-product-${index}.jpg`,
+      merchant: 'Merchant Example',
+      shop_id: 'shop-1',
+      shop_name: 'Merchant Shop',
+      cate: 'Điện tử',
+      ...overrides,
+    };
+  }
+
+  await test('datafeed { data, total } giữ đủ 80 record qua extract và normalize', () => {
+    const records = Array.from({ length: 80 }, (_, index) => datafeedRecord(index + 1));
+    const result = accessTrade.processAccessTradePayload(
+      { data: records, total: 80 },
+      { keyword: 'tai nghe', kind: 'product', limit: 20, imageOnly: false, affiliateLinkOnly: false },
+    );
+    equal(result.diagnostics.providerReportedItemCount, 80);
+    equal(result.diagnostics.rawItemCount, 80);
+    equal(result.diagnostics.extractedItemCount, 80);
+    equal(result.diagnostics.normalizedItemCount, 80);
+    equal(result.diagnostics.classifiedProductCount, 80);
+    equal(result.items.length, 20);
+    equal(result.diagnostics.returnedCount, 20);
+    equal(result.diagnostics.limitedCount, 60);
+    equal(result.diagnostics.rejectedCount, 0);
+    equal(result.diagnostics.state, 'RESULTS_RETURNED');
+  });
+
+  await test('datafeed data.data và root array đều được extract có giới hạn', () => {
+    const nested = accessTrade.processAccessTradePayload(
+      { data: { data: [datafeedRecord(1), datafeedRecord(2)] }, total: 2 },
+      { kind: 'product', limit: 20 },
+    );
+    equal(nested.diagnostics.extractedItemCount, 2);
+    equal(nested.items.length, 2);
+    const root = accessTrade.processAccessTradePayload(
+      [datafeedRecord(3), datafeedRecord(4)],
+      { kind: 'product', limit: 20 },
+    );
+    equal(root.diagnostics.rawItemCount, 2);
+    equal(root.items.length, 2);
+  });
+
+  await test('datafeed product không cần provider type field', () => {
+    const result = accessTrade.processAccessTradePayload(
+      { data: [datafeedRecord(5)], total: 1 },
+      { kind: 'product', limit: 20 },
+    );
+    equal(result.items.length, 1);
+    equal(result.items[0].kind, 'product');
+    equal(result.items[0].sourceItemId, 'provider-product-5');
+  });
+
+  await test('thiếu aff_link khi filter tắt vẫn giữ product để review', () => {
+    const record = datafeedRecord(6);
+    delete record.aff_link;
+    const result = accessTrade.processAccessTradePayload(
+      { data: [record], total: 1 },
+      { kind: 'product', affiliateLinkOnly: false },
+    );
+    equal(result.items.length, 1);
+    equal(result.items[0].kind, 'product');
+    assert(result.items[0].normalizationIssues.includes('MISSING_AFFILIATE_URL'));
+    equal(result.items[0].publicDecision, 'needs_review');
+  });
+
+  await test('thiếu image khi filter tắt vẫn giữ product để review', () => {
+    const record = datafeedRecord(7);
+    delete record.image;
+    const result = accessTrade.processAccessTradePayload(
+      { data: [record], total: 1 },
+      { kind: 'product', imageOnly: false },
+    );
+    equal(result.items.length, 1);
+    assert(result.items[0].normalizationIssues.includes('MISSING_IMAGE'));
+    equal(result.diagnostics.reviewByReason.MISSING_IMAGE, 1);
+  });
+
+  await test('canonical URL lỗi vẫn là product reviewable và giữ bằng chứng nguồn', () => {
+    const result = accessTrade.processAccessTradePayload(
+      { data: [datafeedRecord(8, { url: 'javascript:alert(1)' })], total: 1 },
+      { kind: 'product' },
+    );
+    equal(result.items.length, 1);
+    equal(result.items[0].kind, 'product');
+    equal(result.items[0].canonicalProductUrl, undefined);
+    assert(result.items[0].normalizationIssues.includes('INVALID_CANONICAL_URL'));
+    equal(result.items[0].fieldProvenance.canonicalProductUrl.verificationStatus, 'INVALID');
+    equal(result.items[0].rawData.url, 'javascript:alert(1)');
+    equal(result.items[0].publicDecision, 'needs_review');
+  });
+
+  await test('giá nguồn sai định dạng được giữ làm provenance INVALID, không bị gọi là MISSING', () => {
+    const result = accessTrade.processAccessTradePayload(
+      { data: [datafeedRecord(81, { price: 'not-a-price' })], total: 1 },
+      { kind: 'product' },
+    );
+    equal(result.items.length, 1);
+    equal(result.items[0].price, 0);
+    assert(result.items[0].normalizationIssues.includes('INVALID_PRICE'));
+    assert(!result.items[0].normalizationIssues.includes('MISSING_PRICE'));
+    equal(result.items[0].fieldProvenance.price.value, 'not-a-price');
+    equal(result.items[0].fieldProvenance.price.verificationStatus, 'INVALID');
+    equal(result.diagnostics.reviewByReason.INVALID_PRICE, 1);
+    const mapped = accessTrade.mapAccessTradeToProduct(result.items[0]);
+    equal(mapped.priceVerificationStatus, 'INVALID');
+  });
+
+  await test('mapping tự động giữ INVALID khác MISSING cho canonical và affiliate URL', () => {
+    const result = accessTrade.processAccessTradePayload(
+      { data: [datafeedRecord(82, { url: 'javascript:bad', aff_link: 'data:text/plain,bad' })], total: 1 },
+      { kind: 'product' },
+    );
+    equal(result.items.length, 1);
+    const mapped = accessTrade.mapAccessTradeToProduct(result.items[0]);
+    equal(mapped.canonicalUrlStatus, 'invalid');
+    equal(mapped.affiliateUrlStatus, 'invalid');
+    equal(mapped.fieldProvenance.canonicalProductUrl.verificationStatus, 'INVALID');
+    equal(mapped.fieldProvenance.affiliateUrl.verificationStatus, 'INVALID');
+    equal(mapped.publicHidden, true);
+    equal(mapped.publicBlocked, true);
+  });
+
+  await test('provider có dữ liệu nhưng không extract được có state riêng', () => {
+    const result = accessTrade.processAccessTradePayload(
+      { data: [null, 42, 'unsafe'], total: 3 },
+      { kind: 'product' },
+    );
+    equal(result.items.length, 0);
+    equal(result.diagnostics.state, 'PROVIDER_DATA_REJECTED');
+    equal(result.diagnostics.providerReportedItemCount, 3);
+    equal(result.diagnostics.rejectedByReason.INVALID_RECORD, 3);
+  });
+
+  await test('summary được tính đúng từ đúng collection cuối cùng', () => {
+    const result = accessTrade.processAccessTradePayload(
+      { data: [datafeedRecord(9), datafeedRecord(10)], total: 2 },
+      { kind: 'product', limit: 1 },
+    );
+    equal(result.summary.total, result.items.length);
+    equal(result.summary.products, result.products.length);
+    equal(result.summary.vouchers, result.vouchers.length);
+    equal(result.summary.campaigns, result.campaigns.length);
+    equal(result.summary.storeOffers, result.storeOffers.length);
+    equal(result.summary.unknown, result.unknown.length);
+  });
+
+  await test('canonical và affiliate URL tách biệt, deep-link Unicode chỉ decode một lớp', () => {
+    const destination = 'https://merchant.example/sản-phẩm?q=đỏ&nested=https%3A%2F%2Finner.example%2Fa%3Fx%3D1';
+    const affiliate = `https://go.isclix.com/deep_link/campaign?url=${encodeURIComponent(destination)}`;
+    const result = accessTrade.processAccessTradePayload(
+      { data: [datafeedRecord(11, { url: 'https://merchant.example/sản-phẩm?q=đỏ', aff_link: affiliate })], total: 1 },
+      { kind: 'product' },
+    );
+    const item = result.items[0];
+    assert(item.canonicalProductUrl !== item.affiliateUrl);
+    equal(item.affiliateUrl, new URL(affiliate).href);
+    const decoded = new URL(item.affiliateDestinationUrl);
+    equal(decoded.searchParams.get('q'), 'đỏ');
+    equal(decoded.searchParams.get('nested'), 'https://inner.example/a?x=1');
+  });
+
+  await test('duplicate provider record được dedupe bằng identity ổn định', () => {
+    const record = datafeedRecord(12);
+    const first = accessTrade.processAccessTradePayload({ data: [record, { ...record }], total: 2 }, { kind: 'product' });
+    const second = accessTrade.processAccessTradePayload({ data: [{ ...record }], total: 1 }, { kind: 'product' });
+    equal(first.items.length, 1);
+    equal(first.diagnostics.duplicateCount, 1);
+    equal(first.diagnostics.rejectedByReason.DUPLICATE, 1);
+    equal(first.items[0].id, second.items[0].id);
+  });
+
+  await test('raw metadata bị chặn secret và giới hạn ở allowlist', () => {
+    const result = accessTrade.processAccessTradePayload({ data: [datafeedRecord(13, {
+      authorization: 'must-not-leak', api_key: 'must-not-leak', unexpected: 'not-allowlisted',
+    })], total: 1 }, { kind: 'product' });
+    const raw = result.items[0].rawData;
+    assert(!('authorization' in raw));
+    assert(!('api_key' in raw));
+    assert(!('unexpected' in raw));
+    equal(raw.product_id, 'provider-product-13');
+  });
+
+  await test('UI phân biệt provider rỗng và provider có data nhưng zero-normalized', () => {
+    const pageSource = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/product-sources/page.tsx'), 'utf8');
+    assert(pageSource.includes("state?: 'RESULTS_RETURNED' | 'PROVIDER_EMPTY' | 'PROVIDER_DATA_REJECTED'"));
+    assert(pageSource.includes("atResults.diagnostics?.state === 'PROVIDER_DATA_REJECTED'"));
+    assert(pageSource.includes('AccessTrade đã trả dữ liệu, nhưng không có bản ghi nào vượt qua bước chuẩn hoá'));
+    assert(pageSource.includes('providerReportedItemCount'));
+    assert(pageSource.includes('aria-selected={activeTab === tab.id}'));
+    assert(pageSource.includes('role="tabpanel"'));
+    assert(pageSource.includes('id={`product-source-panel-${tabId}`}'));
+    assert(pageSource.includes('id="product-source-panel-csv"'));
+    for (const tabId of ['shopee', 'tiktok', 'lazada', 'other']) assert(pageSource.includes(`'${tabId}',`));
+  });
+
+  await test('HTTP image được giữ làm bằng chứng nhưng UI không tạo mixed-content request', () => {
+    const result = accessTrade.processAccessTradePayload({
+      data: [datafeedRecord(14, { image: 'http://legacy-images.example/item.jpg' })], total: 1,
+    }, { kind: 'product' });
+    equal(result.items[0].imageUrl, 'http://legacy-images.example/item.jpg');
+    equal(result.items[0].publicDecision, 'needs_review');
+    equal(result.items[0].autoPublishEligible, false);
+    const sourcesPage = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/product-sources/page.tsx'), 'utf8');
+    const safeImage = fs.readFileSync(path.join(process.cwd(), 'src/components/safe-product-image.tsx'), 'utf8');
+    const publicImage = fs.readFileSync(path.join(process.cwd(), 'src/app/deals/ProductImage.tsx'), 'utf8');
+    assert(!sourcesPage.includes("candidate.protocol = 'https:'"));
+    assert(safeImage.includes("parsed.protocol === 'https:'"));
+    assert(publicImage.includes("parsed.protocol === 'https:'"));
+  });
+
   await test('HTTP 200 nhưng body Not Allowed bị đánh dấu không hợp lệ', async () => {
     const result = await health.checkLinkHealth('https://go.isclix.com/deep_link/campaign', {
       resolveDns: false,

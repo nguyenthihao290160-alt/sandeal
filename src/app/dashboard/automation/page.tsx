@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
+import { buildIdempotencyKey } from '@/lib/automation/idempotency';
 import styles from '../operations.module.css';
 
 type RunLog = {
@@ -62,6 +63,27 @@ function formatTime(value?: string | null) {
   return new Date(value).toLocaleString('vi-VN');
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 15_000): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) forwardAbort();
+  else init.signal?.addEventListener('abort', forwardAbort, { once: true });
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error('Yêu cầu quá thời gian; trạng thái backend chưa bị thay đổi.');
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    init.signal?.removeEventListener('abort', forwardAbort);
+  }
+}
+
 export default function AutomationDashboard() {
   const [state, setState] = useState<ScheduleState | null>(null);
   const [truth, setTruth] = useState<AutomationTruth | null>(null);
@@ -74,32 +96,47 @@ export default function AutomationDashboard() {
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [trackedSafeRunId, setTrackedSafeRunId] = useState<string | null>(null);
+  const [safeRunPollingTimedOut, setSafeRunPollingTimedOut] = useState(false);
+  const [safeRunPollRevision, setSafeRunPollRevision] = useState(0);
   const trackedStatus = useRef<string | null>(null);
+  const safeRunPollStartedAt = useRef<number | null>(null);
+  const safeRunPollAttempt = useRef(0);
   const toastTimer = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
+    if (mountedRef.current) {
+      setLoading(true);
+      setError('');
+    }
     try {
       const [scheduleResponse, truthResponse] = await Promise.all([
-        fetch('/api/ai-bots/schedule', { cache: 'no-store' }),
-        fetch('/api/automation/truth', { cache: 'no-store' }),
+        fetchWithTimeout('/api/ai-bots/schedule', { cache: 'no-store' }),
+        fetchWithTimeout('/api/automation/truth', { cache: 'no-store' }),
       ]);
       const scheduleBody = await scheduleResponse.json();
       const truthBody = await truthResponse.json();
       if (!scheduleResponse.ok) throw new Error(scheduleBody.error || 'Không thể tải cấu hình lịch tự động.');
       if (!truthResponse.ok || !truthBody.ok) throw new Error(truthBody.message || 'Không thể xác minh lịch tự động.');
+      if (!mountedRef.current) return;
       setState(scheduleBody);
       setTruth(truthBody.data);
       setDraft({ intervalHours: scheduleBody.settings.intervalHours, maxItemsPerRun: scheduleBody.settings.maxItemsPerRun, maxItemsPerDay: scheduleBody.settings.maxItemsPerDay });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Không thể tải trang tự động hóa.');
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : 'Không thể tải trang tự động hóa.');
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => {
+    mountedRef.current = true;
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => {
+      mountedRef.current = false;
+      window.clearTimeout(timer);
+    };
+  }, [load]);
   useEffect(() => {
     if (!dialog) return;
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) { setDialog(null); setReason(''); } };
@@ -108,35 +145,75 @@ export default function AutomationDashboard() {
   }, [dialog, busy]);
 
   const notify = useCallback((message: string, tone: ToastState['tone'] = 'success') => {
+    if (!mountedRef.current) return;
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     setToast({ message, tone });
     toastTimer.current = window.setTimeout(() => setToast(null), tone === 'error' ? 7000 : 4500);
   }, []);
 
   const latestSafeRun = truth?.runs?.latestSafeRun || null;
+  const effectiveTrackedSafeRunId = trackedSafeRunId
+    || (latestSafeRun && ['QUEUED', 'RUNNING'].includes(latestSafeRun.status) ? latestSafeRun.jobId : null);
+  const latestTrackedRunTerminal = Boolean(
+      effectiveTrackedSafeRunId
+      && latestSafeRun?.jobId === effectiveTrackedSafeRunId
+      && ['SUCCEEDED', 'FAILED', 'SKIPPED'].includes(latestSafeRun.status),
+  );
   useEffect(() => {
-    if (!trackedSafeRunId || !latestSafeRun || latestSafeRun.jobId !== trackedSafeRunId) return;
+    if (!latestSafeRun) return;
+    if (['SUCCEEDED', 'FAILED', 'SKIPPED'].includes(latestSafeRun.status)) {
+      safeRunPollStartedAt.current = null;
+      safeRunPollAttempt.current = 0;
+    }
+    if (!trackedSafeRunId || latestSafeRun.jobId !== trackedSafeRunId) return;
     const previous = trackedStatus.current;
     trackedStatus.current = latestSafeRun.status;
     if (previous && !['SUCCEEDED', 'FAILED', 'SKIPPED'].includes(previous) && latestSafeRun.status === 'SUCCEEDED') notify('Chạy thử hoàn thành', 'success');
     if (previous && !['SUCCEEDED', 'FAILED', 'SKIPPED'].includes(previous) && latestSafeRun.status === 'FAILED') notify(`Chạy thử thất bại: ${latestSafeRun.error || 'Không có nguyên nhân chi tiết.'}`, 'error');
   }, [latestSafeRun, notify, trackedSafeRunId]);
   useEffect(() => {
-    if (!trackedSafeRunId || !latestSafeRun || latestSafeRun.jobId !== trackedSafeRunId || !['QUEUED', 'RUNNING'].includes(latestSafeRun.status)) return;
-    const timer = window.setInterval(() => void load(), 2500);
-    return () => window.clearInterval(timer);
-  }, [latestSafeRun, load, trackedSafeRunId]);
+    if (safeRunPollingTimedOut || !effectiveTrackedSafeRunId) return;
+    const trackedSnapshot = latestSafeRun?.jobId === effectiveTrackedSafeRunId ? latestSafeRun : null;
+    if (trackedSnapshot && !['QUEUED', 'RUNNING'].includes(trackedSnapshot.status)) return;
+    const startedAt = safeRunPollStartedAt.current ?? Date.now();
+    safeRunPollStartedAt.current = startedAt;
+    if (Date.now() - startedAt >= 5 * 60_000) {
+      const timeout = window.setTimeout(() => {
+        setSafeRunPollingTimedOut(true);
+        notify(`Tác vụ ${effectiveTrackedSafeRunId.slice(0, 10)}… vẫn đang chờ xử lý. Có thể tiếp tục theo dõi trong Tác vụ và tiến độ.`, 'warning');
+      }, 0);
+      return () => window.clearTimeout(timeout);
+    }
+    const delayMs = Math.min(15_000, Math.round(1_500 * (1.6 ** safeRunPollAttempt.current)));
+    const timer = window.setTimeout(() => {
+      safeRunPollAttempt.current += 1;
+      void load().finally(() => {
+        if (mountedRef.current) setSafeRunPollRevision(revision => revision + 1);
+      });
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [effectiveTrackedSafeRunId, latestSafeRun, load, notify, safeRunPollingTimedOut, safeRunPollRevision]);
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current); }, []);
 
   async function createDryRun() {
     setBusy(true);
     try {
-      const response = await fetch('/api/automation/safe-run', {
+      const response = await fetchWithTimeout('/api/automation/safe-run', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idempotencyKey: `dashboard:${Math.floor(Date.now() / 60_000)}`, limit: Math.min(20, state?.settings.maxItemsPerRun || 10) }),
+        body: JSON.stringify({
+          idempotencyKey: buildIdempotencyKey({
+            scope: 'dashboard:safe-run',
+            values: { limit: Math.min(20, state?.settings.maxItemsPerRun || 10) },
+          }),
+          limit: Math.min(20, state?.settings.maxItemsPerRun || 10),
+        }),
       });
       const body = await response.json();
       if (!response.ok || !body.ok) throw new Error(body.message || 'Không thể tạo tác vụ chạy thử.');
+      if (!mountedRef.current) return;
+      safeRunPollStartedAt.current = Date.now();
+      safeRunPollAttempt.current = 0;
+      setSafeRunPollingTimedOut(false);
       setTrackedSafeRunId(body.data.id);
       trackedStatus.current = body.data.status === 'RUNNING' ? 'RUNNING' : 'QUEUED';
       notify('Đã tạo tác vụ chạy thử', 'info');
@@ -144,26 +221,27 @@ export default function AutomationDashboard() {
     } catch (cause) {
       notify(`${cause instanceof Error ? cause.message : 'Không thể tạo tác vụ.'} Dữ liệu hiện tại không bị thay đổi.`, 'error');
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }
 
   async function updateScheduler(action: 'pause_scheduler' | 'resume_scheduler') {
     setBusy(true);
     try {
-      const response = await fetch('/api/automation/control', {
+      const response = await fetchWithTimeout('/api/automation/control', {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, reason: reason.trim() }),
       });
       const body = await response.json();
       if (!response.ok || !body.ok) throw new Error(body.message || 'Không thể cập nhật lịch tự động.');
+      if (!mountedRef.current) return;
       notify(action === 'pause_scheduler' ? 'Đã tạm dừng lịch tự động' : 'Đã tiếp tục lịch; lần chạy kế tiếp đã được tính lại.', action === 'pause_scheduler' ? 'warning' : 'success');
       setPauseConfirm(false);
       setReason('');
       await load();
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : 'Không thể cập nhật lịch tự động.', 'error');
-    } finally { setBusy(false); }
+    } finally { if (mountedRef.current) setBusy(false); }
   }
 
   async function submitDialog() {
@@ -172,24 +250,25 @@ export default function AutomationDashboard() {
     try {
       const scheduleMutation = dialog === 'enable_schedule' || dialog === 'save_settings';
       const response = scheduleMutation
-        ? await fetch('/api/ai-bots/schedule', {
+        ? await fetchWithTimeout('/api/ai-bots/schedule', {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ...(dialog === 'enable_schedule' ? { enabled: true } : draft), reason: reason.trim(), confirmed: true }),
           })
-        : await fetch('/api/automation/control', {
+        : await fetchWithTimeout('/api/automation/control', {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: dialog, reason: reason.trim(), confirmed: true }),
           });
       const body = await response.json();
       if (!response.ok || (scheduleMutation ? body.success !== true : body.ok !== true)) throw new Error(body.error || body.message || 'Không thể cập nhật lịch tự động.');
+      if (!mountedRef.current) return;
       notify(dialog === 'save_settings' ? 'Đã lưu giới hạn xử lý và ghi nhật ký kiểm soát.' : 'Đã cập nhật trạng thái lịch tự động.');
       setDialog(null);
       setReason('');
       await load();
     } catch (cause) {
-      setError(`${cause instanceof Error ? cause.message : 'Không thể cập nhật lịch tự động.'} Dữ liệu chưa được thay đổi.`);
+      if (mountedRef.current) setError(`${cause instanceof Error ? cause.message : 'Không thể cập nhật lịch tự động.'} Dữ liệu chưa được thay đổi.`);
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }
 
@@ -264,6 +343,11 @@ export default function AutomationDashboard() {
       <section className={styles.panel}>
         <div className={styles.panelHeader}><h2><DashboardIcon name="task" size={19} />Lần chạy thử mới nhất</h2><button className={styles.button} onClick={() => void load()} disabled={loading}>Làm mới trạng thái</button></div>
         {latestSafeRun ? <div className={styles.safeRunCard}><div><span>Trạng thái</span><strong className={`${styles.badge} ${latestSafeRun.status === 'SUCCEEDED' ? styles.success : latestSafeRun.status === 'FAILED' ? styles.error : styles.info}`}>{SAFE_RUN_LABELS[latestSafeRun.status]}</strong></div><div><span>Job ID</span><code>{latestSafeRun.jobId}</code></div><div><span>Tạo / vào hàng chờ</span><strong>{formatTime(latestSafeRun.createdAt)} · {formatTime(latestSafeRun.queuedAt)}</strong></div><div><span>Bắt đầu / hoàn tất</span><strong>{formatTime(latestSafeRun.startedAt)} · {formatTime(latestSafeRun.completedAt)}</strong></div><div><span>Kết quả</span><strong>{latestSafeRun.result.claimed} nhận · {latestSafeRun.result.succeeded} thành công · {latestSafeRun.result.failed} lỗi · {latestSafeRun.result.skipped} bỏ qua</strong></div>{latestSafeRun.error && <div><span>Nguyên nhân</span><strong>{latestSafeRun.error}</strong></div>}</div> : <div className={styles.empty}><p>Chưa có lần chạy thử an toàn.</p></div>}
+        {safeRunPollingTimedOut && effectiveTrackedSafeRunId && !latestTrackedRunTerminal && (
+          <div className={styles.notice} role="status">
+            Tác vụ vẫn đang chờ xử lý. Job {effectiveTrackedSafeRunId.slice(0, 10)}… có thể tiếp tục được xem trong Tác vụ và tiến độ; trạng thái backend không bị đổi thành thất bại.
+          </div>
+        )}
       </section>
 
       <section className={styles.panel}>

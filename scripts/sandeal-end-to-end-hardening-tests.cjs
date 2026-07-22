@@ -245,7 +245,7 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
 
   await test('release identity dùng Git SHA nhúng, không dùng Next BUILD_ID làm commit', () => {
     const before = { build: process.env.SANDEAL_BUILD_COMMIT, runtime: process.env.SANDEAL_RELEASE_ID, git: process.env.GIT_COMMIT_SHA, public: process.env.NEXT_PUBLIC_SANDEAL_RELEASE_ID };
-    const built = 'a'.repeat(40); const runtime = 'b'.repeat(40);
+    const built = 'abcdef0123456789abcdef0123456789abcdef01'; const runtime = 'b'.repeat(40);
     try {
       process.env.SANDEAL_BUILD_COMMIT = built;
       process.env.SANDEAL_RELEASE_ID = built;
@@ -254,6 +254,10 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
       const matching = releaseIdentity.getReleaseIdentity();
       assert.equal(matching.commitSha, built);
       assert.equal(matching.releaseMismatch, false);
+      process.env.SANDEAL_RELEASE_ID = built.toUpperCase();
+      const caseNormalized = releaseIdentity.getReleaseIdentity();
+      assert.equal(caseNormalized.runtimeReleaseId, built);
+      assert.equal(caseNormalized.releaseMismatch, false);
       process.env.SANDEAL_RELEASE_ID = runtime;
       const mismatched = releaseIdentity.getReleaseIdentity();
       assert.equal(mismatched.buildId, built);
@@ -271,6 +275,26 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     assert.doesNotMatch(nextConfig, /generateBuildId/);
     assert.match(manifest, /manifest\.releaseId !== manifest\.commitSha/);
     assert.doesNotMatch(manifest, /manifest\.buildId !== manifest\.commitSha/);
+  });
+
+  await test('build release resolver xử lý explicit, mismatch và môi trường không có .git', async () => {
+    const configModule = require('../next.config.ts');
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim().toLowerCase();
+    assert.equal(configModule.resolveBuildCommit({ explicitReleaseId: head, gitCommitOverride: null, nodeEnv: 'production' }), head);
+    assert.equal(configModule.resolveBuildCommit({ explicitReleaseId: head.toUpperCase(), gitCommitOverride: null, nodeEnv: 'production' }), head);
+    assert.equal(configModule.resolveBuildCommit({ gitCommitOverride: null, nodeEnv: 'development' }), 'development');
+    assert.throws(
+      () => configModule.resolveBuildCommit({ gitCommitOverride: null, nodeEnv: 'production' }),
+      /SANDEAL_RELEASE_ID_GIT_SHA_REQUIRED/,
+    );
+    assert.throws(
+      () => configModule.resolveBuildCommit({ explicitReleaseId: 'f'.repeat(40), gitCommitOverride: head, nodeEnv: 'production' }),
+      /SANDEAL_RELEASE_ID_GIT_HEAD_MISMATCH/,
+    );
+    const headers = (await configModule.default.headers())[0].headers;
+    assert.equal(headers.find(header => header.key === 'X-SanDeal-Build-Id').value, head);
+    assert.equal(headers.find(header => header.key === 'X-SanDeal-Release-Id').value, head);
+    assert.equal(configModule.default.deploymentId, head);
   });
 
   await test('PM2 truyền cùng release cho web/worker/scheduler và chặn env rollback lệch checkout', () => {
@@ -320,12 +344,23 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     const polling = fs.readFileSync(path.join(root, 'src/lib/dashboard/scanPolling.ts'), 'utf8');
     const sources = fs.readFileSync(path.join(root, 'src/app/dashboard/product-sources/page.tsx'), 'utf8');
     const list = fs.readFileSync(path.join(root, 'src/app/dashboard/products/products-dashboard.tsx'), 'utf8');
+    const dashboard = fs.readFileSync(path.join(root, 'src/app/dashboard/page.tsx'), 'utf8');
+    const automation = fs.readFileSync(path.join(root, 'src/app/dashboard/automation/page.tsx'), 'utf8');
     assert.match(polling, /encodeURIComponent\(options\.jobId\)/);
     assert.match(polling, /cache: 'no-store'/);
     const terminalPoll = sources.indexOf('const job = await pollScanJob({');
     assert.ok(terminalPoll >= 0 && sources.indexOf('await loadRecent();', terminalPoll) > terminalPoll);
-    assert.match(sources, /fetch\('\/api\/products\?limit=10', \{ cache: 'no-store' \}\)/);
+    assert.match(sources, /fetchWithTimeout\('\/api\/products\?limit=10', \{ cache: 'no-store' \}\)/);
     assert.match(list, /if \(\['completed', 'failed', 'cancelled', 'blocked'\]\.includes\(next\.status\)\) \{\s*refresh\(\)/s);
+    assert.match(dashboard, /buildIdempotencyKey\(\{ scope: 'dashboard:product-scan:dry'/);
+    assert.match(automation, /scope: 'dashboard:safe-run'/);
+    assert.match(automation, /Math\.min\(15_000/);
+    assert.match(automation, /5 \* 60_000/);
+    assert.match(automation, /fetchWithTimeout/);
+    assert.match(automation, /effectiveTrackedSafeRunId/);
+    assert.match(automation, /latestSafeRun && \['QUEUED', 'RUNNING'\]\.includes\(latestSafeRun\.status\)/);
+    assert.doesNotMatch(automation, /setInterval\(\(\) => void load\(\), 2500\)/);
+    assert.match(automation, /trạng thái backend không bị đổi thành thất bại/);
   });
 
   await test('dashboard/home/product detail dùng operational truth và bố cục responsive', () => {

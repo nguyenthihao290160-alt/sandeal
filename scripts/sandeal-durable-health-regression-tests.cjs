@@ -26,6 +26,7 @@ const idempotency = require('../src/lib/automation/idempotency.ts');
 const productJobs = require('../src/lib/product-intelligence/jobs.ts');
 const products = require('../src/lib/storage/products.ts');
 const blockers = require('../src/lib/productBlockers.ts');
+const eligibility = require('../src/lib/productEligibility.ts');
 const dashboardProducts = require('../src/lib/dashboard/products.ts');
 const polling = require('../src/lib/dashboard/scanPolling.ts');
 const accessTrade = require('../src/lib/integrations/accesstrade.ts');
@@ -37,7 +38,7 @@ const { NextRequest } = require('next/server');
 const auth = `Basic ${Buffer.from('durable-health:local-test-password').toString('base64')}`;
 const jsonHeaders = { authorization: auth, 'content-type': 'application/json' };
 const collections = [
-  'products', 'product-duplicate-merge-audit', 'automation-jobs', 'automation-job-projections',
+  'products', 'product-duplicate-merge-audit', 'product-reprocess-audit', 'automation-jobs', 'automation-job-projections',
   'automation-job-heartbeats', 'automation-control', 'automation-audit', 'runtime-role-leases',
   'runtime-role-conflicts', 'pipeline-daily-usage', 'automation-settings',
 ];
@@ -156,6 +157,9 @@ function jobEnvelope(job) {
       /WORKER_FENCING_REJECTED/,
     );
     assert.equal((await store.getAutomationJob(created.job.id)).status, 'RUNNING');
+    const productsSource = fs.readFileSync(path.join(process.cwd(), 'src/lib/storage/products.ts'), 'utf8');
+    assert.match(productsSource, /isRuntimeRoleOwner\('WORKER'/);
+    assert.match(productsSource, /throw new Error\('WORKER_FENCING_REJECTED'\)/);
   });
 
   await test('FileStorage giữ đủ update khi nhiều transaction chạy đồng thời', async () => {
@@ -255,7 +259,7 @@ function jobEnvelope(job) {
     assert.equal((await adapter.readCollection(collection))[0].count, 1);
   });
 
-  await test('queue compaction preview không ghi và apply giữ active + 100 terminal audit + backup', async () => {
+  await test('queue compaction preview không ghi và apply giữ active + workflow refs + 100 terminal audit + backup', async () => {
     await reset();
     const now = Date.now();
     const old = now - 40 * 24 * 60 * 60_000;
@@ -267,19 +271,21 @@ function jobEnvelope(job) {
       return job;
     });
     const active = store.createAutomationJobRecord(jobInput('compact-active-health'));
+    terminal[102].parentJobId = active.id;
     await adapter.writeCollection('automation-jobs', [...terminal, active]);
     await adapter.writeCollection('automation-job-projections', [...terminal, active]);
     const preview = await store.compactAutomationJobs({ nowMs: now, retentionDays: 30, minimumTerminalJobs: 100 });
     assert.equal(preview.apply, false);
-    assert.equal(preview.removableJobs, 3);
+    assert.equal(preview.removableJobs, 2);
     assert.equal((await adapter.readCollection('automation-jobs')).length, 104);
     const applied = await store.compactAutomationJobs({ apply: true, nowMs: now, retentionDays: 30, minimumTerminalJobs: 100, actor: 'test' });
-    assert.equal(applied.removableJobs, 3);
+    assert.equal(applied.removableJobs, 2);
     assert.ok(applied.backupRef && fs.existsSync(applied.backupRef));
     const retained = await adapter.readCollection('automation-jobs');
-    assert.equal(retained.length, 101);
+    assert.equal(retained.length, 102);
     assert.ok(retained.some(job => job.id === active.id && job.status === 'PENDING'));
-    assert.equal((await adapter.readCollection('automation-job-projections')).length, 101);
+    assert.ok(retained.some(job => job.id === terminal[102].id && job.parentJobId === active.id));
+    assert.equal((await adapter.readCollection('automation-job-projections')).length, 102);
     const backupSnapshot = JSON.parse(fs.readFileSync(applied.backupRef, 'utf8'));
     assert.equal(backupSnapshot.length, 104);
     assert.ok(backupSnapshot.some(job => job.id === active.id && job.status === 'PENDING'));
@@ -366,7 +372,7 @@ function jobEnvelope(job) {
     assert.equal(stored.canonicalProductUrl, destination);
     assert.equal(stored.affiliateUrl, tracking.href);
     assert.equal(stored.affiliateDestinationUrl, new URL(destination).href);
-    assert.equal(stored.imageUrl, 'https://cdn.example.com/serum.jpg');
+    assert.equal(stored.imageUrl, 'http://cdn.example.com/serum.jpg');
     assert.equal(stored.price, 320000);
     assert.equal(stored.priceVerificationStatus, 'UNVERIFIED');
     assert.equal(stored.sourceVerified, true);
@@ -387,6 +393,49 @@ function jobEnvelope(job) {
     const richerBody = await richerDuplicate.json();
     assert.ok(richerBody.mergeResult.updatedFields.includes('rawData.seller_id'));
     assert.equal((await products.getProductById(stored.id)).rawData.seller_id, 'merchant-source-001');
+  });
+
+  await test('AccessTrade field lỗi giữ raw evidence và provenance INVALID thay vì đổi thành MISSING', async () => {
+    await reset();
+    const affiliateUrl = 'https://go.isclix.com/deep_link/invalid-source-fixture';
+    const response = await productsRoute.POST(apiProductRequest({
+      title: 'Ứng viên AccessTrade có dữ liệu nguồn lỗi định dạng',
+      platform: 'accesstrade', source: 'accesstrade', kind: 'product',
+      affiliateUrl,
+      imageUrl: 'data:text/plain,not-an-image',
+      sourceItemId: 'at-invalid-evidence-001', sourceEndpoint: 'datafeed',
+      affiliateUrlSource: 'provider_api', affiliateUrlSourceField: 'aff_link',
+      sourceFetchedAt: new Date().toISOString(),
+      sourceNormalizationIssues: ['INVALID_CANONICAL_URL', 'INVALID_IMAGE_URL', 'INVALID_PRICE'],
+      rawData: {
+        url: 'javascript:alert(1)', aff_link: affiliateUrl,
+        image: 'data:text/plain,not-an-image', price: 'not-a-price',
+        authorization: 'must-not-survive', oversized: 'x'.repeat(50_000),
+      },
+    }));
+    assert.equal(response.status, 201);
+    const stored = (await products.getAllProducts())[0];
+    assert.equal(stored.originalUrl, undefined);
+    assert.equal(stored.affiliateUrl, affiliateUrl);
+    assert.equal(stored.imageUrl, undefined);
+    assert.equal(stored.price, undefined);
+    assert.equal(stored.canonicalUrlStatus, 'invalid');
+    assert.equal(stored.priceVerificationStatus, 'INVALID');
+    assert.equal(stored.fieldProvenance.canonicalProductUrl.value, 'javascript:alert(1)');
+    assert.equal(stored.fieldProvenance.canonicalProductUrl.verificationStatus, 'INVALID');
+    assert.equal(stored.fieldProvenance.imageUrl.value, 'data:text/plain,not-an-image');
+    assert.equal(stored.fieldProvenance.imageUrl.verificationStatus, 'INVALID');
+    assert.equal(stored.fieldProvenance.price.value, 'not-a-price');
+    assert.equal(stored.fieldProvenance.price.verificationStatus, 'INVALID');
+    assert.equal(Object.hasOwn(stored.rawData, 'authorization'), false);
+    assert.ok(Buffer.byteLength(JSON.stringify(stored.rawData), 'utf8') <= 32 * 1024);
+    const snapshot = eligibility.evaluateProductEligibility(stored, Date.now());
+    assert.ok(snapshot.criticalBlockers.includes('invalid_product_url_source'));
+    assert.ok(snapshot.criticalBlockers.includes('invalid_image_url_source'));
+    assert.ok(snapshot.criticalBlockers.includes('invalid_price_source'));
+    assert.equal(snapshot.eligibleForPublish, false);
+    assert.equal(stored.publicHidden, true);
+    assert.equal(stored.publicBlocked, true);
   });
 
   await test('duplicate AccessTrade chỉ bổ sung field thiếu, không chiếm provenance hoặc verification manual', async () => {
@@ -514,6 +563,11 @@ function jobEnvelope(job) {
       assert.equal(current.publicBlockReasons.includes('legal_compliance_hold'), true);
     }
     assert.equal(new Set(counts).size, 1);
+    const history = await adapter.readCollection('product-reprocess-audit');
+    assert.equal(history.length, 5);
+    assert.ok(history.some(event => event.before.publicBlockReasons.includes('product_url_unverified')));
+    assert.ok(history.some(event => !event.after.publicBlockReasons.includes('product_url_unverified')));
+    assert.ok(history.every(event => !event.after.publicBlockReasons.some(code => /stored:|review:/.test(code))));
   });
 
   await test('dashboard tách affected product count khỏi deduped issue occurrence count', () => {

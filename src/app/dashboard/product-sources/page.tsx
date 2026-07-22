@@ -87,6 +87,29 @@ type AccessTradeItem = Record<string, unknown> & {
   fetchedAt?: string;
   merchant?: string;
   merchantDomain?: string;
+  shopId?: string;
+  shopName?: string;
+  sku?: string;
+  providerUpdatedAt?: string;
+  normalizationIssues?: string[];
+  fieldProvenance?: Product['fieldProvenance'];
+};
+
+type AccessTradeDiagnostics = {
+  state?: 'RESULTS_RETURNED' | 'PROVIDER_EMPTY' | 'PROVIDER_DATA_REJECTED';
+  providerStatusCode?: number;
+  providerResultType?: string;
+  providerReportedItemCount?: number;
+  rawItemCount?: number;
+  extractedItemCount?: number;
+  normalizedItemCount?: number;
+  returnedCount?: number;
+  rejectedCount?: number;
+  duplicateCount?: number;
+  filteredCount?: number;
+  limitedCount?: number;
+  rejectedByReason?: Record<string, number>;
+  reviewByReason?: Record<string, number>;
 };
 
 type AccessTradeResults = {
@@ -111,6 +134,7 @@ type AccessTradeResults = {
     blockedFromPublic?: number;
     nonProducts?: number;
   };
+  diagnostics?: AccessTradeDiagnostics;
 };
 
 type ApiEnvelope<T> = {
@@ -126,6 +150,27 @@ type ApiEnvelope<T> = {
 };
 
 type HealthScanState = Pick<ScanJobSnapshot, 'id' | 'status' | 'progress' | 'pollingTimedOut' | 'lastErrorCode' | 'lastErrorMessage'>;
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 20_000): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) forwardAbort();
+  else init.signal?.addEventListener('abort', forwardAbort, { once: true });
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error('Yêu cầu quá thời gian; vui lòng kiểm tra trạng thái trước khi thử lại.');
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    init.signal?.removeEventListener('abort', forwardAbort);
+  }
+}
 
 function healthScanLabel(scan: HealthScanState | null): string {
   if (!scan) return 'Kiểm tra sản phẩm đã lưu';
@@ -540,6 +585,13 @@ function getAtItemValidationIssues(item: AccessTradeItem): string[] {
     issues.push('Thiếu tên sản phẩm.');
   }
 
+  const canonicalUrl = getString(item.canonicalProductUrl) || getString(item.originalUrl);
+  if (!isValidHttpUrl(canonicalUrl)) {
+    issues.push(item.normalizationIssues?.includes('INVALID_CANONICAL_URL')
+      ? 'Link sản phẩm từ nguồn không hợp lệ; bản ghi chỉ có thể lưu để xem xét.'
+      : 'Thiếu link sản phẩm hợp lệ.');
+  }
+
   if (!isValidHttpUrl(item.affiliateUrl) && item.affiliateLinkReason === 'provider_deeplink_not_supported') {
     issues.push('Nhà cung cấp không cho phép deep-link.');
   } else if (!isValidHttpUrl(item.affiliateUrl)) {
@@ -564,7 +616,7 @@ function getAtItemValidationIssues(item: AccessTradeItem): string[] {
     issues.push('Điểm chất lượng nguồn chưa đạt 70.');
   }
 
-  return issues;
+  return [...new Set(issues)];
 }
 
 function getAtPublicDecision(item: AccessTradeItem) {
@@ -639,6 +691,20 @@ function normalizeAtResults(
             isNonProductKind(getAtItemKind(item)),
         ).length,
       },
+      diagnostics: {
+        state: data.length ? 'RESULTS_RETURNED' : 'PROVIDER_EMPTY',
+        providerReportedItemCount: data.length,
+        rawItemCount: data.length,
+        extractedItemCount: data.length,
+        normalizedItemCount: data.length,
+        returnedCount: data.length,
+        rejectedCount: 0,
+        duplicateCount: 0,
+        filteredCount: 0,
+        limitedCount: 0,
+        rejectedByReason: {},
+        reviewByReason: {},
+      },
     };
   }
 
@@ -702,6 +768,7 @@ function normalizeAtResults(
           data?.summary?.nonProducts ??
           items.filter((item) => isNonProductKind(getAtItemKind(item))).length,
     },
+    diagnostics: data?.diagnostics,
   };
 }
 
@@ -762,7 +829,6 @@ function SafeThumb({
   let cleanSrc = '';
   try {
     const candidate = new URL(src?.trim() || '');
-    if (candidate.protocol === 'http:') candidate.protocol = 'https:';
     if (candidate.protocol === 'https:') cleanSrc = candidate.href;
   } catch {
     cleanSrc = '';
@@ -806,6 +872,8 @@ function SafeThumb({
             flexShrink: 0,
           }}
       >
+        {/* Dynamic provider hosts are intentionally not proxied through Next Image. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
             src={cleanSrc}
             alt=""
@@ -855,7 +923,7 @@ export default function ProductSourcesPage() {
 
   const loadRecent = useCallback(async () => {
     try {
-      const res = await fetch('/api/products?limit=10', { cache: 'no-store' });
+      const res = await fetchWithTimeout('/api/products?limit=10', { cache: 'no-store' });
       const data = (await res.json().catch(() => null)) as ApiEnvelope<
           Product[]
       > | null;
@@ -868,7 +936,7 @@ export default function ProductSourcesPage() {
     }
 
     try {
-      const healthRes = await fetch('/api/app-health', { cache: 'no-store' });
+      const healthRes = await fetchWithTimeout('/api/app-health', { cache: 'no-store' });
       const healthData = (await healthRes
           .json()
           .catch(() => null)) as ApiEnvelope<{
@@ -978,7 +1046,7 @@ export default function ProductSourcesPage() {
     setRunningBot(true);
 
     try {
-      const res = await fetch('/api/automation/jobs', {
+      const res = await fetchWithTimeout('/api/automation/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -1037,7 +1105,7 @@ export default function ProductSourcesPage() {
     setAtResults(null);
 
     try {
-      const res = await fetch('/api/product-sources/accesstrade/search', {
+      const res = await fetchWithTimeout('/api/product-sources/accesstrade/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1047,7 +1115,7 @@ export default function ProductSourcesPage() {
           imageOnly: false,
           affiliateLinkOnly: false,
         }),
-      });
+      }, 40_000);
 
       const data = (await res.json().catch(() => null)) as ApiEnvelope<
           AccessTradeResults | AccessTradeItem[]
@@ -1063,8 +1131,8 @@ export default function ProductSourcesPage() {
             `Lỗi khi tìm kiếm. HTTP ${res.status}`,
         );
       }
-    } catch {
-      if (mountedRef.current) setAtError('Không thể kết nối đến server.');
+    } catch (error) {
+      if (mountedRef.current) setAtError(error instanceof Error ? error.message : 'Không thể kết nối đến server.');
     } finally {
       if (mountedRef.current) setAtLoading(false);
     }
@@ -1117,7 +1185,7 @@ export default function ProductSourcesPage() {
     setAtSaving(itemId);
 
     try {
-      const res = await fetch('/api/products', {
+      const res = await fetchWithTimeout('/api/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1169,6 +1237,7 @@ export default function ProductSourcesPage() {
           imageUrl,
           price,
           salePrice,
+          priceVerificationStatus: price || salePrice ? 'UNVERIFIED' : 'MISSING',
 
           category: getString(item.category) || undefined,
           campaignName: getString(item.campaignName) || undefined,
@@ -1210,6 +1279,14 @@ export default function ProductSourcesPage() {
           sourceFetchedAt: getString(item.fetchedAt) || getString(item.canonicalUrlFetchedAt) || getString(item.affiliateUrlFetchedAt) || undefined,
           merchant: getString(item.merchant) || getString(item.campaignName) || undefined,
           merchantDomain: getString(item.merchantDomain) || undefined,
+          shopId: getString(item.shopId) || undefined,
+          shopName: getString(item.shopName) || undefined,
+          sku: getString(item.sku) || undefined,
+          providerUpdatedAt: getString(item.providerUpdatedAt) || undefined,
+          sourceNormalizationIssues: Array.isArray(item.normalizationIssues)
+            ? item.normalizationIssues.slice(0, 16)
+            : [],
+          fieldProvenance: item.fieldProvenance,
 
           rawSourceType: 'accesstrade',
           rawData:
@@ -1226,7 +1303,7 @@ export default function ProductSourcesPage() {
       if (!mountedRef.current) return;
       if (res.ok && (data?.ok || data?.success)) {
         if (runScore && data.data?.id) {
-          await fetch(`/api/products/${data.data.id}/score`, {
+          await fetchWithTimeout(`/api/products/${data.data.id}/score`, {
             method: 'POST',
           });
         }
@@ -1265,12 +1342,16 @@ export default function ProductSourcesPage() {
   };
 
   const renderPlaceholderTab = (
+      tabId: Exclude<TabId, 'accesstrade' | 'csv'>,
       icon: string,
       title: string,
       desc: string,
       keys?: string,
   ) => (
       <div
+          id={`product-source-panel-${tabId}`}
+          role="tabpanel"
+          aria-labelledby={`product-source-tab-${tabId}`}
           className="coming-soon-container"
           style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}
       >
@@ -1541,11 +1622,15 @@ export default function ProductSourcesPage() {
         </div>
 
         {/* Tabs */}
-        <div className="tabs-bar product-source-tabs">
+        <div className="tabs-bar product-source-tabs" role="tablist" aria-label="Nguồn sản phẩm">
           {TABS.map((tab) => (
               <button
                   key={tab.id}
                   type="button"
+                  id={`product-source-tab-${tab.id}`}
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  aria-controls={`product-source-panel-${tab.id}`}
                   className={`tab-btn${activeTab === tab.id ? ' tab-btn-active' : ''}`}
                   onClick={() => setActiveTab(tab.id)}
               >
@@ -1558,7 +1643,11 @@ export default function ProductSourcesPage() {
         <div className="tab-content">
           {/* ====== ACCESSTRADE TAB ====== */}
           {activeTab === 'accesstrade' && (
-              <div>
+              <div
+                  id="product-source-panel-accesstrade"
+                  role="tabpanel"
+                  aria-labelledby="product-source-tab-accesstrade"
+              >
                 <div
                     className="card"
                     style={{ maxWidth: '960px', marginBottom: 'var(--space-lg)' }}
@@ -1688,7 +1777,8 @@ export default function ProductSourcesPage() {
                             <button
                                 key={keyword}
                                 type="button"
-                                className="btn btn-ghost btn-sm"
+                                className={`btn btn-ghost btn-sm${atKeyword === keyword ? ' tab-btn-active' : ''}`}
+                                aria-pressed={atKeyword === keyword}
                                 onClick={() => setAtKeyword(keyword)}
                                 disabled={atLoading || !atConfigured}
                             >
@@ -1761,6 +1851,66 @@ export default function ProductSourcesPage() {
 
                 {atResults && (
                     <div style={{ maxWidth: '960px' }}>
+                      {atResults.diagnostics && (
+                          <div
+                              className="glass-card"
+                              aria-live="polite"
+                              style={{
+                                padding: 'var(--space-md)',
+                                marginBottom: 'var(--space-md)',
+                                borderColor: atResults.diagnostics.state === 'PROVIDER_DATA_REJECTED'
+                                  ? 'rgba(245, 158, 11, 0.35)'
+                                  : 'var(--ds-border)',
+                              }}
+                          >
+                            <div
+                                className="grid"
+                                style={{
+                                  gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+                                  gap: 'var(--space-sm)',
+                                }}
+                            >
+                              <div>
+                                <strong>{atResults.diagnostics.providerReportedItemCount ?? 0}</strong>
+                                <div className="stat-card-label">Bản ghi từ nhà cung cấp</div>
+                              </div>
+                              <div>
+                                <strong>{atResults.diagnostics.extractedItemCount ?? 0}</strong>
+                                <div className="stat-card-label">Đã trích xuất</div>
+                              </div>
+                              <div>
+                                <strong>{atResults.diagnostics.normalizedItemCount ?? 0}</strong>
+                                <div className="stat-card-label">Đã chuẩn hoá</div>
+                              </div>
+                              <div>
+                                <strong>{atResults.diagnostics.returnedCount ?? atResults.items.length}</strong>
+                                <div className="stat-card-label">Đang hiển thị</div>
+                              </div>
+                            </div>
+
+                            {atResults.diagnostics.state === 'PROVIDER_DATA_REJECTED' && (
+                                <p style={{ marginTop: 'var(--space-sm)', color: 'var(--color-warning)' }}>
+                                  AccessTrade đã trả dữ liệu, nhưng không có bản ghi nào vượt qua bước chuẩn hoá và bộ lọc hiện tại.
+                                </p>
+                            )}
+
+                            {Object.keys(atResults.diagnostics.rejectedByReason || {}).length > 0 && (
+                                <details style={{ marginTop: 'var(--space-sm)' }}>
+                                  <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                                    Xem số bản ghi bị loại theo lý do
+                                  </summary>
+                                  <div className="flex gap-xs" style={{ flexWrap: 'wrap', marginTop: 'var(--space-xs)' }}>
+                                    {Object.entries(atResults.diagnostics.rejectedByReason || {}).map(([reason, count]) => (
+                                        <span className="badge badge-neutral" key={reason}>
+                                          {reason}: {count}
+                                        </span>
+                                    ))}
+                                  </div>
+                                </details>
+                            )}
+                          </div>
+                      )}
+
                       {/* Summary */}
                       <div
                           className="grid"
@@ -2061,10 +2211,14 @@ export default function ProductSourcesPage() {
                               AT
                             </div>
                             <div className="empty-state-title">
-                              Không tìm thấy kết quả
+                              {atResults.diagnostics?.state === 'PROVIDER_DATA_REJECTED'
+                                ? 'Dữ liệu nguồn chưa vượt qua bước chuẩn hoá'
+                                : 'AccessTrade không trả về kết quả phù hợp'}
                             </div>
                             <div className="empty-state-desc">
-                              Thử thay đổi từ khoá hoặc bộ lọc.
+                              {atResults.diagnostics?.state === 'PROVIDER_DATA_REJECTED'
+                                ? `Nhà cung cấp trả ${atResults.diagnostics.providerReportedItemCount ?? atResults.diagnostics.rawItemCount ?? 0} bản ghi, nhưng hiện có 0 bản ghi hợp lệ để hiển thị. Mở phần lý do phía trên để kiểm tra.`
+                                : 'Thử thay đổi từ khoá hoặc bộ lọc.'}
                             </div>
                           </div>
                       )}
@@ -2076,6 +2230,7 @@ export default function ProductSourcesPage() {
           {/* ====== SHOPEE TAB ====== */}
           {activeTab === 'shopee' &&
               renderPlaceholderTab(
+                  'shopee',
                   'SP',
                   'Tiếp thị liên kết Shopee',
                   'Nguồn tiếp thị liên kết Shopee sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm liên kết Shopee thủ công vào hàng chờ an toàn.',
@@ -2085,6 +2240,7 @@ export default function ProductSourcesPage() {
           {/* ====== TIKTOK TAB ====== */}
           {activeTab === 'tiktok' &&
               renderPlaceholderTab(
+                  'tiktok',
                   'TK',
                   'Tiếp thị liên kết TikTok Shop',
                   'Nguồn tiếp thị liên kết TikTok Shop sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm liên kết sản phẩm thủ công.',
@@ -2094,6 +2250,7 @@ export default function ProductSourcesPage() {
           {/* ====== LAZADA TAB ====== */}
           {activeTab === 'lazada' &&
               renderPlaceholderTab(
+                  'lazada',
                   'LZ',
                   'Tiếp thị liên kết Lazada',
                   'Nguồn tiếp thị liên kết Lazada sẽ được kết nối ở bước sau.',
@@ -2103,6 +2260,9 @@ export default function ProductSourcesPage() {
           {/* ====== CSV TAB ====== */}
           {activeTab === 'csv' && (
               <div
+                  id="product-source-panel-csv"
+                  role="tabpanel"
+                  aria-labelledby="product-source-tab-csv"
                   className="coming-soon-container"
                   style={{ minHeight: 'auto', padding: 'var(--space-xl) 0' }}
               >
@@ -2137,6 +2297,7 @@ export default function ProductSourcesPage() {
           {/* ====== OTHER TAB ====== */}
           {activeTab === 'other' &&
               renderPlaceholderTab(
+                  'other',
                   '+',
                   'Nguồn khác',
                   'Bạn có thể thêm sản phẩm từ bất kỳ nguồn nào bằng cách nhập thủ công. Giao diện tích hợp nội bộ (API) sẽ được hoàn thiện ở bước sau.',

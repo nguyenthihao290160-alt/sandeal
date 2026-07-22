@@ -24,16 +24,21 @@ const RECALCULATED_REASONS = new Set([
   'invalid_title',
   'invalid_slug',
   'missing_product_url',
+  'invalid_product_url_source',
   'product_url_unhealthy',
   'product_health_stale',
   'missing_affiliate_url',
+  'invalid_affiliate_url_source',
   'affiliate_url_unhealthy',
   'affiliate_health_stale',
   'affiliate_provenance_missing',
   'missing_image',
+  'invalid_image_url_source',
+  'image_https_required',
   'image_unhealthy',
   'image_health_stale',
   'missing_price',
+  'invalid_price_source',
   'price_unverified',
   'price_stale',
   'source_unverified',
@@ -74,6 +79,15 @@ function validHttpUrl(value?: string): boolean {
   try {
     const parsed = new URL(value || '');
     return Boolean(parsed.hostname) && (parsed.protocol === 'http:' || parsed.protocol === 'https:');
+  } catch {
+    return false;
+  }
+}
+
+function secureHttpsUrl(value?: string): boolean {
+  try {
+    const parsed = new URL(value || '');
+    return Boolean(parsed.hostname) && parsed.protocol === 'https:';
   } catch {
     return false;
   }
@@ -128,16 +142,21 @@ export function eligibilityBlockerMessage(reason: string): string {
     merchant_quarantined_30shinestore: 'Merchant 30shinestore đang được quarantine mềm.',
     source_unverified: 'Nguồn sản phẩm chưa được xác minh.',
     missing_product_url: 'Thiếu Product URL hợp lệ.',
+    invalid_product_url_source: 'Nguồn có Product URL nhưng định dạng không hợp lệ.',
     product_url_unhealthy: 'Product URL chưa khỏe.',
     product_health_stale: 'Kết quả Product URL đã stale hoặc chưa có.',
     missing_affiliate_url: 'Thiếu Affiliate URL hợp lệ.',
+    invalid_affiliate_url_source: 'Nguồn có Affiliate URL nhưng định dạng không hợp lệ.',
     affiliate_url_unhealthy: 'Affiliate URL chưa khỏe.',
     affiliate_health_stale: 'Kết quả Affiliate URL đã stale hoặc chưa có.',
     affiliate_provenance_missing: 'Affiliate URL AccessTrade thiếu provenance API/field allowlist.',
     missing_image: 'Thiếu ảnh hợp lệ.',
+    invalid_image_url_source: 'Nguồn có URL ảnh nhưng định dạng không hợp lệ.',
+    image_https_required: 'Ảnh nguồn dùng HTTP; cần URL HTTPS đã kiểm tra trước khi public.',
     image_unhealthy: 'Ảnh chưa khỏe.',
     image_health_stale: 'Kết quả kiểm tra ảnh đã stale hoặc chưa có.',
     missing_price: 'Giá không hợp lệ.',
+    invalid_price_source: 'Nguồn có giá nhưng định dạng giá không hợp lệ.',
     price_unverified: 'Giá chưa có mốc xác minh.',
     price_stale: 'Giá đã stale hoặc có xung đột.',
     review_quality_unready: 'Review chưa vượt cổng chất lượng deterministic.',
@@ -166,6 +185,7 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
   const reviewQuality = evaluateReviewQuality(product, now);
   const canonicalProductUrl = product.canonicalProductUrl || product.originalUrl;
+  const normalizationIssues = new Set(product.sourceNormalizationIssues || []);
   const isThirtyShine = urlContainsDomain(canonicalProductUrl, '30shinestore.com')
     || urlContainsDomain(product.affiliateUrl, '30shinestore.com');
 
@@ -176,7 +196,11 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (!String(product.slug || '').trim()) dataBlockers.push('invalid_slug');
   if (product.verifiedSource !== true && product.sourceVerified !== true) dataBlockers.push('source_unverified');
 
-  if (!validHttpUrl(canonicalProductUrl)) dataBlockers.push('missing_product_url');
+  if (!validHttpUrl(canonicalProductUrl)) {
+    dataBlockers.push(normalizationIssues.has('INVALID_CANONICAL_URL')
+      || product.fieldProvenance?.canonicalProductUrl?.verificationStatus === 'INVALID'
+      ? 'invalid_product_url_source' : 'missing_product_url');
+  }
   if (!GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''))) dataBlockers.push('product_url_unhealthy');
   if (!checkedRecently(product.linkLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now)) dataBlockers.push('product_health_stale');
   if (product.canonicalUrlStatus !== 'verified') dataBlockers.push('canonical_url_unverified');
@@ -187,7 +211,11 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
     || !product.canonicalUrlSourceField
     || !(ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(product.canonicalUrlSourceField)
   )) dataBlockers.push('canonical_provenance_missing');
-  if (!validHttpUrl(product.affiliateUrl)) dataBlockers.push('missing_affiliate_url');
+  if (!validHttpUrl(product.affiliateUrl)) {
+    dataBlockers.push(normalizationIssues.has('INVALID_AFFILIATE_URL')
+      || product.fieldProvenance?.affiliateUrl?.verificationStatus === 'INVALID'
+      ? 'invalid_affiliate_url_source' : 'missing_affiliate_url');
+  }
   if (!GOOD_HEALTH.has(String(product.affiliateHealthStatus || ''))) dataBlockers.push('affiliate_url_unhealthy');
   if (!checkedRecently(product.affiliateLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now)) dataBlockers.push('affiliate_health_stale');
   if (product.affiliateUrlStatus !== 'verified') dataBlockers.push('affiliate_url_unverified');
@@ -200,14 +228,23 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
     || product.deepLinkSupported === false
   )) dataBlockers.push('affiliate_provenance_missing');
 
-  if (!validHttpUrl(product.imageUrl)) dataBlockers.push('missing_image');
+  if (!validHttpUrl(product.imageUrl)) {
+    dataBlockers.push(normalizationIssues.has('INVALID_IMAGE_URL')
+      || product.fieldProvenance?.imageUrl?.verificationStatus === 'INVALID'
+      ? 'invalid_image_url_source' : 'missing_image');
+  }
+  if (validHttpUrl(product.imageUrl) && !secureHttpsUrl(product.imageUrl)) dataBlockers.push('image_https_required');
   if (!GOOD_HEALTH.has(String(product.imageHealthStatus || ''))) dataBlockers.push('image_unhealthy');
   if (!checkedRecently(product.imageLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now)) dataBlockers.push('image_health_stale');
   if (product.imageUrlHttpStatus !== 200) dataBlockers.push('image_http_not_200');
   if (!String(product.imageContentType || '').toLowerCase().startsWith('image/')) dataBlockers.push('image_content_type_invalid');
 
   const price = Number(product.salePrice || product.price || 0);
-  if (!Number.isFinite(price) || price <= 0 || product.currency !== 'VND') dataBlockers.push('missing_price');
+  if (!Number.isFinite(price) || price <= 0 || product.currency !== 'VND') {
+    dataBlockers.push(normalizationIssues.has('INVALID_PRICE')
+      || product.fieldProvenance?.price?.verificationStatus === 'INVALID'
+      ? 'invalid_price_source' : 'missing_price');
+  }
   const priceObserved = Date.parse(product.priceObservedAt || '');
   const priceVerified = product.priceVerificationStatus === 'VERIFIED'
     || (product.priceVerificationStatus === undefined && product.priceTruthState === 'FRESH' && Number.isFinite(priceObserved));

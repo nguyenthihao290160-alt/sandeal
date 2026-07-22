@@ -22,7 +22,14 @@ export default function ProductImage({
   sizes?: string;
   fallbackLabel?: string | null;
 }) {
-  const cleanSrc = typeof src === 'string' ? src.trim() : '';
+  const source = typeof src === 'string' ? src.trim() : '';
+  let cleanSrc = '';
+  try {
+    const parsed = new URL(source);
+    if (parsed.protocol === 'https:') cleanSrc = parsed.href;
+  } catch {
+    if (source.startsWith('/') && !source.startsWith('//')) cleanSrc = source;
+  }
   const [failedSrc, setFailedSrc] = useState('');
   const initials = String(fallbackLabel || alt || 'SanDeal').trim().split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join('') || 'SD';
 

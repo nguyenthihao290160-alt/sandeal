@@ -542,20 +542,28 @@ async function recheckHealth(job: AutomationJob) {
       await startReprocessAudit(job, product);
       const retryTimes: string[] = [];
       const failureReasons: string[] = [];
+      const normalizationIssues = new Set(product.sourceNormalizationIssues || []);
       const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
       let affiliateUrlHealthy = !checkAffiliate && goodHealth.has(String(product.affiliateHealthStatus || ''));
       const effectivePrice = product.salePrice || product.price;
       const priceObservedAt = Date.parse(product.priceObservedAt || product.sourceFetchedAt || '');
       const priceStale = Number.isFinite(priceObservedAt) && Date.now() - priceObservedAt > 7 * 24 * 60 * 60_000;
-      updates.priceVerificationStatus = !effectivePrice ? 'MISSING'
+      const invalidSourcePrice = !effectivePrice && (
+        normalizationIssues.has('INVALID_PRICE')
+        || product.fieldProvenance?.price?.verificationStatus === 'INVALID'
+      );
+      updates.priceVerificationStatus = !effectivePrice ? invalidSourcePrice ? 'INVALID' : 'MISSING'
         : priceStale ? 'STALE'
           : product.priceVerificationStatus === 'VERIFIED' ? 'VERIFIED' : 'UNVERIFIED';
       setFieldProvenance(product, updates, 'price', {
-        value: effectivePrice,
+        value: effectivePrice ?? product.fieldProvenance?.price?.value,
         verificationStatus: updates.priceVerificationStatus,
-        verificationReason: !effectivePrice ? 'PRICE_MISSING' : priceStale ? 'PRICE_STALE' : product.priceVerificationStatus === 'VERIFIED' ? undefined : 'PRICE_SOURCE_OBSERVATION_NOT_INDEPENDENTLY_VERIFIED',
+        verificationReason: !effectivePrice
+          ? invalidSourcePrice ? 'PRICE_FORMAT_INVALID' : 'PRICE_MISSING'
+          : priceStale ? 'PRICE_STALE'
+            : product.priceVerificationStatus === 'VERIFIED' ? undefined : 'PRICE_SOURCE_OBSERVATION_NOT_INDEPENDENTLY_VERIFIED',
       });
-      if (!effectivePrice) failureReasons.push('price:missing');
+      if (!effectivePrice) failureReasons.push(invalidSourcePrice ? 'price:invalid' : 'price:missing');
       else if (updates.priceVerificationStatus !== 'VERIFIED') failureReasons.push(`price:${updates.priceVerificationStatus.toLowerCase()}`);
 
       const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
@@ -602,14 +610,23 @@ async function recheckHealth(job: AutomationJob) {
         else externalRequests += 1;
         await assertJobMayContinue(job);
       } else if (checkLinks) {
+        const invalidSourceUrl = normalizationIssues.has('INVALID_CANONICAL_URL')
+          || product.fieldProvenance?.canonicalProductUrl?.verificationStatus === 'INVALID';
         updates.linkHealthStatus = 'error';
         updates.linkLastCheckedAt = new Date().toISOString();
-        updates.productUrlHealthReason = 'Thiếu product URL hợp lệ.';
-        updates.productUrlErrorCode = 'MISSING_PRODUCT_URL';
+        updates.productUrlHealthReason = invalidSourceUrl
+          ? 'Nguồn có product URL nhưng định dạng không hợp lệ.'
+          : 'Thiếu product URL hợp lệ.';
+        updates.productUrlErrorCode = invalidSourceUrl ? 'INVALID_PRODUCT_URL' : 'MISSING_PRODUCT_URL';
         updates.productUrlTimedOut = false;
         updates.canonicalUrlVerifiedAt = undefined;
-        updates.canonicalUrlStatus = 'unavailable';
-        failureReasons.push('link:missing');
+        updates.canonicalUrlStatus = invalidSourceUrl ? 'invalid' : 'unavailable';
+        setFieldProvenance(product, updates, 'canonicalProductUrl', {
+          value: product.fieldProvenance?.canonicalProductUrl?.value,
+          verificationStatus: invalidSourceUrl ? 'INVALID' : 'MISSING',
+          verificationReason: updates.productUrlHealthReason,
+        });
+        failureReasons.push(invalidSourceUrl ? 'link:invalid' : 'link:missing');
       }
 
       const support = accessTradeAffiliateSupport(product);
@@ -677,16 +694,25 @@ async function recheckHealth(job: AutomationJob) {
         });
         failureReasons.push('affiliate:provenance_required');
       } else if (checkAffiliate) {
+        const invalidSourceAffiliate = normalizationIssues.has('INVALID_AFFILIATE_URL')
+          || product.fieldProvenance?.affiliateUrl?.verificationStatus === 'INVALID';
         affiliateUrlHealthy = false;
         updates.affiliateHealthStatus = 'error';
         updates.affiliateLastCheckedAt = new Date().toISOString();
-        updates.affiliateUrlHealthReason = 'Nhà cung cấp không trả về tracking URL/deep-link.';
-        updates.affiliateUrlErrorCode = 'MISSING_AFFILIATE_URL';
+        updates.affiliateUrlHealthReason = invalidSourceAffiliate
+          ? 'Nhà cung cấp trả tracking URL/deep-link không đúng định dạng.'
+          : 'Nhà cung cấp không trả về tracking URL/deep-link.';
+        updates.affiliateUrlErrorCode = invalidSourceAffiliate ? 'INVALID_AFFILIATE_URL' : 'MISSING_AFFILIATE_URL';
         updates.affiliateUrlTimedOut = false;
         updates.affiliateUrlVerifiedAt = undefined;
-        updates.affiliateUrlStatus = 'unavailable';
-        updates.affiliateLinkErrors = 'Nhà cung cấp không trả về tracking URL/deep-link.';
-        failureReasons.push('affiliate:missing');
+        updates.affiliateUrlStatus = invalidSourceAffiliate ? 'invalid' : 'unavailable';
+        updates.affiliateLinkErrors = updates.affiliateUrlHealthReason;
+        setFieldProvenance(product, updates, 'affiliateUrl', {
+          value: product.fieldProvenance?.affiliateUrl?.value,
+          verificationStatus: invalidSourceAffiliate ? 'INVALID' : 'MISSING',
+          verificationReason: updates.affiliateUrlHealthReason,
+        });
+        failureReasons.push(invalidSourceAffiliate ? 'affiliate:invalid' : 'affiliate:missing');
       } else if (!support.supported) {
         affiliateUrlHealthy = false;
       }
@@ -730,13 +756,22 @@ async function recheckHealth(job: AutomationJob) {
         externalRequests += checkedImages.resolution.attempts;
         await assertJobMayContinue(job);
       } else if (checkImages) {
+        const invalidSourceImage = normalizationIssues.has('INVALID_IMAGE_URL')
+          || product.fieldProvenance?.imageUrl?.verificationStatus === 'INVALID';
         updates.imageHealthStatus = 'error';
         updates.imageLastCheckedAt = new Date().toISOString();
         updates.imageValidationState = 'BROKEN';
         updates.imageUrlHttpStatus = undefined;
         updates.imageUrlFinalUrl = undefined;
-        updates.imageUrlHealthReason = 'Thiếu image URL hợp lệ.';
-        failureReasons.push('image:missing');
+        updates.imageUrlHealthReason = invalidSourceImage
+          ? 'Nguồn có image URL nhưng định dạng không hợp lệ.'
+          : 'Thiếu image URL hợp lệ.';
+        setFieldProvenance(product, updates, 'imageUrl', {
+          value: product.fieldProvenance?.imageUrl?.value,
+          verificationStatus: invalidSourceImage ? 'INVALID' : 'MISSING',
+          verificationReason: updates.imageUrlHealthReason,
+        });
+        failureReasons.push(invalidSourceImage ? 'image:invalid' : 'image:missing');
       }
 
       const isThirtyShine = urlContainsDomain(canonicalUrl, '30shinestore.com')

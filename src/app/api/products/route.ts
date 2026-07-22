@@ -23,17 +23,58 @@ function validHttpUrl(value: unknown): boolean {
 }
 
 const SOURCE_SECRET_KEY = /token|secret|password|cookie|authorization|api[_-]?key|credential/i;
+const SOURCE_PAYLOAD_MAX_BYTES = 32 * 1024;
 
-function sanitizeSourcePayload(value: unknown, depth = 0): unknown {
-  if (depth > 5) return '[truncated]';
+function sanitizeSourceValue(value: unknown, depth = 0): unknown {
+  if (depth > 2) return '[truncated]';
   if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.slice(0, 2_000);
-  if (Array.isArray(value)) return value.slice(0, 50).map(item => sanitizeSourcePayload(item, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 20).map(item => sanitizeSourceValue(item, depth + 1));
   if (!value || typeof value !== 'object') return undefined;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
     .filter(([key]) => !SOURCE_SECRET_KEY.test(key))
-    .slice(0, 100)
-    .map(([key, item]) => [key, sanitizeSourcePayload(item, depth + 1)]));
+    .slice(0, 64)
+    .map(([key, item]) => [key.slice(0, 120), sanitizeSourceValue(item, depth + 1)]));
+}
+
+function serializedBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function sanitizeSourcePayload(value: unknown): unknown {
+  const sanitized = sanitizeSourceValue(value);
+  if (serializedBytes(sanitized) <= SOURCE_PAYLOAD_MAX_BYTES) return sanitized;
+  if (Array.isArray(sanitized)) {
+    const bounded: unknown[] = [];
+    for (const item of sanitized) {
+      if (serializedBytes([...bounded, item]) > SOURCE_PAYLOAD_MAX_BYTES) break;
+      bounded.push(item);
+    }
+    return bounded;
+  }
+  if (sanitized && typeof sanitized === 'object') {
+    const bounded: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(sanitized as Record<string, unknown>)) {
+      const next = { ...bounded, [key]: item };
+      if (serializedBytes(next) > SOURCE_PAYLOAD_MAX_BYTES) continue;
+      bounded[key] = item;
+    }
+    return bounded;
+  }
+  return undefined;
+}
+
+function sourceEvidenceText(rawData: Record<string, unknown> | undefined, fields: readonly string[]): { value?: string; field?: string } {
+  for (const field of fields) {
+    const value = rawData?.[field];
+    if (typeof value === 'string' && value.trim()) return { value: value.trim().slice(0, 4_096), field };
+    if (typeof value === 'number' && Number.isFinite(value)) return { value: String(value), field };
+  }
+  return {};
 }
 
 function isoDate(value: unknown): string | undefined {
@@ -134,6 +175,20 @@ export async function POST(request: NextRequest) {
 
     const source = (body.source as ProductSource) || 'manual';
     const accessTrade = source === 'accesstrade' && body.platform === 'accesstrade';
+    const sanitizedRawSource = sanitizeSourcePayload(body.rawData);
+    const rawData = sanitizedRawSource && typeof sanitizedRawSource === 'object' && !Array.isArray(sanitizedRawSource)
+      ? sanitizedRawSource as Record<string, unknown>
+      : undefined;
+    const canonicalEvidence = accessTrade
+      ? sourceEvidenceText(rawData, ['url', 'link', 'productUrl', 'product_url'])
+      : {};
+    const affiliateEvidence = accessTrade ? sourceEvidenceText(rawData, ['aff_link']) : {};
+    const imageEvidence = accessTrade
+      ? sourceEvidenceText(rawData, ['image', 'image_url', 'imageUrl', 'productImage', 'product_image'])
+      : {};
+    const priceEvidence = accessTrade
+      ? sourceEvidenceText(rawData, ['price', 'sale_price', 'salePrice', 'currentPrice', 'current_price'])
+      : {};
     const originalUrl = typeof body.originalUrl === 'string' ? body.originalUrl : undefined;
     const affiliateUrl = typeof body.affiliateUrl === 'string' ? body.affiliateUrl : undefined;
     const canonicalUrlSourceField = accessTrade && ['url', 'link'].includes(String(body.canonicalUrlSourceField || ''))
@@ -149,8 +204,11 @@ export async function POST(request: NextRequest) {
       : typeof body.sourceId === 'string' ? body.sourceId.trim().slice(0, 240) : undefined;
     const verifiedSource = Boolean(accessTrade && body.sourceVerified === true && sourceItemId && sourceEndpoint && canonicalUrlSourceField);
     const imageUrl = normalizeAccessTradeImageUrl(body.imageUrl);
-    const fetchedPrice = body.salePrice !== undefined && body.salePrice !== '' ? Number(body.salePrice)
+    const suppliedPrice = body.salePrice !== undefined && body.salePrice !== '' ? Number(body.salePrice)
       : body.price !== undefined && body.price !== '' ? Number(body.price) : undefined;
+    const fetchedPrice = suppliedPrice !== undefined && Number.isFinite(suppliedPrice) && suppliedPrice > 0
+      ? suppliedPrice
+      : undefined;
     const decodedAffiliateDestination = extractAccessTradeAffiliateDestination(affiliateUrl);
     const suppliedAffiliateDestination = typeof body.affiliateDestinationUrl === 'string' && validHttpUrl(body.affiliateDestinationUrl)
       ? body.affiliateDestinationUrl
@@ -172,7 +230,7 @@ export async function POST(request: NextRequest) {
       canonicalUrlSourceEndpoint: sourceEndpoint,
       canonicalUrlSourceField,
       canonicalUrlFetchedAt: sourceFetchedAt,
-      canonicalUrlStatus: originalUrl ? 'unverified' : 'unavailable',
+      canonicalUrlStatus: originalUrl ? 'unverified' : canonicalEvidence.value ? 'invalid' : 'unavailable',
       affiliateUrl,
       affiliateDestinationUrl,
       affiliateUrlSource: body.affiliateUrlSource === 'provider_api' ? 'provider_api' : body.affiliateUrlSource === 'manual' ? 'manual' : 'none',
@@ -181,7 +239,7 @@ export async function POST(request: NextRequest) {
       affiliateUrlSourceField,
       affiliateUrlCampaignId: typeof body.affiliateUrlCampaignId === 'string' ? body.affiliateUrlCampaignId.slice(0, 240) : undefined,
       affiliateUrlFetchedAt: sourceFetchedAt,
-      affiliateUrlStatus: affiliateUrl ? 'unverified' : 'unavailable',
+      affiliateUrlStatus: affiliateUrl ? 'unverified' : affiliateEvidence.value ? 'invalid' : 'unavailable',
       deepLinkSupported: typeof body.deepLinkSupported === 'boolean' ? body.deepLinkSupported : undefined,
       affiliateLinkReason: typeof body.affiliateLinkReason === 'string' ? body.affiliateLinkReason.slice(0, 240) : undefined,
       imageUrl: imageUrl || undefined,
@@ -189,7 +247,7 @@ export async function POST(request: NextRequest) {
       price: body.price !== undefined && body.price !== '' ? Number(body.price) : undefined,
       salePrice: body.salePrice !== undefined && body.salePrice !== '' ? Number(body.salePrice) : undefined,
       currency: 'VND',
-      priceVerificationStatus: fetchedPrice === undefined ? 'MISSING' : 'UNVERIFIED',
+      priceVerificationStatus: fetchedPrice !== undefined ? 'UNVERIFIED' : priceEvidence.value ? 'INVALID' : 'MISSING',
       priceObservedAt: sourceFetchedAt,
       priceNote: typeof body.priceNote === 'string' ? body.priceNote : undefined,
       category: typeof body.category === 'string' ? body.category : undefined,
@@ -218,13 +276,63 @@ export async function POST(request: NextRequest) {
       importedFrom: typeof body.importedFrom === 'string' ? body.importedFrom.slice(0, 80) : undefined,
       merchant: typeof body.merchant === 'string' ? body.merchant.slice(0, 240) : undefined,
       merchantDomain: typeof body.merchantDomain === 'string' ? body.merchantDomain.toLowerCase().slice(0, 240) : undefined,
+      shopId: typeof body.shopId === 'string' ? body.shopId.trim().slice(0, 240) : undefined,
+      shopName: typeof body.shopName === 'string' ? body.shopName.trim().slice(0, 240) : undefined,
+      sku: typeof body.sku === 'string' ? body.sku.trim().slice(0, 240) : undefined,
+      providerUpdatedAt: isoDate(body.providerUpdatedAt),
+      sourceNormalizationIssues: Array.isArray(body.sourceNormalizationIssues)
+        ? body.sourceNormalizationIssues
+            .filter((issue): issue is string => typeof issue === 'string')
+            .slice(0, 16)
+            .map((issue) => issue.slice(0, 80))
+        : [],
       sourceQualityScore: Number.isFinite(Number(body.sourceQualityScore)) ? Math.max(0, Math.min(100, Number(body.sourceQualityScore))) : undefined,
-      rawData: sanitizeSourcePayload(body.rawData) as Record<string, unknown> | undefined,
+      rawData,
       fieldProvenance: {
-        canonicalProductUrl: { value: originalUrl, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: canonicalUrlSourceField, fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: originalUrl ? 'UNVERIFIED' : 'MISSING' },
-        affiliateUrl: { value: affiliateUrl, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: affiliateUrlSourceField, fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: affiliateUrl ? 'UNVERIFIED' : 'MISSING' },
-        imageUrl: { value: imageUrl || undefined, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: typeof body.imageSourceField === 'string' ? body.imageSourceField.slice(0, 80) : 'image', fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: imageUrl ? 'UNVERIFIED' : 'MISSING' },
-        price: { value: fetchedPrice, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: body.salePrice !== undefined && body.salePrice !== '' ? 'salePrice' : 'price', fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: fetchedPrice === undefined ? 'MISSING' : 'UNVERIFIED' },
+        canonicalProductUrl: {
+          value: originalUrl || canonicalEvidence.value,
+          source,
+          provider: accessTrade ? 'accesstrade' : source,
+          endpoint: sourceEndpoint,
+          sourceField: canonicalUrlSourceField || canonicalEvidence.field,
+          fetchedAt: sourceFetchedAt,
+          canonicalizedAt: originalUrl ? new Date().toISOString() : undefined,
+          verificationStatus: originalUrl ? 'UNVERIFIED' : canonicalEvidence.value ? 'INVALID' : 'MISSING',
+          verificationReason: originalUrl ? undefined : canonicalEvidence.value ? 'CANONICAL_URL_FORMAT_INVALID' : 'CANONICAL_URL_MISSING',
+        },
+        affiliateUrl: {
+          value: affiliateUrl || affiliateEvidence.value,
+          source,
+          provider: accessTrade ? 'accesstrade' : source,
+          endpoint: sourceEndpoint,
+          sourceField: affiliateUrlSourceField || affiliateEvidence.field,
+          fetchedAt: sourceFetchedAt,
+          canonicalizedAt: affiliateUrl ? new Date().toISOString() : undefined,
+          verificationStatus: affiliateUrl ? 'UNVERIFIED' : affiliateEvidence.value ? 'INVALID' : 'MISSING',
+          verificationReason: affiliateUrl ? undefined : affiliateEvidence.value ? 'AFFILIATE_URL_FORMAT_INVALID' : 'AFFILIATE_URL_MISSING',
+        },
+        imageUrl: {
+          value: imageUrl || imageEvidence.value,
+          source,
+          provider: accessTrade ? 'accesstrade' : source,
+          endpoint: sourceEndpoint,
+          sourceField: typeof body.imageSourceField === 'string' ? body.imageSourceField.slice(0, 80) : imageEvidence.field || 'image',
+          fetchedAt: sourceFetchedAt,
+          canonicalizedAt: imageUrl ? new Date().toISOString() : undefined,
+          verificationStatus: imageUrl ? 'UNVERIFIED' : imageEvidence.value ? 'INVALID' : 'MISSING',
+          verificationReason: imageUrl ? undefined : imageEvidence.value ? 'IMAGE_URL_FORMAT_INVALID' : 'IMAGE_URL_MISSING',
+        },
+        price: {
+          value: fetchedPrice ?? priceEvidence.value,
+          source,
+          provider: accessTrade ? 'accesstrade' : source,
+          endpoint: sourceEndpoint,
+          sourceField: body.salePrice !== undefined && body.salePrice !== '' ? 'salePrice' : priceEvidence.field || 'price',
+          fetchedAt: sourceFetchedAt,
+          canonicalizedAt: fetchedPrice !== undefined ? new Date().toISOString() : undefined,
+          verificationStatus: fetchedPrice !== undefined ? 'UNVERIFIED' : priceEvidence.value ? 'INVALID' : 'MISSING',
+          verificationReason: fetchedPrice !== undefined ? undefined : priceEvidence.value ? 'PRICE_FORMAT_INVALID' : 'PRICE_MISSING',
+        },
       },
       // Manual creation can never bypass the review/publication transaction.
       status: 'needs_review',

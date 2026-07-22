@@ -117,6 +117,27 @@ function emptyAccessTradeResult(message: string) {
       publicEligibleProducts: 0,
       blockedFromPublic: 0,
     },
+    requests: [],
+    diagnostics: {
+      state: 'PROVIDER_EMPTY' as const,
+      providerResultType: 'success_empty' as const,
+      providerReportedItemCount: 0,
+      rawItemCount: 0,
+      extractedItemCount: 0,
+      normalizedItemCount: 0,
+      classifiedProductCount: 0,
+      classifiedVoucherCount: 0,
+      classifiedCampaignCount: 0,
+      classifiedStoreOfferCount: 0,
+      classifiedUnknownCount: 0,
+      returnedCount: 0,
+      rejectedCount: 0,
+      duplicateCount: 0,
+      filteredCount: 0,
+      limitedCount: 0,
+      rejectedByReason: {},
+      reviewByReason: {},
+    },
   };
 }
 
