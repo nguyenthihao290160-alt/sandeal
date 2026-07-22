@@ -2,13 +2,14 @@
 // API: Products — GET (list) + POST (create)
 // ===========================================
 
-import { type NextRequest } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
 import { listProducts, createProduct, DuplicateProductError } from '@/lib/storage/products';
 import { requirePermission } from '@/lib/auth';
 import type { ProductPlatform, ProductSource, ProductStatus, ProductKind, ProductRiskLevel } from '@/lib/types';
 import { PublicProductQueryError, queryPublicProducts } from '@/lib/product-intelligence/publicProducts';
 import { validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
+import { extractAccessTradeAffiliateDestination, normalizeAccessTradeImageUrl } from '@/lib/integrations/accesstrade';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,6 +20,25 @@ const RISK_LEVELS = new Set<ProductRiskLevel>(['low', 'medium', 'high', 'unknown
 
 function validHttpUrl(value: unknown): boolean {
   return validateExternalUrl(value).safe;
+}
+
+const SOURCE_SECRET_KEY = /token|secret|password|cookie|authorization|api[_-]?key|credential/i;
+
+function sanitizeSourcePayload(value: unknown, depth = 0): unknown {
+  if (depth > 5) return '[truncated]';
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.slice(0, 2_000);
+  if (Array.isArray(value)) return value.slice(0, 50).map(item => sanitizeSourcePayload(item, depth + 1));
+  if (!value || typeof value !== 'object') return undefined;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !SOURCE_SECRET_KEY.test(key))
+    .slice(0, 100)
+    .map(([key, item]) => [key, sanitizeSourcePayload(item, depth + 1)]));
+}
+
+function isoDate(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return undefined;
+  return new Date(value).toISOString();
 }
 
 export async function GET(request: NextRequest) {
@@ -112,22 +132,65 @@ export async function POST(request: NextRequest) {
       return [];
     };
 
+    const source = (body.source as ProductSource) || 'manual';
+    const accessTrade = source === 'accesstrade' && body.platform === 'accesstrade';
+    const originalUrl = typeof body.originalUrl === 'string' ? body.originalUrl : undefined;
+    const affiliateUrl = typeof body.affiliateUrl === 'string' ? body.affiliateUrl : undefined;
+    const canonicalUrlSourceField = accessTrade && ['url', 'link'].includes(String(body.canonicalUrlSourceField || ''))
+      ? String(body.canonicalUrlSourceField)
+      : undefined;
+    const affiliateUrlSourceField = accessTrade && body.affiliateUrlSourceField === 'aff_link' ? 'aff_link' : undefined;
+    const sourceEndpoint = accessTrade && ['datafeed', 'offers'].includes(String(body.sourceEndpoint || body.canonicalUrlSourceEndpoint || ''))
+      ? String(body.sourceEndpoint || body.canonicalUrlSourceEndpoint)
+      : undefined;
+    const sourceFetchedAt = isoDate(body.sourceFetchedAt || body.canonicalUrlFetchedAt || body.affiliateUrlFetchedAt);
+    const sourceItemId = typeof body.sourceItemId === 'string'
+      ? body.sourceItemId.trim().slice(0, 240)
+      : typeof body.sourceId === 'string' ? body.sourceId.trim().slice(0, 240) : undefined;
+    const verifiedSource = Boolean(accessTrade && body.sourceVerified === true && sourceItemId && sourceEndpoint && canonicalUrlSourceField);
+    const imageUrl = normalizeAccessTradeImageUrl(body.imageUrl);
+    const fetchedPrice = body.salePrice !== undefined && body.salePrice !== '' ? Number(body.salePrice)
+      : body.price !== undefined && body.price !== '' ? Number(body.price) : undefined;
+    const decodedAffiliateDestination = extractAccessTradeAffiliateDestination(affiliateUrl);
+    const suppliedAffiliateDestination = typeof body.affiliateDestinationUrl === 'string' && validHttpUrl(body.affiliateDestinationUrl)
+      ? body.affiliateDestinationUrl
+      : undefined;
+    // AccessTrade destinations must be derived from the provider tracking URL,
+    // never trusted from a parallel browser field that could disagree with it.
+    const affiliateDestinationUrl = accessTrade ? decodedAffiliateDestination : suppliedAffiliateDestination;
+
     const product = await createProduct({
       title: (body.title as string).trim(),
       description: typeof body.description === 'string' ? body.description : undefined,
       kind: (body.kind as ProductKind) || 'product',
       platform: body.platform as ProductPlatform,
-      source: (body.source as ProductSource) || 'manual',
-      originalUrl: typeof body.originalUrl === 'string' ? body.originalUrl : undefined,
-      affiliateUrl: typeof body.affiliateUrl === 'string' ? body.affiliateUrl : undefined,
+      source,
+      originalUrl,
+      canonicalProductUrl: originalUrl,
+      canonicalUrlSource: accessTrade && canonicalUrlSourceField ? 'provider_api' : source === 'manual' ? 'manual' : 'none',
+      canonicalUrlProvider: accessTrade && canonicalUrlSourceField ? 'accesstrade' : source === 'manual' ? 'manual' : undefined,
+      canonicalUrlSourceEndpoint: sourceEndpoint,
+      canonicalUrlSourceField,
+      canonicalUrlFetchedAt: sourceFetchedAt,
+      canonicalUrlStatus: originalUrl ? 'unverified' : 'unavailable',
+      affiliateUrl,
+      affiliateDestinationUrl,
       affiliateUrlSource: body.affiliateUrlSource === 'provider_api' ? 'provider_api' : body.affiliateUrlSource === 'manual' ? 'manual' : 'none',
-      deepLinkSupported: body.deepLinkSupported === true,
+      affiliateUrlProvider: accessTrade && affiliateUrlSourceField ? 'accesstrade' : source === 'manual' ? 'manual' : undefined,
+      affiliateUrlSourceEndpoint: sourceEndpoint,
+      affiliateUrlSourceField,
+      affiliateUrlCampaignId: typeof body.affiliateUrlCampaignId === 'string' ? body.affiliateUrlCampaignId.slice(0, 240) : undefined,
+      affiliateUrlFetchedAt: sourceFetchedAt,
+      affiliateUrlStatus: affiliateUrl ? 'unverified' : 'unavailable',
+      deepLinkSupported: typeof body.deepLinkSupported === 'boolean' ? body.deepLinkSupported : undefined,
       affiliateLinkReason: typeof body.affiliateLinkReason === 'string' ? body.affiliateLinkReason.slice(0, 240) : undefined,
-      imageUrl: typeof body.imageUrl === 'string' ? body.imageUrl : undefined,
+      imageUrl: imageUrl || undefined,
       gallery: parseMultiline(body.gallery),
       price: body.price !== undefined && body.price !== '' ? Number(body.price) : undefined,
       salePrice: body.salePrice !== undefined && body.salePrice !== '' ? Number(body.salePrice) : undefined,
       currency: 'VND',
+      priceVerificationStatus: fetchedPrice === undefined ? 'MISSING' : 'UNVERIFIED',
+      priceObservedAt: sourceFetchedAt,
       priceNote: typeof body.priceNote === 'string' ? body.priceNote : undefined,
       category: typeof body.category === 'string' ? body.category : undefined,
       tags,
@@ -142,19 +205,56 @@ export async function POST(request: NextRequest) {
       commissionNote: typeof body.commissionNote === 'string' ? body.commissionNote : undefined,
       affiliateDisclosure: typeof body.affiliateDisclosure === 'string' ? body.affiliateDisclosure : undefined,
       riskLevel: (body.riskLevel as ProductRiskLevel) || 'unknown',
+      externalId: sourceItemId,
+      sourceId: sourceItemId,
+      sourceItemId,
+      sourceEndpoint,
+      sourceFetchedAt,
+      sourceItemKind: (body.sourceItemKind as ProductKind) || (body.kind as ProductKind) || 'product',
+      rawSourceKind: typeof body.rawSourceKind === 'string' ? body.rawSourceKind.slice(0, 160) : undefined,
+      rawSourceType: typeof body.rawSourceType === 'string' ? body.rawSourceType.slice(0, 160) : undefined,
+      sourceType: typeof body.sourceType === 'string' ? body.sourceType.slice(0, 80) : undefined,
+      dataSource: typeof body.dataSource === 'string' ? body.dataSource.slice(0, 80) : undefined,
+      importedFrom: typeof body.importedFrom === 'string' ? body.importedFrom.slice(0, 80) : undefined,
+      merchant: typeof body.merchant === 'string' ? body.merchant.slice(0, 240) : undefined,
+      merchantDomain: typeof body.merchantDomain === 'string' ? body.merchantDomain.toLowerCase().slice(0, 240) : undefined,
+      sourceQualityScore: Number.isFinite(Number(body.sourceQualityScore)) ? Math.max(0, Math.min(100, Number(body.sourceQualityScore))) : undefined,
+      rawData: sanitizeSourcePayload(body.rawData) as Record<string, unknown> | undefined,
+      fieldProvenance: {
+        canonicalProductUrl: { value: originalUrl, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: canonicalUrlSourceField, fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: originalUrl ? 'UNVERIFIED' : 'MISSING' },
+        affiliateUrl: { value: affiliateUrl, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: affiliateUrlSourceField, fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: affiliateUrl ? 'UNVERIFIED' : 'MISSING' },
+        imageUrl: { value: imageUrl || undefined, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: typeof body.imageSourceField === 'string' ? body.imageSourceField.slice(0, 80) : 'image', fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: imageUrl ? 'UNVERIFIED' : 'MISSING' },
+        price: { value: fetchedPrice, source, provider: accessTrade ? 'accesstrade' : source, endpoint: sourceEndpoint, sourceField: body.salePrice !== undefined && body.salePrice !== '' ? 'salePrice' : 'price', fetchedAt: sourceFetchedAt, canonicalizedAt: new Date().toISOString(), verificationStatus: fetchedPrice === undefined ? 'MISSING' : 'UNVERIFIED' },
+      },
       // Manual creation can never bypass the review/publication transaction.
       status: 'needs_review',
       publicHidden: true,
       publicBlocked: true,
       autoPublished: false,
       needsVerification: true,
-      verifiedSource: false,
+      verifiedSource,
+      sourceVerified: verifiedSource,
     });
 
     return successResponse('Đã thêm sản phẩm thành công.', product, 201);
   } catch (err) {
     if (err instanceof DuplicateProductError) {
-      return errorResponse('Sản phẩm đã tồn tại.', err.code, 409);
+      return NextResponse.json({
+        ok: false,
+        code: err.code,
+        error: err.code,
+        message: err.mergeResult.updatedFields.length
+          ? 'Sản phẩm đã tồn tại; các trường nguồn còn thiếu đã được bổ sung an toàn.'
+          : 'Sản phẩm đã tồn tại.',
+        existingProductId: err.existingProductId,
+        existingProductUrl: err.existingProductUrl,
+        mergeResult: err.mergeResult,
+        data: {
+          existingProductId: err.existingProductId,
+          existingProductUrl: err.existingProductUrl,
+          mergeResult: err.mergeResult,
+        },
+      }, { status: 409 });
     }
     return serverErrorResponse('Không thể thêm sản phẩm.', err);
   }

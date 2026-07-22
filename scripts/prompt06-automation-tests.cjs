@@ -70,8 +70,10 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
   });
 
   await test('heartbeat gia hạn lease đúng worker', async () => {
-    await reset(); const created = await create({ idempotencyKey: 'heartbeat-job-01' }); await store.claimAutomationJobs('worker-heartbeat', 1, 100);
-    assert(await store.heartbeatAutomationJob(created.job.id, 'worker-heartbeat', 5000)); assert(!(await store.heartbeatAutomationJob(created.job.id, 'worker-other', 5000)));
+    await reset(); const created = await create({ idempotencyKey: 'heartbeat-job-01' }); const [claimed] = await store.claimAutomationJobs('worker-heartbeat', 1, 100);
+    assert(claimed?.claimToken); assert(await store.heartbeatAutomationJob(created.job.id, 'worker-heartbeat', 5000, claimed.claimToken));
+    assert(!(await store.heartbeatAutomationJob(created.job.id, 'worker-other', 5000, claimed.claimToken)));
+    assert(!(await store.heartbeatAutomationJob(created.job.id, 'worker-heartbeat', 5000)));
   });
 
   await test('lỗi tạm thời retry có giới hạn, lỗi xác thực không retry', async () => {

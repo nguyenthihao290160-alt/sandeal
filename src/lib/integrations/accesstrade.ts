@@ -52,6 +52,7 @@ export interface NormalizedAccessTradeItem {
   canonicalUrlFetchedAt?: string;
   canonicalUrlStatus?: 'available' | 'unavailable';
   affiliateUrl: string;
+  affiliateDestinationUrl?: string;
   affiliateUrlSource?: 'provider_api' | 'none';
   affiliateUrlProvider?: 'accesstrade';
   affiliateUrlSourceEndpoint?: 'datafeed' | 'offers';
@@ -66,6 +67,11 @@ export interface NormalizedAccessTradeItem {
   category: string;
   commissionRate?: number;
   campaignName?: string;
+  merchant?: string;
+  merchantDomain?: string;
+  sourceEndpoint?: 'datafeed' | 'offers';
+  sourceItemId?: string;
+  fetchedAt?: string;
   rawSourceKind: string;
 
   needsVerification: boolean;
@@ -452,7 +458,7 @@ export function normalizeAccessTradeItem(
     'promotion',
   ]);
 
-  const imageUrl = getFirstText(item, [
+  const imageUrl = normalizeAccessTradeImageUrl(getFirstText(item, [
     'productImage',
     'product_image',
     'image',
@@ -463,7 +469,7 @@ export function normalizeAccessTradeItem(
     'thumbnailUrl',
     'logo',
     'banner',
-  ]);
+  ]));
 
   // Collect ALL image URL candidates from raw payload for fallback logic
   const imageCandidates: string[] = [];
@@ -475,8 +481,9 @@ export function normalizeAccessTradeItem(
   ];
   for (const field of imageFieldOrder) {
     const val = getFirstText(item, [field]);
-    if (val && isValidHttpUrl(val) && !imageCandidates.includes(val)) {
-      imageCandidates.push(val);
+    const normalized = normalizeAccessTradeImageUrl(val);
+    if (normalized && !imageCandidates.includes(normalized)) {
+      imageCandidates.push(normalized);
     }
   }
   // Also extract from arrays like gallery/images if present
@@ -484,8 +491,9 @@ export function normalizeAccessTradeItem(
   if (Array.isArray(galleryField)) {
     for (const entry of galleryField) {
       const entryUrl = typeof entry === 'string' ? entry.trim() : (typeof entry === 'object' && entry ? String((entry as Record<string, unknown>).url ?? '') : '');
-      if (entryUrl && isValidHttpUrl(entryUrl) && !imageCandidates.includes(entryUrl)) {
-        imageCandidates.push(entryUrl);
+      const normalized = normalizeAccessTradeImageUrl(entryUrl);
+      if (normalized && !imageCandidates.includes(normalized)) {
+        imageCandidates.push(normalized);
       }
     }
   }
@@ -494,6 +502,7 @@ export function normalizeAccessTradeItem(
   const originalUrl = canonicalResolution.canonicalProductUrl;
   const affiliateResolution = resolveAccessTradeAffiliateUrl(item);
   const affiliateUrl = affiliateResolution.affiliateUrl;
+  const affiliateDestinationUrl = extractAccessTradeAffiliateDestination(affiliateUrl);
 
   const category = getFirstText(item, [
     'cate',
@@ -646,6 +655,7 @@ export function normalizeAccessTradeItem(
     canonicalUrlFetchedAt: item.__sandealFetchedAt,
     canonicalUrlStatus: canonicalResolution.status,
     affiliateUrl,
+    affiliateDestinationUrl,
     affiliateUrlSource: affiliateResolution.source,
     affiliateUrlProvider: affiliateUrl ? 'accesstrade' : undefined,
     affiliateUrlSourceEndpoint: item.__sandealEndpoint,
@@ -660,6 +670,11 @@ export function normalizeAccessTradeItem(
     category,
     commissionRate: commissionRate || undefined,
     campaignName: campaignName || undefined,
+    merchant: campaignName || undefined,
+    merchantDomain: safeHostname(originalUrl || affiliateDestinationUrl),
+    sourceEndpoint: item.__sandealEndpoint,
+    sourceItemId: getItemId(item),
+    fetchedAt: item.__sandealFetchedAt,
     rawSourceKind,
     needsVerification,
     verifiedSource,
@@ -698,6 +713,39 @@ export function isAccessTradeTrackingUrl(value: unknown): boolean {
   if (!isValidHttpUrl(text)) return false;
   const hostname = new URL(text).hostname.toLowerCase().replace(/\.$/, '');
   return [...ACCESS_TRADE_TRACKING_HOSTS].some(host => hostname === host || hostname.endsWith(`.${host}`));
+}
+
+export function normalizeAccessTradeImageUrl(value: unknown): string {
+  const text = stringifyValue(value);
+  if (!isValidHttpUrl(text)) return '';
+  const parsed = new URL(text);
+  // Never send mixed-content image requests from the dashboard. If the source
+  // host has no HTTPS endpoint, the bounded image checker will mark it broken
+  // and the UI will keep a local placeholder.
+  if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+  return parsed.href;
+}
+
+function safeHostname(value: unknown): string | undefined {
+  const text = stringifyValue(value);
+  if (!isValidHttpUrl(text)) return undefined;
+  return new URL(text).hostname.toLowerCase().replace(/\.$/, '') || undefined;
+}
+
+/**
+ * URLSearchParams decodes one layer. Deliberately do not call decodeURIComponent
+ * again: nested merchant query strings and Unicode must remain byte-stable.
+ */
+export function extractAccessTradeAffiliateDestination(value: unknown): string | undefined {
+  const text = stringifyValue(value);
+  if (!isAccessTradeTrackingUrl(text)) return undefined;
+  const tracking = new URL(text);
+  for (const key of ['url', 'redirect_url', 'redirect', 'target', 'destination', 'deeplink']) {
+    const candidate = tracking.searchParams.get(key)?.trim();
+    if (!candidate || !isValidHttpUrl(candidate) || isAccessTradeTrackingUrl(candidate)) continue;
+    return new URL(candidate).href;
+  }
+  return undefined;
 }
 
 function firstProviderUrl(
@@ -917,6 +965,7 @@ export function mapAccessTradeToProduct(
     canonicalUrlFetchedAt: item.canonicalUrlFetchedAt,
     canonicalUrlStatus: item.canonicalUrlStatus === 'available' ? 'unverified' : 'unavailable',
     affiliateUrl: item.affiliateUrl || undefined,
+    affiliateDestinationUrl: item.affiliateDestinationUrl,
     affiliateUrlSource: item.affiliateUrlSource,
     affiliateUrlProvider: item.affiliateUrlProvider,
     affiliateUrlSourceEndpoint: item.affiliateUrlSourceEndpoint,
@@ -957,6 +1006,11 @@ export function mapAccessTradeToProduct(
 
     externalId: item.id,
     sourceId: item.id,
+    sourceItemId: item.sourceItemId,
+    sourceEndpoint: item.sourceEndpoint,
+    sourceFetchedAt: item.fetchedAt,
+    merchant: item.merchant,
+    merchantDomain: item.merchantDomain,
 
     verifiedSource: item.verifiedSource,
     sourceVerified: item.verifiedSource,
@@ -981,6 +1035,35 @@ export function mapAccessTradeToProduct(
     nonProductReason: item.nonProductReason,
     qualityScore: item.qualityScore,
     sourceQualityScore: item.qualityScore,
+    priceVerificationStatus: item.price || item.salePrice ? 'UNVERIFIED' : 'MISSING',
+    priceObservedAt: item.fetchedAt,
+
+    fieldProvenance: {
+      canonicalProductUrl: {
+        value: item.canonicalProductUrl || item.originalUrl || undefined,
+        source: 'accesstrade', provider: item.canonicalUrlProvider,
+        endpoint: item.canonicalUrlSourceEndpoint, sourceField: item.canonicalUrlSourceField,
+        fetchedAt: item.canonicalUrlFetchedAt, canonicalizedAt: item.canonicalUrlFetchedAt,
+        verificationStatus: item.canonicalProductUrl || item.originalUrl ? 'UNVERIFIED' : 'MISSING',
+      },
+      affiliateUrl: {
+        value: item.affiliateUrl || undefined,
+        source: 'accesstrade', provider: item.affiliateUrlProvider,
+        endpoint: item.affiliateUrlSourceEndpoint, sourceField: item.affiliateUrlSourceField,
+        fetchedAt: item.affiliateUrlFetchedAt, canonicalizedAt: item.affiliateUrlFetchedAt,
+        verificationStatus: item.affiliateUrl ? 'UNVERIFIED' : 'MISSING',
+      },
+      imageUrl: {
+        value: item.imageUrl || undefined, source: 'accesstrade', provider: 'accesstrade',
+        endpoint: item.sourceEndpoint, sourceField: 'image', fetchedAt: item.fetchedAt,
+        canonicalizedAt: item.fetchedAt, verificationStatus: item.imageUrl ? 'UNVERIFIED' : 'MISSING',
+      },
+      price: {
+        value: item.salePrice || item.price || undefined, source: 'accesstrade', provider: 'accesstrade',
+        endpoint: item.sourceEndpoint, sourceField: item.salePrice ? 'salePrice' : 'price', fetchedAt: item.fetchedAt,
+        canonicalizedAt: item.fetchedAt, verificationStatus: item.salePrice || item.price ? 'UNVERIFIED' : 'MISSING',
+      },
+    },
 
     rawSourceType: 'accesstrade',
     rawData: item.rawData,

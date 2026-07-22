@@ -13,7 +13,9 @@ process.env.AUTO_PUBLISH_ENABLED = 'false';
 
 require('./register-typescript.cjs');
 
-const TEST_NOW = '2026-07-15T04:00:00.000Z';
+// Public eligibility uses the real clock for freshness; pin once per run so
+// this fixture cannot expire merely because the calendar advanced.
+const TEST_NOW = new Date().toISOString();
 let passed = 0;
 let failed = 0;
 

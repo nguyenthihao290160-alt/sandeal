@@ -1,6 +1,7 @@
 import type { AutomationJob } from '@/lib/automation/types';
 import { getAutomationControl, getAutomationJob } from '@/lib/automation/store';
-import type { Product } from '@/lib/types';
+import { isRuntimeRoleOwner } from '@/lib/automation/runtimeRoles';
+import type { Product, ProductFieldProvenance } from '@/lib/types';
 import { getAllProducts, getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import { runTransaction } from '@/lib/storage/adapter';
 import {
@@ -13,9 +14,11 @@ import {
 import {
   ACCESS_TRADE_AFFILIATE_URL_FIELDS,
   ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
+  extractAccessTradeAffiliateDestination,
   isAccessTradeTrackingUrl,
 } from '@/lib/integrations/accesstrade';
 import { eligibilityBlockerMessage, evaluateProductEligibility } from '@/lib/productEligibility';
+import { canonicalizeProductBlockers } from '@/lib/productBlockers';
 import { getDomainCircuitDecision, recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import { applyImportBatch, escapeCsvCell, getImportBatch } from './importer';
@@ -100,11 +103,21 @@ async function assertJobMayContinue(job: AutomationJob): Promise<void> {
   const [control, latest] = await Promise.all([getAutomationControl(), getAutomationJob(job.id)]);
   if (control.killSwitch) throw new Error('KILL_SWITCH_ACTIVE');
   if (latest?.status === 'CANCELLED') throw new Error('JOB_CANCELLED');
+  if (job.workerInstanceId && job.workerFencingToken) {
+    const owner = await isRuntimeRoleOwner('WORKER', {
+      ownerId: job.workerOwnerId || '',
+      instanceId: job.workerInstanceId,
+      fencingToken: job.workerFencingToken,
+    });
+    if (!owner) throw new Error('WORKER_FENCING_REJECTED');
+  }
 }
 
 function isJobStop(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message === 'KILL_SWITCH_ACTIVE' || message === 'JOB_CANCELLED';
+  return message === 'KILL_SWITCH_ACTIVE'
+    || message === 'JOB_CANCELLED'
+    || message === 'WORKER_FENCING_REJECTED';
 }
 
 async function scoreProducts(job: AutomationJob) {
@@ -271,6 +284,50 @@ export function accessTradeAffiliateSupport(product: Partial<Product>): { suppor
     return { supported: false, reason: 'Nhà cung cấp không cho phép deep-link.' };
   }
   return { supported: true };
+}
+
+function domainsRelated(left?: string, right?: string): boolean {
+  if (!left || !right) return false;
+  return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`);
+}
+
+function affiliateFinalDomainAllowed(product: Partial<Product>, finalUrl: string | undefined): boolean {
+  if (!finalUrl) return false;
+  if (isAccessTradeTrackingUrl(finalUrl)) return true;
+  const finalHost = finalDomain(finalUrl);
+  const destination = product.affiliateDestinationUrl || extractAccessTradeAffiliateDestination(product.affiliateUrl);
+  const allowedHosts = [
+    finalDomain(destination),
+    finalDomain(product.canonicalProductUrl || product.originalUrl),
+    product.merchantDomain?.toLowerCase().replace(/^www\./, ''),
+  ].filter((value): value is string => Boolean(value));
+  return allowedHosts.some(host => domainsRelated(finalHost, host));
+}
+
+function canonicalFinalDomainAllowed(product: Partial<Product>, canonicalUrl: string, finalUrl: string | undefined): boolean {
+  const finalHost = finalDomain(finalUrl || canonicalUrl);
+  const allowedHosts = [
+    finalDomain(canonicalUrl),
+    product.merchantDomain?.toLowerCase().replace(/^www\./, ''),
+  ].filter((value): value is string => Boolean(value));
+  return allowedHosts.some(host => domainsRelated(finalHost, host));
+}
+
+function setFieldProvenance(
+  product: Product,
+  updates: Partial<Product>,
+  field: string,
+  patch: Partial<ProductFieldProvenance> & Pick<ProductFieldProvenance, 'verificationStatus'>,
+): void {
+  const current = updates.fieldProvenance || product.fieldProvenance || {};
+  updates.fieldProvenance = {
+    ...current,
+    [field]: {
+      ...(current[field] || {}),
+      source: current[field]?.source || product.source,
+      ...patch,
+    },
+  };
 }
 
 export function accessTradeCanonicalSupport(product: Partial<Product>): { supported: boolean; reason?: string } {
@@ -487,6 +544,19 @@ async function recheckHealth(job: AutomationJob) {
       const failureReasons: string[] = [];
       const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
       let affiliateUrlHealthy = !checkAffiliate && goodHealth.has(String(product.affiliateHealthStatus || ''));
+      const effectivePrice = product.salePrice || product.price;
+      const priceObservedAt = Date.parse(product.priceObservedAt || product.sourceFetchedAt || '');
+      const priceStale = Number.isFinite(priceObservedAt) && Date.now() - priceObservedAt > 7 * 24 * 60 * 60_000;
+      updates.priceVerificationStatus = !effectivePrice ? 'MISSING'
+        : priceStale ? 'STALE'
+          : product.priceVerificationStatus === 'VERIFIED' ? 'VERIFIED' : 'UNVERIFIED';
+      setFieldProvenance(product, updates, 'price', {
+        value: effectivePrice,
+        verificationStatus: updates.priceVerificationStatus,
+        verificationReason: !effectivePrice ? 'PRICE_MISSING' : priceStale ? 'PRICE_STALE' : product.priceVerificationStatus === 'VERIFIED' ? undefined : 'PRICE_SOURCE_OBSERVATION_NOT_INDEPENDENTLY_VERIFIED',
+      });
+      if (!effectivePrice) failureReasons.push('price:missing');
+      else if (updates.priceVerificationStatus !== 'VERIFIED') failureReasons.push(`price:${updates.priceVerificationStatus.toLowerCase()}`);
 
       const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
       const canonicalSupport = accessTradeCanonicalSupport(product);
@@ -494,9 +564,14 @@ async function recheckHealth(job: AutomationJob) {
         const checkedLink = await checkLinkWithDomainCircuit(canonicalUrl);
         const linkResult = checkedLink.result;
         const canonicalDestinationSupported = !isAccessTradeTrackingUrl(linkResult.finalUrl || canonicalUrl);
-        const canonicalHealthy = linkResult.ok && canonicalSupport.supported && canonicalDestinationSupported;
+        const canonicalDomainAllowed = canonicalFinalDomainAllowed(product, canonicalUrl, linkResult.finalUrl);
+        const canonicalHealthy = linkResult.ok && canonicalSupport.supported && canonicalDestinationSupported && canonicalDomainAllowed;
         const canonicalReason = canonicalSupport.reason
-          || (!canonicalDestinationSupported ? 'Canonical URL resolved to a tracking host.' : linkResult.reason);
+          || (!canonicalDestinationSupported
+            ? 'Canonical URL resolved to a tracking host.'
+            : !canonicalDomainAllowed
+              ? 'Canonical URL chuyển hướng tới domain ngoài allowlist của sản phẩm.'
+              : linkResult.reason);
         updates.canonicalProductUrl = canonicalUrl;
         updates.originalUrl = canonicalUrl;
         updates.linkHealthStatus = (canonicalHealthy ? linkResult.status : linkResult.ok ? 'unknown' : linkResult.status) as Product['linkHealthStatus'];
@@ -506,11 +581,19 @@ async function recheckHealth(job: AutomationJob) {
         updates.productUrlFinalDomain = finalDomain(linkResult.finalUrl || canonicalUrl);
         updates.productUrlHealthReason = canonicalReason.slice(0, 500);
         updates.productUrlErrorCode = canonicalSupport.supported
-          ? canonicalDestinationSupported ? linkResult.errorCode : 'CANONICAL_RESOLVED_TO_TRACKING'
+          ? canonicalDestinationSupported
+            ? canonicalDomainAllowed ? linkResult.errorCode : 'CANONICAL_FINAL_DOMAIN_NOT_ALLOWED'
+            : 'CANONICAL_RESOLVED_TO_TRACKING'
           : 'CANONICAL_PROVENANCE_REQUIRED';
         updates.productUrlTimedOut = linkResult.timedOut === true;
         updates.canonicalUrlVerifiedAt = canonicalHealthy ? new Date().toISOString() : undefined;
         updates.canonicalUrlStatus = canonicalHealthy ? 'verified' : linkResult.retryable ? 'unverified' : 'invalid';
+        setFieldProvenance(product, updates, 'canonicalProductUrl', {
+          value: canonicalUrl,
+          verificationStatus: canonicalHealthy ? 'VERIFIED' : linkResult.retryable ? 'UNVERIFIED' : 'INVALID',
+          verifiedAt: canonicalHealthy ? updates.canonicalUrlVerifiedAt : undefined,
+          verificationReason: canonicalReason,
+        });
         if (!canonicalHealthy) {
           failureReasons.push(`link:${canonicalSupport.supported ? linkResult.status : 'provenance_required'}`);
           if (linkResult.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
@@ -533,21 +616,30 @@ async function recheckHealth(job: AutomationJob) {
       if (checkAffiliate && product.affiliateUrl && support.supported) {
         const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl);
         const linkResult = checkedLink.result;
-        affiliateUrlHealthy = linkResult.ok;
-        const affiliateReason = linkResult.reason;
-        updates.affiliateHealthStatus = linkResult.status as Product['affiliateHealthStatus'];
+        const finalDomainAllowed = affiliateFinalDomainAllowed(product, linkResult.finalUrl || product.affiliateUrl);
+        affiliateUrlHealthy = linkResult.ok && finalDomainAllowed;
+        const affiliateReason = finalDomainAllowed ? linkResult.reason : 'Affiliate URL chuyển hướng tới domain ngoài allowlist của sản phẩm.';
+        updates.affiliateHealthStatus = (affiliateUrlHealthy
+          ? linkResult.status
+          : linkResult.ok ? 'not_allowed' : linkResult.status) as Product['affiliateHealthStatus'];
         updates.affiliateLastCheckedAt = new Date().toISOString();
         updates.affiliateUrlHttpStatus = linkResult.statusCode;
         updates.affiliateUrlFinalUrl = linkResult.finalUrl;
         updates.affiliateUrlFinalDomain = finalDomain(linkResult.finalUrl || product.affiliateUrl);
         updates.affiliateUrlHealthReason = affiliateReason.slice(0, 500);
-        updates.affiliateUrlErrorCode = linkResult.errorCode;
+        updates.affiliateUrlErrorCode = finalDomainAllowed ? linkResult.errorCode : 'AFFILIATE_FINAL_DOMAIN_NOT_ALLOWED';
         updates.affiliateUrlTimedOut = linkResult.timedOut === true;
         updates.affiliateUrlVerifiedAt = affiliateUrlHealthy ? new Date().toISOString() : undefined;
         updates.affiliateUrlStatus = affiliateUrlHealthy ? 'verified' : linkResult.retryable ? 'unverified' : 'invalid';
         updates.affiliateLinkErrors = affiliateUrlHealthy ? undefined : affiliateReason.slice(0, 500);
+        setFieldProvenance(product, updates, 'affiliateUrl', {
+          value: product.affiliateUrl,
+          verificationStatus: affiliateUrlHealthy ? 'VERIFIED' : linkResult.retryable ? 'UNVERIFIED' : 'INVALID',
+          verifiedAt: affiliateUrlHealthy ? updates.affiliateUrlVerifiedAt : undefined,
+          verificationReason: affiliateReason,
+        });
         if (!affiliateUrlHealthy) {
-          failureReasons.push(`affiliate:${linkResult.status}`);
+          failureReasons.push(`affiliate:${finalDomainAllowed ? linkResult.status : 'final_domain_not_allowed'}`);
           if (linkResult.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
@@ -562,13 +654,9 @@ async function recheckHealth(job: AutomationJob) {
           provider: product.affiliateUrlProvider,
           sourceField: product.affiliateUrlSourceField,
         };
-        updates.affiliateUrl = undefined;
-        updates.affiliateUrlSource = 'none';
-        updates.affiliateUrlProvider = undefined;
-        updates.affiliateUrlSourceEndpoint = undefined;
-        updates.affiliateUrlSourceField = undefined;
-        updates.affiliateUrlStatus = 'unavailable';
-        updates.deepLinkSupported = false;
+        // Keep source evidence intact. Missing provenance is UNVERIFIED, not
+        // MISSING, and must never erase the provider tracking URL.
+        updates.affiliateUrlStatus = 'unverified';
         updates.affiliateHealthStatus = 'not_allowed';
         updates.affiliateLastCheckedAt = new Date().toISOString();
         updates.affiliateUrlVerifiedAt = undefined;
@@ -579,6 +667,14 @@ async function recheckHealth(job: AutomationJob) {
         updates.affiliateUrlErrorCode = 'AFFILIATE_PROVENANCE_REQUIRED';
         updates.affiliateUrlTimedOut = false;
         updates.affiliateLinkErrors = updates.affiliateUrlHealthReason;
+        setFieldProvenance(product, updates, 'affiliateUrl', {
+          value: product.affiliateUrl,
+          provider: product.affiliateUrlProvider,
+          endpoint: product.affiliateUrlSourceEndpoint,
+          sourceField: product.affiliateUrlSourceField,
+          verificationStatus: 'UNVERIFIED',
+          verificationReason: updates.affiliateUrlHealthReason,
+        });
         failureReasons.push('affiliate:provenance_required');
       } else if (checkAffiliate) {
         affiliateUrlHealthy = false;
@@ -616,6 +712,12 @@ async function recheckHealth(job: AutomationJob) {
         updates.imageUrlHttpStatus = imageResult.statusCode;
         updates.imageUrlFinalUrl = imageResult.finalUrl || checkedImages.resolution.selectedUrl || product.imageUrl;
         updates.imageUrlHealthReason = imageResult.reason.slice(0, 500);
+        setFieldProvenance(product, updates, 'imageUrl', {
+          value: checkedImages.resolution.selectedUrl || product.imageUrl,
+          verificationStatus: imageResult.ok ? 'VERIFIED' : imageResult.retryable ? 'UNVERIFIED' : 'INVALID',
+          verifiedAt: imageResult.ok ? new Date().toISOString() : undefined,
+          verificationReason: imageResult.reason,
+        });
         if (fallbackUsed && checkedImages.resolution.selectedUrl) {
           updates.imageUrl = checkedImages.resolution.selectedUrl;
           fallbackImages += 1;
@@ -643,14 +745,20 @@ async function recheckHealth(job: AutomationJob) {
       const blockers = eligibility.criticalBlockers;
       const operationalBlockers = blockers.filter(reason => ![
         'auto_publish_ineligible', 'human_review_required', 'prohibited_product',
-      ].includes(reason) && !reason.startsWith('stored:'));
+      ].includes(reason));
       const healthUnsafe = operationalBlockers.length > 0;
       const publishUnsafe = blockers.length > 0;
       const healthReason = blockers.length ? blockers.map(eligibilityBlockerMessage).join(' · ').slice(0, 500) : undefined;
 
       updates.eligibility = eligibility;
       updates.reviewQuality = eligibility.reviewQuality;
-      updates.publicBlockReasons = blockers;
+      updates.currentBlockers = canonicalizeProductBlockers(blockers, new Date().toISOString()).map(blocker => ({
+        ...blocker,
+        source: 'PRODUCT_HEALTH_RULES',
+        message: eligibilityBlockerMessage(blocker.code),
+      }));
+      updates.blockersCheckedAt = new Date().toISOString();
+      updates.publicBlockReasons = updates.currentBlockers.map(blocker => blocker.code);
       updates.publicBlocked = publishUnsafe;
       updates.publicBlockReason = healthReason;
       if (publishUnsafe) {
@@ -693,6 +801,7 @@ async function recheckHealth(job: AutomationJob) {
       updates.lastReprocessOperationId = operationId;
       updates.lastReprocessedAt = new Date().toISOString();
       const beforeSignature = operationalHealthSignature(product);
+      await assertJobMayContinue(job);
       const persisted = await saveCanonicalProduct(product.id, updates, { verifiedHealthUpdate: true });
       if (!persisted) throw new Error(`STORAGE_ERROR: product ${product.id} disappeared before health persistence`);
       await finishReprocessAudit(job, persisted, 'COMPLETED');

@@ -247,6 +247,32 @@ export type ProductScoreLabel =
   | "Nên làm"
   | "Ưu tiên cao";
 
+export type ProductFieldVerificationStatus = 'MISSING' | 'UNVERIFIED' | 'VERIFYING' | 'VERIFIED' | 'STALE' | 'CONFLICT' | 'INVALID';
+
+export interface ProductFieldProvenance {
+  value?: string | number | boolean;
+  source: string;
+  sourceField?: string;
+  provider?: string;
+  endpoint?: string;
+  fetchedAt?: string;
+  canonicalizedAt?: string;
+  verificationStatus: ProductFieldVerificationStatus;
+  verifiedAt?: string;
+  verificationReason?: string;
+}
+
+export interface CanonicalProductBlocker {
+  code: string;
+  category: 'LINK' | 'AFFILIATE' | 'IMAGE' | 'PRICE' | 'DUPLICATE' | 'PROVENANCE' | 'CONTENT_EVIDENCE' | 'POLICY';
+  target: string;
+  scope: 'PRODUCT' | 'REVIEW' | 'PUBLICATION';
+  severity: 'INFO' | 'WARNING' | 'BLOCKER';
+  source: string;
+  message: string;
+  checkedAt: string;
+}
+
 export interface Product {
   schemaVersion?: number;
   id: string;
@@ -269,6 +295,8 @@ export interface Product {
   canonicalUrlVerifiedAt?: string;
   canonicalUrlStatus?: 'available' | 'unavailable' | 'unverified' | 'verified' | 'invalid';
   affiliateUrl?: string;
+  /** Decoded merchant destination, kept separately from the tracking URL. */
+  affiliateDestinationUrl?: string;
   affiliateUrlSource?: 'provider_api' | 'manual' | 'none';
   affiliateUrlProvider?: 'accesstrade' | 'manual';
   affiliateUrlSourceEndpoint?: string;
@@ -292,6 +320,7 @@ export interface Product {
   price?: number;
   salePrice?: number;
   currency: "VND";
+  priceVerificationStatus?: ProductFieldVerificationStatus;
   priceNote?: string;
 
   category?: string;
@@ -319,6 +348,19 @@ export interface Product {
 
   externalId?: string;
   rawSourceType?: string;
+  rawSourceKind?: string;
+  sourceItemKind?: ProductKind;
+  sourceEndpoint?: string;
+  sourceItemId?: string;
+  sourceFetchedAt?: string;
+  sourceQualityScore?: number;
+  sourceType?: string;
+  dataSource?: string;
+  importedFrom?: string;
+  merchant?: string;
+  merchantDomain?: string;
+  rawData?: Record<string, unknown>;
+  fieldProvenance?: Record<string, ProductFieldProvenance>;
 
   // Bot infrastructure fields
   linkHealthStatus?: LinkHealthStatus;
@@ -372,6 +414,8 @@ export interface Product {
   publicBlocked?: boolean;
   publicBlockReason?: string;
   publicBlockReasons?: string[];
+  currentBlockers?: CanonicalProductBlocker[];
+  blockersCheckedAt?: string;
   autoPublished?: boolean;
   needsVerification?: boolean;
   qualityScore?: number;

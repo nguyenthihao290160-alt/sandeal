@@ -7,6 +7,7 @@ import type {
   ProductRiskLevel,
   ProductStatus,
 } from '@/lib/types';
+import { canonicalBlockerCodes } from '@/lib/productBlockers';
 
 export const DASHBOARD_PRODUCT_SORTS = [
   'updated_desc',
@@ -101,6 +102,12 @@ export interface DashboardProductSummary {
    * broken image.
    */
   blockingSignals: number;
+  /** Distinct products affected by at least one current canonical issue. */
+  affectedProducts: number;
+  /** Current canonical issue occurrences after deduplication within a product. */
+  issueOccurrences: number;
+  linkIssueProducts: number;
+  imageIssueProducts: number;
   brokenLinks: number;
   brokenImages: number;
   missingPrice: number;
@@ -118,6 +125,9 @@ export interface DashboardProductsResult {
   };
   filters: DashboardProductQuery;
   updatedAt: string;
+  scope: 'ALL_PRODUCTS' | 'FILTERED_PRODUCTS';
+  healthSnapshotAt: string | null;
+  stale: boolean;
 }
 
 const PLATFORMS = new Set<ProductPlatform>([
@@ -315,6 +325,15 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
     || (item.health.affiliate && BROKEN.has(item.health.affiliate)),
   ).length;
   const brokenImages = filtered.filter((item) => item.health.image && BROKEN.has(item.health.image)).length;
+  const filteredIds = new Set(filtered.map(item => item.id));
+  const scopedProducts = products.filter(product => filteredIds.has(product.id));
+  const issuesByProduct = scopedProducts.map(product => canonicalBlockerCodes(
+    product.currentBlockers?.length ? product.currentBlockers : evaluateProductEligibility(product).criticalBlockers,
+  ));
+  const affectedProducts = issuesByProduct.filter(issues => issues.length > 0).length;
+  const issueOccurrences = issuesByProduct.reduce((total, issues) => total + issues.length, 0);
+  const linkIssueProducts = issuesByProduct.filter(issues => issues.some(code => /(?:product|canonical|affiliate)_(?:url|link|health)|final_domain/.test(code))).length;
+  const imageIssueProducts = issuesByProduct.filter(issues => issues.some(code => /image/.test(code))).length;
   const summary: DashboardProductSummary = {
     totalItems: filtered.length,
     qualifiedForPublish: filtered.filter((item) => item.publish.eligible).length,
@@ -327,7 +346,11 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
     published: filtered.filter((item) => item.safePublishStatus === 'published').length,
     publishCandidates: filtered.filter((item) => item.safePublishStatus === 'qualified').length,
     blocked,
-    blockingSignals: blocked + brokenLinks + brokenImages,
+    blockingSignals: issueOccurrences,
+    affectedProducts,
+    issueOccurrences,
+    linkIssueProducts,
+    imageIssueProducts,
     brokenLinks,
     brokenImages,
     missingPrice: filtered.filter((item) => item.price === null).length,
@@ -336,12 +359,28 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
   const totalPages = Math.max(1, Math.ceil(filtered.length / query.pageSize));
   const page = Math.min(query.page, totalPages);
   const start = (page - 1) * query.pageSize;
+  const activeScopeFilter = Boolean(query.q || query.platform || query.status || query.kind || query.riskLevel || query.safePublishStatus || query.pipelineStage);
+  const healthTimes = scopedProducts.flatMap(product => [product.blockersCheckedAt, product.linkLastCheckedAt, product.affiliateLastCheckedAt, product.imageLastCheckedAt])
+    .map(value => Date.parse(value || ''))
+    .filter(Number.isFinite);
+  const latestHealthTime = healthTimes.length ? Math.max(...healthTimes) : null;
+  const healthIsStale = scopedProducts.some(product => {
+    const productHealthTimes = [product.blockersCheckedAt, product.linkLastCheckedAt, product.affiliateLastCheckedAt, product.imageLastCheckedAt]
+      .map(value => Date.parse(value || ''))
+      .filter(Number.isFinite);
+    const latestProductHealth = productHealthTimes.length ? Math.max(...productHealthTimes) : null;
+    return !latestProductHealth || Date.now() - latestProductHealth > 7 * 24 * 60 * 60_000;
+  });
+  const updatedAt = new Date().toISOString();
 
   return {
     items: filtered.slice(start, start + query.pageSize),
     summary,
     pagination: { page, pageSize: query.pageSize, totalItems: filtered.length, totalPages },
     filters: { ...query, page },
-    updatedAt: new Date().toISOString(),
+    updatedAt,
+    scope: activeScopeFilter ? 'FILTERED_PRODUCTS' : 'ALL_PRODUCTS',
+    healthSnapshotAt: latestHealthTime ? new Date(latestHealthTime).toISOString() : null,
+    stale: scopedProducts.length > 0 && healthIsStale,
   };
 }

@@ -3417,6 +3417,32 @@ tr:hover td {
 .dashboard-shell .product-source-hero { min-height: 0; padding: 20px !important; }
 .dashboard-shell .product-source-tabs { display: flex; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
 .dashboard-shell .product-source-tabs .tab-btn { flex: 0 0 auto; }
+.dashboard-shell .product-source-hero { flex-wrap: wrap; gap: 16px; }
+.dashboard-shell .product-source-hero .command-hero-content { min-width: min(100%, 520px); }
+.dashboard-shell .product-source-hero .command-hero-panel { max-width: 330px; }
+.dashboard-shell .health-job-status {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  color: var(--ds-text-soft);
+  background: rgba(255, 255, 255, .82);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius);
+}
+.dashboard-shell .health-job-status > div { display: grid; gap: 2px; }
+.dashboard-shell .health-job-status span,
+.dashboard-shell .health-job-status small { color: var(--ds-text-muted); font-size: 12px; }
+.dashboard-shell .health-job-status a { flex: 0 0 auto; color: var(--ds-primary); font-size: 13px; font-weight: 700; }
+.dashboard-shell .health-job-running { border-color: #bfdbfe; background: #eff6ff; }
+.dashboard-shell .health-job-succeeded { border-color: #a7f3d0; background: #ecfdf5; }
+.dashboard-shell .health-job-failed,
+.dashboard-shell .health-job-blocked { border-color: #fecaca; background: #fef2f2; }
+.dashboard-shell .source-candidate-card { padding: 14px !important; overflow: hidden; }
 
 @media (max-width: 768px) {
   .dashboard-shell .dashboard-sidebar { z-index: 70; box-shadow: var(--ds-shadow-lg); }
@@ -3446,6 +3472,15 @@ tr:hover td {
     border: 0 !important;
     border-radius: 0;
   }
+  .dashboard-shell .product-source-hero { padding: 14px !important; }
+  .dashboard-shell .product-source-hero .command-hero-panel { width: 100%; max-width: none; }
+  .dashboard-shell .health-job-status { align-items: flex-start; flex-direction: column; }
+  .dashboard-shell .source-candidate-card { align-items: flex-start; }
+}
+
+@media (max-width: 560px) {
+  .dashboard-shell .source-candidate-card { flex-direction: column; }
+  .dashboard-shell .source-candidate-card > div:last-child { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

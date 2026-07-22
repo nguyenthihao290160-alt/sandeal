@@ -22,6 +22,7 @@ import {
   getAutomationControl,
   getAutomationJob,
   heartbeatAutomationJob,
+  logAutomationJobEvent,
   productProcessingReservationKey,
   recordCircuitResult,
   updateAutomationControl,
@@ -29,6 +30,7 @@ import {
   waitAutomationJobForChildren,
   waitAutomationJobForManual,
 } from './store';
+import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
@@ -105,11 +107,13 @@ function errorCode(error: unknown): string {
     : '';
   if (explicitCode) return explicitCode.slice(0, 80);
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes('WORKER_FENCING_REJECTED')) return 'WORKER_FENCING_REJECTED';
   if (/429|rate.?limit/i.test(message)) return 'PROVIDER_RATE_LIMIT';
   if (/timeout|abort|TEMPORARY_ERROR/i.test(message)) return 'PROVIDER_TIMEOUT';
   if (/image.*(?:hotlink|403|forbidden)|hotlink.*image/i.test(message)) return 'IMAGE_HOTLINK_BLOCKED';
   if (/link.*(?:404|410|not.?found)|LINK_NOT_FOUND/i.test(message)) return 'LINK_NOT_FOUND';
   if (/duplicate/i.test(message)) return 'DUPLICATE';
+  if (/UNSUPPORTED_JOB_TYPE|UNSUPPORTED_PRODUCT_INTELLIGENCE_JOB|HANDLER_NOT_REGISTERED/i.test(message)) return 'UNSUPPORTED_JOB_TYPE';
   if (/storage|filesystem|lock.?timeout|enospc|eacces/i.test(message)) return 'STORAGE_ERROR';
   if (/invalid.?source|source.?data/i.test(message)) return 'INVALID_SOURCE_DATA';
   if (/not.?implemented|handler.?unavailable/i.test(message)) return 'PROVIDER_NOT_IMPLEMENTED';
@@ -493,34 +497,37 @@ async function executeJob(job: AutomationJob, workerId: string): Promise<Record<
   }
 }
 
-export async function processAutomationBatch(workerId: string, limit = 2): Promise<WorkerRunResult> {
+export async function processAutomationBatch(workerId: string, limit = 2, ownership?: RuntimeRoleOwnership): Promise<WorkerRunResult> {
   const result: WorkerRunResult = { workerId, claimed: 0, succeeded: 0, failed: 0, skipped: 0, waitingManual: 0, waitingChildren: 0 };
   const initialControl = await getAutomationControl();
   const lastHeartbeat = Date.parse(initialControl.workerHeartbeatAt || '');
   if (initialControl.workerId !== workerId || !Number.isFinite(lastHeartbeat) || Date.now() - lastHeartbeat >= 15_000) {
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
   }
-  const claimed = await claimAutomationJobs(workerId, limit);
+  const claimed = await claimAutomationJobs(workerId, limit, 60_000, Date.now(), ownership);
   result.claimed = claimed.length;
 
   const processJob = async (job: AutomationJob): Promise<void> => {
+    if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) throw new Error('WORKER_FENCING_REJECTED');
     const freshControl = await getAutomationControl();
     if (freshControl.killSwitch && job.type !== 'RUNTIME_GUARDIAN') {
-      await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.');
+      await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.', {}, ownership);
       if (job.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(job));
       result.skipped += 1;
       return;
     }
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
+    let workerLeaseLost = false;
     const heartbeat = setInterval(() => {
-      void Promise.all([
-        heartbeatAutomationJob(job.id, workerId),
-        updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId),
-      ]);
+      void heartbeatAutomationJob(job.id, workerId, 60_000, job.claimToken, ownership).then(updated => {
+        if (!updated) workerLeaseLost = true;
+      }).catch(() => { workerLeaseLost = true; });
     }, 20_000);
     let businessExecutionStarted = false;
     try {
       assertWorkerPolicy(job);
+      logAutomationJobEvent('job_handler_resolved', job, { workerId, reasonCode: `HANDLER_${job.type}` });
+      logAutomationJobEvent('job_started', job, { workerId, reasonCode: job.requestedExecutionMode === 'LOCAL_ONLY' ? 'LOCAL_RULES_SELECTED' : 'HANDLER_STARTED' });
       const startedPlan = (job.executionPlan || []).map((step, index) => index === 0 && step.status === 'PENDING' ? { ...step, status: 'RUNNING' as const } : step);
       await updateAutomationJobExecution(job.id, workerId, {
         executionPlan: startedPlan,
@@ -528,6 +535,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
       });
       businessExecutionStarted = job.type === 'PROCESS_CANDIDATE';
       const output = await executeJob(job, workerId);
+      if (workerLeaseLost || (ownership && !await isRuntimeRoleOwner('WORKER', ownership))) throw new Error('WORKER_FENCING_REJECTED');
       const latest = await getAutomationJob(job.id);
       if (latest?.status === 'CANCELLED') { result.skipped += 1; return; }
       if (latest?.status === 'WAITING_FOR_MANUAL_INPUT') { result.waitingManual += 1; return; }
@@ -601,7 +609,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
         if (waiting) result.waitingChildren += 1; else result.skipped += 1;
         return;
       }
-      const completed = await completeAutomationJob(job.id, workerId, output);
+      const completed = await completeAutomationJob(job.id, workerId, output, ownership);
       if (completed) result.succeeded += 1; else result.skipped += 1;
     } catch (error) {
       const latest = await getAutomationJob(job.id);
@@ -610,6 +618,11 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
         return;
       }
       const code = errorCode(error);
+      if (code === 'WORKER_FENCING_REJECTED') {
+        logAutomationJobEvent('job_skipped', job, { workerId, reasonCode: code });
+        result.skipped += 1;
+        return;
+      }
       await failAutomationJob(job.id, workerId, code, error, {
         errorCategory: errorCategory(code),
         nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
@@ -617,7 +630,7 @@ export async function processAutomationBatch(workerId: string, limit = 2): Promi
           && typeof (error as { result?: unknown }).result === 'object'
           ? (error as { result: Record<string, unknown> }).result
           : undefined,
-      });
+      }, ownership);
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);

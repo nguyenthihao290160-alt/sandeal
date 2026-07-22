@@ -171,6 +171,10 @@ export interface AutomationJob {
   nextRetryAt?: string;
   claimedAt?: string;
   claimedBy?: string;
+  claimToken?: string;
+  workerOwnerId?: string;
+  workerInstanceId?: string;
+  workerFencingToken?: number;
   leaseExpiresAt?: string;
   heartbeatAt?: string;
   startedAt?: string;

@@ -91,14 +91,15 @@ async function main() {
     assert.equal(new Set(attempts.filter(item => item.acquired).map(item => item.lease.fencingToken)).size, 1);
   });
 
-  await test('worker and scheduler entrypoints reject a second live process role', async () => {
+  await test('worker backs off from a live role without PM2 restart spam and scheduler rejects its duplicate', async () => {
     await reset(); const now = Date.now();
     await roles.acquireRuntimeRole({ role: 'WORKER', ownerId: 'held-worker', instanceId: 'held-worker:1', now, leaseMs: 45_000 });
     await roles.acquireRuntimeRole({ role: 'SCHEDULER', ownerId: 'held-scheduler', instanceId: 'held-scheduler:1', now, leaseMs: 45_000 });
     const env = { ...process.env, SANDEAL_DATA_DIR: tempDir, NODE_ENV: 'test' };
     const workerResult = spawnSync(process.execPath, [path.join(root, 'scripts', 'automation-worker.cjs'), '--once'], { cwd: root, env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
     const schedulerResult = spawnSync(process.execPath, [path.join(root, 'scripts', 'automation-scheduler.cjs'), '--once'], { cwd: root, env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
-    assert.notEqual(workerResult.status, 0); assert.match(workerResult.stderr, /WORKER_ROLE_ALREADY_ACTIVE/);
+    assert.equal(workerResult.status, 0, workerResult.stderr); assert.match(workerResult.stderr, /worker_role_wait/); assert.match(workerResult.stderr, /ROLE_ALREADY_ACTIVE/);
+    assert.equal(workerResult.stdout.includes('worker_tick'), false);
     assert.notEqual(schedulerResult.status, 0); assert.match(schedulerResult.stderr, /scheduler_role_rejected/); assert.match(schedulerResult.stderr, /SCHEDULER_ROLE_ALREADY_ACTIVE/);
     assert.equal(schedulerResult.stdout.includes('scheduler_tick'), false);
   });

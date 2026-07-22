@@ -23,6 +23,7 @@ export interface StorageAdapter {
   ensureDataDir(): Promise<void>;
   readCollection<T>(collection: string): Promise<T[]>;
   writeCollection<T>(collection: string, data: T[]): Promise<void>;
+  backupCollection?(collection: string, label: string): Promise<string>;
   runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void>;
   checkHealth(): Promise<StorageHealth>;
 }

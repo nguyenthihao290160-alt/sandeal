@@ -20,6 +20,12 @@ export function writeCollection<T>(collection: string, data: T[]): Promise<void>
   return getStorageAdapter().writeCollection(collection, data);
 }
 
+export function backupCollection(collection: string, label: string): Promise<string> {
+  const adapter = getStorageAdapter();
+  if (!adapter.backupCollection) throw new Error(`STORAGE_BACKUP_UNSUPPORTED:${adapter.driver}`);
+  return adapter.backupCollection(collection, label);
+}
+
 export function runTransaction<T>(
   collection: string,
   fn: StorageTransaction<T>

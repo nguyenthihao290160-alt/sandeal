@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { appendAutomationAudit, createAutomationJob } from '@/lib/automation/store';
 import { generateId, runTransaction } from '@/lib/storage/adapter';
-import { getProductById } from '@/lib/storage/products';
+import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import { getProductPipelineTruth, type ProductAdminActionRecord, type ProductAdminActionType } from './productPipelineTruth';
 
 function actionId(productId: string, action: ProductAdminActionType, operationId: string): string {
@@ -30,6 +30,28 @@ export async function recordProductAdminAction(input: { productId: string; actio
     items.push(record); created = true; return items;
   });
   let job: { id: string; status: string } | null = null;
+  if (created && input.action === 'data_verified') {
+    const observedPrice = Number(product.salePrice || product.price || 0);
+    const hasObservedPrice = Number.isFinite(observedPrice) && observedPrice > 0;
+    await saveCanonicalProduct(input.productId, {
+      priceVerificationStatus: hasObservedPrice ? 'VERIFIED' : 'MISSING',
+      priceObservedAt: hasObservedPrice ? occurredAt : product.priceObservedAt,
+      priceTruthState: hasObservedPrice ? 'FRESH' : 'UNAVAILABLE',
+      fieldProvenance: {
+        ...(product.fieldProvenance || {}),
+        price: {
+          ...(product.fieldProvenance?.price || { source: product.source }),
+          value: hasObservedPrice ? observedPrice : undefined,
+          verificationStatus: hasObservedPrice ? 'VERIFIED' : 'MISSING',
+          verifiedAt: hasObservedPrice ? occurredAt : undefined,
+          verificationReason: hasObservedPrice ? 'OWNER_DATA_VERIFIED' : 'PRICE_MISSING',
+        },
+      },
+      publicHidden: true,
+      publicBlocked: true,
+      autoPublished: false,
+    });
+  }
   if (created && input.action === 'safe_publish_requested') {
     const result = await createAutomationJob({
       type: 'RECHECK_PRODUCT_HEALTH', payload: { productIds: [input.productId], safePublishAssessment: true },

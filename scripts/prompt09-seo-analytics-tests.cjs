@@ -14,7 +14,8 @@ process.env.AUTO_PUBLISH_ENABLED = 'false';
 
 require('./register-typescript.cjs');
 
-const TEST_NOW = '2026-07-15T05:00:00.000Z';
+// Keep the verified public fixture inside the production freshness window.
+const TEST_NOW = new Date().toISOString();
 let passed = 0;
 let failed = 0;
 

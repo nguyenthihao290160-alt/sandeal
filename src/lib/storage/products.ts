@@ -26,10 +26,164 @@ async function readCanonicalProducts(): Promise<Product[]> {
 
 export class DuplicateProductError extends Error {
   readonly code = 'DUPLICATE_PRODUCT';
-  constructor() {
+  readonly existingProductId: string;
+  readonly existingProductUrl: string;
+  readonly mergeResult: { updatedFields: string[]; unchangedFields: string[] };
+
+  constructor(product: Product, mergeResult: { updatedFields: string[]; unchangedFields: string[] }) {
     super('duplicate_product');
     this.name = 'DuplicateProductError';
+    this.existingProductId = product.id;
+    this.existingProductUrl = `/dashboard/products/${encodeURIComponent(product.id)}`;
+    this.mergeResult = mergeResult;
   }
+}
+
+function normalizedDuplicateUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (!['http:', 'https:'].includes(url.protocol)) return undefined;
+    url.protocol = 'https:';
+    url.hostname = url.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(?:utm_|aff|affiliate|ref|source|campaign|clickid|subid)/i.test(key)) url.searchParams.delete(key);
+    }
+    url.searchParams.sort();
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function duplicateKeys(product: Partial<Product>): Set<string> {
+  const keys = new Set<string>();
+  const sourceItemId = product.sourceItemId || product.sourceId || product.externalId;
+  if (product.source && sourceItemId) keys.add(`source:${product.source}:${String(sourceItemId).trim().toLowerCase()}`);
+  const canonicalUrl = normalizedDuplicateUrl(product.canonicalProductUrl || product.originalUrl);
+  if (canonicalUrl) keys.add(`canonical:${canonicalUrl}`);
+  const affiliateUrl = normalizedDuplicateUrl(product.affiliateUrl);
+  if (affiliateUrl) keys.add(`affiliate:${affiliateUrl}`);
+  const merchant = (product.merchantDomain || (() => {
+    try { return canonicalUrl ? new URL(canonicalUrl).hostname : ''; } catch { return ''; }
+  })()).toLowerCase();
+  const title = product.title?.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // Title is only a fallback when neither side has a stable source/URL key;
+  // otherwise two variants sharing a merchant title must remain distinct.
+  if (!keys.size && merchant && title && title.length >= 16) keys.add(`merchant-title:${merchant}:${title}`);
+  return keys;
+}
+
+export function productsAreCanonicalDuplicates(left: Partial<Product>, right: Partial<Product>): boolean {
+  const leftKeys = duplicateKeys(left);
+  return [...duplicateKeys(right)].some(key => leftKeys.has(key));
+}
+
+function mergeDuplicateCandidate(existing: Product, candidate: CreateProductInput): { product: Product; updatedFields: string[]; unchangedFields: string[] } {
+  const updates: Partial<Product> = {};
+  const updatedFields: string[] = [];
+  const unchangedFields: string[] = [];
+  const fields: Array<keyof Product> = [
+    'originalUrl', 'canonicalProductUrl', 'affiliateUrl', 'affiliateDestinationUrl',
+    'imageUrl', 'price', 'salePrice', 'sourceId', 'sourceItemId', 'sourceEndpoint',
+    'sourceFetchedAt', 'merchant', 'merchantDomain', 'rawSourceKind', 'sourceItemKind',
+    'canonicalUrlSource', 'canonicalUrlProvider', 'canonicalUrlSourceEndpoint',
+    'canonicalUrlSourceField', 'canonicalUrlFetchedAt', 'affiliateUrlSource',
+    'affiliateUrlProvider', 'affiliateUrlSourceEndpoint', 'affiliateUrlSourceField',
+    'affiliateUrlCampaignId', 'affiliateUrlFetchedAt', 'deepLinkSupported',
+    'priceObservedAt',
+  ];
+  const sameSource = existing.source === candidate.source;
+  const sourceIdentityFields = new Set<keyof Product>([
+    'sourceId', 'sourceItemId', 'sourceEndpoint', 'sourceFetchedAt', 'rawSourceKind', 'sourceItemKind',
+  ]);
+  for (const field of fields) {
+    const current = existing[field];
+    const incoming = (candidate as Partial<Product>)[field];
+    if (sourceIdentityFields.has(field) && !sameSource) {
+      if (incoming !== undefined) unchangedFields.push(String(field));
+      continue;
+    }
+    if ((current === undefined || current === null || current === '') && incoming !== undefined && incoming !== null && incoming !== '') {
+      (updates as Record<string, unknown>)[field] = incoming;
+      updatedFields.push(String(field));
+    } else if (incoming !== undefined) {
+      unchangedFields.push(String(field));
+    }
+  }
+  if (sameSource && existing.source !== 'manual' && candidate.verifiedSource === true && existing.verifiedSource !== true) {
+    updates.verifiedSource = true;
+    updates.sourceVerified = true;
+    updatedFields.push('verifiedSource');
+  }
+  if (sameSource && existing.source !== 'manual' && (candidate.sourceQualityScore || 0) > (existing.sourceQualityScore || 0)) {
+    updates.sourceQualityScore = candidate.sourceQualityScore;
+    updatedFields.push('sourceQualityScore');
+  }
+  const canonicalAdopted = updatedFields.includes('originalUrl') || updatedFields.includes('canonicalProductUrl');
+  const affiliateAdopted = updatedFields.includes('affiliateUrl');
+  const priceAdopted = updatedFields.includes('price') || updatedFields.includes('salePrice');
+  if ((sameSource || canonicalAdopted) && existing.canonicalUrlStatus !== 'verified' && candidate.canonicalUrlStatus
+    && (!existing.canonicalUrlStatus || existing.canonicalUrlStatus === 'unavailable')) {
+    updates.canonicalUrlStatus = candidate.canonicalUrlStatus;
+    updatedFields.push('canonicalUrlStatus');
+  }
+  if ((sameSource || affiliateAdopted) && existing.affiliateUrlStatus !== 'verified' && candidate.affiliateUrlStatus
+    && (!existing.affiliateUrlStatus || existing.affiliateUrlStatus === 'unavailable')) {
+    updates.affiliateUrlStatus = candidate.affiliateUrlStatus;
+    updatedFields.push('affiliateUrlStatus');
+  }
+  if ((sameSource || priceAdopted) && existing.priceVerificationStatus !== 'VERIFIED' && candidate.priceVerificationStatus
+    && (!existing.priceVerificationStatus || existing.priceVerificationStatus === 'MISSING')) {
+    updates.priceVerificationStatus = candidate.priceVerificationStatus;
+    updatedFields.push('priceVerificationStatus');
+  }
+  const mergedProvenance = { ...(existing.fieldProvenance || {}) };
+  const adoptedProvenanceFields = new Set([
+    ...(canonicalAdopted ? ['canonicalProductUrl'] : []),
+    ...(affiliateAdopted ? ['affiliateUrl'] : []),
+    ...(updatedFields.includes('imageUrl') ? ['imageUrl'] : []),
+    ...(priceAdopted ? ['price'] : []),
+  ]);
+  let provenanceChanged = false;
+  for (const [field, provenance] of Object.entries(candidate.fieldProvenance || {})) {
+    const current = mergedProvenance[field];
+    const currentVerified = current?.verificationStatus === 'VERIFIED';
+    const incomingVerified = provenance.verificationStatus === 'VERIFIED';
+    const protectsManualEvidence = !adoptedProvenanceFields.has(field)
+      && (existing.source === 'manual' || current?.source === 'manual' || current?.provider === 'manual');
+    const actualValue = field === 'canonicalProductUrl' ? existing.canonicalProductUrl || existing.originalUrl
+      : field === 'affiliateUrl' ? existing.affiliateUrl
+        : field === 'imageUrl' ? existing.imageUrl
+          : field === 'price' ? existing.salePrice || existing.price
+            : undefined;
+    const incomingMatchesActual = actualValue === undefined || actualValue === null || actualValue === ''
+      || String(actualValue) === String(provenance.value ?? '');
+    if (!protectsManualEvidence && incomingMatchesActual
+      && (!current || (!currentVerified && incomingVerified) || (!currentVerified && !current.value && provenance.value))) {
+      mergedProvenance[field] = provenance;
+      provenanceChanged = true;
+      if (!updatedFields.includes(`fieldProvenance.${field}`)) updatedFields.push(`fieldProvenance.${field}`);
+    }
+  }
+  if (provenanceChanged) updates.fieldProvenance = mergedProvenance;
+  if (candidate.rawData) {
+    const currentRaw = existing.rawData || {};
+    const missingRawEntries = Object.entries(candidate.rawData).filter(([key, value]) =>
+      value !== undefined && value !== null && value !== ''
+      && (currentRaw[key] === undefined || currentRaw[key] === null || currentRaw[key] === ''));
+    if (missingRawEntries.length) {
+      updates.rawData = { ...currentRaw, ...Object.fromEntries(missingRawEntries) };
+      updatedFields.push(...missingRawEntries.map(([key]) => `rawData.${key}`));
+    }
+  }
+  return {
+    product: updatedFields.length ? normalizeCanonicalProduct({ ...existing, ...updates, id: existing.id, updatedAt: new Date().toISOString() }) : existing,
+    updatedFields,
+    unchangedFields,
+  };
 }
 
 /** List products with optional filters */
@@ -165,24 +319,54 @@ function invalidateChangedUrlHealth(
 export async function createProduct(data: CreateProductInput): Promise<Product> {
   if (requestsPublicProductState(data as Partial<Product>)) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
-    const products = await readCanonicalProducts();
-    if (products.some((item) =>
-      (data.originalUrl && item.originalUrl === data.originalUrl)
-      || (data.affiliateUrl && item.affiliateUrl === data.affiliateUrl))) {
-      throw new DuplicateProductError();
-    }
-    const id = generateId();
-    const now = new Date().toISOString();
-    const product = normalizeCanonicalProduct({
-      ...data,
-      id,
-      slug: ensureUniqueSlug(generateSlug(data.title), products, id),
-      createdAt: now,
-      updatedAt: now,
+    let created: Product | null = null;
+    let duplicate: { product: Product; updatedFields: string[]; unchangedFields: string[] } | null = null;
+    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+      const products = stored.map(item => normalizeCanonicalProduct(item));
+      const existingIndex = products.findIndex(item => productsAreCanonicalDuplicates(item, data));
+      if (existingIndex >= 0) {
+        duplicate = mergeDuplicateCandidate(products[existingIndex], data);
+        if (duplicate.updatedFields.length) products[existingIndex] = duplicate.product;
+        return duplicate.updatedFields.length ? products : undefined;
+      }
+      const id = generateId();
+      const now = new Date().toISOString();
+      created = normalizeCanonicalProduct({
+        ...data,
+        id,
+        slug: ensureUniqueSlug(generateSlug(data.title), products, id),
+        createdAt: now,
+        updatedAt: now,
+      });
+      products.push(created);
+      return products;
     });
-    products.push(product);
-    await writeCollection(COLLECTION, products);
-    return product;
+    const duplicateResult = duplicate as { product: Product; updatedFields: string[]; unchangedFields: string[] } | null;
+    if (duplicateResult) {
+      try {
+        await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items.slice(-999), {
+          id: generateId(),
+          existingProductId: duplicateResult.product.id,
+          source: data.source,
+          sourceItemId: data.sourceItemId || data.sourceId || data.externalId,
+          updatedFields: duplicateResult.updatedFields,
+          unchangedFields: duplicateResult.unchangedFields,
+          createdAt: new Date().toISOString(),
+        }]);
+      } catch (error) {
+        console.error(JSON.stringify({
+          type: 'product_duplicate_merge_audit_failed',
+          productId: duplicateResult.product.id,
+          reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'UNKNOWN_ERROR'),
+        }));
+      }
+      throw new DuplicateProductError(duplicateResult.product, {
+        updatedFields: duplicateResult.updatedFields,
+        unchangedFields: duplicateResult.unchangedFields,
+      });
+    }
+    if (!created) throw new Error('PRODUCT_CREATE_NOT_COMMITTED');
+    return created;
   });
 }
 
@@ -198,22 +382,27 @@ export async function saveCanonicalProduct(
 ): Promise<Product | null> {
   if (options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
-    const products = await readCanonicalProducts();
-    const index = products.findIndex((item) => item.id === id);
-    if (index < 0) return null;
-    const alreadyPublic = products[index].status === 'published' && products[index].publicHidden === false;
-    if (requestsPublicProductState(updates) && !alreadyPublic) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
-    const now = new Date().toISOString();
-    const guardedUpdates = invalidateChangedUrlHealth(products[index], updates, options.verifiedHealthUpdate === true);
-    const merged = { ...products[index], ...guardedUpdates, id, updatedAt: now };
-    const before = JSON.stringify({ ...products[index], updatedAt: undefined });
-    const after = JSON.stringify({ ...merged, updatedAt: undefined });
-    if (before === after) return products[index];
-    products[index] = options.evaluate
-      ? evaluateCanonicalProduct(merged, now)
-      : normalizeCanonicalProduct(merged, now);
-    await writeCollection(COLLECTION, products);
-    return products[index];
+    let saved: Product | null = null;
+    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+      const products = stored.map(item => normalizeCanonicalProduct(item));
+      const index = products.findIndex((item) => item.id === id);
+      if (index < 0) return undefined;
+      const alreadyPublic = products[index].status === 'published' && products[index].publicHidden === false;
+      if (requestsPublicProductState(updates) && !alreadyPublic) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
+      const now = new Date().toISOString();
+      const guardedUpdates = invalidateChangedUrlHealth(products[index], updates, options.verifiedHealthUpdate === true);
+      const merged = { ...products[index], ...guardedUpdates, id, updatedAt: now };
+      const before = JSON.stringify({ ...products[index], updatedAt: undefined });
+      const after = JSON.stringify({ ...merged, updatedAt: undefined });
+      if (before === after) {
+        saved = products[index];
+        return undefined;
+      }
+      products[index] = normalizeCanonicalProduct(merged, now);
+      saved = products[index];
+      return products;
+    });
+    return saved;
   });
 }
 
@@ -223,44 +412,50 @@ export async function upsertCanonicalProduct(
 ): Promise<{ product: Product; created: boolean; unchanged: boolean }> {
   if (requestsPublicProductState(draft) || options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
-    const products = await readCanonicalProducts();
-    const sourceId = String(draft.sourceId || draft.externalId || '');
-    const hash = draft.sourceHash || draft.contentHash || stableProductHash(draft);
-    const index = products.findIndex((item) =>
-      (sourceId && item.source === draft.source && (item.sourceId === sourceId || item.externalId === sourceId)) ||
-      (draft.originalUrl && item.originalUrl === draft.originalUrl) ||
-      (draft.affiliateUrl && item.affiliateUrl === draft.affiliateUrl),
-    );
-    if (index >= 0 && products[index].sourceHash === hash) {
-      return { product: products[index], created: false, unchanged: true };
-    }
-    const now = new Date().toISOString();
-    if (index >= 0) {
-      const sourceChanged = products[index].sourceHash !== hash;
-      const staleReview = sourceChanged && products[index].reviewContent
-        ? { ...products[index].reviewContent, reviewStatus: 'stale' as const }
-        : products[index].reviewContent;
-      const guardedDraft = invalidateChangedUrlHealth(products[index], draft, options.verifiedHealthUpdate === true);
-      const merged = { ...products[index], ...guardedDraft, reviewContent: draft.reviewContent || staleReview, id: products[index].id, sourceHash: hash, contentHash: hash, updatedAt: now };
-      products[index] = options.evaluate ? evaluateCanonicalProduct(merged, now) : normalizeCanonicalProduct(merged, now);
-      await writeCollection(COLLECTION, products);
-      return { product: products[index], created: false, unchanged: false };
-    }
-    const requestedSlug = draft.slug || generateStableSlug(String(draft.title || 'san-pham'), hash);
-    const uniqueSlug = ensureUniqueSlug(requestedSlug, products, hash);
-    const base = {
-      ...draft,
-      id: String(draft.id || generateId()),
-      slug: uniqueSlug,
-      sourceHash: hash,
-      contentHash: hash,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const product = options.evaluate ? evaluateCanonicalProduct(base, now) : normalizeCanonicalProduct(base, now);
-    products.push(product);
-    await writeCollection(COLLECTION, products);
-    return { product, created: true, unchanged: false };
+    let output: { product: Product; created: boolean; unchanged: boolean } | null = null;
+    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+      const products = stored.map(item => normalizeCanonicalProduct(item));
+      const sourceId = String(draft.sourceId || draft.externalId || '');
+      const hash = draft.sourceHash || draft.contentHash || stableProductHash(draft);
+      const index = products.findIndex((item) =>
+        (sourceId && item.source === draft.source && (item.sourceId === sourceId || item.externalId === sourceId)) ||
+        (draft.originalUrl && item.originalUrl === draft.originalUrl) ||
+        (draft.affiliateUrl && item.affiliateUrl === draft.affiliateUrl),
+      );
+      if (index >= 0 && products[index].sourceHash === hash) {
+        output = { product: products[index], created: false, unchanged: true };
+        return undefined;
+      }
+      const now = new Date().toISOString();
+      if (index >= 0) {
+        const sourceChanged = products[index].sourceHash !== hash;
+        const staleReview = sourceChanged && products[index].reviewContent
+          ? { ...products[index].reviewContent, reviewStatus: 'stale' as const }
+          : products[index].reviewContent;
+        const guardedDraft = invalidateChangedUrlHealth(products[index], draft, options.verifiedHealthUpdate === true);
+        const merged = { ...products[index], ...guardedDraft, reviewContent: draft.reviewContent || staleReview, id: products[index].id, sourceHash: hash, contentHash: hash, updatedAt: now };
+        products[index] = normalizeCanonicalProduct(merged, now);
+        output = { product: products[index], created: false, unchanged: false };
+        return products;
+      }
+      const requestedSlug = draft.slug || generateStableSlug(String(draft.title || 'san-pham'), hash);
+      const uniqueSlug = ensureUniqueSlug(requestedSlug, products, hash);
+      const base = {
+        ...draft,
+        id: String(draft.id || generateId()),
+        slug: uniqueSlug,
+        sourceHash: hash,
+        contentHash: hash,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const product = normalizeCanonicalProduct(base, now);
+      products.push(product);
+      output = { product, created: true, unchanged: false };
+      return products;
+    });
+    if (!output) throw new Error('PRODUCT_UPSERT_NOT_COMMITTED');
+    return output;
   });
 }
 
@@ -374,9 +569,17 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
       dryRun: audit.dryRun,
       idempotencyKey: job.idempotencyKey,
     }, async () => {
-      products[index] = candidate;
+      let committed = false;
       try {
-        await writeCollection(COLLECTION, products);
+        await runTransaction<Partial<Product>>(COLLECTION, stored => {
+          const currentProducts = stored.map(item => normalizeCanonicalProduct(item));
+          const currentIndex = currentProducts.findIndex(item => item.id === id);
+          if (currentIndex < 0) throw new Error('canonical_product_disappeared');
+          if (currentProducts[currentIndex].updatedAt !== previous.updatedAt) throw new Error('PRODUCT_CHANGED_DURING_PUBLISH');
+          currentProducts[currentIndex] = candidate;
+          committed = true;
+          return currentProducts;
+        });
         const confirmed = (await readCanonicalProducts()).find((item) => item.id === id);
         if (!confirmed) throw new Error('canonical_readback_failed');
         // Autonomous publication remains fail-closed while the durable lifecycle
@@ -389,7 +592,17 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
         await appendPublicationAudit({ operationId: job.operationId, runId: audit.runId || job.id, candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM', dryRun: false, timestamp: now });
         return confirmed;
       } catch (error) {
-        products[index] = previous; await writeCollection(COLLECTION, products);
+        if (committed) {
+          await runTransaction<Partial<Product>>(COLLECTION, stored => {
+            const currentProducts = stored.map(item => normalizeCanonicalProduct(item));
+            const currentIndex = currentProducts.findIndex(item => item.id === id);
+            if (currentIndex < 0) return undefined;
+            const current = currentProducts[currentIndex];
+            if (current.publicationEffectKey !== publicationEffectKey || current.updatedAt !== candidate.updatedAt) return undefined;
+            currentProducts[currentIndex] = previous;
+            return currentProducts;
+          });
+        }
         await appendPublicationAudit({ operationId: job.operationId, runId: audit.runId || job.id, candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [sanitizeErrorMessage(error instanceof Error ? error.message : 'publication_error')], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, riskLevel: 'HIGH', dryRun: false, timestamp: now });
         throw error;
       }

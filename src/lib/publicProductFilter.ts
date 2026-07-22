@@ -653,9 +653,9 @@ function getQualityScore(
 ): number | undefined {
   const p = asRecord(product);
 
-  const rawScore =
-      p.sourceQualityScore ??
-      p.qualityScore;
+  const rawScore: unknown =
+      (p as Record<string, unknown>).sourceQualityScore ??
+      (p as Record<string, unknown>).qualityScore;
 
   if (
       typeof rawScore === 'number' &&

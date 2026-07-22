@@ -6,6 +6,7 @@ import {
   ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
 } from './integrations/accesstrade';
 import { evaluateReviewQuality } from './reviewQuality';
+import { canonicalBlockerCodes } from './productBlockers';
 
 export const PRODUCT_ELIGIBILITY_POLICY_VERSION = 'product-eligibility-v2';
 
@@ -18,19 +19,55 @@ const NON_BLOCKING_STORED_REASONS = new Set([
   'review_required',
 ]);
 const RECALCULATED_REASONS = new Set([
+  'not_product',
+  'archived',
+  'invalid_title',
+  'invalid_slug',
+  'missing_product_url',
   'product_url_unhealthy',
+  'product_health_stale',
+  'missing_affiliate_url',
   'affiliate_url_unhealthy',
+  'affiliate_health_stale',
+  'affiliate_provenance_missing',
+  'missing_image',
   'image_unhealthy',
-  'price_invalid',
+  'image_health_stale',
+  'missing_price',
+  'price_unverified',
   'price_stale',
   'source_unverified',
   'canonical_provenance_missing',
   'canonical_url_unverified',
   'affiliate_url_unverified',
+  'cooldown',
+  'duplicate_unresolved',
   'review_quality_unready',
   'image_http_not_200',
   'image_content_type_invalid',
   'merchant_quarantined_30shinestore',
+  'review_missing',
+  'review_not_approved',
+  'review_source_stale',
+  'review_thin_content',
+  'unsupported_claims',
+  'affiliate_disclosure_missing',
+  'hands_on_evidence_unavailable',
+  'review_unbalanced',
+  'unsupported_promotional_claim',
+  'duplicate_source_copy',
+  'price_stale_or_unverified',
+  'product_url_unverified',
+  'image_unverified',
+  'low_content_quality',
+  'low_originality',
+  'low_seo_readiness',
+  'review_quality_below_threshold',
+  'claims_unverified',
+  'auto_publish_ineligible',
+  'human_review_required',
+  'prohibited_product',
+  'public_blocked',
 ]);
 
 function validHttpUrl(value?: string): boolean {
@@ -172,7 +209,9 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   const price = Number(product.salePrice || product.price || 0);
   if (!Number.isFinite(price) || price <= 0 || product.currency !== 'VND') dataBlockers.push('missing_price');
   const priceObserved = Date.parse(product.priceObservedAt || '');
-  if (!Number.isFinite(priceObserved)) dataBlockers.push('price_unverified');
+  const priceVerified = product.priceVerificationStatus === 'VERIFIED'
+    || (product.priceVerificationStatus === undefined && product.priceTruthState === 'FRESH' && Number.isFinite(priceObserved));
+  if (!priceVerified) dataBlockers.push('price_unverified');
   if (!Number.isFinite(priceObserved)
     || now - priceObserved > PRODUCT_INTELLIGENCE_CONFIG.freshness.priceDays * 86_400_000
     || ['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(String(product.priceTruthState || ''))) dataBlockers.push('price_stale');
@@ -189,11 +228,14 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (product.riskLevel === 'high' || product.riskLevel === 'unknown' || HIGH_RISK_TERMS.test(policyText)) publishBlockers.push('human_review_required');
   if (PROHIBITED_TERMS.test(policyText)) publishBlockers.push('prohibited_product');
 
-  const storedReasons = (product.publicBlockReasons || []).filter(reason =>
-    !NON_BLOCKING_STORED_REASONS.has(reason) && !RECALCULATED_REASONS.has(reason));
-  publishBlockers.push(...storedReasons.map(reason => `stored:${reason}`));
+  const storedReasons = canonicalBlockerCodes(product.currentBlockers?.length ? product.currentBlockers : product.publicBlockReasons)
+    // Known rule output is recalculated from current data above. Unknown/manual
+    // policy blockers remain fail-closed until an explicit workflow clears them.
+    .filter(reason => !NON_BLOCKING_STORED_REASONS.has(reason)
+      && !RECALCULATED_REASONS.has(reason));
+  publishBlockers.push(...storedReasons);
   if (product.publicBlocked === true && !product.publicBlockReasons?.length
-    && product.publicBlockReason && !NON_BLOCKING_STORED_REASONS.has(product.publicBlockReason)) publishBlockers.push('stored:public_blocked');
+    && product.publicBlockReason && !NON_BLOCKING_STORED_REASONS.has(product.publicBlockReason)) publishBlockers.push('public_blocked');
 
   if (!product.productUrlFinalDomain) warningBlockers.push('product_final_domain_missing');
   if (!product.affiliateUrlFinalDomain) warningBlockers.push('affiliate_final_domain_missing');
@@ -201,9 +243,9 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (product.riskLevel === 'medium') warningBlockers.push('medium_risk');
   warningBlockers.push(...reviewQuality.warnings.map(warning => `review:${warning}`));
 
-  const uniqueData = [...new Set(dataBlockers)];
-  const criticalBlockers = [...new Set([...uniqueData, ...publishBlockers])];
-  const uniqueWarnings = [...new Set(warningBlockers)];
+  const uniqueData = canonicalBlockerCodes(dataBlockers);
+  const criticalBlockers = canonicalBlockerCodes([...uniqueData, ...publishBlockers]);
+  const uniqueWarnings = canonicalBlockerCodes(warningBlockers);
   const eligibleForReview = uniqueData.length === 0;
   const eligibleForCanary = criticalBlockers.length === 0;
   const eligibleForPublish = eligibleForCanary;

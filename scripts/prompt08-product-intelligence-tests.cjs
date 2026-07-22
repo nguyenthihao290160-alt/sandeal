@@ -16,7 +16,10 @@ process.env.AUTO_PUBLISH_ENABLED = 'false';
 
 require('./register-typescript.cjs');
 
-const TEST_NOW = Date.parse('2026-07-14T03:00:00.000Z');
+// Keep health/price fixtures inside their real freshness windows. A fixed
+// calendar date made this suite begin failing after seven days despite no
+// product-policy regression.
+const TEST_NOW = Date.now();
 const auth = `Basic ${Buffer.from('prompt08-test:local-test-password').toString('base64')}`;
 const jsonHeaders = { authorization: auth, 'content-type': 'application/json' };
 let passed = 0;

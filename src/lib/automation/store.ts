@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import { backupCollection, generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
 import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 import { getJobRegistryDefaults } from './botRegistry';
 import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, listAutomationPolicies } from './policyRegistry';
@@ -8,6 +8,7 @@ import { vietnamDayKey } from './timezone';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
+import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -26,6 +27,8 @@ import type {
 } from './types';
 
 const JOBS = 'automation-jobs';
+const JOB_HEARTBEATS = 'automation-job-heartbeats';
+const JOB_PROJECTIONS = 'automation-job-projections';
 const CONTROL = 'automation-control';
 const AUDIT = 'automation-audit';
 const USAGE = 'automation-ai-usage';
@@ -34,6 +37,89 @@ const MAX_PAYLOAD_BYTES = 16 * 1024;
 export const AUTOMATION_JOB_SCHEMA_VERSION = 2;
 const SECRET_KEY = /token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key|credential/i;
 const TERMINAL = new Set<AutomationJobStatus>(['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED']);
+const FAIRNESS_AFTER_MS = Math.max(15_000, Number(process.env.SANDEAL_JOB_FAIRNESS_AFTER_MS) || 60_000);
+const MAX_JOB_PROJECTIONS = Math.max(500, Number(process.env.SANDEAL_JOB_PROJECTION_LIMIT) || 2_000);
+const PROJECTION_RECONCILE_AFTER_MS = Math.max(30_000, Number(process.env.SANDEAL_JOB_PROJECTION_RECONCILE_MS) || 60_000);
+const projectionReconcileTimes = new Map<string, number>();
+
+interface AutomationJobHeartbeat {
+  id: string;
+  jobId: string;
+  workerId: string;
+  claimToken: string;
+  heartbeatAt: string;
+  leaseExpiresAt: string;
+}
+
+export type AutomationJobLogEvent =
+  | 'job_created' | 'job_reused' | 'job_claim_attempt' | 'job_claimed'
+  | 'job_skipped' | 'job_not_runnable' | 'job_handler_resolved' | 'job_started'
+  | 'job_completed' | 'job_failed' | 'job_requeued' | 'job_terminal_timeout';
+
+export function logAutomationJobEvent(
+  event: AutomationJobLogEvent,
+  job: Pick<AutomationJob, 'id' | 'type' | 'status' | 'scheduledAt' | 'priority' | 'attemptCount'>,
+  input: { workerId?: string; reasonCode: string; durationMs?: number },
+): void {
+  console.log(JSON.stringify({
+    type: event,
+    jobId: job.id,
+    jobType: job.type,
+    status: job.status,
+    scheduledAt: job.scheduledAt,
+    priority: job.priority,
+    attemptCount: job.attemptCount,
+    workerId: input.workerId || null,
+    reasonCode: input.reasonCode,
+    ...(input.durationMs === undefined ? {} : { durationMs: Math.max(0, Math.round(input.durationMs)) }),
+  }));
+}
+
+function projectedJob(job: AutomationJob): AutomationJob {
+  return { ...structuredClone(job), payload: {} };
+}
+
+async function syncJobProjection(job: AutomationJob): Promise<void> {
+  await runTransaction<AutomationJob>(JOB_PROJECTIONS, items => {
+    const index = items.findIndex(item => item.id === job.id);
+    const projection = projectedJob(job);
+    if (index >= 0) items[index] = projection;
+    else items.push(projection);
+    if (items.length > MAX_JOB_PROJECTIONS) {
+      const removable = items
+        .filter(item => TERMINAL.has(item.status))
+        .sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+      const removeIds = new Set(removable.slice(0, items.length - MAX_JOB_PROJECTIONS).map(item => item.id));
+      if (removeIds.size) return items.filter(item => !removeIds.has(item.id));
+    }
+    return items;
+  });
+}
+
+async function removeJobHeartbeat(jobId: string): Promise<void> {
+  await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+    const filtered = items.filter(item => item.jobId !== jobId);
+    return filtered.length === items.length ? undefined : filtered;
+  });
+}
+
+async function syncJobReadModelsBestEffort(job: AutomationJob, removeHeartbeat = false): Promise<void> {
+  const operations: Array<{ label: string; work: Promise<void> }> = [
+    { label: 'projection', work: syncJobProjection(job) },
+  ];
+  if (removeHeartbeat) operations.push({ label: 'heartbeat', work: removeJobHeartbeat(job.id) });
+  const results = await Promise.allSettled(operations.map(operation => operation.work));
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(JSON.stringify({
+        type: 'automation_job_read_model_sync_failed',
+        jobId: job.id,
+        readModel: operations[index].label,
+        reasonCode: sanitizeErrorMessage(result.reason instanceof Error ? result.reason.message : 'unknown_error'),
+      }));
+    }
+  });
+}
 const COOPERATIVELY_CANCELLABLE = new Set<AutomationJobType>([
   'RECHECK_PRODUCT_HEALTH',
   'SCORE_PRODUCTS',
@@ -190,7 +276,7 @@ export function validateAutomationJobContract(
   if (job.handlerVersion !== policy.handlerVersion) return { valid: false, code: 'STALE_HANDLER_VERSION', reasons: ['handlerVersion does not match the current registry'] };
   const reasons: string[] = [];
   if (typeof job.id !== 'string' || !job.id.trim()) reasons.push('id is required');
-  if (typeof job.idempotencyKey !== 'string' || !/^[a-zA-Z0-9:_-]{8,160}$/.test(job.idempotencyKey)) reasons.push('idempotencyKey is invalid');
+  if (typeof job.idempotencyKey !== 'string' || !IDEMPOTENCY_KEY_PATTERN.test(job.idempotencyKey)) reasons.push('idempotencyKey is invalid');
   if (typeof job.operationId !== 'string' || !job.operationId.trim()) reasons.push('operationId is required');
   if (typeof job.requestedBy !== 'string' || !job.requestedBy.trim()) reasons.push('requestedBy is required');
   if (!job.payload || typeof job.payload !== 'object' || Array.isArray(job.payload)) reasons.push('payload must be an object');
@@ -222,7 +308,7 @@ export function assertAutomationJobContract(
 
 export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs = Date.now()): AutomationJob {
   const key = typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : '';
-  if (!/^[a-zA-Z0-9:_-]{8,160}$/.test(key)) rejectAutomationJob('INVALID_IDEMPOTENCY_KEY', ['idempotencyKey must be 8-160 safe characters']);
+  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) rejectAutomationJob('INVALID_IDEMPOTENCY_KEY', ['idempotencyKey must be 8-160 safe characters']);
   const requestedBy = typeof input.requestedBy === 'string' ? input.requestedBy.trim() : '';
   if (!requestedBy) rejectAutomationJob('AUTOMATION_JOB_REQUESTED_BY_REQUIRED', ['requestedBy is required']);
   const payload = sanitizeAutomationData(input.payload || {}) as Record<string, unknown>;
@@ -338,7 +424,11 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
   let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
   try {
     await runTransaction<AutomationJob>(JOBS, items => {
-      const existing = items.find(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey);
+      const sameKey = items
+        .filter(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey)
+        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+      const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
+        || sameKey.find(item => item.status === 'SUCCEEDED');
       if (existing) {
         response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
         return undefined;
@@ -360,10 +450,19 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
     await releaseProductProcessingCapacity(reservationKey);
   }
   if (response.created) {
-    await appendAutomationAudit({ correlationId: response.job.correlationId || response.job.operationId, operationId: response.job.operationId, jobId: response.job.id,
-      operationType: response.job.type, actor: response.job.requestedBy, nextState: response.job.status, risk: response.job.riskLevel,
-      reasons: input.approvalReason ? [input.approvalReason] : [], dryRun: response.job.dryRun, attempts: 0 });
+    try {
+      await appendAutomationAudit({ correlationId: response.job.correlationId || response.job.operationId, operationId: response.job.operationId, jobId: response.job.id,
+        operationType: response.job.type, actor: response.job.requestedBy, nextState: response.job.status, risk: response.job.riskLevel,
+        reasons: input.approvalReason ? [input.approvalReason] : [], dryRun: response.job.dryRun, attempts: 0 });
+    } catch (error) {
+      console.error(JSON.stringify({ type: 'automation_job_created_audit_failed', jobId: response.job.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') }));
+    }
   }
+  await syncJobProjection(response.job).catch(error => console.error(JSON.stringify({ type: 'automation_job_projection_failed', jobId: response.job.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') })));
+  logAutomationJobEvent(response.created ? 'job_created' : 'job_reused', response.job, {
+    workerId: response.created ? response.job.requestedBy : response.job.claimedBy,
+    reasonCode: response.created ? 'CREATED' : response.code === 'ALREADY_PROCESSED' ? 'COMPLETED_RECENTLY' : 'REUSED_ACTIVE_JOB',
+  });
   return response;
 }
 
@@ -395,6 +494,51 @@ export function isEquivalentActiveScan(existing: AutomationJob, requested: Autom
 
 export async function getAutomationJob(id: string): Promise<AutomationJob | null> {
   return (await readCollection<AutomationJob>(JOBS)).find(job => job.id === id) || null;
+}
+
+/** Lightweight status read for browser polling; falls back once for legacy jobs. */
+export async function getAutomationJobProjection(id: string): Promise<AutomationJob | null> {
+  const projection = (await readCollection<AutomationJob>(JOB_PROJECTIONS)).find(job => job.id === id);
+  if (projection) {
+    if (TERMINAL.has(projection.status)) {
+      projectionReconcileTimes.delete(id);
+      return projection;
+    }
+    const nowMs = Date.now();
+    const heartbeat = (await readCollection<AutomationJobHeartbeat>(JOB_HEARTBEATS)).find(item => item.jobId === id);
+    const matchingActiveHeartbeat = Boolean(heartbeat
+      && heartbeat.workerId === projection.claimedBy
+      && (!projection.claimToken || heartbeat.claimToken === projection.claimToken)
+      && Date.parse(heartbeat.leaseExpiresAt) > nowMs);
+    const projectionAge = nowMs - Date.parse(projection.updatedAt || projection.createdAt);
+    const statusContradictsHeartbeat = projection.status === 'RUNNING'
+      ? !matchingActiveHeartbeat
+      : matchingActiveHeartbeat;
+    const periodicReconcileDue = !Number.isFinite(projectionAge) || projectionAge >= PROJECTION_RECONCILE_AFTER_MS;
+    if (!statusContradictsHeartbeat && !periodicReconcileDue) {
+      return projection;
+    }
+    const lastReconcileAt = projectionReconcileTimes.get(id) || 0;
+    if (!statusContradictsHeartbeat && nowMs - lastReconcileAt < PROJECTION_RECONCILE_AFTER_MS) return projection;
+    projectionReconcileTimes.set(id, nowMs);
+    if (projectionReconcileTimes.size > 2_000) {
+      for (const [jobId, checkedAt] of projectionReconcileTimes) {
+        if (nowMs - checkedAt >= PROJECTION_RECONCILE_AFTER_MS) projectionReconcileTimes.delete(jobId);
+      }
+    }
+    const durable = await getAutomationJob(id);
+    if (!durable) return projection;
+    const reconciled = durable.status === 'RUNNING' && heartbeat
+      && heartbeat.workerId === durable.claimedBy
+      && (!durable.claimToken || heartbeat.claimToken === durable.claimToken)
+      ? { ...durable, heartbeatAt: heartbeat.heartbeatAt, leaseExpiresAt: heartbeat.leaseExpiresAt, updatedAt: heartbeat.heartbeatAt }
+      : durable;
+    await syncJobReadModelsBestEffort(reconciled);
+    return reconciled;
+  }
+  const job = await getAutomationJob(id);
+  if (job) await syncJobReadModelsBestEffort(job);
+  return job;
 }
 
 export async function getAllAutomationJobs(): Promise<AutomationJob[]> {
@@ -479,7 +623,9 @@ export async function updateAutomationJobExecution(
     updated = { ...job };
     return items;
   });
-  return updated;
+  const updatedJob = updated as AutomationJob | null;
+  if (updatedJob) await syncJobReadModelsBestEffort(updatedJob);
+  return updatedJob;
 }
 
 export async function waitAutomationJobForManual(
@@ -507,6 +653,7 @@ export async function waitAutomationJobForManual(
     return items;
   });
   const waitingJob = waiting as AutomationJob | null;
+  if (waitingJob) await syncJobReadModelsBestEffort(waitingJob, true);
   if (waitingJob) await appendAutomationAudit({
     correlationId: waitingJob.operationId,
     operationId: waitingJob.operationId,
@@ -544,6 +691,7 @@ export async function waitAutomationJobForChildren(
     return items;
   });
   const waitingJob = waiting as AutomationJob | null;
+  if (waitingJob) await syncJobReadModelsBestEffort(waitingJob, true);
   if (waitingJob) await appendAutomationAudit({
     correlationId: waitingJob.operationId,
     operationId: waitingJob.operationId,
@@ -598,6 +746,7 @@ export async function completeAutomationParentJob(
     return items;
   });
   const completedJob = completed as AutomationJob | null;
+  if (completedJob) await syncJobReadModelsBestEffort(completedJob);
   if (completedJob) await appendAutomationAudit({
     correlationId: completedJob.operationId,
     operationId: completedJob.operationId,
@@ -631,6 +780,7 @@ export async function resumeAutomationJobFromManual(id: string, actor: string, t
     return items;
   });
   const resumedJob = resumed as AutomationJob | null;
+  if (resumedJob) await syncJobReadModelsBestEffort(resumedJob);
   if (resumedJob) await appendAutomationAudit({
     correlationId: resumedJob.operationId,
     operationId: resumedJob.operationId,
@@ -647,28 +797,61 @@ export async function resumeAutomationJobFromManual(id: string, actor: string, t
   return resumedJob;
 }
 
-export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs = 60_000, nowMs = Date.now()): Promise<AutomationJob[]> {
+function runnableCreatedAt(job: AutomationJob): number {
+  const value = Date.parse(job.queuedAt || job.createdAt);
+  return Number.isFinite(value) ? value : 0;
+}
+
+/** Priority is respected for fresh work; overdue work gets a guaranteed FIFO slot. */
+export function selectFairRunnableJobs(items: AutomationJob[], limit: number, nowMs = Date.now()): AutomationJob[] {
+  const maximum = Math.max(0, Math.min(limit, 10));
+  if (!maximum) return [];
+  const priorityOrder = (left: AutomationJob, right: AutomationJob) =>
+    right.priority - left.priority || runnableCreatedAt(left) - runnableCreatedAt(right);
+  const due = [...items].sort(priorityOrder);
+  const overdue = due
+    .filter(item => nowMs - runnableCreatedAt(item) >= FAIRNESS_AFTER_MS)
+    .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right));
+  const selected: AutomationJob[] = overdue[0] ? [overdue[0]] : [];
+  const selectedIds = new Set(selected.map(item => item.id));
+  const selectedTypes = new Set(selected.map(item => item.type));
+  const remaining = due.filter(item => !selectedIds.has(item.id));
+  for (const item of remaining.filter(candidate => !selectedTypes.has(candidate.type))) {
+    if (selected.length >= maximum) break;
+    selected.push(item);
+    selectedIds.add(item.id);
+    selectedTypes.add(item.type);
+  }
+  for (const item of remaining) {
+    if (selected.length >= maximum) break;
+    if (!selectedIds.has(item.id)) selected.push(item);
+  }
+  return selected;
+}
+
+const notRunnableLogTimes = new Map<string, number>();
+
+export async function claimAutomationJobs(
+  workerId: string,
+  limit = 1,
+  leaseMs = 60_000,
+  nowMs = Date.now(),
+  ownership?: RuntimeRoleOwnership,
+): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
   if (control.workerPaused) return [];
+  if (ownership && !await isRuntimeRoleOwner('WORKER', ownership, nowMs)) throw new Error('WORKER_FENCING_REJECTED');
   const claimed: AutomationJob[] = [];
   const rejectedBeforeClaim: Array<{ job: AutomationJob; validation: AutomationJobContractValidation; previousStatus: AutomationJobStatus }> = [];
+  const timedOut: AutomationJob[] = [];
+  const requeued: AutomationJob[] = [];
   const now = new Date(nowMs).toISOString();
-  const preclaimJobs = (await readCollection<AutomationJob>(JOBS))
-    .filter(item => item.type === 'PROCESS_CANDIDATE'
-      && (item.status === 'PENDING' || (item.status === 'RETRY_SCHEDULED' && Boolean(item.nextRetryAt) && Date.parse(item.nextRetryAt!) <= nowMs))
-      && Date.parse(item.scheduledAt) <= nowMs)
-    .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
-    .slice(0, Math.max(0, Math.min(limit, 10)));
-  const candidateClaimable = new Set<string>();
+  const heartbeatItems = await readCollection<AutomationJobHeartbeat>(JOB_HEARTBEATS);
+  const heartbeats = new Map(heartbeatItems.map(item => [item.jobId, item]));
+  // Product capacity is reserved atomically at enqueue; claim must not parse the
+  // large queue a second time merely to reserve the same key again.
   const candidateQuotaDenied = new Set<string>();
-  if (preclaimJobs.length) {
-    const settings = await getAutomationSettings();
-    for (const item of preclaimJobs) {
-      const reservation = await reserveProductProcessingCapacity(productProcessingReservationKey(item), 1, settings.maxItemsPerDay, nowMs);
-      if (reservation.allowed) candidateClaimable.add(item.id);
-      else candidateQuotaDenied.add(item.id);
-    }
-  }
+  let oldestNotRunnable: AutomationJob | undefined;
   await runTransaction<AutomationJob>(JOBS, items => {
     let changed = false;
     for (const item of items) {
@@ -681,22 +864,36 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
           item.lastErrorMessage = sanitizeErrorMessage(validation.reasons.join('; ') || 'Automation job contract is invalid.');
           item.claimedBy = undefined;
           item.claimedAt = undefined;
+          item.claimToken = undefined;
+          item.workerOwnerId = undefined;
+          item.workerInstanceId = undefined;
+          item.workerFencingToken = undefined;
           item.leaseExpiresAt = undefined;
           item.completedAt = now;
           item.updatedAt = now;
-          rejectedBeforeClaim.push({ job: { ...item }, validation, previousStatus });
+          rejectedBeforeClaim.push({ job: structuredClone(item), validation, previousStatus });
           changed = true;
           continue;
         }
       }
-      if (item.status === 'RUNNING' && item.leaseExpiresAt && Date.parse(item.leaseExpiresAt) <= nowMs) {
+      if (item.status === 'RUNNING') {
+        const heartbeat = heartbeats.get(item.id);
+        const heartbeatMatches = heartbeat
+          && heartbeat.workerId === item.claimedBy
+          && (!item.claimToken || heartbeat.claimToken === item.claimToken);
+        const effectiveLease = heartbeatMatches ? heartbeat.leaseExpiresAt : item.leaseExpiresAt;
+        if (effectiveLease && Date.parse(effectiveLease) <= nowMs) {
         item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
         item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
         item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorCategory = 'PROVIDER_TIMEOUT'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.';
         item.retryable = item.status === 'RETRY_SCHEDULED'; item.deadLetterReason = item.retryable ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED'; item.claimedBy = undefined; item.updatedAt = now;
+        item.claimedAt = undefined; item.claimToken = undefined; item.workerOwnerId = undefined; item.workerInstanceId = undefined; item.workerFencingToken = undefined; item.leaseExpiresAt = undefined;
+        if (item.status === 'FAILED') { item.completedAt = now; timedOut.push(structuredClone(item)); }
+        else requeued.push(structuredClone(item));
         changed = true;
+        }
       }
-      if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) { item.status = 'PENDING'; changed = true; }
+      if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) { item.status = 'PENDING'; item.scheduledAt = item.nextRetryAt; item.nextRetryAt = undefined; changed = true; }
       if (item.status === 'PENDING' && item.type === 'PROCESS_CANDIDATE' && candidateQuotaDenied.has(item.id)) {
         item.status = 'BLOCKED';
         item.lastErrorCode = 'DAILY_PRODUCT_LIMIT_REACHED';
@@ -707,19 +904,53 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
         changed = true;
       }
     }
-    const due = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
-      && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
-      && (item.type !== 'PROCESS_CANDIDATE' || candidateClaimable.has(item.id)))
-      .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt)).slice(0, Math.max(0, Math.min(limit, 10)));
+    const eligible = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
+      && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN'));
+    const due = selectFairRunnableJobs(eligible, limit, nowMs);
+    if (!due.length) {
+      oldestNotRunnable = items
+        .filter(item => item.status === 'PENDING')
+        .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
+    }
     for (const item of due) {
       item.status = 'RUNNING'; item.claimedBy = workerId; item.claimedAt = now; item.heartbeatAt = now;
+      item.claimToken = generateId(); item.workerOwnerId = ownership?.ownerId; item.workerInstanceId = ownership?.instanceId; item.workerFencingToken = ownership?.fencingToken;
       item.leaseExpiresAt = new Date(nowMs + leaseMs).toISOString(); item.startedAt ||= now; item.attemptCount += 1; item.updatedAt = now;
-      claimed.push({ ...item, payload: { ...item.payload } });
+      claimed.push(structuredClone(item));
       changed = true;
     }
     return changed ? items : undefined;
   });
+  for (const job of [...claimed, ...requeued, ...timedOut, ...rejectedBeforeClaim.map(item => item.job)]) {
+    await syncJobProjection(job).catch(() => undefined);
+  }
+  if (claimed.length) {
+    await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+      const claimedIds = new Set(claimed.map(job => job.id));
+      const next = items.filter(item => !claimedIds.has(item.jobId) && Date.parse(item.leaseExpiresAt) > nowMs);
+      for (const job of claimed) next.push({
+        id: job.id,
+        jobId: job.id,
+        workerId,
+        claimToken: job.claimToken || '',
+        heartbeatAt: now,
+        leaseExpiresAt: job.leaseExpiresAt || now,
+      });
+      return next;
+    });
+  }
+  for (const job of requeued) logAutomationJobEvent('job_requeued', job, { workerId, reasonCode: 'LEASE_EXPIRED' });
+  for (const job of timedOut) logAutomationJobEvent('job_terminal_timeout', job, { workerId, reasonCode: 'LEASE_EXPIRED_MAX_ATTEMPTS' });
+  const notRunnable = oldestNotRunnable as AutomationJob | undefined;
+  if (notRunnable && nowMs - (notRunnableLogTimes.get(notRunnable.id) || 0) >= 60_000) {
+    notRunnableLogTimes.set(notRunnable.id, nowMs);
+    logAutomationJobEvent('job_not_runnable', notRunnable, {
+      workerId,
+      reasonCode: control.killSwitch && notRunnable.type !== 'RUNTIME_GUARDIAN' ? 'KILL_SWITCH_ACTIVE' : 'SCHEDULED_FOR_FUTURE',
+    });
+  }
   for (const rejected of rejectedBeforeClaim) {
+    logAutomationJobEvent('job_skipped', rejected.job, { workerId, reasonCode: rejected.validation.code || 'SCHEMA_VALIDATION_FAILED' });
     if (rejected.job.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(rejected.job), nowMs);
     const operationId = rejected.job.operationId || generateId();
     const risk = rejected.job.riskLevel && rejected.job.riskLevel in RISK_RANK ? rejected.job.riskLevel : 'BLOCKER';
@@ -738,6 +969,8 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
     });
   }
   for (const job of claimed) {
+    logAutomationJobEvent('job_claim_attempt', job, { workerId, reasonCode: 'RUNNABLE_SELECTED' });
+    logAutomationJobEvent('job_claimed', job, { workerId, reasonCode: 'ATOMIC_CLAIM_COMMITTED' });
     try {
       await appendAutomationAudit({
         correlationId: job.correlationId || job.operationId,
@@ -765,21 +998,54 @@ export async function claimAutomationJobs(workerId: string, limit = 1, leaseMs =
   return claimed;
 }
 
-export async function heartbeatAutomationJob(id: string, workerId: string, leaseMs = 60_000): Promise<boolean> {
-  let updated = false; const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
-    const job = items.find(item => item.id === id);
-    if (!job || job.status !== 'RUNNING' || job.claimedBy !== workerId) return undefined;
-    job.heartbeatAt = now; job.leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString(); job.updatedAt = now; updated = true; return items;
+export async function heartbeatAutomationJob(
+  id: string,
+  workerId: string,
+  leaseMs = 60_000,
+  claimToken?: string,
+  ownership?: RuntimeRoleOwnership,
+): Promise<boolean> {
+  const nowMs = Date.now();
+  if (ownership && !await isRuntimeRoleOwner('WORKER', ownership, nowMs)) return false;
+  if (!claimToken) return false;
+  const now = new Date(nowMs).toISOString();
+  const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
+  let renewed = false;
+  await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+    const current = items.find(item => item.jobId === id);
+    if (!current || current.workerId !== workerId || current.claimToken !== claimToken) return undefined;
+    current.heartbeatAt = now;
+    current.leaseExpiresAt = leaseExpiresAt;
+    renewed = true;
+    return items.filter(item => item.jobId === id || Date.parse(item.leaseExpiresAt) > nowMs);
   });
-  return updated;
+  if (!renewed) return false;
+  // Projection is a read model. Update it atomically only while it still
+  // represents this claim, so an in-flight heartbeat can never overwrite a
+  // terminal projection written by complete/fail.
+  await runTransaction<AutomationJob>(JOB_PROJECTIONS, items => {
+    const current = items.find(item => item.id === id);
+    if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
+    if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
+    current.heartbeatAt = now;
+    current.leaseExpiresAt = leaseExpiresAt;
+    current.updatedAt = now;
+    return items;
+  }).catch(error => console.error(JSON.stringify({
+    type: 'automation_job_projection_heartbeat_failed',
+    jobId: id,
+    reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+  })));
+  return true;
 }
 
-export async function completeAutomationJob(id: string, workerId: string, result: Record<string, unknown>): Promise<AutomationJob | null> {
+export async function completeAutomationJob(id: string, workerId: string, result: Record<string, unknown>, ownership?: RuntimeRoleOwnership): Promise<AutomationJob | null> {
+  if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) throw new Error('WORKER_FENCING_REJECTED');
   let completed: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'RUNNING' || job.claimedBy !== workerId) return undefined;
+    if (ownership && (job.workerInstanceId !== ownership.instanceId || job.workerFencingToken !== ownership.fencingToken)) return undefined;
     job.status = 'SUCCEEDED'; job.result = sanitizeAutomationData(result) as Record<string, unknown>; job.completedAt = now;
     job.lastErrorCode = undefined; job.lastErrorCategory = undefined; job.lastErrorMessage = undefined; job.retryable = undefined; job.deadLetterReason = undefined;
     if (job.progress) {
@@ -792,16 +1058,26 @@ export async function completeAutomationJob(id: string, workerId: string, result
     job.leaseExpiresAt = undefined; job.heartbeatAt = now; job.updatedAt = now; completed = { ...job }; return items;
   });
   const completedJob = completed as AutomationJob | null;
-  if (completedJob) await appendAutomationAudit({ correlationId: completedJob.operationId, operationId: completedJob.operationId, jobId: completedJob.id, operationType: completedJob.type,
-    actor: workerId, previousState: 'RUNNING', nextState: 'SUCCEEDED', risk: completedJob.riskLevel, result, reasons: [], dryRun: completedJob.dryRun, attempts: completedJob.attemptCount });
+  if (completedJob) {
+    await syncJobReadModelsBestEffort(completedJob, true);
+    logAutomationJobEvent('job_completed', completedJob, { workerId, reasonCode: 'HANDLER_COMPLETED', durationMs: Date.now() - Date.parse(completedJob.startedAt || completedJob.claimedAt || completedJob.updatedAt) });
+    try {
+      await appendAutomationAudit({ correlationId: completedJob.operationId, operationId: completedJob.operationId, jobId: completedJob.id, operationType: completedJob.type,
+        actor: workerId, previousState: 'RUNNING', nextState: 'SUCCEEDED', risk: completedJob.riskLevel, result, reasons: [], dryRun: completedJob.dryRun, attempts: completedJob.attemptCount });
+    } catch (error) {
+      console.error(JSON.stringify({ type: 'automation_job_completion_audit_failed', jobId: completedJob.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') }));
+    }
+  }
   return completedJob;
 }
 
-export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string; errorCategory?: AutomationErrorCategory; result?: Record<string, unknown> } = {}): Promise<AutomationJob | null> {
+export async function failAutomationJob(id: string, workerId: string, code: string, error: unknown, options: { nextRetryAt?: string; errorCategory?: AutomationErrorCategory; result?: Record<string, unknown> } = {}, ownership?: RuntimeRoleOwnership): Promise<AutomationJob | null> {
+  if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) throw new Error('WORKER_FENCING_REJECTED');
   let failed: AutomationJob | null = null; const now = new Date().toISOString();
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'RUNNING' || job.claimedBy !== workerId) return undefined;
+    if (ownership && (job.workerInstanceId !== ownership.instanceId || job.workerFencingToken !== ownership.fencingToken)) return undefined;
     const retry = isRetryableAutomationError(code, job.type) && job.attemptCount < Math.min(job.maxAttempts, getAutomationPolicy(job.type).retryPolicy.maxAttempts);
     const requestedRetryAt = Date.parse(options.nextRetryAt || '');
     job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED';
@@ -817,9 +1093,21 @@ export async function failAutomationJob(id: string, workerId: string, code: stri
     job.leaseExpiresAt = undefined; job.updatedAt = now; if (!retry) job.completedAt = now; failed = { ...job }; return items;
   });
   const failedJob = failed as AutomationJob | null;
-  if (failedJob) await appendAutomationAudit({ correlationId: failedJob.operationId, operationId: failedJob.operationId, jobId: failedJob.id, operationType: failedJob.type,
-    actor: workerId, previousState: 'RUNNING', nextState: failedJob.status, risk: failedJob.riskLevel, result: options.result,
-    reasons: [failedJob.lastErrorMessage || code], dryRun: failedJob.dryRun, attempts: failedJob.attemptCount });
+  if (failedJob) {
+    await syncJobReadModelsBestEffort(failedJob, true);
+    logAutomationJobEvent(failedJob.status === 'RETRY_SCHEDULED' ? 'job_requeued' : 'job_failed', failedJob, {
+      workerId,
+      reasonCode: code,
+      durationMs: Date.now() - Date.parse(failedJob.startedAt || failedJob.claimedAt || failedJob.updatedAt),
+    });
+    try {
+      await appendAutomationAudit({ correlationId: failedJob.operationId, operationId: failedJob.operationId, jobId: failedJob.id, operationType: failedJob.type,
+        actor: workerId, previousState: 'RUNNING', nextState: failedJob.status, risk: failedJob.riskLevel, result: options.result,
+        reasons: [failedJob.lastErrorMessage || code], dryRun: failedJob.dryRun, attempts: failedJob.attemptCount });
+    } catch (auditError) {
+      console.error(JSON.stringify({ type: 'automation_job_failure_audit_failed', jobId: failedJob.id, reasonCode: sanitizeErrorMessage(auditError instanceof Error ? auditError.message : 'unknown_error') }));
+    }
+  }
   return failedJob;
 }
 
@@ -833,8 +1121,11 @@ export async function cancelAutomationJob(id: string, actor: string, reason: str
   });
   const cancelledJob = cancelled as AutomationJob | null;
   if (cancelledJob?.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(cancelledJob));
-  if (cancelledJob) await appendAutomationAudit({ correlationId: cancelledJob.operationId, operationId: cancelledJob.operationId, jobId: cancelledJob.id, operationType: 'JOB_CANCELLED', actor,
-    previousState: String(cancelledJob.result?.previousState || ''), nextState: 'CANCELLED', risk: cancelledJob.riskLevel, reasons: [reason], dryRun: cancelledJob.dryRun, attempts: cancelledJob.attemptCount });
+  if (cancelledJob) {
+    await syncJobReadModelsBestEffort(cancelledJob, true);
+    await appendAutomationAudit({ correlationId: cancelledJob.operationId, operationId: cancelledJob.operationId, jobId: cancelledJob.id, operationType: 'JOB_CANCELLED', actor,
+      previousState: String(cancelledJob.result?.previousState || ''), nextState: 'CANCELLED', risk: cancelledJob.riskLevel, reasons: [reason], dryRun: cancelledJob.dryRun, attempts: cancelledJob.attemptCount });
+  }
   return cancelledJob;
 }
 
@@ -846,8 +1137,11 @@ export async function retryAutomationJob(id: string, actor: string): Promise<Aut
     job.status = 'PENDING'; job.nextRetryAt = undefined; job.completedAt = undefined; job.retryable = undefined; job.deadLetterReason = undefined; job.updatedAt = now; retried = { ...job }; return items;
   });
   const retriedJob = retried as AutomationJob | null;
-  if (retriedJob) await appendAutomationAudit({ correlationId: retriedJob.operationId, operationId: retriedJob.operationId, jobId: retriedJob.id, operationType: 'JOB_RETRIED', actor,
-    previousState: 'FAILED', nextState: 'PENDING', risk: retriedJob.riskLevel, reasons: [], dryRun: retriedJob.dryRun, attempts: retriedJob.attemptCount });
+  if (retriedJob) {
+    await syncJobReadModelsBestEffort(retriedJob);
+    await appendAutomationAudit({ correlationId: retriedJob.operationId, operationId: retriedJob.operationId, jobId: retriedJob.id, operationType: 'JOB_RETRIED', actor,
+      previousState: 'FAILED', nextState: 'PENDING', risk: retriedJob.riskLevel, reasons: [], dryRun: retriedJob.dryRun, attempts: retriedJob.attemptCount });
+  }
   return retriedJob;
 }
 
@@ -888,7 +1182,10 @@ export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRo
     return items;
   });
   const result = recovered as AutomationJob | null;
-  if (result) await appendAutomationAudit({ correlationId: result.operationId, operationId: `${result.operationId}:stale-recovery:${ownership.fencingToken}`.slice(0, 160), jobId: result.id, operationType: 'STALE_JOB_RECOVERED', actor, previousState: 'RUNNING', nextState: result.status, risk: 'MEDIUM', reasons: ['LEASE_EXPIRED', `fencing:${ownership.fencingToken}`], dryRun: result.dryRun, attempts: result.attemptCount });
+  if (result) {
+    await syncJobReadModelsBestEffort(result, true);
+    await appendAutomationAudit({ correlationId: result.operationId, operationId: `${result.operationId}:stale-recovery:${ownership.fencingToken}`.slice(0, 160), jobId: result.id, operationType: 'STALE_JOB_RECOVERED', actor, previousState: 'RUNNING', nextState: result.status, risk: 'MEDIUM', reasons: ['LEASE_EXPIRED', `fencing:${ownership.fencingToken}`], dryRun: result.dryRun, attempts: result.attemptCount });
+  }
   return result;
 }
 
@@ -907,8 +1204,11 @@ export async function approveAutomationJob(id: string, actor: string, reason: st
     job.updatedAt = now; changed = { ...job }; return items;
   });
   const changedJob = changed as AutomationJob | null;
-  if (changedJob) await appendAutomationAudit({ correlationId: changedJob.operationId, operationId: changedJob.operationId, jobId: changedJob.id, operationType: approve ? 'JOB_APPROVED' : 'JOB_REJECTED', actor,
-    previousState: 'WAITING_APPROVAL', nextState: changedJob.status, risk: changedJob.riskLevel, reasons: [reason], dryRun: changedJob.dryRun, attempts: changedJob.attemptCount });
+  if (changedJob) {
+    await syncJobReadModelsBestEffort(changedJob, TERMINAL.has(changedJob.status));
+    await appendAutomationAudit({ correlationId: changedJob.operationId, operationId: changedJob.operationId, jobId: changedJob.id, operationType: approve ? 'JOB_APPROVED' : 'JOB_REJECTED', actor,
+      previousState: 'WAITING_APPROVAL', nextState: changedJob.status, risk: changedJob.riskLevel, reasons: [reason], dryRun: changedJob.dryRun, attempts: changedJob.attemptCount });
+  }
   return changedJob;
 }
 
@@ -972,4 +1272,94 @@ export async function getAutomationQueueStats() {
   const jobs = await readCollection<AutomationJob>(JOBS);
   const counts = Object.fromEntries(['PENDING','WAITING_APPROVAL','WAITING_FOR_MANUAL_INPUT','WAITING_CHILDREN','RUNNING','RETRY_SCHEDULED','SUCCEEDED','FAILED','CANCELLED','BLOCKED','PAUSED'].map(status => [status, jobs.filter(job => job.status === status).length]));
   return { total: jobs.length, ...counts } as Record<AutomationJobStatus | 'total', number>;
+}
+
+export interface AutomationJobCompactionPlan {
+  apply: boolean;
+  totalJobs: number;
+  activeJobs: number;
+  terminalJobs: number;
+  removableJobs: number;
+  retainedJobs: number;
+  retentionDays: number;
+  minimumTerminalJobs: number;
+  cutoffAt: string;
+  backupRef?: string;
+  removedJobIdsSample: string[];
+}
+
+function buildCompactionSelection(
+  jobs: AutomationJob[],
+  nowMs: number,
+  retentionDays: number,
+  minimumTerminalJobs: number,
+): { removable: Set<string>; cutoffAt: string; terminalJobs: AutomationJob[] } {
+  const cutoffAt = new Date(nowMs - retentionDays * 24 * 60 * 60_000).toISOString();
+  const terminalJobs = jobs
+    .filter(job => TERMINAL.has(job.status))
+    .sort((left, right) => Date.parse(right.completedAt || right.updatedAt) - Date.parse(left.completedAt || left.updatedAt));
+  const protectedIds = new Set(terminalJobs.slice(0, minimumTerminalJobs).map(job => job.id));
+  const removable = new Set(terminalJobs
+    .filter(job => !protectedIds.has(job.id) && Date.parse(job.completedAt || job.updatedAt) < Date.parse(cutoffAt))
+    .map(job => job.id));
+  return { removable, cutoffAt, terminalJobs };
+}
+
+/** Preview by default. Apply is explicit and always snapshots FileStorage first. */
+export async function compactAutomationJobs(options: {
+  apply?: boolean;
+  nowMs?: number;
+  retentionDays?: number;
+  minimumTerminalJobs?: number;
+  actor?: string;
+} = {}): Promise<AutomationJobCompactionPlan> {
+  const nowMs = options.nowMs ?? Date.now();
+  const retentionDays = Math.max(7, Math.floor(options.retentionDays ?? (Number(process.env.SANDEAL_JOB_RETENTION_DAYS) || 30)));
+  const minimumTerminalJobs = Math.max(100, Math.floor(options.minimumTerminalJobs ?? (Number(process.env.SANDEAL_JOB_MIN_TERMINAL_AUDIT) || 1_000)));
+  const initial = await readCollection<AutomationJob>(JOBS);
+  const preview = buildCompactionSelection(initial, nowMs, retentionDays, minimumTerminalJobs);
+  let backupRef: string | undefined;
+  let removedIds = [...preview.removable];
+
+  if (options.apply && removedIds.length) {
+    backupRef = await backupCollection(JOBS, 'pre-compaction');
+    await runTransaction<AutomationJob>(JOBS, jobs => {
+      const current = buildCompactionSelection(jobs, nowMs, retentionDays, minimumTerminalJobs);
+      removedIds = [...current.removable];
+      return jobs.filter(job => !current.removable.has(job.id));
+    });
+    const removedSet = new Set(removedIds);
+    await Promise.all([
+      runTransaction<AutomationJob>(JOB_PROJECTIONS, jobs => jobs.filter(job => !removedSet.has(job.id))),
+      runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, heartbeats => heartbeats.filter(item => !removedSet.has(item.jobId))),
+    ]);
+    await appendAutomationAudit({
+      correlationId: generateId(),
+      operationId: generateId(),
+      operationType: 'AUTOMATION_QUEUE_COMPACTED',
+      actor: options.actor || 'queue-compaction',
+      target: JOBS,
+      previousState: String(initial.length),
+      nextState: String(initial.length - removedIds.length),
+      risk: 'MEDIUM',
+      result: { removedJobs: removedIds.length, retentionDays, minimumTerminalJobs, backupCreated: true },
+      reasons: ['TERMINAL_RETENTION_EXPIRED'],
+      dryRun: false,
+      attempts: 1,
+    });
+  }
+
+  return {
+    apply: options.apply === true,
+    totalJobs: initial.length,
+    activeJobs: initial.filter(job => !TERMINAL.has(job.status)).length,
+    terminalJobs: preview.terminalJobs.length,
+    removableJobs: removedIds.length,
+    retainedJobs: initial.length - removedIds.length,
+    retentionDays,
+    minimumTerminalJobs,
+    cutoffAt: preview.cutoffAt,
+    backupRef,
+    removedJobIdsSample: removedIds.slice(0, 20),
+  };
 }

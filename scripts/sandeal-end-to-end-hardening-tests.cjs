@@ -128,7 +128,7 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     const jobId = body.data.id;
     const duplicateResponse = await jobsRoute.POST(jobRequest('health-e2e-overlapping'));
     const duplicateBody = await duplicateResponse.json();
-    assert.equal(duplicateBody.code, 'IN_PROGRESS');
+    assert.equal(duplicateBody.code, 'REUSED_ACTIVE_JOB');
     assert.equal(duplicateBody.data.id, jobId);
     assert.equal(JSON.parse(fs.readFileSync(path.join(tempDir, 'automation-jobs.json'), 'utf8')).length, 1);
 
@@ -322,7 +322,7 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     const list = fs.readFileSync(path.join(root, 'src/app/dashboard/products/products-dashboard.tsx'), 'utf8');
     assert.match(polling, /encodeURIComponent\(options\.jobId\)/);
     assert.match(polling, /cache: 'no-store'/);
-    const terminalPoll = sources.indexOf('const job = await pollScanJob({ jobId });');
+    const terminalPoll = sources.indexOf('const job = await pollScanJob({');
     assert.ok(terminalPoll >= 0 && sources.indexOf('await loadRecent();', terminalPoll) > terminalPoll);
     assert.match(sources, /fetch\('\/api\/products\?limit=10', \{ cache: 'no-store' \}\)/);
     assert.match(list, /if \(\['completed', 'failed', 'cancelled', 'blocked'\]\.includes\(next\.status\)\) \{\s*refresh\(\)/s);

@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import type { Product } from './types';
 import { applySafePublishDecision } from './safePublish';
 import { normalizeReviewContent } from './editorialReview';
+import { canonicalBlockerCodes, canonicalizeProductBlockers } from './productBlockers';
 
 const VALID_KINDS = new Set(['product', 'voucher', 'campaign', 'deal', 'store_offer', 'unknown']);
 const VALID_STATUSES = new Set(['draft', 'needs_review', 'approved', 'published', 'archived']);
@@ -45,6 +46,13 @@ export function normalizeCanonicalProduct(input: Partial<Product>, now = new Dat
   const reviewContent = normalizeReviewContent(input.reviewContent, input.sourceHash || input.contentHash || '');
   const canonicalProductUrl = input.canonicalProductUrl || input.originalUrl || undefined;
   const originalUrl = input.originalUrl || canonicalProductUrl;
+  const legacyBlockers = Array.isArray(input.publicBlockReasons)
+    ? input.publicBlockReasons
+    : String(input.publicBlockReason || '').split(',').map(reason => reason.trim()).filter(Boolean);
+  const currentBlockers = canonicalizeProductBlockers(
+    input.currentBlockers?.length ? input.currentBlockers : legacyBlockers,
+    input.blockersCheckedAt || input.updatedAt || now,
+  );
   return {
     ...input,
     schemaVersion: 2,
@@ -77,9 +85,9 @@ export function normalizeCanonicalProduct(input: Partial<Product>, now = new Dat
     publicHidden: safelyPublished ? false : input.publicHidden !== false,
     publicBlocked: safelyPublished ? false : input.publicBlocked === true,
     publicDecision: safelyPublished ? 'published' : (input.publicDecision || 'needs_review'),
-    publicBlockReasons: Array.isArray(input.publicBlockReasons)
-      ? [...new Set(input.publicBlockReasons.map(String).filter(Boolean))]
-      : String(input.publicBlockReason || '').split(',').map((reason) => reason.trim()).filter(Boolean),
+    publicBlockReasons: canonicalBlockerCodes(currentBlockers),
+    currentBlockers,
+    blockersCheckedAt: input.blockersCheckedAt || input.updatedAt || now,
     needsVerification: safelyPublished ? false : input.needsVerification !== false,
     autoPublished: safelyPublished ? input.autoPublished === true : false,
     contentHash: input.contentHash || stableProductHash(input),

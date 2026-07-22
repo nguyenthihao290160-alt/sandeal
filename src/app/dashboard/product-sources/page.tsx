@@ -3,12 +3,14 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from 'react';
 import Link from 'next/link';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
 import type { Product, ProductKind } from '@/lib/types';
-import { pollScanJob, type ScanJobResult } from '@/lib/dashboard/scanPolling';
+import { pollScanJob, type ScanJobResult, type ScanJobSnapshot } from '@/lib/dashboard/scanPolling';
+import { buildIdempotencyKey } from '@/lib/automation/idempotency';
 
 // ---- Tab IDs ----
 const TABS = [
@@ -38,8 +40,21 @@ type AccessTradeItem = Record<string, unknown> & {
   sourceItemKind?: ProductKind | string;
   imageUrl?: string;
   originalUrl?: string;
+  canonicalProductUrl?: string;
+  canonicalUrlSource?: string;
+  canonicalUrlProvider?: string;
+  canonicalUrlSourceEndpoint?: string;
+  canonicalUrlSourceField?: string;
+  canonicalUrlFetchedAt?: string;
   affiliateUrl?: string;
+  affiliateDestinationUrl?: string;
   affiliateUrlSource?: string;
+  affiliateUrlProvider?: string;
+  affiliateUrlSourceEndpoint?: string;
+  affiliateUrlSourceField?: string;
+  affiliateUrlCampaignId?: string;
+  affiliateUrlFetchedAt?: string;
+  affiliateUrlStatus?: string;
   deepLinkSupported?: boolean;
   affiliateLinkReason?: string;
   url?: string;
@@ -62,9 +77,16 @@ type AccessTradeItem = Record<string, unknown> & {
   unpublishedReason?: string;
   linkHealthStatus?: string;
   imageHealthStatus?: string;
+  imageValidationState?: string;
+  affiliateHealthStatus?: string;
   qualityScore?: number | string;
   sourceQualityScore?: number | string;
   rawData?: Record<string, unknown>;
+  sourceEndpoint?: string;
+  sourceItemId?: string;
+  fetchedAt?: string;
+  merchant?: string;
+  merchantDomain?: string;
 };
 
 type AccessTradeResults = {
@@ -94,10 +116,27 @@ type AccessTradeResults = {
 type ApiEnvelope<T> = {
   ok?: boolean;
   success?: boolean;
+  code?: string;
   message?: string;
   error?: string;
   data?: T;
+  existingProductId?: string;
+  existingProductUrl?: string;
+  mergeResult?: { updatedFields?: string[]; unchangedFields?: string[] };
 };
+
+type HealthScanState = Pick<ScanJobSnapshot, 'id' | 'status' | 'progress' | 'pollingTimedOut' | 'lastErrorCode' | 'lastErrorMessage'>;
+
+function healthScanLabel(scan: HealthScanState | null): string {
+  if (!scan) return 'Kiểm tra sản phẩm đã lưu';
+  if (scan.pollingTimedOut) return 'Tác vụ vẫn đang chờ xử lý';
+  if (['PENDING', 'RETRY_SCHEDULED'].includes(scan.status)) return 'Đã xếp hàng';
+  if (scan.status === 'RUNNING') return 'Đang xử lý';
+  if (scan.status === 'SUCCEEDED') return 'Hoàn tất';
+  if (['WAITING_APPROVAL', 'WAITING_FOR_MANUAL_INPUT', 'PAUSED'].includes(scan.status)) return 'Cần thao tác';
+  if (['FAILED', 'BLOCKED', 'CANCELLED'].includes(scan.status)) return 'Thất bại';
+  return scan.status;
+}
 
 
 
@@ -720,7 +759,14 @@ function SafeThumb({
   size?: number;
 }) {
   const [failed, setFailed] = useState(false);
-  const cleanSrc = src?.trim() || '';
+  let cleanSrc = '';
+  try {
+    const candidate = new URL(src?.trim() || '');
+    if (candidate.protocol === 'http:') candidate.protocol = 'https:';
+    if (candidate.protocol === 'https:') cleanSrc = candidate.href;
+  } catch {
+    cleanSrc = '';
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => setFailed(false), 0);
@@ -783,6 +829,10 @@ export default function ProductSourcesPage() {
   const [recentProducts, setRecentProducts] = useState<Product[]>([]);
   const [runningBot, setRunningBot] = useState(false);
   const [scanResult, setScanResult] = useState<(ScanJobResult & { completedAt: string }) | null>(null);
+  const [healthScan, setHealthScan] = useState<HealthScanState | null>(null);
+  const scanAbortRef = useRef<AbortController | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
   // AccessTrade state
   const [atKeyword, setAtKeyword] = useState('');
@@ -791,11 +841,16 @@ export default function ProductSourcesPage() {
   const [atError, setAtError] = useState('');
   const [atResults, setAtResults] = useState<AccessTradeResults | null>(null);
   const [atSaving, setAtSaving] = useState<string | null>(null);
+  const [existingProducts, setExistingProducts] = useState<Record<string, { id: string; route: string }>>({});
   const [atConfigured, setAtConfigured] = useState(false);
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
+    if (!mountedRef.current) return;
     setToast({ type, message });
-    window.setTimeout(() => setToast(null), 4000);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      if (mountedRef.current) setToast(null);
+    }, 4000);
   }, []);
 
   const loadRecent = useCallback(async () => {
@@ -805,7 +860,7 @@ export default function ProductSourcesPage() {
           Product[]
       > | null;
 
-      if (res.ok && (data?.ok || data?.success) && Array.isArray(data.data)) {
+      if (mountedRef.current && res.ok && (data?.ok || data?.success) && Array.isArray(data.data)) {
         setRecentProducts(data.data.slice(0, 10));
       }
     } catch {
@@ -824,6 +879,7 @@ export default function ProductSourcesPage() {
         };
       }> | null;
 
+      if (!mountedRef.current) return;
       if (healthRes.ok && (healthData?.ok || healthData?.success)) {
         setAtConfigured(
             Boolean(healthData.data?.integrations?.accesstrade?.configured),
@@ -832,7 +888,7 @@ export default function ProductSourcesPage() {
         setAtConfigured(false);
       }
     } catch {
-      setAtConfigured(false);
+      if (mountedRef.current) setAtConfigured(false);
     }
   }, []);
 
@@ -841,19 +897,98 @@ export default function ProductSourcesPage() {
     return () => window.clearTimeout(timer);
   }, [loadRecent]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const controller = scanAbortRef.current;
+      scanAbortRef.current = null;
+      controller?.abort();
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
+
+
+  const monitorHealthScan = useCallback(async (jobId: string, controller: AbortController) => {
+    const job = await pollScanJob({
+      jobId,
+      signal: controller.signal,
+      onSnapshot: snapshot => {
+        if (mountedRef.current && !controller.signal.aborted) setHealthScan(snapshot);
+      },
+    });
+    if (!mountedRef.current || controller.signal.aborted) return;
+    setHealthScan(job);
+    if (job.pollingTimedOut) {
+      showToast('info', `Tác vụ vẫn đang chờ xử lý (${jobId.slice(0, 8)}…). Bạn có thể theo dõi trong “Tác vụ và tiến độ”.`);
+      return;
+    }
+    if (['WAITING_APPROVAL', 'WAITING_FOR_MANUAL_INPUT', 'PAUSED'].includes(job.status)) {
+      showToast('info', `Tác vụ ${jobId.slice(0, 8)}… cần thao tác trong “Tác vụ và tiến độ”.`);
+      return;
+    }
+    window.localStorage.removeItem('sandeal:active-product-health-job');
+    const result = job.result || {};
+    setScanResult({ ...result, completedAt: new Date().toISOString() });
+    await loadRecent();
+    if (job.status !== 'SUCCEEDED') {
+      showToast('error', job.lastErrorMessage || job.lastErrorCode || `Tác vụ kết thúc với trạng thái ${job.status}.`);
+      return;
+    }
+    showToast(
+        'success',
+        `Quét hoàn tất: ${result.processed || 0}/${result.total || 0} đã lưu, khỏe ${result.healthy || 0}, chưa khỏe ${result.unhealthy || 0}, quarantine ${result.quarantined || 0}, lỗi xử lý ${result.failed || 0}.`,
+    );
+  }, [loadRecent, showToast]);
+
+  useEffect(() => {
+    const jobId = window.localStorage.getItem('sandeal:active-product-health-job');
+    if (!jobId) return;
+    const controller = new AbortController();
+    scanAbortRef.current = controller;
+    const timer = window.setTimeout(() => {
+      if (!mountedRef.current || controller.signal.aborted) return;
+      setRunningBot(true);
+      void monitorHealthScan(jobId, controller)
+        .catch(error => {
+          if (!(error instanceof DOMException && error.name === 'AbortError')) {
+            showToast('error', error instanceof Error ? error.message : 'Không đọc được trạng thái tác vụ.');
+          }
+        })
+        .finally(() => {
+          if (mountedRef.current && scanAbortRef.current === controller) {
+            scanAbortRef.current = null;
+            setRunningBot(false);
+          }
+        });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      if (scanAbortRef.current === controller) scanAbortRef.current = null;
+      controller.abort();
+    };
+  }, [monitorHealthScan, showToast]);
 
   const handleProductHealthScan = async () => {
+    if (runningBot) return;
+    const controller = new AbortController();
+    scanAbortRef.current?.abort();
+    scanAbortRef.current = controller;
     setRunningBot(true);
 
     try {
       const res = await fetch('/api/automation/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           type: 'RECHECK_PRODUCT_HEALTH',
           payload: { limit: 100, healthTarget: 'all', trigger: 'dashboard' },
-          idempotencyKey: `dashboard-product-health:${Date.now()}`,
+          idempotencyKey: buildIdempotencyKey({
+            scope: 'dashboard:recheck-product-health',
+            values: { healthTarget: 'all', limit: 100 },
+          }),
           dryRun: false,
         }),
       });
@@ -862,27 +997,19 @@ export default function ProductSourcesPage() {
       if (!res.ok || !data?.ok || !jobId) {
         throw new Error(data?.message || data?.error || `Không tạo được tác vụ quét. HTTP ${res.status}`);
       }
-      showToast('info', 'Đã bắt đầu quét');
-      const job = await pollScanJob({ jobId });
-      const result = job.result || {};
-      setScanResult({ ...result, completedAt: new Date().toISOString() });
-      // A failed job may still have persisted earlier records. Always reload
-      // terminal truth instead of leaving the dashboard on its pre-scan data.
-      await loadRecent();
-      if (job.status !== 'SUCCEEDED') {
-        throw new Error(job.lastErrorMessage || job.lastErrorCode || `Tác vụ kết thúc với trạng thái ${job.status}.`);
+      window.localStorage.setItem('sandeal:active-product-health-job', jobId);
+      setHealthScan({ id: jobId, status: getString(data.data?.status) || 'PENDING' });
+      showToast('info', data.code === 'REUSED_ACTIVE_JOB' ? 'Đang dùng lại tác vụ cùng phạm vi đã có.' : data.code === 'COMPLETED_RECENTLY' ? 'Đang dùng kết quả vừa hoàn tất.' : 'Đã xếp tác vụ vào hàng đợi.');
+      await monitorHealthScan(jobId, controller);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        showToast('error', error instanceof Error ? error.message : 'Không chạy được tác vụ quét.');
       }
-      showToast(
-          'success',
-          `Quét hoàn tất: ${result.processed || 0}/${result.total || 0} đã lưu, khỏe ${result.healthy || 0}, chưa khỏe ${result.unhealthy || 0}, quarantine ${result.quarantined || 0}, lỗi xử lý ${result.failed || 0}.`,
-      );
-    } catch (err) {
-      showToast(
-          'error',
-          err instanceof Error ? err.message : 'Không chạy được tác vụ quét.',
-      );
     } finally {
-      setRunningBot(false);
+      if (mountedRef.current && scanAbortRef.current === controller) {
+        scanAbortRef.current = null;
+        setRunningBot(false);
+      }
     }
   };
 
@@ -926,6 +1053,7 @@ export default function ProductSourcesPage() {
           AccessTradeResults | AccessTradeItem[]
       > | null;
 
+      if (!mountedRef.current) return;
       if (res.ok && (data?.ok || data?.success)) {
         setAtResults(normalizeAtResults(data.data));
       } else {
@@ -936,9 +1064,9 @@ export default function ProductSourcesPage() {
         );
       }
     } catch {
-      setAtError('Không thể kết nối đến server.');
+      if (mountedRef.current) setAtError('Không thể kết nối đến server.');
     } finally {
-      setAtLoading(false);
+      if (mountedRef.current) setAtLoading(false);
     }
   };
 
@@ -1020,11 +1148,23 @@ export default function ProductSourcesPage() {
           approvalMode: 'manual_or_auto_safe_required',
 
           originalUrl,
+          canonicalProductUrl: originalUrl,
+          canonicalUrlSource: getString(item.canonicalUrlSource) || undefined,
+          canonicalUrlProvider: getString(item.canonicalUrlProvider) || undefined,
+          canonicalUrlSourceEndpoint: getString(item.canonicalUrlSourceEndpoint) || getString(item.sourceEndpoint) || undefined,
+          canonicalUrlSourceField: getString(item.canonicalUrlSourceField) || undefined,
+          canonicalUrlFetchedAt: getString(item.canonicalUrlFetchedAt) || getString(item.fetchedAt) || undefined,
           affiliateUrl,
+          affiliateDestinationUrl: getString(item.affiliateDestinationUrl) || undefined,
           affiliateUrlSource: getString(item.affiliateUrlSource) || 'none',
-          deepLinkSupported: item.deepLinkSupported === true,
+          affiliateUrlProvider: getString(item.affiliateUrlProvider) || undefined,
+          affiliateUrlSourceEndpoint: getString(item.affiliateUrlSourceEndpoint) || getString(item.sourceEndpoint) || undefined,
+          affiliateUrlSourceField: getString(item.affiliateUrlSourceField) || undefined,
+          affiliateUrlCampaignId: getString(item.affiliateUrlCampaignId) || undefined,
+          affiliateUrlFetchedAt: getString(item.affiliateUrlFetchedAt) || getString(item.fetchedAt) || undefined,
+          deepLinkSupported: typeof item.deepLinkSupported === 'boolean' ? item.deepLinkSupported : undefined,
           affiliateLinkReason: getString(item.affiliateLinkReason) || undefined,
-          url: affiliateUrl || originalUrl,
+          url: originalUrl,
 
           imageUrl,
           price,
@@ -1065,6 +1205,11 @@ export default function ProductSourcesPage() {
 
           qualityScore: getAtQualityScore(item) ?? undefined,
           sourceQualityScore: getAtQualityScore(item) ?? undefined,
+          sourceItemId: getString(item.sourceItemId) || getString(item.sourceId) || getString(item.productId) || getString(item.id) || undefined,
+          sourceEndpoint: getString(item.sourceEndpoint) || getString(item.canonicalUrlSourceEndpoint) || getString(item.affiliateUrlSourceEndpoint) || undefined,
+          sourceFetchedAt: getString(item.fetchedAt) || getString(item.canonicalUrlFetchedAt) || getString(item.affiliateUrlFetchedAt) || undefined,
+          merchant: getString(item.merchant) || getString(item.campaignName) || undefined,
+          merchantDomain: getString(item.merchantDomain) || undefined,
 
           rawSourceType: 'accesstrade',
           rawData:
@@ -1078,6 +1223,7 @@ export default function ProductSourcesPage() {
           .json()
           .catch(() => null)) as ApiEnvelope<Product> | null;
 
+      if (!mountedRef.current) return;
       if (res.ok && (data?.ok || data?.success)) {
         if (runScore && data.data?.id) {
           await fetch(`/api/products/${data.data.id}/score`, {
@@ -1093,6 +1239,16 @@ export default function ProductSourcesPage() {
         );
 
         await loadRecent();
+      } else if ((data?.error || data?.code) === 'DUPLICATE_PRODUCT') {
+        const duplicateData = data?.data as Product & { existingProductId?: string; existingProductUrl?: string } | undefined;
+        const existingProductId = getString(data?.existingProductId || duplicateData?.existingProductId);
+        const existingProductUrl = getString(data?.existingProductUrl || duplicateData?.existingProductUrl)
+          || (existingProductId ? `/dashboard/products/${encodeURIComponent(existingProductId)}` : '');
+        if (existingProductId && existingProductUrl) {
+          setExistingProducts(current => ({ ...current, [itemId]: { id: existingProductId, route: existingProductUrl } }));
+        }
+        showToast('info', data?.message || 'Sản phẩm đã tồn tại; không tạo thêm bản ghi trùng.');
+        await loadRecent();
       } else {
         showToast(
             'error',
@@ -1104,7 +1260,7 @@ export default function ProductSourcesPage() {
     } catch {
       showToast('error', 'Lỗi kết nối.');
     } finally {
-      setAtSaving(null);
+      if (mountedRef.current) setAtSaving(null);
     }
   };
 
@@ -1212,9 +1368,7 @@ export default function ProductSourcesPage() {
                   disabled={runningBot}
                   onClick={() => void handleProductHealthScan()}
               >
-                {runningBot
-                    ? 'Đang chạy...'
-                    : 'Quét và kiểm tra sản phẩm'}
+                {runningBot ? healthScanLabel(healthScan) : 'Quét và kiểm tra sản phẩm'}
               </button>
 
               <button
@@ -1235,6 +1389,23 @@ export default function ProductSourcesPage() {
               </Link>
             </div>
           </div>
+
+          {healthScan && (
+              <div className={`health-job-status health-job-${healthScan.status.toLowerCase()}`} role="status">
+                <div>
+                  <strong>{healthScanLabel(healthScan)}</strong>
+                  <span>
+                    Job {healthScan.id.slice(0, 8)}…
+                    {healthScan.status === 'RUNNING' && healthScan.progress?.total
+                      ? ` · ${healthScan.progress.processed || 0}/${healthScan.progress.total}`
+                      : ''}
+                  </span>
+                  {healthScan.pollingTimedOut && <small>Tác vụ vẫn còn ở backend; trang đã dừng polling để tránh request storm.</small>}
+                  {healthScan.lastErrorMessage && <small>{healthScan.lastErrorMessage}</small>}
+                </div>
+                <Link href="/dashboard/ai-bots">Tác vụ và tiến độ</Link>
+              </div>
+          )}
 
           {scanResult && (
               <div className="disclosure-banner" style={{ alignSelf: 'center', textAlign: 'left' }}>
@@ -1566,7 +1737,7 @@ export default function ProductSourcesPage() {
                         disabled={runningBot || !atConfigured}
                       title={!atConfigured ? 'Chỉ khả dụng sau khi thêm kết nối AccessTrade.' : 'Kiểm tra lại link, ảnh và dữ liệu của sản phẩm đã lưu'}
                     >
-                      {runningBot ? 'Đang chạy...' : 'Kiểm tra sản phẩm đã lưu'}
+                      {runningBot ? healthScanLabel(healthScan) : 'Kiểm tra sản phẩm đã lưu'}
                     </button>
 
                     <Link href="/dashboard/products" className="btn btn-secondary">
@@ -1726,6 +1897,13 @@ export default function ProductSourcesPage() {
                         const affiliateUrl = getString(item.affiliateUrl);
                         const hasAffiliateLink = isValidHttpUrl(affiliateUrl);
                         const hasImage = isValidImageUrl(imageUrl);
+                        const affiliateState = getString(item.affiliateHealthStatus || item.affiliateUrlStatus).toLowerCase();
+                        const imageState = getString(item.imageHealthStatus || item.imageValidationState).toLowerCase();
+                        const affiliateVerified = affiliateState === 'ok' || affiliateState === 'verified';
+                        const affiliateInvalid = ['error', 'broken', 'not_allowed', 'invalid'].includes(affiliateState);
+                        const imageVerified = imageState === 'ok' || imageState === 'valid';
+                        const imageInvalid = ['error', 'broken', 'image_broken', 'invalid_image', 'invalid_content_type'].includes(imageState);
+                        const existingProduct = existingProducts[itemId];
                         const hasPrice = Boolean(
                             getNumber(item.salePrice) || getNumber(item.price),
                         );
@@ -1737,7 +1915,7 @@ export default function ProductSourcesPage() {
                         return (
                             <div
                                 key={`${itemId}-${index}`}
-                                className="glass-card"
+                                className="glass-card source-candidate-card"
                                 style={{
                                   marginBottom: 'var(--space-md)',
                                   display: 'flex',
@@ -1817,15 +1995,15 @@ export default function ProductSourcesPage() {
                           </span>
 
                                   <span
-                                      className={`badge ${hasAffiliateLink ? 'badge-success' : 'badge-danger'}`}
+                                      className={`badge ${affiliateVerified ? 'badge-success' : affiliateInvalid || !hasAffiliateLink ? 'badge-danger' : 'badge-warning'}`}
                                   >
-                            Liên kết tiếp thị: {hasAffiliateLink ? 'Có' : 'Thiếu'}
+                            {affiliateVerified ? 'Đã xác minh domain affiliate' : affiliateInvalid ? 'Link tiếp thị không hợp lệ' : hasAffiliateLink ? 'Có link tiếp thị · Chưa xác minh' : 'Thiếu link tiếp thị'}
                           </span>
 
                                   <span
-                                      className={`badge ${hasImage ? 'badge-success' : 'badge-danger'}`}
+                                      className={`badge ${imageVerified ? 'badge-success' : imageInvalid || !hasImage ? 'badge-danger' : 'badge-warning'}`}
                                   >
-                            Ảnh: {hasImage ? 'Có' : 'Thiếu'}
+                            {imageVerified ? 'Ảnh đã xác minh' : imageInvalid ? 'Ảnh lỗi' : hasImage ? 'Có URL ảnh · Chưa xác minh' : 'Thiếu URL ảnh'}
                           </span>
                                 </div>
 
@@ -1861,6 +2039,12 @@ export default function ProductSourcesPage() {
                                         ? 'Đang lưu...'
                                         : 'Lưu vào hàng chờ'}
                                   </button>
+
+                                  {existingProduct && (
+                                      <Link className="btn btn-sm btn-secondary" href={existingProduct.route}>
+                                        Xem sản phẩm đã có
+                                      </Link>
+                                  )}
 
                                 </div>
                               </div>

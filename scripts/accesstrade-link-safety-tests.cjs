@@ -197,11 +197,11 @@ function product(overrides = {}) {
     const pageSource = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/product-sources/page.tsx'), 'utf8');
     assert(pageSource.includes('disabled={runningBot}'));
     assert(pageSource.includes('handleProductHealthScan'));
-    assert(pageSource.includes('pollScanJob({ jobId })'));
+    assert(pageSource.includes('pollScanJob({'));
     const sequence = [envelope({ id: 'scan-1', status: 'RUNNING' }), envelope({ id: 'scan-1', status: 'SUCCEEDED', result: { total: 52, processed: 52, healthy: 15, unhealthy: 37, quarantined: 2, unchanged: 4, skipped: 0, failed: 0, durationMs: 1250 } })];
     const result = await polling.pollScanJob({ jobId: 'scan-1', fetchImpl: async () => sequence.shift(), wait: async () => {}, intervalMs: 0, maximumPolls: 3 });
     equal(result.status, 'SUCCEEDED'); equal(result.result.unhealthy, 37); equal(result.result.processed, 52);
-    const pollIndex = pageSource.indexOf('pollScanJob({ jobId })');
+    const pollIndex = pageSource.indexOf('pollScanJob({');
     const reloadIndex = pageSource.indexOf('await loadRecent()', pollIndex);
     assert(pollIndex >= 0 && reloadIndex > pollIndex, 'terminal polling must refresh product records');
   });
