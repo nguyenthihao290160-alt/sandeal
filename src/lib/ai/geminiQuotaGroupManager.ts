@@ -1,4 +1,4 @@
-import { readCollection, writeCollection } from '../storage/adapter';
+import { readCollection, runTransaction } from '../storage/adapter';
 
 const COLLECTION = 'gemini-pool-state';
 export type GeminiPoolStateName = 'ACTIVE' | 'DEGRADED' | 'LOCAL_ONLY' | 'RECOVERING' | 'DISABLED';
@@ -9,14 +9,28 @@ export async function getGeminiPoolState(): Promise<GeminiPoolState> {
   return (await readCollection<GeminiPoolState>(COLLECTION))[0] || { id: 'pool', state: 'LOCAL_ONLY', groups: {}, updatedAt: new Date().toISOString() };
 }
 export async function setGeminiPoolState(state: GeminiPoolStateName): Promise<GeminiPoolState> {
-  const current = await getGeminiPoolState(); current.state = state; current.updatedAt = new Date().toISOString(); await writeCollection(COLLECTION, [current]); return current;
+  let result!: GeminiPoolState;
+  await runTransaction<GeminiPoolState>(COLLECTION, items => {
+    const current = items[0] || { id: 'pool', state: 'LOCAL_ONLY', groups: {}, updatedAt: new Date().toISOString() };
+    current.state = state;
+    current.updatedAt = new Date().toISOString();
+    result = current;
+    return [current];
+  });
+  return result;
 }
 
 export async function updateQuotaGroup(quotaGroupId: string, patch: Partial<GeminiQuotaGroupState>, poolState?: GeminiPoolStateName): Promise<GeminiPoolState> {
-  const current = await getGeminiPoolState();
-  current.groups[quotaGroupId] = { ...current.groups[quotaGroupId], ...patch, quotaGroupId, failureStreak: patch.failureStreak ?? current.groups[quotaGroupId]?.failureStreak ?? 0, concurrency: patch.concurrency ?? current.groups[quotaGroupId]?.concurrency ?? 1, updatedAt: new Date().toISOString() };
-  if (poolState) current.state = poolState;
-  current.updatedAt = new Date().toISOString(); await writeCollection(COLLECTION, [current]); return current;
+  let result!: GeminiPoolState;
+  await runTransaction<GeminiPoolState>(COLLECTION, items => {
+    const current = items[0] || { id: 'pool', state: 'LOCAL_ONLY', groups: {}, updatedAt: new Date().toISOString() };
+    current.groups[quotaGroupId] = { ...current.groups[quotaGroupId], ...patch, quotaGroupId, failureStreak: patch.failureStreak ?? current.groups[quotaGroupId]?.failureStreak ?? 0, concurrency: patch.concurrency ?? current.groups[quotaGroupId]?.concurrency ?? 1, updatedAt: new Date().toISOString() };
+    if (poolState) current.state = poolState;
+    current.updatedAt = new Date().toISOString();
+    result = current;
+    return [current];
+  });
+  return result;
 }
 
 export function quotaGroupAvailable(group: GeminiQuotaGroupState | undefined, now = Date.now()): boolean {

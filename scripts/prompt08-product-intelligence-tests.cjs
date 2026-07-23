@@ -139,7 +139,11 @@ async function main() {
     const reviewContent = editorial.generateEditorialReview(product, [], now);
     const published = safePublish.applySafePublishDecision({ ...product, reviewContent }, now);
     assert.equal(published.status, 'published', `public fixture was blocked: ${(published.publicBlockReasons || []).join(',')}`);
-    assert.equal(publicFilter.isPublicSafeProduct(published), true);
+    assert.equal(
+      publicFilter.isPublicSafeProduct(published),
+      true,
+      `public fixture failed public filter: ${publicFilter.getPublicProductBlockReason(published)}`,
+    );
     return published;
   }
 

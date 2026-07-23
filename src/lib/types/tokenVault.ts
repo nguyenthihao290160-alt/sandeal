@@ -45,8 +45,33 @@ export type CredentialRole =
 
 export type GeminiBillingMode = 'free_confirmed' | 'paid' | 'unknown';
 export type GeminiKeyType = 'auth' | 'restricted_standard' | 'standard' | 'unknown';
-export type GeminiGenerationStatus = 'unchecked' | 'available' | 'rate_limited' | 'quota_exhausted' | 'cooldown' | 'transient_error' | 'invalid' | 'missing_permission' | 'disabled';
+export type GeminiGenerationStatus =
+  | 'unchecked'
+  | 'available'
+  | 'rate_limited'
+  | 'quota_exhausted'
+  | 'cooldown'
+  | 'transient_error'
+  | 'model_unavailable'
+  | 'region_restricted'
+  | 'provider_unavailable'
+  | 'invalid'
+  | 'missing_permission'
+  | 'disabled';
 export type GeminiLightTestStatus = 'unchecked' | 'available' | 'invalid' | 'missing_permission' | 'transient_error';
+export type GeminiDiagnosticCategory =
+  | 'READY'
+  | 'FREE_POLICY_UNVERIFIED'
+  | 'INVALID_KEY'
+  | 'PERMISSION_DENIED'
+  | 'QUOTA_EXCEEDED'
+  | 'RATE_LIMITED'
+  | 'MODEL_NOT_AVAILABLE'
+  | 'REGION_RESTRICTED'
+  | 'NETWORK_TIMEOUT'
+  | 'PROVIDER_UNAVAILABLE'
+  | 'TRANSIENT_ERROR'
+  | 'UNKNOWN_PROVIDER_ERROR';
 
 export interface GeminiCredentialMetadata {
   provider?: 'gemini';
@@ -56,19 +81,29 @@ export interface GeminiCredentialMetadata {
   billingMode: GeminiBillingMode;
   keyType: GeminiKeyType;
   supportedModels: string[];
+  supportedGenerateContentModels?: string[];
   preferredModel?: string;
+  testedModel?: string;
   lightTestStatus: GeminiLightTestStatus;
   generationStatus: GeminiGenerationStatus;
+  generationReady?: boolean;
+  generationReadinessReason?: string;
+  freePolicyEligible?: boolean;
+  adapterReady?: boolean;
+  runtimeRouteReady?: boolean;
+  diagnosticCategory?: GeminiDiagnosticCategory;
+  retryable?: boolean;
+  providerHttpStatus?: number;
+  discoveredModelCount?: number;
+  lastCheckedAt?: string;
   lastLightTestAt?: string;
   lastGenerationTestAt?: string;
   generationVerifiedAt?: string;
+  lastGenerationSucceededAt?: string;
   lastSuccessfulRequestAt?: string;
   lastFailureAt?: string;
   lastErrorCode?: string;
-  testedModel?: string;
-  providerHttpStatus?: number;
   errorCategory?: string;
-  retryable?: boolean;
   failureStreak: number;
   cooldownUntil?: string;
   nextProbeAt?: string;
@@ -108,17 +143,21 @@ export type SafeCredential = Omit<StoredCredential, 'encryptedValue'> & {
     stored: boolean;
     valid: boolean;
     generationReady: boolean;
-    reasonCode: 'ready' | 'not_applicable' | 'credential_not_checked' | 'credential_not_valid' | 'generation_not_verified' | 'generation_temporarily_unavailable' | 'cooldown_active' | 'quota_limited' | 'billing_not_confirmed' | 'quota_group_missing' | 'model_not_verified' | 'invalid' | 'disabled' | 'missing_permission' | 'unknown';
+    reasonCode: 'ready' | 'not_applicable' | 'credential_not_checked' | 'credential_not_valid' | 'generation_not_verified' | 'generation_check_stale' | 'generation_temporarily_unavailable' | 'cooldown_active' | 'quota_limited' | 'free_policy_unverified' | 'billing_not_confirmed' | 'quota_group_missing' | 'model_not_verified' | 'model_not_available' | 'region_restricted' | 'provider_unavailable' | 'invalid' | 'disabled' | 'missing_permission' | 'unknown';
     priority: number;
     preferredModel: string | null;
+    testedModel: string | null;
     projectLabel: string | null;
     quotaGroup: string | null;
     cooldownUntil: string | null;
     lastCheckedAt: string | null;
-    errorCategory: string | null;
-    testedModel: string | null;
-    httpStatus: number | null;
+    lastGenerationSucceededAt: string | null;
+    diagnosticCategory: GeminiDiagnosticCategory | null;
     retryable: boolean;
+    freePolicyEligible: boolean;
+    adapterReady: boolean;
+    errorCategory: string | null;
+    httpStatus: number | null;
   };
 };
 

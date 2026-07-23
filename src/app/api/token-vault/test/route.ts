@@ -11,6 +11,7 @@ import { getCredentialById, getRawCredentialValue, getSafeCredentialById, update
 import type { CredentialStatus } from '@/lib/types/tokenVault';
 import { requireAuth } from '@/lib/auth';
 import { lightTestCredential } from '@/lib/ai/geminiCredentialProbe';
+import { getCredentialTruth } from '@/lib/ai/credentialTruth';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,10 +32,14 @@ export async function POST(request: NextRequest) {
     }
 
     if (cred.platform === 'gemini') {
-      const diagnostic = await lightTestCredential(id);
+      const result = await lightTestCredential(id);
       const updated = await getSafeCredentialById(id);
-      if (!updated) return errorResponse('Không thể tải kết quả kiểm tra.');
-      return successResponse(diagnostic.message, { ...updated, providerDiagnostic: diagnostic });
+      if (!updated) return errorResponse('Không thể cập nhật kết quả kiểm tra.');
+      return successResponse(result.message, {
+        ...updated,
+        providerDiagnostic: result,
+        readiness: getCredentialTruth(updated),
+      });
     }
 
     const rawValue = await getRawCredentialValue(id);

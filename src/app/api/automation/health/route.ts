@@ -4,30 +4,68 @@ import { buildAutomationDashboard } from '@/lib/automation/dashboard';
 import { getPrimaryCredential } from '@/lib/storage/tokenVault';
 import { getLatestRuntimeHealth, providerHealth } from '@/lib/automation/runtimeGuardian';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
+import { deriveSystemCapabilityStatus } from '@/lib/health/systemCapability';
+import { getGeminiProviderReadiness } from '@/lib/ai/geminiProviderStatus';
 
 export async function GET(request: NextRequest) {
   const authError = await requireAuth(request); if (authError) return authError;
   try {
-    const [data, geminiVault, accessTradeVault, runtime] = await Promise.all([
+    const [data, geminiReadiness, accessTradeVault, runtime] = await Promise.all([
       buildAutomationDashboard('today'),
-      getPrimaryCredential('gemini'),
+      getGeminiProviderReadiness(),
       getPrimaryCredential('accesstrade'),
       getLatestRuntimeHealth(),
     ]);
-    const geminiConfigured = Boolean(geminiVault && geminiVault.status !== 'disabled') || Boolean(process.env.GEMINI_API_KEY?.trim());
     const accessTradeConfigured = Boolean(accessTradeVault && accessTradeVault.status !== 'disabled') || Boolean(process.env.ACCESS_TRADE_API_KEY?.trim());
+    const runtimeGemini = runtime?.providers.gemini;
+    const geminiStatus = geminiReadiness.status === 'ready'
+      && ['circuit_open', 'rate_limited', 'quota_exhausted', 'last_check_failed'].includes(String(runtimeGemini || ''))
+      ? 'degraded'
+      : geminiReadiness.status;
     const providers = {
-      gemini: runtime?.providers.gemini || providerHealth({ configured: geminiConfigured, adapterAvailable: false }),
+      gemini: geminiStatus,
       accessTrade: runtime?.providers.accessTrade || providerHealth({ configured: accessTradeConfigured, adapterAvailable: true }),
     };
+    const release = getReleaseIdentity();
+    const capabilities = deriveSystemCapabilityStatus({
+      web: runtime?.web,
+      worker: data.worker,
+      scheduler: data.scheduler,
+      queue: {
+        pending: data.queue.PENDING,
+        running: data.queue.RUNNING,
+        stuck: runtime?.queue.stuck,
+        staleJobs: runtime?.queue.staleJobs,
+      },
+      control: data.control,
+      runtime,
+      release,
+      ai: {
+        providerStatus: providers.gemini,
+        budgetAvailable: data.aiUsage.requests < data.aiUsage.requestLimit && data.aiUsage.tokens < data.aiUsage.tokenLimit,
+        policyAllowed: data.policy.freeOnly || data.policy.allowPaidAi,
+      },
+    });
+    const readiness = capabilities.overallStatus === 'OPERATIONAL' ? 'active'
+      : capabilities.overallStatus === 'LIMITED' ? 'degraded' : 'paused';
     return NextResponse.json({ ok: true, code: 'OK', message: 'Đã kiểm tra hệ thống tự động hóa.', data: {
-      release: getReleaseIdentity(),
+      release,
       web: runtime?.web || { status: 'alive', buildAvailable: process.env.NODE_ENV !== 'production', publicRouteHealthy: null },
-      readiness: data.control.killSwitch || data.control.publishPaused ? 'paused'
-        : data.runtime.reasons.length ? 'degraded' : 'active',
+      readiness,
+      capabilities,
+      operationalStatus: capabilities.operationalStatus,
+      publishingStatus: capabilities.publishingStatus,
+      aiStatus: capabilities.aiStatus,
+      emergencyStatus: capabilities.emergencyStatus,
+      overallStatus: capabilities.overallStatus,
+      overallLabel: capabilities.overallLabel,
       worker: data.worker, scheduler: data.scheduler,
       queue: data.queue, aiUsage: data.aiUsage, circuits: data.circuits, policy: data.policy,
-      providers, runtime: runtime ? { publishSafe: runtime.publishSafe, reasons: data.runtime.reasons, historicalReasons: runtime.reasons, storage: runtime.storage, duplicateRoles: runtime.duplicateRoles, checkedAt: runtime.checkedAt } : null,
+      providers, providerDetails: { gemini: geminiReadiness }, runtime: runtime ? {
+        publishSafe: runtime.publishSafe, reasons: runtime.reasons, historicalReasons: runtime.historicalReasons || [],
+        restart: runtime.restart || null, storage: runtime.storage, duplicateRoles: runtime.duplicateRoles, checkedAt: runtime.checkedAt,
+      } : null,
+      control: data.control,
       killSwitch: data.control.killSwitch, updatedAt: data.updatedAt,
     } });
   } catch {

@@ -254,8 +254,13 @@ async function main() {
     assert.equal((await adapter.readCollection('automation-slo-snapshots')).length, 1);
   });
 
-  await test('healthy persisted outcomes produce a measured PASS without changing configured mode', async () => {
+  await test('healthy persisted outcomes clear only the runtime publish block and preserve operator pause', async () => {
     await reset('AUTONOMOUS'); const now = Date.now(); await seedHealthyEvidence(now);
+    await store.updateAutomationControl({
+      publishPausedByOperator: true,
+      publishBlockedByRuntime: true,
+      publishRuntimeReasons: ['REPEATED_PROCESS_RESTART'],
+    }, 'slo-test');
     const result = await slo.applyAutomationErrorBudget({ now });
     assert.equal(result.measurement.dataStatus, 'MEASURED');
     assert.equal(result.evaluation.status, 'PASS', JSON.stringify(result.measurement.metrics));
@@ -263,7 +268,10 @@ async function main() {
     assert.equal(result.measurement.duplicatePublishCount, 0);
     assert.equal(result.measurement.unsafePublishCount, 0);
     assert.equal(result.control.mode, 'AUTONOMOUS'); assert.equal(result.control.effectiveMode, 'AUTONOMOUS');
-    assert.equal(result.applied, false); assert.equal(result.ingestionAvailable, true);
+    assert.equal(result.control.publishBlockedByRuntime, false);
+    assert.equal(result.control.publishPausedByOperator, true);
+    assert.equal(result.control.publishPaused, true);
+    assert.equal(result.applied, true); assert.equal(result.ingestionAvailable, true);
   });
 
   await test('a non-severe error-rate breach degrades one step without pausing canary publication', async () => {

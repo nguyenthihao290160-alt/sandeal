@@ -394,7 +394,11 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     equal(geminiModels.routeModel(profile, ['gemini-preview'], Date.parse('2026-07-12')), null);
   });
 
-  const geminiCredential = (id, group, billingMode, healthScore, role = 'backup') => ({ id, platform: 'gemini', credentialType: 'api_key', role, label: id, encryptedValue: `b64:${Buffer.from(`secret-${id}`).toString('base64')}`, maskedValue: 'secr****test', status: 'valid', metadata: { billingMode, keyType: 'auth', quotaGroupId: group, supportedModels: ['gemini-3.1-flash-lite'], lightTestStatus: 'available', generationStatus: 'available', generationVerifiedAt: '2026-07-12T00:00:00.000Z', lastSuccessfulRequestAt: '2026-07-12T00:00:00.000Z', failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore }, createdAt: '2026-07-12T00:00:00.000Z', updatedAt: '2026-07-12T00:00:00.000Z' });
+  const geminiCredential = (id, group, billingMode, healthScore, role = 'backup') => {
+    const freeReady = billingMode === 'free_confirmed';
+    const observedAt = new Date().toISOString();
+    return { id, platform: 'gemini', credentialType: 'api_key', role, label: id, encryptedValue: `b64:${Buffer.from(`secret-${id}`).toString('base64')}`, maskedValue: 'secr****test', status: 'valid', metadata: { billingMode, keyType: 'auth', quotaGroupId: group, supportedModels: ['gemini-3.1-flash-lite'], supportedGenerateContentModels: ['gemini-3.1-flash-lite'], preferredModel: 'gemini-3.1-flash-lite', testedModel: 'gemini-3.1-flash-lite', lightTestStatus: 'available', lastLightTestAt: observedAt, generationStatus: 'available', generationReady: freeReady, freePolicyEligible: freeReady, adapterReady: freeReady, runtimeRouteReady: freeReady, diagnosticCategory: freeReady ? 'READY' : 'FREE_POLICY_UNVERIFIED', generationVerifiedAt: observedAt, lastSuccessfulRequestAt: observedAt, lastGenerationSucceededAt: observedAt, failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore }, lastCheckedAt: observedAt, createdAt: observedAt, updatedAt: observedAt };
+  };
 
   await test('V4-06. paid/unknown billing key không được chọn', async () => {
     await adapter.writeCollection('token-vault', [geminiCredential('paid', 'paid-group', 'paid', 100), geminiCredential('unknown', 'unknown-group', 'unknown', 100)]);

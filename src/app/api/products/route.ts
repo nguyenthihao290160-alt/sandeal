@@ -4,9 +4,9 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
-import { listProducts, createProduct, DuplicateProductError } from '@/lib/storage/products';
+import { listProducts, createProduct, DuplicateProductError, SourceCandidateMappingConflictError, upsertSourceCandidateProduct } from '@/lib/storage/products';
 import { requirePermission } from '@/lib/auth';
-import type { ProductPlatform, ProductSource, ProductStatus, ProductKind, ProductRiskLevel } from '@/lib/types';
+import type { CreateProductInput, ProductPlatform, ProductSource, ProductStatus, ProductKind, ProductRiskLevel } from '@/lib/types';
 import { PublicProductQueryError, queryPublicProducts } from '@/lib/product-intelligence/publicProducts';
 import { validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 import { extractAccessTradeAffiliateDestination, normalizeAccessTradeImageUrl } from '@/lib/integrations/accesstrade';
@@ -217,7 +217,7 @@ export async function POST(request: NextRequest) {
     // never trusted from a parallel browser field that could disagree with it.
     const affiliateDestinationUrl = accessTrade ? decodedAffiliateDestination : suppliedAffiliateDestination;
 
-    const product = await createProduct({
+    const productDraft: CreateProductInput = {
       title: (body.title as string).trim(),
       description: typeof body.description === 'string' ? body.description : undefined,
       kind: (body.kind as ProductKind) || 'product',
@@ -342,10 +342,53 @@ export async function POST(request: NextRequest) {
       needsVerification: true,
       verifiedSource,
       sourceVerified: verifiedSource,
-    });
+    };
+
+    if (productDraft.source === 'accesstrade' && productDraft.sourceId) {
+      const result = await upsertSourceCandidateProduct(productDraft);
+      const evidenceLabel = result.mapping.duplicateEvidence.includes('SOURCE_ID_EXACT')
+        ? 'source ID trùng chính xác'
+        : result.mapping.duplicateEvidence.includes('CANONICAL_URL_EXACT')
+          ? 'URL sản phẩm gốc trùng chính xác'
+          : '';
+      const message = result.created
+        ? 'Đã thêm sản phẩm AccessTrade vào hàng chờ.'
+        : result.mapping.enrichedFields.length
+          ? `Sản phẩm đã tồn tại (ID ${result.mapping.canonicalIdentifier}); ${evidenceLabel}. Đã bổ sung: ${result.mapping.enrichedFields.join(', ')}.`
+          : `Sản phẩm đã tồn tại (ID ${result.mapping.canonicalIdentifier}); ${evidenceLabel}. Không có trường còn thiếu cần bổ sung.`;
+      const responseData = { ...result.product, mapping: result.mapping };
+      if (result.created) return successResponse(message, responseData, 201);
+
+      const existingProductUrl = `/dashboard/products/${encodeURIComponent(result.product.id)}`;
+      const mergeResult = {
+        updatedFields: result.mapping.enrichedFields,
+        unchangedFields: result.mapping.unchangedFields,
+      };
+      return NextResponse.json({
+        ok: false,
+        success: false,
+        code: 'DUPLICATE_PRODUCT',
+        error: 'DUPLICATE_PRODUCT',
+        message,
+        existingProductId: result.product.id,
+        existingProductUrl,
+        mergeResult,
+        data: {
+          ...responseData,
+          existingProductId: result.product.id,
+          existingProductUrl,
+          mergeResult,
+        },
+      }, { status: 409 });
+    }
+
+    const product = await createProduct(productDraft);
 
     return successResponse('Đã thêm sản phẩm thành công.', product, 201);
   } catch (err) {
+    if (err instanceof SourceCandidateMappingConflictError) {
+      return errorResponse('Candidate có bằng chứng định danh mâu thuẫn giữa nhiều sản phẩm. Không tự động merge; cần kiểm tra thủ công.', err.code, 409);
+    }
     if (err instanceof DuplicateProductError) {
       return NextResponse.json({
         ok: false,

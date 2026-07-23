@@ -28,6 +28,9 @@ export interface RuntimeRoleLease {
   fencingToken: number;
   previousHolderId?: string;
   previousInstanceId?: string;
+  /** ISO timestamps for bounded, windowed restart detection. */
+  takeoverHistory?: string[];
+  lastTakeoverAt?: string;
   takeoverCount: number;
   updatedAt: string;
 }
@@ -86,6 +89,9 @@ function normalizeLease(lease: RuntimeRoleLease): RuntimeRoleLease {
     expiresAt,
     leaseExpiresAt: expiresAt,
     fencingToken: Math.max(1, lease.fencingToken || 1),
+    takeoverHistory: Array.isArray(lease.takeoverHistory)
+      ? lease.takeoverHistory.filter(value => Number.isFinite(Date.parse(value))).slice(-100)
+      : [],
   };
 }
 
@@ -133,6 +139,10 @@ export async function acquireRuntimeRole(input: {
       return undefined;
     }
     const takeover = Boolean(existing && !sameInstance);
+    const takeoverHistory = [
+      ...(existing?.takeoverHistory || []),
+      ...(takeover ? [now] : []),
+    ].filter(value => Number.isFinite(Date.parse(value))).slice(-100);
     const fencingToken = sameInstance
       ? Math.max(1, existing?.fencingToken || 1)
       : Math.max(1, (existing?.fencingToken || 0) + 1);
@@ -156,6 +166,8 @@ export async function acquireRuntimeRole(input: {
       fencingToken,
       previousHolderId: takeover && existing ? ownerOf(existing) : existing?.previousHolderId,
       previousInstanceId: takeover && existing ? instanceOf(existing) : existing?.previousInstanceId,
+      takeoverHistory,
+      lastTakeoverAt: takeover ? now : existing?.lastTakeoverAt,
       takeoverCount: (existing?.takeoverCount || 0) + (takeover ? 1 : 0),
       updatedAt: now,
     };

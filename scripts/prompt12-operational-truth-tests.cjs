@@ -160,7 +160,7 @@ async function main() {
   await test(61, 'Retry max được tôn trọng', () => assert.ok(source('src/lib/automation/store.ts').includes('job.attemptCount < job.maxAttempts')));
   await test(62, 'Không gọi network thật', () => assert.equal(global.fetch.toString().includes('PROMPT12_NETWORK_FORBIDDEN'), true));
 
-  const storedCredential = { id: 'cred-b', platform: 'gemini', maskedValue: '****abcd', status: 'valid', role: 'backup', metadata: { generationStatus: 'available', generationVerifiedAt: new Date(now).toISOString(), lastSuccessfulRequestAt: new Date(now).toISOString(), billingMode: 'free_confirmed', quotaGroupId: 'group-a', supportedModels: ['gemini-free-fixture'], priority: 2 }, lastCheckedAt: new Date(now).toISOString() };
+  const storedCredential = { id: 'cred-b', platform: 'gemini', maskedValue: '****abcd', status: 'valid', role: 'backup', metadata: { generationStatus: 'available', generationReady: true, generationVerifiedAt: new Date(now).toISOString(), lastSuccessfulRequestAt: new Date(now).toISOString(), lastGenerationSucceededAt: new Date(now).toISOString(), billingMode: 'free_confirmed', freePolicyEligible: true, adapterReady: true, runtimeRouteReady: true, quotaGroupId: 'group-a', supportedModels: ['gemini-free-fixture'], supportedGenerateContentModels: ['gemini-free-fixture'], preferredModel: 'gemini-free-fixture', testedModel: 'gemini-free-fixture', priority: 2 }, lastCheckedAt: new Date(now).toISOString() };
   await test(63, 'API không trả raw key', () => assert.ok(!source('src/app/api/token-vault/list/route.ts').includes('encryptedValue')));
   await test(64, 'Masking đúng', () => assert.equal(secrets.maskSecret('fixture-value-abcd'), '****abcd'));
   await test(65, 'stored không đồng nghĩa valid', () => { const value = credentialTruth.getCredentialTruth({ ...storedCredential, status: 'unchecked' }, now); assert.equal(value.valid, false); });
@@ -266,12 +266,12 @@ async function main() {
     assert.ok(page.includes('READINESS_REASON_LABELS') && page.includes('data-readiness-reason'));
     assert.ok(!page.match(/useEffect\([\s\S]{0,300}\/probe/));
   });
-  await test(116, 'Generation ready fail-closed khi billing Free chưa xác minh', () => {
-    const truth = credentialTruth.getCredentialTruth({ ...storedCredential, metadata: { ...storedCredential.metadata, billingMode: 'unknown' } }, now);
+  await test(116, 'Generation ready fail-closed khi Free policy chưa xác minh', () => {
+    const truth = credentialTruth.getCredentialTruth({ ...storedCredential, metadata: { ...storedCredential.metadata, billingMode: 'unknown', freePolicyEligible: false } }, now);
     assert.equal(truth.generationReady, false);
-    assert.equal(truth.reasonCode, 'billing_not_confirmed');
+    assert.equal(truth.reasonCode, 'free_policy_unverified');
   });
-  await test(117, 'Generation ready cần valid, available, Free, quota group và model', () => {
+  await test(117, 'Generation ready cần valid, probe fresh, Free, adapter, quota group và model', () => {
     const truth = credentialTruth.getCredentialTruth(storedCredential, now);
     assert.equal(truth.generationReady, true);
     assert.equal(truth.reasonCode, 'ready');

@@ -194,7 +194,17 @@ export interface AutomationControlState {
   id: 'automation-control';
   mode: AutonomousMode;
   effectiveMode: Exclude<AutonomousMode, 'EMERGENCY_STOP'>;
+  /**
+   * Backward-compatible aggregate. New code must also persist the source
+   * fields below so a recovered runtime incident cannot clear an operator
+   * pause (or vice versa).
+   */
   publishPaused: boolean;
+  publishPausedByOperator?: boolean;
+  publishBlockedByRuntime?: boolean;
+  publishBlockedByPolicy?: boolean;
+  publishRuntimeReasons?: string[];
+  publishPolicyReasons?: string[];
   ingestionPaused: boolean;
   workerPaused: boolean;
   schedulerPaused: boolean;

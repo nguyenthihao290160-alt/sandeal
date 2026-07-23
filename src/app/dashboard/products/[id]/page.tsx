@@ -6,6 +6,10 @@ import { useParams } from 'next/navigation';
 import type { Product } from '@/lib/types';
 import { classifyProductKind } from '@/lib/sourceItemClassifier';
 import { SafeProductImage } from '@/components/safe-product-image';
+import {
+  deriveProductRemediationSummary,
+  sanitizeProductTechnicalDetails,
+} from '@/lib/dashboard/productDetailStatus';
 import styles from './product-detail.module.css';
 import { canonicalBlockerCodes } from '@/lib/productBlockers';
 
@@ -16,6 +20,7 @@ type PipelineTruth = {
   health: { link: string; productLink: string; affiliateLink: string; image: string; price: string; source: string; content: string };
   requiredAction: string | null;
   remediationAvailable: boolean;
+  eligibility?: { criticalBlockers: string[]; warningBlockers: string[]; nextRequiredAction: string };
   safety: { publishingEnabled: boolean; launchEnabled: boolean; effectiveMode: string };
 };
 
@@ -79,6 +84,7 @@ export default function ProductDetailPage() {
   const [actionBusy, setActionBusy] = useState('');
   const mountedRef = useRef(true);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [archivePending, setArchivePending] = useState(false);
 
   const showToast = useCallback((type: string, message: string) => {
     if (!mountedRef.current) return;
@@ -223,20 +229,24 @@ export default function ProductDetailPage() {
           ? 'Link affiliate chưa vượt qua kiểm tra an toàn.' : '';
   const blockers = canonicalBlockerCodes(product.currentBlockers?.length ? product.currentBlockers : pipelineTruth?.lifecycle.blockers || []);
   const priorityBlockers = blockers.slice(0, 6);
-  const blockerGroups = blockers.reduce<Record<string, string[]>>((groups, blocker) => {
-    const group = /affiliate/i.test(blocker) ? 'Affiliate' : /image|ảnh/i.test(blocker) ? 'Ảnh' : /price|giá/i.test(blocker) ? 'Giá'
-      : /duplicate|trùng/i.test(blocker) ? 'Trùng lặp' : /content|claim|evidence|review|seo|originality|disclosure/i.test(blocker) ? 'Nội dung và bằng chứng'
-        : /link|url|domain/i.test(blocker) ? 'Liên kết' : 'Dữ liệu và chính sách';
-    (groups[group] ||= []).push(blocker);
-    return groups;
-  }, {});
-  const canaryDisabledReason = pipelineTruth?.lifecycle.canaryReady ? 'Sản phẩm đã ở danh sách xét CANARY.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.` : '';
-  const publishDisabledReason = pipelineTruth?.lifecycle.safePublishRequested ? 'Đã có yêu cầu Safe Publish.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.`
-    : pipelineTruth && !pipelineTruth.safety.publishingEnabled ? 'Publishing đang bị khóa bởi chính sách vận hành.' : '';
   const publicStateExplanation = pipelineTruth?.lifecycle.publicHidden === false ? 'Đang hiển thị công khai'
     : product.status === 'archived' ? `Đã lưu trữ${product.archivedReason ? ` · ${friendlyBlocker(product.archivedReason)}` : ''}`
       : product.lifecycleState === 'QUARANTINED' ? `Đang cách ly · ${product.quarantineReasons?.map(friendlyBlocker).join(', ') || 'chờ xác minh'}`
         : `Đang ẩn · ${blockers.length} blocker hiện hành`;
+  const criticalBlockers = pipelineTruth?.eligibility?.criticalBlockers || product.eligibility?.criticalBlockers || blockers;
+  const remediation = deriveProductRemediationSummary(blockers, criticalBlockers, pipelineTruth?.requiredAction);
+  const canaryDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth; CANARY vẫn bị khóa.'
+    : pipelineTruth.lifecycle.canaryReady ? 'Sản phẩm đã ở danh sách xét CANARY.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.` : '';
+  const publishDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth; Safe Publish vẫn bị khóa.'
+    : pipelineTruth.lifecycle.safePublishRequested ? 'Đã có yêu cầu Safe Publish.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.`
+      : !pipelineTruth.safety.publishingEnabled ? 'Publishing đang bị khóa bởi chính sách vận hành.' : '';
+  const reviewedDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth.' : pipelineTruth.lifecycle.reviewed ? 'Đã ghi nhận người vận hành xem sản phẩm.' : '';
+  const dataVerifiedDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth.' : pipelineTruth.lifecycle.dataVerified ? 'Dữ liệu đã được xác nhận.' : '';
+  const publishingLabel = pipelineTruth?.lifecycle.published ? 'Đã đăng'
+    : pipelineTruth?.lifecycle.publishApproved ? 'Đã phê duyệt'
+      : pipelineTruth?.lifecycle.safePublishRequested ? 'Đang chờ kiểm tra Safe Publish'
+        : blockers.length ? 'Đang bị chặn' : 'Chưa yêu cầu đăng';
+  const technicalJson = JSON.stringify(sanitizeProductTechnicalDetails(product), null, 2);
 
   return (
     <main className={styles.page}>
@@ -250,7 +260,7 @@ export default function ProductDetailPage() {
           <h2>{product.title}</h2>
           <p>{product.description || 'Chưa có mô tả sản phẩm.'}</p>
           <div className={styles.priceRow}><strong>{formatPrice(product.salePrice || product.price)}</strong>{product.salePrice && product.price && product.price !== product.salePrice && <del>{formatPrice(product.price)}</del>}{product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}</div>
-          <dl className={styles.heroFacts}><div><dt>Nguồn</dt><dd>{product.source || '—'}</dd></div><div><dt>Danh mục</dt><dd>{product.category || '—'}</dd></div><div><dt>Trạng thái public</dt><dd>{publicStateExplanation}</dd></div><div><dt>Rủi ro</dt><dd>{product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa rõ'}</dd></div></dl>
+          <dl className={styles.heroFacts}><div><dt>Nguồn / merchant</dt><dd>{product.source || '—'} · {product.merchant || product.identity?.merchant || product.campaignName || 'chưa rõ'}</dd></div><div><dt>Lifecycle</dt><dd>{pipelineTruth?.lifecycle.stage || product.lifecycleState || 'Chưa xác định'}</dd></div><div><dt>Đăng an toàn</dt><dd>{publishingLabel}</dd></div><div><dt>Trạng thái public</dt><dd>{publicStateExplanation}</dd></div><div><dt>Rủi ro</dt><dd>{product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa rõ'}</dd></div><div><dt>Danh mục</dt><dd>{product.category || '—'}</dd></div></dl>
           <div className={styles.linkActions} aria-label="Liên kết sản phẩm đã kiểm tra">
             <div data-link-state={affiliateLinkEnabled ? 'enabled' : 'disabled'}><span>Affiliate</span>{affiliateLinkEnabled
               ? <a href={product.affiliateUrl!} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm">Mở link affiliate</a>
@@ -263,6 +273,45 @@ export default function ProductDetailPage() {
         <aside className={styles.scoreSummary}><span>Điểm đánh giá</span><strong className={product.score != null && product.score >= 75 ? styles.goodScore : product.score != null && product.score >= 45 ? styles.mediumScore : styles.lowScore}>{product.score ?? '—'}</strong><small>{product.scoreLabel || 'Chưa có nhãn điểm'}</small><button className="btn btn-accent btn-sm" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>{actionBusy === 'score' ? 'Đang chấm…' : 'Chấm điểm lại'}</button></aside>
       </section>
 
+      <section className={styles.remediationSummary} aria-labelledby="remediation-title">
+        <div className={styles.remediationHeader}>
+          <div><span>Ưu tiên xử lý</span><h2 id="remediation-title">Tóm tắt cần xử lý</h2></div>
+          <div className={styles.remediationCounts}>
+            <span><strong>{remediation.total}</strong> blocker</span>
+            <span className={remediation.critical ? styles.criticalCount : styles.clearCount}><strong>{remediation.critical}</strong> nghiêm trọng</span>
+          </div>
+        </div>
+        {remediation.merchantQuarantined && (
+          <div className={styles.merchantNotice}>
+            Merchant đang bị quarantine theo policy. Đây là blocker merchant/chính sách, không phải lỗi worker hay scheduler.
+          </div>
+        )}
+        {priorityBlockers.length > 0 && (
+          <section className={styles.priorityFixes} aria-labelledby="priority-fixes-title">
+            <div>
+              <h4 id="priority-fixes-title">Việc cần sửa trước</h4>
+              <span>{priorityBlockers.length}/{blockers.length} việc ưu tiên</span>
+            </div>
+            <ol>
+              {priorityBlockers.map(blocker => <li key={blocker}>{friendlyBlocker(blocker)}</li>)}
+            </ol>
+          </section>
+        )}
+        {remediation.groups.length ? (
+          <div className={styles.remediationGroups}>
+            {remediation.groups.map(group => (
+              <div key={group.category}>
+                <strong>{group.label} <small>{group.blockers.length}</small></strong>
+                <ul>
+                  {group.blockers.map(blocker => <li key={blocker.code} className={blocker.critical ? styles.criticalBlocker : undefined}>{blocker.label}</li>)}
+                </ul>
+              </div>
+            ))}
+          </div>
+        ) : <p className={styles.clearState}>Không có blocker được ghi nhận trong snapshot hiện tại.</p>}
+        <p className={styles.nextAction}>Hành động ưu tiên tiếp theo: <strong>{remediation.nextAction}</strong></p>
+      </section>
+
       <section className={styles.operationGrid}>
         <article className={styles.card}>
           <div className={styles.cardHeader}><div><span>Runtime & policy</span><h3>Operational truth</h3></div><span className={`badge ${blockers.length ? 'badge-warning' : 'badge-success'}`}>{blockers.length ? `${blockers.length} blocker` : 'Không có blocker'}</span></div>
@@ -273,23 +322,16 @@ export default function ProductDetailPage() {
               <span>Affiliate <strong>{pipelineTruth.health.affiliateLink}</strong><small>{product.affiliateUrlFinalDomain || 'Chưa có final domain'} · {product.affiliateUrlHttpStatus ? `HTTP ${product.affiliateUrlHttpStatus}` : product.affiliateUrlErrorCode || 'Chưa có HTTP status'} · {product.affiliateUrlVerifiedAt ? new Date(product.affiliateUrlVerifiedAt).toLocaleString('vi-VN') : 'Chưa xác minh'}</small></span>
               <span>Ảnh <strong>{pipelineTruth.health.image}</strong><small>{product.imageUrlHttpStatus ? `HTTP ${product.imageUrlHttpStatus}` : 'Chưa có HTTP status'} · {product.imageContentType || 'Chưa có Content-Type'}</small></span><span>Giá <strong>{pipelineTruth.health.price}</strong></span><span>Nguồn <strong>{pipelineTruth.health.source}</strong></span>
             </div>
-            {blockers.length ? <>
-              <section className={styles.priorityFixes} aria-labelledby="priority-fixes-title">
-                <div><h4 id="priority-fixes-title">Việc cần sửa trước</h4><span>{priorityBlockers.length}/{blockers.length} việc ưu tiên</span></div>
-                <ol>{priorityBlockers.map(blocker => <li key={blocker}>{friendlyBlocker(blocker)}</li>)}</ol>
-                {blockers.length > priorityBlockers.length && <small>Còn {blockers.length - priorityBlockers.length} blocker trong các nhóm bên dưới.</small>}
-              </section>
-              <div className={styles.blockerGroups}>{Object.entries(blockerGroups).map(([group, items]) => <details key={group}><summary><strong>{group}</strong><span>{items.length}</span></summary><ul>{items.map(blocker => <li key={blocker}>{friendlyBlocker(blocker)}</li>)}</ul><details className={styles.technicalCodes}><summary>Chi tiết kỹ thuật</summary><div>{items.map(blocker => <code key={blocker}>{blocker}</code>)}</div></details></details>)}</div>
-            </> : <p className={styles.clearState}>Không có blocker được ghi nhận trong snapshot hiện tại.</p>}<p className={styles.requiredAction}>Làm thế nào để mở khóa: <strong>{pipelineTruth.requiredAction ? friendlyBlocker(pipelineTruth.requiredAction) : 'Không có hành động bắt buộc'}</strong></p>
+            {blockers.length ? <div className={styles.blockerGroups}>{remediation.groups.map(group => <div key={group.category}><strong>{group.label}</strong><div>{group.blockers.map(blocker => <span key={blocker.code} className={styles.blockerBadge}>{blocker.label}</span>)}</div></div>)}</div> : <p className={styles.clearState}>Không có blocker được ghi nhận trong snapshot hiện tại.</p>}<p className={styles.requiredAction}>Hành động cần thiết: <strong>{remediation.nextAction}</strong></p>
           </> : <p className={styles.clearState}>Chưa tải được operational truth. Các hành động nhạy cảm vẫn bị khóa.</p>}
         </article>
 
         <article className={styles.card}>
           <div className={styles.cardHeader}><div><span>Theo mức độ rủi ro</span><h3>Hành động vận hành</h3></div></div>
-          <div className={styles.actionGroup}><strong>Kiểm tra</strong><div><button className="btn btn-secondary" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>Chấm điểm lại</button><button className="btn btn-secondary" onClick={() => handleAction('reviewed')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.reviewed} title={pipelineTruth?.lifecycle.reviewed ? 'Đã ghi nhận xem xét.' : undefined}>Đánh dấu đã xem</button></div></div>
-          <div className={styles.actionGroup}><strong>Xác nhận dữ liệu</strong><div><button className="btn btn-secondary" onClick={() => handleAction('data_verified')} disabled={Boolean(actionBusy) || pipelineTruth?.lifecycle.dataVerified} title={pipelineTruth?.lifecycle.dataVerified ? 'Dữ liệu đã được xác nhận.' : undefined}>Xác nhận dữ liệu</button></div></div>
-          <div className={styles.actionGroup}><strong>Canary & Safe Publish</strong><div><button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || Boolean(canaryDisabledReason)} title={canaryDisabledReason || undefined}>Đưa vào danh sách xét CANARY</button><button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy) || Boolean(publishDisabledReason)} title={publishDisabledReason || undefined}>Yêu cầu kiểm tra Safe Publish</button></div>{(canaryDisabledReason || publishDisabledReason) && <p className={styles.disabledReason}>{publishDisabledReason || canaryDisabledReason}</p>}</div>
-          <div className={`${styles.actionGroup} ${styles.archiveGroup}`}><strong>Lưu trữ</strong><div><button className="btn btn-secondary" onClick={() => handleAction('archive')} disabled={Boolean(actionBusy)}>Lưu trữ sản phẩm</button><Link href="/dashboard/content" className="btn btn-ghost" aria-disabled="true" title="Tính năng tạo nội dung chưa sẵn sàng.">Tạo nội dung (sắp có)</Link></div></div>
+          <div className={styles.actionGroup}><strong>Kiểm tra</strong><div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>Chấm điểm lại</button></div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('reviewed')} disabled={Boolean(actionBusy) || Boolean(reviewedDisabledReason)} title={reviewedDisabledReason || undefined}>Đánh dấu đã xem</button>{reviewedDisabledReason && <small>{reviewedDisabledReason}</small>}</div></div></div>
+          <div className={styles.actionGroup}><strong>Xác nhận dữ liệu</strong><div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('data_verified')} disabled={Boolean(actionBusy) || Boolean(dataVerifiedDisabledReason)} title={dataVerifiedDisabledReason || undefined}>Xác nhận dữ liệu</button>{dataVerifiedDisabledReason && <small>{dataVerifiedDisabledReason}</small>}</div></div></div>
+          <div className={styles.actionGroup}><strong>Canary & Safe Publish</strong><div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || Boolean(canaryDisabledReason)} title={canaryDisabledReason || undefined}>Đưa vào danh sách xét CANARY</button>{canaryDisabledReason && <small>{canaryDisabledReason}</small>}</div><div className={styles.actionItem}><button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy) || Boolean(publishDisabledReason)} title={publishDisabledReason || undefined}>Yêu cầu kiểm tra Safe Publish</button>{publishDisabledReason && <small>{publishDisabledReason}</small>}</div></div></div>
+          <div className={`${styles.actionGroup} ${styles.archiveGroup}`}><strong>Lưu trữ</strong>{archivePending ? <div className={styles.inlineConfirm}><span>Lưu trữ sản phẩm này? Sản phẩm sẽ không được đăng.</span><button className="btn btn-secondary" onClick={() => { setArchivePending(false); void handleAction('archive'); }} disabled={Boolean(actionBusy)}>Xác nhận lưu trữ</button><button className="btn btn-ghost" onClick={() => setArchivePending(false)}>Huỷ</button></div> : <div><button className="btn btn-secondary" onClick={() => setArchivePending(true)} disabled={Boolean(actionBusy)}>Lưu trữ sản phẩm</button><Link href="/dashboard/content" className="btn btn-ghost" aria-disabled="true" title="Tính năng tạo nội dung chưa sẵn sàng.">Tạo nội dung (sắp có)</Link></div>}</div>
         </article>
       </section>
 
@@ -299,7 +341,21 @@ export default function ProductDetailPage() {
         <article className={styles.card}><div className={styles.cardHeader}><h3>Thông tin bổ sung</h3></div><dl className={styles.metaList}><div><dt>Tags</dt><dd>{product.tags?.join(', ') || '—'}</dd></div><div><dt>Chiến dịch</dt><dd>{product.campaignName || '—'}</dd></div><div><dt>Hoa hồng</dt><dd>{product.commissionNote || '—'}</dd></div><div><dt>Disclosure</dt><dd>{product.affiliateDisclosure || '—'}</dd></div><div><dt>Tạo lúc</dt><dd>{new Date(product.createdAt).toLocaleString('vi-VN')}</dd></div><div><dt>Cập nhật</dt><dd>{new Date(product.updatedAt).toLocaleString('vi-VN')}</dd></div></dl></article>
       </section>
 
-      <section className={styles.technical}><button className="btn btn-ghost btn-sm" onClick={() => setShowTechnical(!showTechnical)}>{showTechnical ? 'Ẩn' : 'Hiện'} chi tiết kỹ thuật</button>{showTechnical && <pre>{JSON.stringify(product, null, 2)}</pre>}</section>
+      <section className={styles.technical}>
+        <div className={styles.technicalActions}>
+          <strong>Chi tiết kỹ thuật</strong>
+          <button className="btn btn-ghost btn-sm" onClick={() => setShowTechnical(!showTechnical)} aria-expanded={showTechnical}>{showTechnical ? 'Thu gọn' : 'Mở'} chi tiết kỹ thuật</button>
+          <button className="btn btn-ghost btn-sm" onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(technicalJson);
+              showToast('success', 'Đã sao chép chi tiết kỹ thuật đã loại bỏ secret.');
+            } catch {
+              showToast('error', 'Không thể sao chép chi tiết kỹ thuật.');
+            }
+          }}>Sao chép JSON an toàn</button>
+        </div>
+        {showTechnical && <pre data-secret-sanitized="true">{technicalJson}</pre>}
+      </section>
     </main>
   );
 }

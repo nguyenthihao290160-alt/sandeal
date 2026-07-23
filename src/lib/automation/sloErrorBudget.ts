@@ -495,7 +495,8 @@ export async function applyAutomationErrorBudget(options: MeasureAutomationSloOp
       publishPausedByBudget = evaluation.severeReasons.length > 0 || nextMode === 'SHADOW';
       control = await updateAutomationControl({
         effectiveMode: nextMode,
-        publishPaused: previous.publishPaused || publishPausedByBudget,
+        publishBlockedByRuntime: publishPausedByBudget,
+        publishRuntimeReasons: publishPausedByBudget ? evaluation.reasons : [],
         degradedAt: evaluation.evaluatedAt,
         degradedReason: evaluation.reasons.join(','),
         reason: evaluation.reasons.join(','),
@@ -508,13 +509,22 @@ export async function applyAutomationErrorBudget(options: MeasureAutomationSloOp
           evaluationId: evaluation.id,
         });
       }
-      applied = nextMode !== previous.effectiveMode || publishPausedByBudget && !previous.publishPaused;
+      applied = nextMode !== previous.effectiveMode || publishPausedByBudget && !previous.publishBlockedByRuntime;
       await completeControlApplication(measurement.id, previous.effectiveMode, control.effectiveMode, control.publishPaused, evaluation.evaluatedAt);
     } else {
       control = await getAutomationControl();
       canary = await getCanaryState();
     }
   } else if (evaluation.status === 'PASS') {
+    if (previous.publishBlockedByRuntime) {
+      control = await updateAutomationControl({
+        publishBlockedByRuntime: false,
+        publishRuntimeReasons: [],
+        degradedReason: undefined,
+        reason: 'Runtime stability window and all measured safety gates passed.',
+      }, options.actor || 'error-budget-controller');
+      applied = true;
+    }
     canary = await advanceCanaryWaveAfterHealthyEvaluation({
       evaluationId: evaluation.id,
       status: evaluation.status,

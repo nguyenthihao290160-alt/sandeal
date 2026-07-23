@@ -124,9 +124,9 @@ export interface NormalizedAccessTradeItem {
   price: number;
   salePrice: number;
   category: string;
+  merchant?: string;
   commissionRate?: number;
   campaignName?: string;
-  merchant?: string;
   merchantDomain?: string;
   shopId?: string;
   shopName?: string;
@@ -177,9 +177,23 @@ export interface AccessTradeSearchResult {
     needsReview: number;
     archived: number;
     blockedFromPublic: number;
+    fetched: number;
+    accepted: number;
+    rejected: number;
+    truncatedByLimit: number;
+    rejectionCounters: AccessTradeRejectionCounters;
   };
   requests: AccessTradeRequestLog[];
   diagnostics: AccessTradeSearchDiagnostics;
+}
+
+export interface AccessTradeRejectionCounters {
+  keywordMismatch: number;
+  categoryMismatch: number;
+  platformMismatch: number;
+  kindMismatch: number;
+  missingImage: number;
+  missingAffiliateUrl: number;
 }
 
 export type AccessTradeResultType =
@@ -568,6 +582,14 @@ function buildAccessTradeSearchResult(
   const publicCandidates = items.filter((item) => item.publicDecision === 'public_candidate').length;
   const needsReview = items.filter((item) => item.publicDecision === 'needs_review').length;
   const archived = items.filter((item) => item.publicDecision === 'archived').length;
+  const rejectionCounters = toAccessTradeRejectionCounters(rejectedByReason);
+  const fetched = successfulResults.reduce(
+    (sum, result) => sum + (result.rawItemCount ?? result.items.length),
+    0,
+  );
+  const rejected = Object.entries(rejectedByReason)
+    .filter(([reason]) => reason !== 'RESULT_LIMIT')
+    .reduce((sum, [, count]) => sum + (count || 0), 0);
 
   return {
     items,
@@ -590,6 +612,11 @@ function buildAccessTradeSearchResult(
       needsReview,
       archived,
       blockedFromPublic: items.length - publicEligibleProducts,
+      fetched,
+      accepted: acceptedCount,
+      rejected,
+      truncatedByLimit: limitedCount,
+      rejectionCounters,
     },
     requests,
     diagnostics: buildAccessTradeDiagnostics({
@@ -774,13 +801,6 @@ export function normalizeAccessTradeItem(
     'industry',
   ]);
 
-  const campaignName = getFirstText(item, [
-    'campaign_name',
-    'campaignName',
-    'campaign',
-    'campaign_name_text',
-  ]);
-
   const merchant = getFirstText(item, [
     'merchant',
     'merchantName',
@@ -793,6 +813,14 @@ export function normalizeAccessTradeItem(
     'shop_name',
     'domain',
   ]);
+
+  const campaignName = getFirstText(item, [
+    'campaign_name',
+    'campaignName',
+    'campaign',
+    'campaign_name_text',
+  ]);
+
   const shopId = getFirstText(item, ['shop_id', 'shopId']);
   const shopName = getFirstText(item, ['shop_name', 'shopName', 'shop']);
   const sku = getFirstText(item, ['sku', 'skuId', 'sku_id']);
@@ -1005,9 +1033,9 @@ export function normalizeAccessTradeItem(
     price,
     salePrice,
     category,
+    merchant: merchant || undefined,
     commissionRate: commissionRate || undefined,
     campaignName: campaignName || undefined,
-    merchant: merchant || undefined,
     merchantDomain: normalizeMerchantDomain(getFirstText(item, ['domain']))
       || safeHostname(originalUrl || affiliateDestinationUrl),
     shopId: shopId || undefined,
@@ -1802,6 +1830,30 @@ function getAccessTradeFilterRejection(
   if (params.affiliateLinkOnly && !item.affiliateUrl) return 'AFFILIATE_LINK_REQUIRED';
 
   return null;
+}
+
+function toAccessTradeRejectionCounters(
+    rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>,
+): AccessTradeRejectionCounters {
+  return {
+    keywordMismatch: rejectedByReason.KEYWORD_MISMATCH || 0,
+    categoryMismatch: rejectedByReason.CATEGORY_MISMATCH || 0,
+    platformMismatch: rejectedByReason.PLATFORM_MISMATCH || 0,
+    kindMismatch: rejectedByReason.TYPE_MISMATCH || 0,
+    missingImage: rejectedByReason.IMAGE_REQUIRED || 0,
+    missingAffiliateUrl: rejectedByReason.AFFILIATE_LINK_REQUIRED || 0,
+  };
+}
+
+export function applyAccessTradeFiltersWithDiagnostics(
+    items: NormalizedAccessTradeItem[],
+    params: AccessTradeSearchParams,
+): { items: NormalizedAccessTradeItem[]; rejectionCounters: AccessTradeRejectionCounters } {
+  const rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>> = {};
+  return {
+    items: filterAccessTradeItems(items, params, rejectedByReason),
+    rejectionCounters: toAccessTradeRejectionCounters(rejectedByReason),
+  };
 }
 
 function sortAccessTradeItems(items: NormalizedAccessTradeItem[]): NormalizedAccessTradeItem[] {
@@ -2874,17 +2926,8 @@ function parsePriceNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-function isValidHttpUrl(value: unknown): boolean {
-  const text = stringifyValue(value);
-
-  if (!text) return false;
-
-  try {
-    const parsed = new URL(text);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
+export function isValidHttpUrl(value: unknown): boolean {
+  return validateExternalUrl(stringifyValue(value)).safe;
 }
 
 function matchesSearchQuery(haystackValue: string, queryValue: string): boolean {

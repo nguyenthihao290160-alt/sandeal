@@ -99,9 +99,10 @@ test('Tự động hóa yêu cầu confirmation, lý do và ghi audit backend', 
 test('Sức khỏe không báo Gemini bình thường khi chưa cấu hình', () => {
   const route = read('src/app/api/automation/health/route.ts');
   const page = read('src/app/dashboard/app-health/page.tsx');
-  assert(route.includes('runtime?.providers.gemini || providerHealth({ configured: geminiConfigured'));
-  assert(route.includes('adapterAvailable: false'));
-  assert(page.includes("const status = configured ? circuit.state : 'not_configured'"));
+  assert(route.includes('getGeminiProviderReadiness'));
+  assert(route.includes('gemini: geminiStatus'));
+  assert(!route.includes('adapterAvailable: false'));
+  assert(page.includes("configured_not_ready: 'Đã cấu hình, chưa sẵn sàng'"));
 });
 
 test('Kết nối bảo mật bỏ topbar tối lặp, icon chữ cái và fallback tiếng Anh', () => {

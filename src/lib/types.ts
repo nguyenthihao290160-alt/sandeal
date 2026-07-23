@@ -126,6 +126,23 @@ export interface ProductIdentity {
   ruleVersion: string;
 }
 
+export type ProductSourceDuplicateEvidence = 'SOURCE_ID_EXACT' | 'CANONICAL_URL_EXACT';
+
+export interface ProductSourceMapping {
+  source: ProductSource;
+  sourceId: string;
+  externalId?: string;
+  originalUrl?: string;
+  normalizedOriginalUrl?: string;
+  affiliateUrl?: string;
+  merchant?: string;
+  domain?: string;
+  duplicateEvidence: ProductSourceDuplicateEvidence[];
+  sourceVerified: boolean;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 export interface ProductOffer {
   id: string;
   source: string;
@@ -324,6 +341,7 @@ export interface Product {
   priceNote?: string;
 
   category?: string;
+  merchant?: string;
   tags: string[];
 
   benefits: string[];
@@ -357,7 +375,6 @@ export interface Product {
   sourceType?: string;
   dataSource?: string;
   importedFrom?: string;
-  merchant?: string;
   merchantDomain?: string;
   shopId?: string;
   shopName?: string;
@@ -489,6 +506,7 @@ export interface Product {
   evidenceSnapshotHash?: string;
   confidences?: ProductConfidenceSet;
   identity?: ProductIdentity;
+  sourceMappings?: ProductSourceMapping[];
   offers?: ProductOffer[];
   bestOfferId?: string;
   priceTruthState?: PriceTruthState;

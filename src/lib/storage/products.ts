@@ -2,7 +2,13 @@
 // Product Storage
 // ===========================================
 
-import type { Product, CreateProductInput, ProductFilters } from '../types';
+import type {
+  Product,
+  CreateProductInput,
+  ProductFilters,
+  ProductSourceDuplicateEvidence,
+  ProductSourceMapping,
+} from '../types';
 import { createHash } from 'crypto';
 import { readCollection, writeCollection, deleteOne, generateId, runTransaction } from './adapter';
 import { normalizeProductForPublic } from '../productNormalizer';
@@ -87,7 +93,7 @@ function mergeDuplicateCandidate(existing: Product, candidate: CreateProductInpu
   const unchangedFields: string[] = [];
   const fields: Array<keyof Product> = [
     'originalUrl', 'canonicalProductUrl', 'affiliateUrl', 'affiliateDestinationUrl',
-    'imageUrl', 'price', 'salePrice', 'sourceId', 'sourceItemId', 'sourceEndpoint',
+    'imageUrl', 'price', 'salePrice', 'sourceId', 'sourceItemId', 'externalId', 'sourceEndpoint',
     'sourceFetchedAt', 'merchant', 'merchantDomain', 'rawSourceKind', 'sourceItemKind',
     'shopId', 'shopName', 'sku', 'providerUpdatedAt', 'sourceNormalizationIssues',
     'canonicalUrlSource', 'canonicalUrlProvider', 'canonicalUrlSourceEndpoint',
@@ -98,7 +104,7 @@ function mergeDuplicateCandidate(existing: Product, candidate: CreateProductInpu
   ];
   const sameSource = existing.source === candidate.source;
   const sourceIdentityFields = new Set<keyof Product>([
-    'sourceId', 'sourceItemId', 'sourceEndpoint', 'sourceFetchedAt', 'rawSourceKind', 'sourceItemKind',
+    'sourceId', 'sourceItemId', 'externalId', 'sourceEndpoint', 'sourceFetchedAt', 'rawSourceKind', 'sourceItemKind',
   ]);
   for (const field of fields) {
     const current = existing[field];
@@ -368,6 +374,237 @@ export async function createProduct(data: CreateProductInput): Promise<Product> 
     }
     if (!created) throw new Error('PRODUCT_CREATE_NOT_COMMITTED');
     return created;
+  });
+}
+
+export class SourceCandidateMappingConflictError extends Error {
+  readonly code = 'SOURCE_CANDIDATE_MAPPING_CONFLICT';
+  constructor() {
+    super('source_candidate_mapping_conflict');
+    this.name = 'SourceCandidateMappingConflictError';
+  }
+}
+
+export interface SourceCandidateMappingResult {
+  canonicalProductId: string;
+  canonicalIdentifier: string;
+  outcome: 'CREATED' | 'EXISTING_ENRICHED' | 'EXISTING_UNCHANGED';
+  duplicateEvidence: ProductSourceDuplicateEvidence[];
+  enrichedFields: string[];
+  unchangedFields: string[];
+}
+
+export interface SourceCandidateUpsertResult {
+  product: Product;
+  created: boolean;
+  unchanged: boolean;
+  mapping: SourceCandidateMappingResult;
+}
+
+const TRACKING_QUERY_KEYS = new Set(['fbclid', 'gclid', 'dclid', 'msclkid']);
+
+export function normalizeProductIdentityUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const url = new URL(value.trim());
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    url.hash = '';
+    if ((url.protocol === 'https:' && url.port === '443') || (url.protocol === 'http:' && url.port === '80')) url.port = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (key.toLowerCase().startsWith('utm_') || TRACKING_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.delete(key);
+    }
+    url.searchParams.sort();
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function mappingDomain(normalizedUrl: string | null): string | undefined {
+  if (!normalizedUrl) return undefined;
+  try {
+    return new URL(normalizedUrl).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function candidateEvidence(product: Product, source: Product['source'], sourceId: string, normalizedOriginalUrl: string | null): ProductSourceDuplicateEvidence[] {
+  const evidence: ProductSourceDuplicateEvidence[] = [];
+  const mappings = Array.isArray(product.sourceMappings) ? product.sourceMappings : [];
+  if (
+    (product.source === source && (product.sourceId === sourceId || product.externalId === sourceId))
+    || mappings.some((mapping) => mapping.source === source && mapping.sourceId === sourceId)
+  ) {
+    evidence.push('SOURCE_ID_EXACT');
+  }
+  if (normalizedOriginalUrl) {
+    const productUrls = [
+      normalizeProductIdentityUrl(product.originalUrl),
+      ...mappings.map((mapping) => mapping.normalizedOriginalUrl || normalizeProductIdentityUrl(mapping.originalUrl)),
+    ].filter(Boolean);
+    if (productUrls.includes(normalizedOriginalUrl)) evidence.push('CANONICAL_URL_EXACT');
+  }
+  return evidence;
+}
+
+function buildSourceMapping(
+  draft: Partial<Product>,
+  sourceId: string,
+  originalUrl: string | undefined,
+  normalizedOriginalUrl: string | null,
+  duplicateEvidence: ProductSourceDuplicateEvidence[],
+  previous: ProductSourceMapping | undefined,
+  now: string,
+): ProductSourceMapping {
+  return {
+    source: draft.source || 'other',
+    sourceId,
+    externalId: String(draft.externalId || sourceId),
+    originalUrl: previous?.originalUrl || originalUrl,
+    normalizedOriginalUrl: previous?.normalizedOriginalUrl || normalizedOriginalUrl || undefined,
+    affiliateUrl: previous?.affiliateUrl || draft.affiliateUrl,
+    merchant: previous?.merchant || draft.merchant,
+    domain: previous?.domain || mappingDomain(normalizedOriginalUrl),
+    duplicateEvidence: [...new Set([...(previous?.duplicateEvidence || []), ...duplicateEvidence])],
+    sourceVerified: previous?.sourceVerified === true || draft.sourceVerified === true || draft.verifiedSource === true,
+    firstSeenAt: previous?.firstSeenAt || now,
+    lastSeenAt: now,
+  };
+}
+
+function sourceCandidateEnrichmentLabel(field: string): string {
+  const labels: Record<string, string> = {
+    sourceId: 'source ID',
+    sourceItemId: 'source item ID',
+    externalId: 'external ID',
+    originalUrl: 'original URL',
+    canonicalProductUrl: 'canonical product URL',
+    imageUrl: 'image URL',
+    affiliateUrl: 'affiliate URL',
+    merchant: 'merchant',
+    price: 'giá nguồn',
+    salePrice: 'giá khuyến mãi nguồn',
+  };
+  return labels[field] || field;
+}
+
+/**
+ * Resolves a source candidate by exact source identity or exact canonical URL.
+ * Titles, keywords and affiliate URLs are deliberately excluded from identity.
+ */
+export async function upsertSourceCandidateProduct(draft: Partial<Product>): Promise<SourceCandidateUpsertResult> {
+  if (requestsPublicProductState(draft)) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
+  const sourceId = String(draft.sourceId || draft.externalId || '').trim().slice(0, 240);
+  if (!sourceId || !draft.source || !draft.title) throw new Error('SOURCE_CANDIDATE_IDENTITY_REQUIRED');
+  const source = draft.source;
+
+  return withProductWrite(async () => {
+    const products = await readCanonicalProducts();
+    const affiliateIdentity = normalizeProductIdentityUrl(draft.affiliateUrl);
+    const requestedOriginal = typeof draft.originalUrl === 'string' ? draft.originalUrl : undefined;
+    const normalizedRequestedOriginal = normalizeProductIdentityUrl(requestedOriginal);
+    // An affiliate/tracking URL is evidence metadata, never a canonical identity.
+    const originalUrl = normalizedRequestedOriginal && normalizedRequestedOriginal !== affiliateIdentity ? requestedOriginal : undefined;
+    const normalizedOriginalUrl = originalUrl ? normalizedRequestedOriginal : null;
+    const matches: Array<{ index: number; evidence: ProductSourceDuplicateEvidence[] }> = [];
+    for (let index = 0; index < products.length; index += 1) {
+      const evidence = candidateEvidence(products[index], source, sourceId, normalizedOriginalUrl);
+      if (evidence.length) matches.push({ index, evidence });
+    }
+    if (matches.length > 1) throw new SourceCandidateMappingConflictError();
+    const matchIndex = matches[0]?.index ?? -1;
+    const duplicateEvidence = matches[0]?.evidence || [];
+
+    const now = new Date().toISOString();
+    if (matchIndex < 0) {
+      const id = generateId();
+      const mapping = buildSourceMapping(draft, sourceId, originalUrl, normalizedOriginalUrl, [], undefined, now);
+      const product = normalizeCanonicalProduct({
+        ...draft,
+        sourceId,
+        externalId: String(draft.externalId || sourceId),
+        originalUrl,
+        sourceMappings: [mapping],
+        id,
+        slug: ensureUniqueSlug(generateSlug(String(draft.title)), products, id),
+        createdAt: now,
+        updatedAt: now,
+      });
+      products.push(product);
+      await writeCollection(COLLECTION, products);
+      return {
+        product,
+        created: true,
+        unchanged: false,
+        mapping: {
+          canonicalProductId: product.id,
+          canonicalIdentifier: product.id.slice(0, 8),
+          outcome: 'CREATED',
+          duplicateEvidence: [],
+          enrichedFields: [],
+          unchangedFields: [],
+        },
+      };
+    }
+
+    const existing = products[matchIndex];
+    const mappings = Array.isArray(existing.sourceMappings) ? existing.sourceMappings : [];
+    const mappingIndex = mappings.findIndex((mapping) => mapping.source === draft.source && mapping.sourceId === sourceId);
+    const nextMapping = buildSourceMapping(draft, sourceId, originalUrl, normalizedOriginalUrl, duplicateEvidence, mappingIndex >= 0 ? mappings[mappingIndex] : undefined, now);
+    const nextMappings = [...mappings];
+    if (mappingIndex >= 0) nextMappings[mappingIndex] = nextMapping;
+    else nextMappings.push(nextMapping);
+
+    // Reuse the canonical duplicate enrichment policy from origin/master: only
+    // missing values and stronger evidence may be adopted, while verified values
+    // are never overwritten. Source mappings remain the identity authority.
+    const duplicateMerge = mergeDuplicateCandidate(existing, draft as CreateProductInput);
+    const enrichedFields = duplicateMerge.updatedFields.map(sourceCandidateEnrichmentLabel);
+    const mappingChanged = mappingIndex < 0 || JSON.stringify(mappings[mappingIndex]) !== JSON.stringify(nextMapping);
+    const changed = duplicateMerge.updatedFields.length > 0 || mappingChanged;
+    const merged = normalizeCanonicalProduct({
+      ...duplicateMerge.product,
+      id: existing.id,
+      sourceMappings: nextMappings,
+      updatedAt: changed ? now : existing.updatedAt,
+    });
+    products[matchIndex] = merged;
+    if (changed) await writeCollection(COLLECTION, products);
+    try {
+      await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items.slice(-999), {
+        id: generateId(),
+        existingProductId: merged.id,
+        source: draft.source,
+        sourceItemId: sourceId,
+        duplicateEvidence,
+        updatedFields: duplicateMerge.updatedFields,
+        unchangedFields: duplicateMerge.unchangedFields,
+        createdAt: now,
+      }]);
+    } catch (error) {
+      console.error(JSON.stringify({
+        type: 'product_duplicate_merge_audit_failed',
+        productId: merged.id,
+        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'UNKNOWN_ERROR'),
+      }));
+    }
+    return {
+      product: merged,
+      created: false,
+      unchanged: enrichedFields.length === 0,
+      mapping: {
+        canonicalProductId: merged.id,
+        canonicalIdentifier: merged.id.slice(0, 8),
+        outcome: enrichedFields.length ? 'EXISTING_ENRICHED' : 'EXISTING_UNCHANGED',
+        duplicateEvidence,
+        enrichedFields,
+        unchangedFields: duplicateMerge.unchangedFields,
+      },
+    };
   });
 }
 

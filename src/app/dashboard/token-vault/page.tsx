@@ -51,12 +51,17 @@ const READINESS_REASON_LABELS: Record<NonNullable<SafeCredential['readiness']>['
   credential_not_checked: 'Kết nối đã lưu nhưng chưa chạy kiểm tra hợp lệ.',
   credential_not_valid: 'Kết nối chưa có kết quả kiểm tra hợp lệ.',
   generation_not_verified: 'Khóa hợp lệ theo kiểm tra nhẹ; khả năng tạo nội dung chưa được xác minh.',
+  generation_check_stale: 'Lần tạo nội dung thành công đã quá hạn xác minh; cần kiểm tra lại.',
   generation_temporarily_unavailable: 'Kiểm tra tạo nội dung gần nhất chưa thành công; hệ thống vẫn fail-closed.',
   cooldown_active: 'Kết nối đang trong thời gian chờ phục hồi.',
   quota_limited: 'Nhóm hạn mức hiện không cho phép tạo nội dung.',
   billing_not_confirmed: 'Chưa xác minh kết nối thuộc chính sách Free; hệ thống không định tuyến yêu cầu tạo.',
+  free_policy_unverified: 'Chưa xác minh model đã thử thuộc chính sách Free-only.',
   quota_group_missing: 'Chưa cấu hình nhóm hạn mức cho định tuyến deterministic.',
   model_not_verified: 'Light Test chưa xác minh model tạo nội dung phù hợp.',
+  model_not_available: 'Không tìm được model phù hợp hỗ trợ tạo nội dung.',
+  region_restricted: 'Kết nối Gemini bị giới hạn theo khu vực.',
+  provider_unavailable: 'Adapter có sẵn nhưng tuyến Gemini tạm thời chưa hoạt động.',
   invalid: 'Kết nối không hợp lệ theo lần kiểm tra gần nhất.',
   disabled: 'Kết nối đang bị tắt.',
   missing_permission: 'Kết nối thiếu quyền hoặc model tạo nội dung phù hợp.',
@@ -76,19 +81,25 @@ const GEMINI_ERROR_LABELS: Record<string, string> = {
   UNKNOWN_PROVIDER_ERROR: 'Lỗi nhà cung cấp chưa xác định',
 };
 
-function geminiAdminStatus(credential: SafeCredential): { label: string; badge: string } {
-  if (credential.readiness?.generationReady) return { label: 'Sẵn sàng', badge: 'badge-success' };
-  const category = credential.readiness?.errorCategory || String(credential.metadata?.errorCategory || '');
-  if (category === 'PERMISSION_DENIED') return { label: 'Lỗi quyền', badge: 'badge-warning' };
+function geminiReadinessBadge(credential: SafeCredential): { label: string; badge: string } {
+  const readiness = credential.readiness;
+  const category = readiness?.diagnosticCategory || readiness?.errorCategory || String(credential.metadata?.diagnosticCategory || credential.metadata?.errorCategory || '');
+  if (credential.role === 'disabled' || readiness?.state === 'disabled') return { label: 'Đã tắt', badge: 'badge-neutral' };
+  if (readiness?.generationReady) return { label: 'Sẵn sàng tạo nội dung', badge: 'badge-success' };
+  if (category === 'PERMISSION_DENIED' || readiness?.reasonCode === 'missing_permission') return { label: 'Lỗi quyền · Thiếu quyền tạo nội dung', badge: 'badge-danger' };
   if (category === 'QUOTA_EXCEEDED' || category === 'RATE_LIMITED') return { label: 'Hạn mức / tốc độ', badge: 'badge-warning' };
   if (['NETWORK_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'TRANSIENT_ERROR', 'UNKNOWN_PROVIDER_ERROR'].includes(category)) {
     return { label: 'Lỗi tạm thời', badge: 'badge-warning' };
   }
-  if (['INVALID_KEY', 'MODEL_NOT_AVAILABLE', 'REGION_RESTRICTED'].includes(category)
-    || ['billing_not_confirmed', 'quota_group_missing', 'model_not_verified'].includes(credential.readiness?.reasonCode || '')) {
-    return { label: 'Lỗi cấu hình', badge: 'badge-danger' };
+  if (category === 'INVALID_KEY' || readiness?.reasonCode === 'invalid') return { label: 'Lỗi cấu hình · Khóa không hợp lệ', badge: 'badge-danger' };
+  if (category === 'MODEL_NOT_AVAILABLE' || readiness?.reasonCode === 'model_not_available' || readiness?.reasonCode === 'model_not_verified') {
+    return { label: 'Lỗi cấu hình · Không tìm được model', badge: 'badge-warning' };
   }
-  return { label: 'Chưa xác minh', badge: 'badge-neutral' };
+  if (readiness?.reasonCode === 'free_policy_unverified' || readiness?.reasonCode === 'billing_not_confirmed') return { label: 'Chưa xác minh Free policy', badge: 'badge-warning' };
+  if (readiness?.state === 'cooldown' || readiness?.state === 'quota_limited') return { label: 'Đang cooldown/hạn mức', badge: 'badge-warning' };
+  if (['generation_temporarily_unavailable', 'provider_unavailable', 'region_restricted'].includes(String(readiness?.reasonCode))) return { label: 'Tạm thời chưa sẵn sàng', badge: 'badge-warning' };
+  if (readiness?.valid) return { label: 'Khóa hợp lệ · Chưa generation-ready', badge: 'badge-warning' };
+  return { label: 'Chưa kiểm tra', badge: 'badge-neutral' };
 }
 
 interface FormState {
@@ -115,7 +126,6 @@ export default function TokenVaultPage() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ type: string; message: string } | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [showValue, setShowValue] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
@@ -238,7 +248,7 @@ export default function TokenVaultPage() {
       const res = await fetch('/api/token-vault/set-primary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, operationId: `credential-disable:${id}` }),
+        body: JSON.stringify({ id, operationId: `credential-primary:${id}` }),
       });
       const data = await res.json();
       showToast(data.ok ? 'success' : 'error', data.message);
@@ -253,7 +263,7 @@ export default function TokenVaultPage() {
     try {
       const res = await fetch('/api/token-vault/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
       const data = await res.json();
-      showToast(data.ok && data.data?.generationStatus === 'available' ? 'success' : 'warning', data.message || 'Đã kiểm tra khả năng tạo nội dung.');
+      showToast(data.ok && data.data?.generationReady ? 'success' : 'warning', data.message || 'Đã kiểm tra khả năng tạo nội dung.');
       await loadCredentials();
     } catch { showToast('error', 'Không thể kiểm tra khả năng tạo nội dung.'); }
     finally { setTestingId(null); }
@@ -263,7 +273,12 @@ export default function TokenVaultPage() {
     setTestingAll(true);
     try {
       const res = await fetch('/api/token-vault/test-all', { method: 'POST' });
-      const data = await res.json(); showToast(data.ok ? 'success' : 'warning', data.message || 'Đã kiểm tra các kết nối Gemini.');
+      const data = await res.json();
+      const stats = data.data;
+      const summary = data.ok && stats
+        ? `${stats.total} kết nối · ${stats.validKeys} khóa hợp lệ · ${stats.generationReady} sẵn sàng · ${stats.permissionDenied} thiếu quyền · ${stats.invalidKey} khóa lỗi · ${stats.rateLimited} giới hạn tốc độ · ${stats.quotaExceeded} hết quota · ${stats.modelUnavailable} thiếu model · ${stats.freePolicyUnverified} chưa xác minh Free policy.`
+        : data.message || 'Đã kiểm tra các kết nối Gemini.';
+      showToast(data.ok && Number(stats?.generationReady || 0) > 0 ? 'success' : 'warning', summary);
       await loadCredentials();
     } catch { showToast('error', 'Không thể kiểm tra các kết nối Gemini.'); }
     finally { setTestingAll(false); }
@@ -306,7 +321,6 @@ export default function TokenVaultPage() {
       });
       const data = await res.json();
       showToast(data.ok ? 'success' : 'error', data.message);
-      setDeleteConfirm(null);
       await loadCredentials();
     } catch {
       showToast('error', 'Lỗi kết nối.');
@@ -344,7 +358,13 @@ export default function TokenVaultPage() {
   }).filter(s => s.groups.length > 0);
 
   const totalCredentials = groups.reduce((sum, g) => sum + g.credentials.length, 0);
-  const geminiCredentials = groups.find(g => g.platform === 'gemini')?.credentials.length ?? 0;
+  const geminiRows = groups.find(g => g.platform === 'gemini')?.credentials ?? [];
+  const geminiCredentials = geminiRows.length;
+  const geminiReady = geminiRows.filter(credential => credential.readiness?.generationReady).length;
+  const geminiPrimary = geminiRows.find(credential => credential.role === 'primary');
+  const geminiUnavailableReason = geminiReady === 0
+    ? geminiRows.find(credential => credential.readiness)?.readiness?.reasonCode
+    : null;
 
   // ---- Render ----
   return (
@@ -390,8 +410,8 @@ export default function TokenVaultPage() {
           </div>
           <div className="stat-card">
             <div className="stat-card-icon" style={{ background: 'var(--ds-surface-blue)', color: 'var(--ds-info)' }}><DashboardIcon name="ai" size={21} /></div>
-            <div className="stat-card-value">{geminiCredentials}</div>
-            <div className="stat-card-label">Kết nối Gemini</div>
+            <div className="stat-card-value">{geminiReady}/{geminiCredentials}</div>
+            <div className="stat-card-label">Gemini generation-ready</div>
           </div>
           <div className="stat-card">
             <div className="stat-card-icon" style={{ background: 'var(--ds-surface-green)', color: 'var(--ds-success)' }}><DashboardIcon name="source" size={21} /></div>
@@ -408,6 +428,15 @@ export default function TokenVaultPage() {
             <div className="stat-card-label">Kết nối mạng xã hội</div>
           </div>
         </div>
+        {geminiCredentials > 0 && (
+          <div className="disclosure-banner" data-gemini-summary style={{ marginBottom: 'var(--space-lg)' }}>
+            <strong>Gemini:</strong> {geminiReady}/{geminiCredentials} kết nối sẵn sàng tạo nội dung
+            {' · '}Kết nối chính: {geminiPrimary ? geminiPrimary.label : 'chưa chọn'}
+            {geminiUnavailableReason && (
+              <> · {READINESS_REASON_LABELS[geminiUnavailableReason]}</>
+            )}
+          </div>
+        )}
 
         {/* Add Credential Form */}
         {showForm && (
@@ -526,10 +555,7 @@ export default function TokenVaultPage() {
                   onSetPrimary={handleSetPrimary}
                   onDisable={handleDisable}
                   onPriority={handlePriority}
-                  deleteConfirmId={deleteConfirm}
-                  onDeleteRequest={setDeleteConfirm}
-                  onDeleteConfirm={handleDelete}
-                  onDeleteCancel={() => setDeleteConfirm(null)}
+                  onDelete={handleDelete}
                   onReplace={(id) => { setReplaceId(id); setReplaceValue(''); }}
                   onReplaceSubmit={handleReplace}
                   onReplaceCancel={() => { setReplaceId(null); setReplaceValue(''); }}
@@ -578,10 +604,7 @@ interface PlatformCardProps {
   onSetPrimary: (id: string) => void;
   onDisable: (id: string) => void;
   onPriority: (credential: SafeCredential, priority: number) => void;
-  deleteConfirmId: string | null;
-  onDeleteRequest: (id: string) => void;
-  onDeleteConfirm: (id: string) => void;
-  onDeleteCancel: () => void;
+  onDelete: (id: string) => void;
   onReplace: (id: string) => void;
   onReplaceSubmit: (id: string) => void;
   onReplaceCancel: () => void;
@@ -598,10 +621,7 @@ function PlatformCard({
   onSetPrimary,
   onDisable,
   onPriority,
-  deleteConfirmId,
-  onDeleteRequest,
-  onDeleteConfirm,
-  onDeleteCancel,
+  onDelete,
   onReplace,
   onReplaceSubmit,
   onReplaceCancel,
@@ -609,6 +629,9 @@ function PlatformCard({
 }: PlatformCardProps) {
   const primary = group.credentials.find(c => c.role === 'primary');
   const hasCredentials = group.credentials.length > 0;
+  const generationReadyCount = group.platform === 'gemini'
+    ? group.credentials.filter(credential => credential.readiness?.generationReady).length
+    : 0;
 
   return (
     <div className="glass-card token-vault-platform-card">
@@ -625,9 +648,9 @@ function PlatformCard({
             </div>
           </div>
         </div>
-        {primary && group.platform === 'gemini' ? (
-           <span className={`badge ${primary.readiness?.generationReady ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '10px' }}>
-             {primary.readiness?.generationReady ? 'Sẵn sàng tạo nội dung' : 'Đã lưu — chưa sẵn sàng tạo'}
+        {group.platform === 'gemini' && hasCredentials ? (
+           <span className={`badge ${generationReadyCount > 0 ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '10px' }}>
+             {generationReadyCount}/{group.credentials.length} sẵn sàng
            </span>
         ) : primary ? (
           <span className={`badge ${primary.status === 'valid' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
@@ -672,10 +695,7 @@ function PlatformCard({
           onSetPrimary={onSetPrimary}
           onDisable={onDisable}
           onPriority={onPriority}
-          deleteConfirmId={deleteConfirmId}
-          onDeleteRequest={onDeleteRequest}
-          onDeleteConfirm={onDeleteConfirm}
-          onDeleteCancel={onDeleteCancel}
+          onDelete={onDelete}
           onReplace={onReplace}
           onReplaceSubmit={onReplaceSubmit}
           onReplaceCancel={onReplaceCancel}
@@ -698,10 +718,7 @@ interface CredentialRowProps {
   onSetPrimary: (id: string) => void;
   onDisable: (id: string) => void;
   onPriority: (credential: SafeCredential, priority: number) => void;
-  deleteConfirmId: string | null;
-  onDeleteRequest: (id: string) => void;
-  onDeleteConfirm: (id: string) => void;
-  onDeleteCancel: () => void;
+  onDelete: (id: string) => void;
   onReplace: (id: string) => void;
   onReplaceSubmit: (id: string) => void;
   onReplaceCancel: () => void;
@@ -718,10 +735,7 @@ function CredentialRow({
   onSetPrimary,
   onDisable,
   onPriority,
-  deleteConfirmId,
-  onDeleteRequest,
-  onDeleteConfirm,
-  onDeleteCancel,
+  onDelete,
   onReplace,
   onReplaceSubmit,
   onReplaceCancel,
@@ -731,9 +745,14 @@ function CredentialRow({
   const roleConfig = CREDENTIAL_ROLE_LABELS[cred.role];
   const isTesting = testingId === cred.id;
   const isReplacing = replaceId === cred.id;
-  const isDeletePending = deleteConfirmId === cred.id;
+  const [priorityEditing, setPriorityEditing] = useState(false);
   const [priorityValue, setPriorityValue] = useState(String(cred.readiness?.priority ?? cred.metadata?.priority ?? 100));
-  const geminiStatus = cred.platform === 'gemini' ? geminiAdminStatus(cred) : null;
+  const [deletePending, setDeletePending] = useState(false);
+  const readinessBadge = cred.platform === 'gemini' ? geminiReadinessBadge(cred) : null;
+  const canSetPrimary = cred.platform !== 'gemini' || cred.readiness?.generationReady === true;
+  const primaryDisabledReason = cred.platform === 'gemini' && !canSetPrimary && cred.readiness
+    ? READINESS_REASON_LABELS[cred.readiness.reasonCode]
+    : null;
 
   return (
     <div className="token-vault-credential">
@@ -745,11 +764,11 @@ function CredentialRow({
               {roleConfig.label}
             </span>
             <span className={`badge ${statusConfig.badge}`} style={{ fontSize: '9px', padding: '2px 6px' }}>
-              {statusConfig.label}
+              {cred.platform === 'gemini' && cred.status === 'valid' ? 'Khóa hợp lệ' : statusConfig.label}
             </span>
-            {geminiStatus && (
-              <span className={`badge ${geminiStatus.badge}`} style={{ fontSize: '9px', padding: '2px 6px' }}>
-                {geminiStatus.label}
+            {readinessBadge && (
+              <span className={`badge ${readinessBadge.badge}`} data-generation-ready={String(Boolean(cred.readiness?.generationReady))} style={{ fontSize: '9px', padding: '2px 6px' }}>
+                {readinessBadge.label}
               </span>
             )}
           </div>
@@ -782,11 +801,18 @@ function CredentialRow({
             </div>
           )}
           {cred.platform === 'gemini' && (
-            <div className="token-vault-gemini-meta">
+            <details className="token-vault-gemini-meta">
+              <summary>Chi tiết định tuyến</summary>
               Nhà cung cấp: Gemini · Mô hình đã thử: {cred.readiness?.testedModel || String(cred.metadata?.testedModel || cred.metadata?.preferredModel || 'chưa có')} · HTTP: {cred.readiness?.httpStatus ?? '—'}<br />
-              Phân loại: {GEMINI_ERROR_LABELS[cred.readiness?.errorCategory || ''] || (cred.readiness?.generationReady ? 'Sẵn sàng' : 'Chưa có lỗi đã phân loại')} · Có thể thử lại: {cred.readiness?.retryable ? 'Có' : 'Không'} · Generation ready: {cred.readiness?.generationReady ? 'Có' : 'Không'}<br />
-              Lần kiểm tra: {cred.readiness?.lastCheckedAt ? new Date(cred.readiness.lastCheckedAt).toLocaleString('vi-VN') : 'chưa kiểm tra'} · Chờ đến: {cred.readiness?.cooldownUntil ? new Date(cred.readiness.cooldownUntil).toLocaleString('vi-VN') : 'không có'}<br />
+              Phân loại: {GEMINI_ERROR_LABELS[cred.readiness?.diagnosticCategory || cred.readiness?.errorCategory || ''] || (cred.readiness?.generationReady ? 'Sẵn sàng' : 'Chưa có lỗi đã phân loại')} · Có thể thử lại: {cred.readiness?.retryable ? 'Có' : 'Không'} · Generation ready: {cred.readiness?.generationReady ? 'Có' : 'Không'}<br />
+              Free policy: {cred.readiness?.freePolicyEligible ? 'đã xác minh' : 'chưa xác minh'} · Lần tạo thành công: {cred.readiness?.lastGenerationSucceededAt ? new Date(cred.readiness.lastGenerationSucceededAt).toLocaleString('vi-VN') : 'chưa có'}<br />
+              Lần kiểm tra: {cred.readiness?.lastCheckedAt ? new Date(cred.readiness.lastCheckedAt).toLocaleString('vi-VN') : 'chưa kiểm tra'} · Chờ phục hồi: {cred.readiness?.cooldownUntil ? new Date(cred.readiness.cooldownUntil).toLocaleString('vi-VN') : 'không có'}<br />
               Dự án: {String(cred.metadata?.projectAlias || 'chưa đặt')} · Nhóm hạn mức: {String(cred.metadata?.quotaGroupId || 'chưa đặt')} · Ưu tiên: {String(cred.metadata?.priority ?? 100)}
+            </details>
+          )}
+          {primaryDisabledReason && cred.role !== 'primary' && cred.role !== 'disabled' && (
+            <div className="token-vault-readiness-reason" data-primary-disabled-reason>
+              Chưa thể đặt làm chính: {primaryDisabledReason}
             </div>
           )}
         </div>
@@ -796,24 +822,11 @@ function CredentialRow({
           </button>
           {cred.platform === 'gemini' && <button className="btn btn-ghost btn-sm" onClick={() => onProbe(cred.id)} disabled={isTesting}>Thử tạo nội dung</button>}
           {cred.role !== 'primary' && cred.role !== 'disabled' && (
-            <button className="btn btn-ghost btn-sm" onClick={() => onSetPrimary(cred.id)} title="Đặt làm chính">
+            <button className="btn btn-ghost btn-sm" onClick={() => onSetPrimary(cred.id)} disabled={!canSetPrimary} title={primaryDisabledReason || 'Đặt làm chính'}>
               Đặt làm chính
             </button>
           )}
-          <label className="token-vault-priority-control">
-            <span>Ưu tiên</span>
-            <input
-              className="input"
-              type="number"
-              min={0}
-              max={10000}
-              step={1}
-              value={priorityValue}
-              onChange={(event) => setPriorityValue(event.target.value)}
-              aria-label={`Ưu tiên của ${cred.label}`}
-            />
-            <button className="btn btn-ghost btn-sm" type="button" onClick={() => onPriority(cred, Number(priorityValue))}>Lưu</button>
-          </label>
+          <button className="btn btn-ghost btn-sm" onClick={() => setPriorityEditing(value => !value)} title="Đổi thứ tự ưu tiên">Đổi ưu tiên</button>
           <button className="btn btn-ghost btn-sm" onClick={() => onReplace(cred.id)} title="Thay thế">
             Thay thế
           </button>
@@ -822,19 +835,11 @@ function CredentialRow({
               Tắt
             </button>
           )}
-          <button className="btn btn-ghost btn-sm" onClick={() => onDeleteRequest(cred.id)} title="Xoá" style={{ color: 'var(--color-danger)' }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setDeletePending(true)} title="Xoá" style={{ color: 'var(--color-danger)' }}>
             Xóa
           </button>
         </div>
       </div>
-
-      {isDeletePending && (
-        <div className="token-vault-inline-confirm" role="status">
-          <span>Xóa vĩnh viễn kết nối {cred.maskedValue}?</span>
-          <button className="btn btn-ghost btn-sm" type="button" onClick={onDeleteCancel}>Giữ lại</button>
-          <button className="btn btn-danger btn-sm" type="button" onClick={() => onDeleteConfirm(cred.id)}>Xóa kết nối</button>
-        </div>
-      )}
 
       {/* Replace inline form */}
       {isReplacing && (
@@ -850,6 +855,37 @@ function CredentialRow({
           />
           <button className="btn btn-primary btn-sm" onClick={() => onReplaceSubmit(cred.id)}>Cập nhật</button>
           <button className="btn btn-ghost btn-sm" onClick={onReplaceCancel}>Huỷ</button>
+        </div>
+      )}
+      {priorityEditing && (
+        <div className="token-vault-replace-form" data-inline-priority>
+          <label htmlFor={`priority-${cred.id}`}>Ưu tiên (0–10000, số nhỏ chạy trước)</label>
+          <input
+            id={`priority-${cred.id}`}
+            className="input"
+            type="number"
+            min={0}
+            max={10_000}
+            step={1}
+            value={priorityValue}
+            onChange={event => setPriorityValue(event.target.value)}
+          />
+          <button className="btn btn-primary btn-sm" onClick={() => {
+            const parsed = Number(priorityValue);
+            if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 10_000) setPriorityEditing(false);
+            onPriority(cred, parsed);
+          }}>Lưu ưu tiên</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setPriorityEditing(false)}>Huỷ</button>
+        </div>
+      )}
+      {deletePending && (
+        <div className="token-vault-replace-form" role="status" data-inline-delete-confirmation>
+          <span>Xóa vĩnh viễn kết nối “{cred.label}”?</span>
+          <button className="btn btn-danger btn-sm" onClick={() => {
+            setDeletePending(false);
+            onDelete(cred.id);
+          }}>Xóa kết nối</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setDeletePending(false)}>Huỷ</button>
         </div>
       )}
     </div>

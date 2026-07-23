@@ -63,6 +63,7 @@ type AccessTradeItem = Record<string, unknown> & {
   currentPrice?: number | string;
   originalPrice?: number | string;
   category?: string;
+  merchant?: string;
   campaignName?: string;
   rawSourceKind?: string;
   needsVerification?: boolean;
@@ -85,7 +86,6 @@ type AccessTradeItem = Record<string, unknown> & {
   sourceEndpoint?: string;
   sourceItemId?: string;
   fetchedAt?: string;
-  merchant?: string;
   merchantDomain?: string;
   shopId?: string;
   shopName?: string;
@@ -134,6 +134,18 @@ type AccessTradeResults = {
     archived?: number;
     blockedFromPublic?: number;
     nonProducts?: number;
+    fetched?: number;
+    accepted?: number;
+    rejected?: number;
+    truncatedByLimit?: number;
+    rejectionCounters?: {
+      keywordMismatch?: number;
+      categoryMismatch?: number;
+      platformMismatch?: number;
+      kindMismatch?: number;
+      missingImage?: number;
+      missingAffiliateUrl?: number;
+    };
   };
   diagnostics?: AccessTradeDiagnostics;
 };
@@ -203,6 +215,24 @@ function healthScanLabel(scan: HealthScanState | null): string {
   if (['FAILED', 'BLOCKED', 'CANCELLED'].includes(scan.status)) return 'Thất bại';
   return scan.status;
 }
+
+type CandidateMapping = {
+  canonicalProductId: string;
+  canonicalIdentifier: string;
+  outcome: 'CREATED' | 'EXISTING_ENRICHED' | 'EXISTING_UNCHANGED';
+  duplicateEvidence: Array<'SOURCE_ID_EXACT' | 'CANONICAL_URL_EXACT'>;
+  enrichedFields: string[];
+  unchangedFields?: string[];
+};
+
+type CandidateSaveResult = {
+  productId: string;
+  canonicalIdentifier: string;
+  existing: boolean;
+  duplicateEvidence: CandidateMapping['duplicateEvidence'];
+  enrichedFields: string[];
+  message: string;
+};
 
 
 
@@ -932,6 +962,7 @@ export default function ProductSourcesPage() {
   const [atSaving, setAtSaving] = useState<string | null>(null);
   const [existingProducts, setExistingProducts] = useState<Record<string, { id: string; route: string }>>({});
   const [atConfigured, setAtConfigured] = useState(false);
+  const [atSaveResults, setAtSaveResults] = useState<Record<string, CandidateSaveResult>>({});
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
     if (!mountedRef.current) return;
@@ -1124,6 +1155,7 @@ export default function ProductSourcesPage() {
     setAtLoading(true);
     setAtError('');
     setAtResults(null);
+    setAtSaveResults({});
 
     try {
       const res = await fetchWithTimeout('/api/product-sources/accesstrade/search', {
@@ -1168,7 +1200,9 @@ export default function ProductSourcesPage() {
     const title = getAtItemName(item);
     const description = getString(item.description);
     const originalUrlCandidate =
-        getString(item.originalUrl) || getString(item.url);
+        getString(item.canonicalProductUrl) ||
+        getString(item.originalUrl) ||
+        getString(item.url);
     const affiliateUrlCandidate = getString(item.affiliateUrl);
     const imageUrlCandidate = getString(item.imageUrl);
 
@@ -1222,6 +1256,12 @@ export default function ProductSourcesPage() {
           importedFrom: 'accesstrade',
           sourceType: 'affiliate',
           rawSourceKind: getString(item.rawSourceKind) || kind,
+          sourceId: itemId,
+          externalId:
+              getString(item.sourceId) ||
+              getString(item.productId) ||
+              getString(item.id) ||
+              itemId,
 
           verifiedSource,
           sourceVerified: verifiedSource,
@@ -1261,6 +1301,13 @@ export default function ProductSourcesPage() {
           priceVerificationStatus: price || salePrice ? 'UNVERIFIED' : 'MISSING',
 
           category: getString(item.category) || undefined,
+          merchant:
+              getString(item.merchant) ||
+              getString(item.rawData?.merchant) ||
+              getString(item.rawData?.merchantName) ||
+              getString(item.rawData?.shopName) ||
+              getString(item.rawData?.domain) ||
+              undefined,
           campaignName: getString(item.campaignName) || undefined,
 
           affiliateSource: 'accesstrade',
@@ -1298,7 +1345,6 @@ export default function ProductSourcesPage() {
           sourceItemId: getString(item.sourceItemId) || getString(item.sourceId) || getString(item.productId) || getString(item.id) || undefined,
           sourceEndpoint: getString(item.sourceEndpoint) || getString(item.canonicalUrlSourceEndpoint) || getString(item.affiliateUrlSourceEndpoint) || undefined,
           sourceFetchedAt: getString(item.fetchedAt) || getString(item.canonicalUrlFetchedAt) || getString(item.affiliateUrlFetchedAt) || undefined,
-          merchant: getString(item.merchant) || getString(item.campaignName) || undefined,
           merchantDomain: getString(item.merchantDomain) || undefined,
           shopId: getString(item.shopId) || undefined,
           shopName: getString(item.shopName) || undefined,
@@ -1319,7 +1365,7 @@ export default function ProductSourcesPage() {
 
       const data = (await res
           .json()
-          .catch(() => null)) as ApiEnvelope<Product> | null;
+          .catch(() => null)) as ApiEnvelope<Product & { mapping?: CandidateMapping }> | null;
 
       if (!mountedRef.current) return;
       if (res.ok && (data?.ok || data?.success)) {
@@ -1329,21 +1375,53 @@ export default function ProductSourcesPage() {
           });
         }
 
-        showToast(
-            'success',
-            isProduct
-                ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ. Chưa đăng công khai cho tới khi liên kết và ảnh đạt kiểm tra chất lượng.'
-                : 'Đã lưu dữ liệu AccessTrade trong nội bộ. Mã giảm giá, chiến dịch và ưu đãi cửa hàng không được đăng như sản phẩm.',
-        );
+        if (data.data?.id) {
+          const mapping = data.data.mapping;
+          setAtSaveResults(previous => ({
+            ...previous,
+            [itemId]: {
+              productId: data.data!.id,
+              canonicalIdentifier: mapping?.canonicalIdentifier || data.data!.id.slice(0, 8),
+              existing: Boolean(mapping && mapping.outcome !== 'CREATED'),
+              duplicateEvidence: mapping?.duplicateEvidence || [],
+              enrichedFields: mapping?.enrichedFields || [],
+              message: data.message || 'Đã lưu candidate.',
+            },
+          }));
+        }
+        showToast('success', data.message || (
+          isProduct
+            ? 'Đã lưu sản phẩm AccessTrade vào hàng chờ.'
+            : 'Đã lưu dữ liệu AccessTrade trong nội bộ.'
+        ));
 
         await loadRecent();
       } else if ((data?.error || data?.code) === 'DUPLICATE_PRODUCT') {
-        const duplicateData = data?.data as Product & { existingProductId?: string; existingProductUrl?: string } | undefined;
+        const duplicateData = data?.data as Product & {
+          existingProductId?: string;
+          existingProductUrl?: string;
+          mapping?: CandidateMapping;
+          mergeResult?: { updatedFields?: string[]; unchangedFields?: string[] };
+        } | undefined;
         const existingProductId = getString(data?.existingProductId || duplicateData?.existingProductId);
-        const existingProductUrl = getString(data?.existingProductUrl || duplicateData?.existingProductUrl)
-          || (existingProductId ? `/dashboard/products/${encodeURIComponent(existingProductId)}` : '');
+        const existingProductUrl = getString(data?.existingProductUrl || duplicateData?.existingProductUrl);
+        const mapping = duplicateData?.mapping;
+        const mergeResult = data?.mergeResult || duplicateData?.mergeResult;
         if (existingProductId && existingProductUrl) {
           setExistingProducts(current => ({ ...current, [itemId]: { id: existingProductId, route: existingProductUrl } }));
+        }
+        if (existingProductId) {
+          setAtSaveResults(previous => ({
+            ...previous,
+            [itemId]: {
+              productId: existingProductId,
+              canonicalIdentifier: mapping?.canonicalIdentifier || existingProductId.slice(0, 8),
+              existing: true,
+              duplicateEvidence: mapping?.duplicateEvidence || [],
+              enrichedFields: mapping?.enrichedFields || mergeResult?.updatedFields || [],
+              message: data?.message || 'Sản phẩm đã tồn tại; không tạo thêm bản ghi trùng.',
+            },
+          }));
         }
         showToast('info', data?.message || 'Sản phẩm đã tồn tại; không tạo thêm bản ghi trùng.');
         await loadRecent();
@@ -2060,6 +2138,18 @@ export default function ProductSourcesPage() {
                           <div className="stat-card-label">Chưa được đăng công khai</div>
                         </div>
                       </div>
+                      {atResults.summary.fetched !== undefined && (
+                        <div className="disclosure-banner" style={{ marginBottom: 'var(--space-md)' }}>
+                          Đã kiểm tra {atResults.summary.fetched} bản ghi · chấp nhận {atResults.summary.accepted ?? atResults.items.length}
+                          {' · '}loại {atResults.summary.rejected ?? 0}
+                          {Number(atResults.summary.rejectionCounters?.keywordMismatch || 0) > 0
+                            ? ` (${atResults.summary.rejectionCounters?.keywordMismatch} không khớp từ khóa)`
+                            : ''}
+                          {Number(atResults.summary.truncatedByLimit || 0) > 0
+                            ? ` · ${atResults.summary.truncatedByLimit} kết quả phù hợp khác chưa hiển thị do giới hạn`
+                            : ''}.
+                        </div>
+                      )}
 
                       {/* Results */}
                       {atResults.items.map((rawItem, index) => {
@@ -2090,6 +2180,7 @@ export default function ProductSourcesPage() {
                             item.verifiedSource === true ||
                             item.sourceVerified === true,
                         );
+                        const saveResult = atSaveResults[itemId];
 
                         return (
                             <div
@@ -2200,6 +2291,40 @@ export default function ProductSourcesPage() {
                                       ? validationIssues.join(' ')
                                       : reason}
                                 </p>
+                                {saveResult && (
+                                  <div className="disclosure-banner" data-candidate-mapping-result style={{ marginTop: 'var(--space-sm)' }}>
+                                    <div>
+                                      <strong>
+                                        {saveResult.existing ? 'Đã ánh xạ tới sản phẩm hiện có' : 'Đã tạo sản phẩm mới'}
+                                        {' · '}ID {saveResult.canonicalIdentifier}
+                                      </strong>
+                                    </div>
+                                    <div style={{ marginTop: 3 }}>
+                                      {saveResult.message}
+                                    </div>
+                                    {saveResult.existing && saveResult.duplicateEvidence.length > 0 && (
+                                      <div style={{ marginTop: 3 }}>
+                                        Bằng chứng trùng:{' '}
+                                        {saveResult.duplicateEvidence.map(evidence => evidence === 'SOURCE_ID_EXACT'
+                                          ? 'source ID trùng chính xác'
+                                          : 'URL sản phẩm gốc trùng chính xác').join(', ')}.
+                                      </div>
+                                    )}
+                                    {saveResult.enrichedFields.length > 0 && (
+                                      <div style={{ marginTop: 3 }}>
+                                        Trường đã bổ sung: {saveResult.enrichedFields.join(', ')}.
+                                      </div>
+                                    )}
+                                    <Link
+                                      className="btn btn-sm btn-secondary"
+                                      data-canonical-product-id={saveResult.productId}
+                                      href={`/dashboard/products/${encodeURIComponent(saveResult.productId)}`}
+                                      style={{ marginTop: 8 }}
+                                    >
+                                      {saveResult.existing ? 'Xem sản phẩm đã có' : 'Xem sản phẩm'}
+                                    </Link>
+                                  </div>
+                                )}
 
                                 <div
                                     className="flex gap-sm"

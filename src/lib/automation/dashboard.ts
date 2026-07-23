@@ -375,6 +375,11 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     circuits: [autopilotCircuit, geminiCircuit],
     control: {
       mode: control.mode, effectiveMode: control.effectiveMode, publishPaused: control.publishPaused,
+      publishPausedByOperator: control.publishPausedByOperator,
+      publishBlockedByRuntime: control.publishBlockedByRuntime,
+      publishBlockedByPolicy: control.publishBlockedByPolicy,
+      publishRuntimeReasons: control.publishRuntimeReasons || [],
+      publishPolicyReasons: control.publishPolicyReasons || [],
       ingestionPaused: control.ingestionPaused, workerPaused: control.workerPaused,
       schedulerPaused: control.schedulerPaused, killSwitch: control.killSwitch,
       launchEnabled: settings.launchEnabled, reason: control.reason || null,

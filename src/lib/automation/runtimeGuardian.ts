@@ -6,14 +6,77 @@ import { DEFAULT_CONTROL, getAllAutomationJobs, getAutomationControl, updateAuto
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases } from './runtimeRoles';
 import { applyAutomationErrorBudget } from './sloErrorBudget';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
+import type { RuntimeRoleLease } from './runtimeRoles';
 
 const HEALTH_COLLECTION = 'runtime-health';
-export const RUNTIME_GUARDIAN_RULE_VERSION = 'runtime-guardian-v1';
+export const RUNTIME_GUARDIAN_RULE_VERSION = 'runtime-guardian-v2';
+
+export interface RuntimeRestartPolicy {
+  detectionWindowMs: number;
+  threshold: number;
+  stabilizationDurationMs: number;
+}
+
+export interface RuntimeRestartRoleState {
+  role: 'WORKER' | 'SCHEDULER';
+  restartsInWindow: number;
+  totalTakeovers: number;
+  lastRestartAt: string | null;
+  active: boolean;
+}
+
+export interface RuntimeRestartState {
+  policy: RuntimeRestartPolicy;
+  active: boolean;
+  roles: RuntimeRestartRoleState[];
+}
+
+function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (!value?.trim()) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? Math.max(minimum, Math.min(maximum, parsed)) : fallback;
+}
+
+export function getRuntimeRestartPolicy(): RuntimeRestartPolicy {
+  return {
+    detectionWindowMs: boundedInteger(process.env.RUNTIME_RESTART_DETECTION_WINDOW_MS, 15 * 60_000, 60_000, 24 * 60 * 60_000),
+    threshold: boundedInteger(process.env.RUNTIME_RESTART_THRESHOLD, 3, 2, 20),
+    stabilizationDurationMs: boundedInteger(process.env.RUNTIME_STABILIZATION_DURATION_MS, 15 * 60_000, 60_000, 24 * 60 * 60_000),
+  };
+}
+
+export function deriveRestartDegradation(
+  leases: RuntimeRoleLease[],
+  now: number,
+  policy = getRuntimeRestartPolicy(),
+): RuntimeRestartState {
+  const roles = (['WORKER', 'SCHEDULER'] as const).map((role): RuntimeRestartRoleState => {
+    const lease = leases.find(item => item.role === role);
+    const history = Array.isArray(lease?.takeoverHistory)
+      ? lease.takeoverHistory.filter(value => {
+        const observedAt = Date.parse(value);
+        return Number.isFinite(observedAt) && observedAt <= now && observedAt >= now - policy.detectionWindowMs;
+      })
+      : [];
+    const lastRestartAt = [...(lease?.takeoverHistory || []), lease?.lastTakeoverAt]
+      .filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now)
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null;
+    const stableLongEnough = !lastRestartAt || now - Date.parse(lastRestartAt) >= policy.stabilizationDurationMs;
+    return {
+      role,
+      restartsInWindow: history.length,
+      totalTakeovers: Math.max(0, Number(lease?.takeoverCount || 0)),
+      lastRestartAt,
+      active: history.length >= policy.threshold && !stableLongEnough,
+    };
+  });
+  return { policy, active: roles.some(role => role.active), roles };
+}
 
 export type WebHealthStatus = 'alive' | 'ready' | 'unhealthy' | 'build_missing' | 'build_mismatch';
 export type WorkerHealthStatus = 'active' | 'paused' | 'stale' | 'missing' | 'crashed' | 'unverified';
 export type SchedulerHealthStatus = 'active' | 'paused' | 'disabled' | 'stale' | 'missing' | 'crashed' | 'unverified';
-export type ProviderHealthStatus = 'not_configured' | 'configured' | 'adapter_unavailable' | 'ready' | 'degraded' | 'circuit_open' | 'rate_limited' | 'invalid_credential' | 'quota_exhausted' | 'last_check_failed';
+export type ProviderHealthStatus = 'not_configured' | 'configured' | 'configured_not_ready' | 'adapter_unavailable' | 'unavailable' | 'ready' | 'degraded' | 'blocked_by_policy' | 'circuit_open' | 'rate_limited' | 'invalid_credential' | 'quota_exhausted' | 'last_check_failed';
 
 export interface RuntimeHealthSnapshot {
   schemaVersion: number;
@@ -28,6 +91,9 @@ export interface RuntimeHealthSnapshot {
   duplicateRoles: string[];
   publishSafe: boolean;
   reasons: string[];
+  /** Audit history only. It must never participate in publishSafe. */
+  historicalReasons?: string[];
+  restart?: RuntimeRestartState;
   recommendation: { pausePublish: boolean; pauseIngestion: false; effectiveMode?: 'SHADOW' | 'CANARY' };
   checkedAt: string;
 }
@@ -89,11 +155,12 @@ export async function runRuntimeGuardian(options: {
   const now = options.now ?? Date.now();
   const checkedAt = new Date(now).toISOString();
   const storage = await inspectStorage(now);
-  const [control, jobs, roles, conflicts] = await Promise.all([
+  const [control, jobs, roles, conflicts, previousSnapshots] = await Promise.all([
     getAutomationControl().catch(() => ({ ...DEFAULT_CONTROL })),
     getAllAutomationJobs().catch(() => []),
     listRuntimeRoleLeases().catch(() => []),
     listRecentRuntimeRoleConflicts(now - 2 * 60_000).catch(() => []),
+    readCollection<RuntimeHealthSnapshot>(HEALTH_COLLECTION).catch(() => []),
   ]);
   const release = getReleaseIdentity();
   let buildAvailable = false;
@@ -124,6 +191,7 @@ export async function runRuntimeGuardian(options: {
       && (!lease?.instanceId || conflict.activeInstanceId === lease.instanceId);
   });
   const duplicateRoles = [...new Set(currentConflicts.map(item => item.role))];
+  const restart = deriveRestartDegradation(roles, now);
   const reasons: string[] = [];
   if (!['active', 'paused'].includes(workerStatus)) reasons.push(`WORKER_${workerStatus.toUpperCase()}`);
   if (!['active', 'paused', 'disabled'].includes(schedulerStatus)) reasons.push(`SCHEDULER_${schedulerStatus.toUpperCase()}`);
@@ -132,17 +200,25 @@ export async function runRuntimeGuardian(options: {
   if (staleJobs) reasons.push('STALE_JOB');
   if (stuck) reasons.push('QUEUE_STUCK');
   if (duplicateRoles.length) reasons.push('DUPLICATE_PROCESS_ROLE');
-  if ((workerLease?.takeoverCount || 0) >= 3 || (schedulerLease?.takeoverCount || 0) >= 3) reasons.push('REPEATED_PROCESS_RESTART');
-  if (Object.values(options.providers || {}).some(status => ['degraded', 'circuit_open', 'rate_limited', 'invalid_credential', 'quota_exhausted', 'last_check_failed'].includes(status))) reasons.push('PROVIDER_DEGRADED');
+  if (restart.active) reasons.push('REPEATED_PROCESS_RESTART');
+  if (Object.values(options.providers || {}).some(status => ['degraded', 'unavailable', 'circuit_open', 'rate_limited', 'invalid_credential', 'quota_exhausted', 'last_check_failed'].includes(status))) reasons.push('PROVIDER_DEGRADED');
   const publishSafe = reasons.length === 0;
+  const previous = [...previousSnapshots].sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt))[0];
+  const legacyRestartIncident = restart.roles.some(role => role.totalTakeovers >= restart.policy.threshold);
+  const historicalReasons = [...new Set([
+    ...(previous?.historicalReasons || []),
+    ...(previous?.reasons || []),
+    ...reasons,
+    ...(legacyRestartIncident ? ['REPEATED_PROCESS_RESTART'] : []),
+  ])];
   const snapshot: RuntimeHealthSnapshot = {
-    schemaVersion: 1, id: `runtime-health:${Math.floor(now / 30_000)}`, ruleVersion: RUNTIME_GUARDIAN_RULE_VERSION,
+    schemaVersion: 2, id: `runtime-health:${Math.floor(now / 30_000)}`, ruleVersion: RUNTIME_GUARDIAN_RULE_VERSION,
     web: { status: webStatus, buildAvailable, publicRouteHealthy: options.publicRouteHealthy ?? null, buildId: artifactBuildId, releaseId: release.releaseId, releaseMatchesBuild },
     worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt, releaseId: workerLease?.releaseId },
     scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt, releaseId: schedulerLease?.releaseId },
     providers: options.providers || {},
     queue: { pending: jobs.filter(job => job.status === 'PENDING').length, running: jobs.filter(job => job.status === 'RUNNING').length, stuck, staleJobs },
-    storage, duplicateRoles, publishSafe, reasons,
+    storage, duplicateRoles, publishSafe, reasons, historicalReasons, restart,
     recommendation: { pausePublish: !publishSafe, pauseIngestion: false, effectiveMode: !publishSafe ? 'SHADOW' : undefined },
     checkedAt,
   };

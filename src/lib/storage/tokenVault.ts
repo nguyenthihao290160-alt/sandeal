@@ -25,6 +25,7 @@ import {
   generateId,
 } from './adapter';
 import { encryptSecret, decryptSecret, maskSecret, toSafeCredential, toSafeCredentials } from '../security/secrets';
+import { getCredentialTruth } from '../ai/credentialTruth';
 
 const COLLECTION = 'token-vault';
 
@@ -42,6 +43,9 @@ function initialMetadata(input: CreateCredentialInput): Record<string, unknown> 
     provider: 'gemini', billingMode: 'unknown', keyType: 'unknown', supportedModels: [], lightTestStatus: 'unchecked',
     generationStatus: 'unchecked', failureStreak: 0, requestsTodayEstimated: 0,
     inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore: 50,
+    generationReady: false, generationReadinessReason: 'GENERATION_NOT_VERIFIED',
+    freePolicyEligible: false, adapterReady: false, runtimeRouteReady: false,
+    diagnosticCategory: 'FREE_POLICY_UNVERIFIED', retryable: false,
   };
 }
 
@@ -146,7 +150,9 @@ export async function createCredential(input: CreateCredentialInput): Promise<Sa
   const hasPrimary = existing.some(
     c => c.platform === input.platform && c.role === 'primary'
   );
-  if (!hasPrimary && role !== 'disabled') {
+  if (input.platform === 'gemini' && role === 'primary') {
+    role = 'backup';
+  } else if (!hasPrimary && role !== 'disabled' && input.platform !== 'gemini') {
     role = 'primary';
   }
 
@@ -226,12 +232,23 @@ export async function replaceCredentialValue(id: string, newValue: string): Prom
       provider: 'gemini',
       lightTestStatus: 'unchecked',
       generationStatus: 'unchecked',
-      generationVerifiedAt: undefined,
-      lastSuccessfulRequestAt: undefined,
+      generationReady: false,
+      generationReadinessReason: 'GENERATION_NOT_VERIFIED',
+      freePolicyEligible: false,
+      adapterReady: false,
+      runtimeRouteReady: false,
+      diagnosticCategory: 'FREE_POLICY_UNVERIFIED',
+      retryable: false,
+      supportedModels: [],
+      supportedGenerateContentModels: [],
+      preferredModel: undefined,
       testedModel: undefined,
+      generationVerifiedAt: undefined,
+      lastGenerationSucceededAt: undefined,
+      lastSuccessfulRequestAt: undefined,
+      lastGenerationTestAt: undefined,
       providerHttpStatus: undefined,
       errorCategory: undefined,
-      retryable: false,
       cooldownUntil: undefined,
       nextProbeAt: undefined,
       quotaExhaustedUntil: undefined,
@@ -271,6 +288,7 @@ export async function disableCredential(id: string): Promise<SafeCredential | nu
 export async function setPrimaryCredential(id: string): Promise<SafeCredential | null> {
   const cred = await getCredentialById(id);
   if (!cred) return null;
+  if (cred.platform === 'gemini' && !getCredentialTruth(cred).generationReady) return null;
 
   // Demote existing primary
   await demotePrimaryForPlatform(cred.platform, id);

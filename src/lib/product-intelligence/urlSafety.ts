@@ -26,6 +26,12 @@ export function isPrivateNetworkAddress(address: string): boolean {
   const lower = address.toLowerCase().split('%')[0];
   const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
   if (mapped) return isPrivateNetworkAddress(mapped);
+  const mappedHex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const high = Number.parseInt(mappedHex[1], 16);
+    const low = Number.parseInt(mappedHex[2], 16);
+    return isPrivateNetworkAddress(`${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`);
+  }
   const ipv4 = ipv4Parts(lower);
   if (ipv4) {
     const [a, b] = ipv4;

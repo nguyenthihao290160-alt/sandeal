@@ -125,13 +125,28 @@ export async function PATCH(request: NextRequest) {
   const updates = action === 'pause_worker' ? { workerPaused: true } : action === 'resume_worker' ? { workerPaused: false }
     : action === 'pause_scheduler' ? { schedulerPaused: true, pausedAt: changedAt.toISOString(), pauseReason, schedulerNextRunAt: undefined }
       : action === 'resume_scheduler' ? { schedulerPaused: false, pausedAt: undefined, pauseReason: undefined, schedulerNextRunAt: resumedNextRunAt }
-      : action === 'pause_autopilot' ? { schedulerPaused: true, publishPaused: true, pausedAt: changedAt.toISOString(), pauseReason, schedulerNextRunAt: undefined }
-        : action === 'resume_autopilot' ? { schedulerPaused: false, publishPaused: false, pausedAt: undefined, pauseReason: undefined, schedulerNextRunAt: resumedNextRunAt }
-          : action === 'set_mode' && requestedMode === 'EMERGENCY_STOP' ? { mode: requestedMode, killSwitch: true, publishPaused: true, ingestionPaused: true }
-            : action === 'set_mode' && (requestedMode === 'CANARY' || requestedMode === 'AUTONOMOUS') ? { mode: requestedMode, effectiveMode: requestedMode }
-              : action === 'set_mode' && (requestedMode === 'OBSERVE' || requestedMode === 'SHADOW') ? { mode: requestedMode, effectiveMode: requestedMode, killSwitch: false, publishPaused: true, ingestionPaused: requestedMode === 'OBSERVE' }
-              : action === 'enable_kill_switch' ? { mode: 'EMERGENCY_STOP' as const, killSwitch: true, publishPaused: true, ingestionPaused: true }
-                : action === 'disable_kill_switch' ? { mode: 'OBSERVE' as const, effectiveMode: 'OBSERVE' as const, killSwitch: false, publishPaused: true, ingestionPaused: true } : null;
+      : action === 'pause_autopilot' ? { schedulerPaused: true, publishPausedByOperator: true, pausedAt: changedAt.toISOString(), pauseReason, schedulerNextRunAt: undefined }
+        : action === 'resume_autopilot' ? { schedulerPaused: false, publishPausedByOperator: false, pausedAt: undefined, pauseReason: undefined, schedulerNextRunAt: resumedNextRunAt }
+          : action === 'set_mode' && requestedMode === 'EMERGENCY_STOP' ? {
+            mode: requestedMode, killSwitch: true, publishBlockedByPolicy: true,
+            publishPolicyReasons: ['KILL_SWITCH_ACTIVE'], ingestionPaused: true,
+          }
+            : action === 'set_mode' && (requestedMode === 'CANARY' || requestedMode === 'AUTONOMOUS') ? {
+              mode: requestedMode, effectiveMode: requestedMode, publishBlockedByPolicy: false, publishPolicyReasons: [],
+            }
+              : action === 'set_mode' && (requestedMode === 'OBSERVE' || requestedMode === 'SHADOW') ? {
+                mode: requestedMode, effectiveMode: requestedMode, killSwitch: false,
+                publishBlockedByPolicy: true, publishPolicyReasons: ['EFFECTIVE_MODE_NOT_PUBLISHABLE'],
+                ingestionPaused: requestedMode === 'OBSERVE',
+              }
+              : action === 'enable_kill_switch' ? {
+                mode: 'EMERGENCY_STOP' as const, killSwitch: true, publishBlockedByPolicy: true,
+                publishPolicyReasons: ['KILL_SWITCH_ACTIVE'], ingestionPaused: true,
+              }
+                : action === 'disable_kill_switch' ? {
+                  mode: 'OBSERVE' as const, effectiveMode: 'OBSERVE' as const, killSwitch: false,
+                  publishBlockedByPolicy: true, publishPolicyReasons: ['EFFECTIVE_MODE_NOT_PUBLISHABLE'], ingestionPaused: true,
+                } : null;
   if (!updates) return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Thao tác điều khiển không hợp lệ.' }, { status: 400 });
   const state = await updateAutomationControl({ ...updates, reason: effectiveReason }, 'dashboard-admin');
   return NextResponse.json({ ok: true, code: 'OK', message: 'Đã cập nhật trạng thái vận hành.', data: state });

@@ -144,6 +144,11 @@ export const DEFAULT_CONTROL: AutomationControlState = {
   mode: 'OBSERVE',
   effectiveMode: 'OBSERVE',
   publishPaused: false,
+  publishPausedByOperator: false,
+  publishBlockedByRuntime: false,
+  publishBlockedByPolicy: false,
+  publishRuntimeReasons: [],
+  publishPolicyReasons: [],
   ingestionPaused: false,
   workerPaused: false,
   schedulerPaused: true,
@@ -180,30 +185,101 @@ export async function appendAutomationAudit(input: Omit<AutomationAuditEvent, 's
 
 export async function getAutomationControl(): Promise<AutomationControlState> {
   const stored = (await readCollection<Partial<AutomationControlState>>(CONTROL))[0];
-  return stored ? { ...DEFAULT_CONTROL, ...stored, schemaVersion: 2, id: 'automation-control' } : { ...DEFAULT_CONTROL };
+  if (!stored) return { ...DEFAULT_CONTROL };
+  const hasProvenance = typeof stored.publishPausedByOperator === 'boolean'
+    || typeof stored.publishBlockedByRuntime === 'boolean'
+    || typeof stored.publishBlockedByPolicy === 'boolean';
+  const systemPause = ['runtime-guardian', 'error-budget-controller'].includes(String(stored.changedBy || ''));
+  const publishPausedByOperator = stored.publishPausedByOperator
+    ?? (hasProvenance ? false : Boolean(stored.publishPaused) && !systemPause);
+  const publishBlockedByRuntime = stored.publishBlockedByRuntime
+    ?? (hasProvenance ? false : Boolean(stored.publishPaused) && systemPause);
+  const publishBlockedByPolicy = stored.publishBlockedByPolicy ?? false;
+  return {
+    ...DEFAULT_CONTROL,
+    ...stored,
+    schemaVersion: 2,
+    id: 'automation-control',
+    publishPausedByOperator,
+    publishBlockedByRuntime,
+    publishBlockedByPolicy,
+    publishRuntimeReasons: Array.isArray(stored.publishRuntimeReasons) ? stored.publishRuntimeReasons.map(String).slice(0, 20) : [],
+    publishPolicyReasons: Array.isArray(stored.publishPolicyReasons) ? stored.publishPolicyReasons.map(String).slice(0, 20) : [],
+    publishPaused: publishPausedByOperator || publishBlockedByRuntime || publishBlockedByPolicy,
+  };
 }
 
 export async function updateAutomationControl(
-  updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'pausedAt' | 'pauseReason' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
+  updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'publishPausedByOperator' | 'publishBlockedByRuntime' | 'publishBlockedByPolicy' | 'publishRuntimeReasons' | 'publishPolicyReasons' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'pausedAt' | 'pauseReason' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
   actor = 'system',
 ): Promise<AutomationControlState> {
   let previous = await getAutomationControl();
   let next = previous;
   const now = new Date().toISOString();
+  const changesControlState = 'killSwitch' in updates
+    || 'workerPaused' in updates
+    || 'schedulerPaused' in updates
+    || 'mode' in updates
+    || 'effectiveMode' in updates
+    || 'publishPaused' in updates
+    || 'publishPausedByOperator' in updates
+    || 'publishBlockedByRuntime' in updates
+    || 'publishBlockedByPolicy' in updates
+    || 'ingestionPaused' in updates;
   await runTransaction<AutomationControlState>(CONTROL, items => {
-    previous = items[0] || { ...DEFAULT_CONTROL };
-    next = { ...previous, ...updates, schemaVersion: 2, id: 'automation-control', updatedAt: now };
-    if ('killSwitch' in updates || 'workerPaused' in updates || 'schedulerPaused' in updates || 'mode' in updates || 'effectiveMode' in updates || 'publishPaused' in updates || 'ingestionPaused' in updates) {
+    const rawPrevious = items[0] || { ...DEFAULT_CONTROL };
+    const hasProvenance = typeof rawPrevious.publishPausedByOperator === 'boolean'
+      || typeof rawPrevious.publishBlockedByRuntime === 'boolean'
+      || typeof rawPrevious.publishBlockedByPolicy === 'boolean';
+    const legacySystemPause = ['runtime-guardian', 'error-budget-controller'].includes(String(rawPrevious.changedBy || ''));
+    previous = {
+      ...DEFAULT_CONTROL,
+      ...rawPrevious,
+      publishPausedByOperator: rawPrevious.publishPausedByOperator
+        ?? (hasProvenance ? false : Boolean(rawPrevious.publishPaused) && !legacySystemPause),
+      publishBlockedByRuntime: rawPrevious.publishBlockedByRuntime
+        ?? (hasProvenance ? false : Boolean(rawPrevious.publishPaused) && legacySystemPause),
+      publishBlockedByPolicy: rawPrevious.publishBlockedByPolicy ?? false,
+    };
+    const normalizedUpdates = { ...updates };
+    if ('publishPaused' in updates
+      && !('publishPausedByOperator' in updates)
+      && !('publishBlockedByRuntime' in updates)
+      && !('publishBlockedByPolicy' in updates)) {
+      if (['runtime-guardian', 'error-budget-controller'].includes(actor)) {
+        normalizedUpdates.publishBlockedByRuntime = Boolean(updates.publishPaused);
+      } else {
+        normalizedUpdates.publishPausedByOperator = Boolean(updates.publishPaused);
+      }
+    }
+    next = { ...previous, ...normalizedUpdates, schemaVersion: 2, id: 'automation-control', updatedAt: now };
+    if ('publishPaused' in updates
+      || 'publishPausedByOperator' in normalizedUpdates
+      || 'publishBlockedByRuntime' in normalizedUpdates
+      || 'publishBlockedByPolicy' in normalizedUpdates) {
+      next.publishPaused = Boolean(next.publishPausedByOperator || next.publishBlockedByRuntime || next.publishBlockedByPolicy);
+    }
+    if (changesControlState) {
       next.changedAt = now;
       next.changedBy = actor;
     }
     return [next];
   });
-  if ('killSwitch' in updates || 'workerPaused' in updates || 'schedulerPaused' in updates || 'mode' in updates || 'effectiveMode' in updates || 'publishPaused' in updates || 'ingestionPaused' in updates) {
+  if (changesControlState) {
     await appendAutomationAudit({
       correlationId: generateId(), operationId: generateId(), operationType: 'CONTROL_CHANGED', actor,
-      target: 'automation-control', previousState: JSON.stringify({ mode: previous.mode, effectiveMode: previous.effectiveMode, publishPaused: previous.publishPaused, ingestionPaused: previous.ingestionPaused, workerPaused: previous.workerPaused, schedulerPaused: previous.schedulerPaused, killSwitch: previous.killSwitch }),
-      nextState: JSON.stringify({ mode: next.mode, effectiveMode: next.effectiveMode, publishPaused: next.publishPaused, ingestionPaused: next.ingestionPaused, workerPaused: next.workerPaused, schedulerPaused: next.schedulerPaused, killSwitch: next.killSwitch }),
+      target: 'automation-control', previousState: JSON.stringify({
+        mode: previous.mode, effectiveMode: previous.effectiveMode, publishPaused: previous.publishPaused,
+        publishPausedByOperator: previous.publishPausedByOperator, publishBlockedByRuntime: previous.publishBlockedByRuntime,
+        publishBlockedByPolicy: previous.publishBlockedByPolicy, ingestionPaused: previous.ingestionPaused,
+        workerPaused: previous.workerPaused, schedulerPaused: previous.schedulerPaused, killSwitch: previous.killSwitch,
+      }),
+      nextState: JSON.stringify({
+        mode: next.mode, effectiveMode: next.effectiveMode, publishPaused: next.publishPaused,
+        publishPausedByOperator: next.publishPausedByOperator, publishBlockedByRuntime: next.publishBlockedByRuntime,
+        publishBlockedByPolicy: next.publishBlockedByPolicy, ingestionPaused: next.ingestionPaused,
+        workerPaused: next.workerPaused, schedulerPaused: next.schedulerPaused, killSwitch: next.killSwitch,
+      }),
       risk: updates.killSwitch ? 'HIGH' : 'MEDIUM', reasons: updates.reason ? [updates.reason] : [], dryRun: false, attempts: 0,
     });
   }
