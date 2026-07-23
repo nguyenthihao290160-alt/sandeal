@@ -49,6 +49,7 @@ export type GeminiGenerationStatus = 'unchecked' | 'available' | 'rate_limited' 
 export type GeminiLightTestStatus = 'unchecked' | 'available' | 'invalid' | 'missing_permission' | 'transient_error';
 
 export interface GeminiCredentialMetadata {
+  provider?: 'gemini';
   priority?: number;
   projectAlias?: string;
   quotaGroupId?: string;
@@ -60,9 +61,14 @@ export interface GeminiCredentialMetadata {
   generationStatus: GeminiGenerationStatus;
   lastLightTestAt?: string;
   lastGenerationTestAt?: string;
+  generationVerifiedAt?: string;
   lastSuccessfulRequestAt?: string;
   lastFailureAt?: string;
   lastErrorCode?: string;
+  testedModel?: string;
+  providerHttpStatus?: number;
+  errorCategory?: string;
+  retryable?: boolean;
   failureStreak: number;
   cooldownUntil?: string;
   nextProbeAt?: string;
@@ -110,6 +116,9 @@ export type SafeCredential = Omit<StoredCredential, 'encryptedValue'> & {
     cooldownUntil: string | null;
     lastCheckedAt: string | null;
     errorCategory: string | null;
+    testedModel: string | null;
+    httpStatus: number | null;
+    retryable: boolean;
   };
 };
 

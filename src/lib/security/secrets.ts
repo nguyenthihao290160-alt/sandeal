@@ -115,7 +115,16 @@ export function maskSecret(value: string): string {
 export function toSafeCredential(stored: StoredCredential): SafeCredential {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { encryptedValue, lastError, ...safe } = stored;
-  return { ...safe, lastError: lastError ? 'PROVIDER_CHECK_FAILED' : undefined };
+  const safeGeminiCategories = new Set([
+    'INVALID_KEY', 'PERMISSION_DENIED', 'QUOTA_EXCEEDED', 'RATE_LIMITED',
+    'MODEL_NOT_AVAILABLE', 'REGION_RESTRICTED', 'NETWORK_TIMEOUT',
+    'PROVIDER_UNAVAILABLE', 'TRANSIENT_ERROR', 'UNKNOWN_PROVIDER_ERROR',
+  ]);
+  const category = typeof stored.metadata?.errorCategory === 'string'
+    && safeGeminiCategories.has(stored.metadata.errorCategory)
+    ? stored.metadata.errorCategory
+    : undefined;
+  return { ...safe, lastError: category || (lastError ? 'PROVIDER_CHECK_FAILED' : undefined) };
 }
 
 /**

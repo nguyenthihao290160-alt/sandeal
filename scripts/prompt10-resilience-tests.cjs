@@ -45,6 +45,7 @@ function geminiCredential(id, group, healthScore = 100) {
     metadata: {
       billingMode: 'free_confirmed', keyType: 'auth', quotaGroupId: group,
       supportedModels: ['gemini-3.1-flash-lite', 'gemini-3.5-flash'], lightTestStatus: 'available', generationStatus: 'available',
+      generationVerifiedAt: new Date().toISOString(), lastSuccessfulRequestAt: new Date().toISOString(),
       failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore,
     },
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),

@@ -130,6 +130,7 @@ function emptyAccessTradeResult(message: string) {
       classifiedCampaignCount: 0,
       classifiedStoreOfferCount: 0,
       classifiedUnknownCount: 0,
+      acceptedCount: 0,
       returnedCount: 0,
       rejectedCount: 0,
       duplicateCount: 0,

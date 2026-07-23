@@ -18,6 +18,7 @@ Module._resolveFilename = function resolve(request, parent, isMain, options) {
 const tempDir = path.join(process.cwd(), '.test-tmp', `accesstrade-link-safety-${process.pid}-${Date.now()}`);
 fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
+process.env.ACCESS_TRADE_API_KEY = 'isolated-access-trade-test-key';
 
 let passed = 0;
 let failed = 0;
@@ -88,6 +89,66 @@ function product(overrides = {}) {
     equal(result.diagnostics.state, 'RESULTS_RETURNED');
   });
 
+  await test('keyword tiếng Việt khớp có dấu, không dấu và qua alias title/name/product_name', () => {
+    const aliases = [
+      datafeedRecord(201, { name: undefined, title: 'Điện thoại chống nước Model A' }),
+      datafeedRecord(202, { name: 'Điện thoại pin bền Model B' }),
+      datafeedRecord(203, { name: undefined, product_name: 'Điện thoại màn hình lớn Model C' }),
+    ];
+    const accented = accessTrade.processAccessTradePayload({ data: aliases, total: 3 }, { keyword: 'điện thoại', kind: 'product' });
+    const plain = accessTrade.processAccessTradePayload({ data: aliases, total: 3 }, { keyword: 'dien thoai', kind: 'product' });
+    equal(accented.items.length, 3);
+    equal(plain.items.length, 3);
+    equal(plain.diagnostics.rejectedByReason.KEYWORD_MISMATCH, undefined);
+  });
+
+  await test('structured rejection counters có lý do riêng và optional chỉ bắt buộc khi bật filter', () => {
+    const missingTitle = datafeedRecord(210, { name: undefined });
+    const wrongKeyword = datafeedRecord(211, { name: 'Bàn phím cơ Model K11' });
+    const malformed = datafeedRecord(212, { url: 'javascript:alert(1)' });
+    const unsafe = datafeedRecord(213, { url: 'http://127.0.0.1/private' });
+    const voucher = datafeedRecord(214, { type: 'voucher', name: 'Voucher tai nghe giảm 20%', voucher_code: 'SAFE20' });
+    const missingImage = datafeedRecord(215); delete missingImage.image;
+    const missingAffiliate = datafeedRecord(216); delete missingAffiliate.aff_link;
+    const result = accessTrade.processAccessTradePayload(
+      { data: [missingTitle, wrongKeyword, malformed, unsafe, voucher, missingImage, missingAffiliate], total: 7 },
+      { keyword: 'tai nghe', kind: 'product', imageOnly: true, affiliateLinkOnly: true },
+    );
+    equal(result.items.length, 0);
+    equal(result.diagnostics.rejectedByReason.MISSING_TITLE, 1);
+    equal(result.diagnostics.rejectedByReason.KEYWORD_MISMATCH, 1);
+    equal(result.diagnostics.rejectedByReason.INVALID_URL, 1);
+    equal(result.diagnostics.rejectedByReason.UNSAFE_DESTINATION, 1);
+    equal(result.diagnostics.rejectedByReason.TYPE_MISMATCH, 1);
+    equal(result.diagnostics.rejectedByReason.IMAGE_REQUIRED, 1);
+    equal(result.diagnostics.rejectedByReason.AFFILIATE_LINK_REQUIRED, 1);
+    equal(result.diagnostics.rejectedCount, 7);
+  });
+
+  await test('search thật phân trang cục bộ vì datafeeds không hỗ trợ keyword provider', async () => {
+    const originalFetch = global.fetch;
+    let calls = 0;
+    const requestedUrls = [];
+    global.fetch = async (input) => {
+      calls += 1;
+      const url = new URL(String(input));
+      requestedUrls.push(url);
+      const page = Number(url.searchParams.get('page'));
+      const rows = Array.from({ length: 200 }, (_, index) => datafeedRecord(page * 1000 + index, {
+        name: page === 2 && index < 20 ? `Tai nghe Bluetooth trang 2 Model ${index}` : `Bàn phím trang ${page} Model ${index}`,
+      }));
+      return new Response(JSON.stringify({ data: rows, total: 400 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const result = await accessTrade.searchAccessTrade({ keyword: 'tai nghe', kind: 'product', limit: 20 });
+      equal(calls, 2);
+      assert(requestedUrls.every((url) => !url.searchParams.has('keyword')));
+      equal(result.items.length, 20);
+      equal(result.diagnostics.acceptedCount, 20);
+      equal(result.diagnostics.rejectedByReason.KEYWORD_MISMATCH, 380);
+    } finally { global.fetch = originalFetch; }
+  });
+
   await test('datafeed data.data và root array đều được extract có giới hạn', () => {
     const nested = accessTrade.processAccessTradePayload(
       { data: { data: [datafeedRecord(1), datafeedRecord(2)] }, total: 2 },
@@ -138,18 +199,13 @@ function product(overrides = {}) {
     equal(result.diagnostics.reviewByReason.MISSING_IMAGE, 1);
   });
 
-  await test('canonical URL lỗi vẫn là product reviewable và giữ bằng chứng nguồn', () => {
+  await test('canonical URL lỗi bị loại khỏi search với lý do INVALID_URL', () => {
     const result = accessTrade.processAccessTradePayload(
       { data: [datafeedRecord(8, { url: 'javascript:alert(1)' })], total: 1 },
       { kind: 'product' },
     );
-    equal(result.items.length, 1);
-    equal(result.items[0].kind, 'product');
-    equal(result.items[0].canonicalProductUrl, undefined);
-    assert(result.items[0].normalizationIssues.includes('INVALID_CANONICAL_URL'));
-    equal(result.items[0].fieldProvenance.canonicalProductUrl.verificationStatus, 'INVALID');
-    equal(result.items[0].rawData.url, 'javascript:alert(1)');
-    equal(result.items[0].publicDecision, 'needs_review');
+    equal(result.items.length, 0);
+    equal(result.diagnostics.rejectedByReason.INVALID_URL, 1);
   });
 
   await test('giá nguồn sai định dạng được giữ làm provenance INVALID, không bị gọi là MISSING', () => {
@@ -169,18 +225,17 @@ function product(overrides = {}) {
   });
 
   await test('mapping tự động giữ INVALID khác MISSING cho canonical và affiliate URL', () => {
-    const result = accessTrade.processAccessTradePayload(
-      { data: [datafeedRecord(82, { url: 'javascript:bad', aff_link: 'data:text/plain,bad' })], total: 1 },
-      { kind: 'product' },
-    );
-    equal(result.items.length, 1);
-    const mapped = accessTrade.mapAccessTradeToProduct(result.items[0]);
+    const normalized = accessTrade.normalizeAccessTradeItem(datafeedRecord(82, { url: 'javascript:bad', aff_link: 'data:text/plain,bad' }));
+    const mapped = accessTrade.mapAccessTradeToProduct(normalized);
     equal(mapped.canonicalUrlStatus, 'invalid');
     equal(mapped.affiliateUrlStatus, 'invalid');
     equal(mapped.fieldProvenance.canonicalProductUrl.verificationStatus, 'INVALID');
     equal(mapped.fieldProvenance.affiliateUrl.verificationStatus, 'INVALID');
     equal(mapped.publicHidden, true);
     equal(mapped.publicBlocked, true);
+    const searched = accessTrade.processAccessTradePayload({ data: [datafeedRecord(82, { url: 'javascript:bad', aff_link: 'data:text/plain,bad' })], total: 1 }, { kind: 'product' });
+    equal(searched.items.length, 0);
+    equal(searched.diagnostics.rejectedByReason.INVALID_URL, 1);
   });
 
   await test('provider có dữ liệu nhưng không extract được có state riêng', () => {
@@ -230,6 +285,18 @@ function product(overrides = {}) {
     equal(first.diagnostics.duplicateCount, 1);
     equal(first.diagnostics.rejectedByReason.DUPLICATE, 1);
     equal(first.items[0].id, second.items[0].id);
+  });
+
+  await test('duplicate merge deterministic và bổ sung evidence optional', () => {
+    const withoutImage = datafeedRecord(220, { image: undefined, desc: 'Mô tả chính' });
+    const withImage = datafeedRecord(220, { desc: undefined, image: 'https://images.example/merged.jpg' });
+    const forward = accessTrade.processAccessTradePayload({ data: [withoutImage, withImage], total: 2 }, { kind: 'product' });
+    const reverse = accessTrade.processAccessTradePayload({ data: [withImage, withoutImage], total: 2 }, { kind: 'product' });
+    equal(forward.items.length, 1);
+    equal(reverse.items.length, 1);
+    equal(JSON.stringify(forward.items[0]), JSON.stringify(reverse.items[0]));
+    equal(forward.items[0].imageUrl, 'https://images.example/merged.jpg');
+    equal(forward.items[0].description, 'Mô tả chính');
   });
 
   await test('raw metadata bị chặn secret và giới hạn ở allowlist', () => {

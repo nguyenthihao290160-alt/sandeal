@@ -15,6 +15,7 @@ import { getRawPrimaryCredentialValue } from '../storage/tokenVault';
 import type { Product, ProductKind, ProductPlatform } from '../types';
 import { classifyProductKind, looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import { getDomainCircuitDecision, recordDomainHealth } from '../bots/domainCircuitBreaker';
+import { validateExternalUrl } from '../product-intelligence/urlSafety';
 
 // ---- Types ----
 
@@ -44,16 +45,15 @@ export type AccessTradeRejectionReason =
   | 'EXTRACTION_FAILED'
   | 'NORMALIZATION_FAILED'
   | 'MISSING_IDENTITY'
-  | 'MISSING_NAME'
-  | 'MISSING_CANONICAL_URL'
-  | 'INVALID_CANONICAL_URL'
-  | 'INVALID_AFFILIATE_URL'
+  | 'MISSING_TITLE'
+  | 'INVALID_URL'
+  | 'UNSAFE_DESTINATION'
   | 'IMAGE_REQUIRED'
-  | 'AFFILIATE_REQUIRED'
-  | 'KIND_FILTERED'
-  | 'QUERY_FILTERED'
-  | 'CATEGORY_FILTERED'
-  | 'PLATFORM_FILTERED'
+  | 'AFFILIATE_LINK_REQUIRED'
+  | 'TYPE_MISMATCH'
+  | 'KEYWORD_MISMATCH'
+  | 'CATEGORY_MISMATCH'
+  | 'PLATFORM_MISMATCH'
   | 'DUPLICATE'
   | 'RESULT_LIMIT'
   | 'UNSUPPORTED_CLASSIFICATION'
@@ -83,6 +83,7 @@ export interface AccessTradeSearchDiagnostics {
   classifiedCampaignCount: number;
   classifiedStoreOfferCount: number;
   classifiedUnknownCount: number;
+  acceptedCount: number;
   returnedCount: number;
   rejectedCount: number;
   duplicateCount: number;
@@ -552,6 +553,7 @@ function buildAccessTradeSearchResult(
 
   let items = filterAccessTradeItems(uniqueItems, params, rejectedByReason);
   items = sortAccessTradeItems(items);
+  const acceptedCount = items.length;
   const limitedCount = Math.max(0, items.length - limit);
   if (limitedCount) increment(rejectedByReason, 'RESULT_LIMIT', limitedCount);
   items = items.slice(0, limit);
@@ -599,6 +601,7 @@ function buildAccessTradeSearchResult(
       classifiedCampaignCount,
       classifiedStoreOfferCount,
       classifiedUnknownCount,
+      acceptedCount,
       returnedCount: items.length,
       duplicateCount,
       limitedCount,
@@ -617,6 +620,7 @@ function buildAccessTradeDiagnostics(input: {
   classifiedCampaignCount: number;
   classifiedStoreOfferCount: number;
   classifiedUnknownCount: number;
+  acceptedCount: number;
   returnedCount: number;
   duplicateCount: number;
   limitedCount: number;
@@ -641,12 +645,15 @@ function buildAccessTradeDiagnostics(input: {
       .filter(([reason]) => reason !== 'RESULT_LIMIT')
       .reduce((sum, [, value]) => sum + (value || 0), 0);
   const filteredCount = [
-    'QUERY_FILTERED',
-    'CATEGORY_FILTERED',
-    'PLATFORM_FILTERED',
-    'KIND_FILTERED',
+    'KEYWORD_MISMATCH',
+    'CATEGORY_MISMATCH',
+    'PLATFORM_MISMATCH',
+    'TYPE_MISMATCH',
+    'MISSING_TITLE',
+    'INVALID_URL',
+    'UNSAFE_DESTINATION',
     'IMAGE_REQUIRED',
-    'AFFILIATE_REQUIRED',
+    'AFFILIATE_LINK_REQUIRED',
   ].reduce((sum, reason) => sum + (input.rejectedByReason[reason as AccessTradeRejectionReason] || 0), 0);
   const providerRequest = input.requests.find((request) => request.statusCode && request.statusCode >= 200 && request.statusCode < 300)
     || input.requests[0];
@@ -669,6 +676,7 @@ function buildAccessTradeDiagnostics(input: {
     classifiedCampaignCount: input.classifiedCampaignCount,
     classifiedStoreOfferCount: input.classifiedStoreOfferCount,
     classifiedUnknownCount: input.classifiedUnknownCount,
+    acceptedCount: input.acceptedCount,
     returnedCount: input.returnedCount,
     rejectedCount,
     duplicateCount: input.duplicateCount,
@@ -796,7 +804,7 @@ export function normalizeAccessTradeItem(
   ] as const;
   const salePriceFields = [
     'salePrice', 'sale_price', 'discountedPrice', 'discounted_price',
-    'discount_price', 'discountPrice', 'currentPrice', 'current_price',
+    'discount_price', 'discountPrice', 'discount', 'currentPrice', 'current_price',
   ] as const;
   const rawPriceValue = getFirstText(item, priceFields);
   const rawSalePriceValue = getFirstText(item, salePriceFields);
@@ -822,6 +830,7 @@ export function normalizeAccessTradeItem(
       parsePriceNumber(item.discounted_price) ||
       parsePriceNumber(item.discount_price) ||
       parsePriceNumber(item.discountPrice) ||
+      parsePriceNumber(item.discount) ||
       parsePriceNumber(item.currentPrice) ||
       parsePriceNumber(item.current_price) ||
       0;
@@ -1034,10 +1043,30 @@ export function normalizeAccessTradeItem(
  */
 export const ACCESS_TRADE_AFFILIATE_URL_FIELDS = [
   'aff_link',
+  'affiliate_url',
+  'affiliateUrl',
+  'affiliate_link',
+  'affiliateLink',
+  'tracking_link',
+  'trackingLink',
+  'deep_link',
+  'deepLink',
+  'deeplink',
 ] as const;
 
 export const ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS = [
-  'url', 'link',
+  'url',
+  'link',
+  'product_url',
+  'productUrl',
+  'final_url',
+  'finalUrl',
+  'original_url',
+  'originalUrl',
+  'landing_page',
+  'landingPage',
+  'merchant_url',
+  'merchantUrl',
 ] as const;
 
 const ACCESS_TRADE_TRACKING_HOSTS = new Set([
@@ -1411,26 +1440,94 @@ async function fetchAccessTradeDatafeeds(
     params: AccessTradeSearchParams,
     limit: number,
 ): Promise<AccessTradeFetchResult> {
-  const url = new URL('https://api.accesstrade.vn/v1/datafeeds');
-
-  url.searchParams.set('limit', String(limit));
-  url.searchParams.set('page', '1');
+  const pageSize = params.keyword ? 200 : limit;
+  const targetMatches = Math.min(Math.max(params.limit || 20, 1), 50);
+  const maxPages = params.keyword ? 5 : 1;
+  const combined: AccessTradeFetchResult[] = [];
 
   const domain = resolveAccessTradeDomain(params.platform);
   const campaign = resolveAccessTradeCampaign(params.platform);
+  let matchingRecordCount = 0;
 
-  if (domain) {
-    url.searchParams.set('domain', domain);
-  } else if (campaign) {
-    url.searchParams.set('campaign', campaign);
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = new URL('https://api.accesstrade.vn/v1/datafeeds');
+    url.searchParams.set('limit', String(pageSize));
+    url.searchParams.set('page', String(page));
+    if (domain) url.searchParams.set('domain', domain);
+    else if (campaign) url.searchParams.set('campaign', campaign);
+    if (params.category) url.searchParams.set('cate', toAsciiSlug(params.category));
+
+    // The official datafeeds contract has no keyword query parameter. Search
+    // is performed locally over bounded pages so an ignored provider parameter
+    // cannot silently turn the first page into a false empty result.
+    const result = await fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed');
+    combined.push(result);
+    if (!result.ok) break;
+
+    matchingRecordCount += result.items.filter((item) => rawAccessTradeRecordMatchesKeyword(item, params.keyword)).length;
+    const pageItemCount = result.rawItemCount ?? result.items.length;
+    const reportedTotal = result.providerReportedItemCount ?? pageItemCount;
+    if (!params.keyword || matchingRecordCount >= targetMatches || pageItemCount < pageSize || page * pageSize >= reportedTotal) break;
   }
 
-  if (params.category) {
-    url.searchParams.set('cate', toAsciiSlug(params.category));
-  }
-  if (params.keyword) url.searchParams.set('keyword', params.keyword);
+  const successful = combined.filter((result) => result.ok);
+  if (!successful.length) return combined[0];
 
-  return fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed');
+  const items = successful.flatMap((result) => result.items);
+  const observedEnvelopeFields = mergeObservedFields(successful, 'observedEnvelopeFields');
+  const observedItemFields = mergeObservedFields(successful, 'observedItemFields');
+  const observedCanonicalUrlFields = mergeObservedFields(successful, 'observedCanonicalUrlFields');
+  const observedAffiliateUrlFields = mergeObservedFields(successful, 'observedAffiliateUrlFields');
+  const durationMs = successful.reduce((sum, result) => sum + (result.request?.durationMs || 0), 0);
+  const status = successful.at(-1)?.status;
+  const rawItemCount = successful.reduce((sum, result) => sum + (result.rawItemCount ?? result.items.length), 0);
+  const extractedItemCount = successful.reduce((sum, result) => sum + (result.extractedItemCount ?? result.items.length), 0);
+  const providerReportedItemCount = Math.max(...successful.map((result) => result.providerReportedItemCount ?? 0), rawItemCount);
+  const extractionRejectedByReason: Partial<Record<AccessTradeRejectionReason, number>> = {};
+  for (const result of successful) {
+    for (const [reason, count] of Object.entries(result.extractionRejectedByReason || {})) {
+      extractionRejectedByReason[reason as AccessTradeRejectionReason] =
+        (extractionRejectedByReason[reason as AccessTradeRejectionReason] || 0) + (count || 0);
+    }
+  }
+  const request: AccessTradeRequestLog = {
+    endpoint: 'datafeed',
+    durationMs,
+    statusCode: status,
+    resultType: items.length ? 'success_with_results' : 'success_empty',
+    itemCount: extractedItemCount,
+    attempts: successful.reduce((sum, result) => sum + (result.attempts || result.request?.attempts || 1), 0),
+    observedEnvelopeFields,
+    observedItemFields,
+    observedCanonicalUrlFields,
+    observedAffiliateUrlFields,
+  };
+  return {
+    endpoint: 'datafeed', ok: true, items, status, request,
+    attempts: request.attempts, rawItemCount, extractedItemCount,
+    providerReportedItemCount, extractionRejectedByReason,
+    payloadObservation: { observedEnvelopeFields, observedItemFields, observedCanonicalUrlFields, observedAffiliateUrlFields },
+  };
+}
+
+function mergeObservedFields(
+    results: AccessTradeFetchResult[],
+    key: 'observedEnvelopeFields' | 'observedItemFields' | 'observedCanonicalUrlFields' | 'observedAffiliateUrlFields',
+): string[] {
+  return [...new Set(results.flatMap((result) => result.payloadObservation?.[key] || result.request?.[key] || []))]
+    .sort()
+    .slice(0, key === 'observedItemFields' ? 120 : 80);
+}
+
+function rawAccessTradeRecordMatchesKeyword(item: AccessTradeRawItem, keyword?: string): boolean {
+  if (!normalizeText(keyword)) return true;
+  const searchableFields = [
+    'title', 'name', 'product_name', 'productName',
+    'description', 'desc', 'short_description', 'shortDescription',
+    'category', 'cate', 'category_name', 'categoryName', 'cat_name',
+    'merchant', 'merchant_name', 'merchantName', 'shop', 'shop_name', 'shopName', 'domain',
+  ];
+  return matchesSearchQuery(searchableFields.map((field) => getFirstText(item, [field])).join(' '), keyword || '');
 }
 
 async function fetchAccessTradeOffers(
@@ -1609,87 +1706,102 @@ function filterAccessTradeItems(
     params: AccessTradeSearchParams,
     rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>,
 ): NormalizedAccessTradeItem[] {
-  let filtered = items;
-  const applyFilter = (
-      reason: AccessTradeRejectionReason,
-      predicate: (item: NormalizedAccessTradeItem) => boolean,
-  ) => {
-    const before = filtered.length;
-    filtered = filtered.filter(predicate);
-    const removed = before - filtered.length;
-    if (removed) rejectedByReason[reason] = (rejectedByReason[reason] || 0) + removed;
-  };
-
   const keyword = normalizeText(params.keyword);
-  if (keyword) {
-    applyFilter('QUERY_FILTERED', (item) => {
-      const haystack = normalizeText(
-          [
-            item.name,
-            item.description,
-            item.category,
-            item.campaignName,
-            item.rawSourceKind,
-            getRawValueText(item.rawData, 'domain'),
-            getRawValueText(item.rawData, 'merchant'),
-            getRawValueText(item.rawData, 'merchantName'),
-            getRawValueText(item.rawData, 'campaign'),
-            getRawValueText(item.rawData, 'campaign_name'),
-            getRawValueText(item.rawData, 'shop'),
-            getRawValueText(item.rawData, 'shopName'),
-          ].join(' '),
-      );
-
-      return matchesSearchQuery(haystack, keyword);
-    });
-  }
-
   const category = normalizeText(params.category);
-  if (category) {
-    applyFilter('CATEGORY_FILTERED', (item) => {
-      const haystack = normalizeText([item.category, item.name, item.description].join(' '));
-      return matchesSearchQuery(haystack, category);
-    });
+  const platform = normalizeText(params.platform);
+  const accepted: NormalizedAccessTradeItem[] = [];
+
+  for (const item of items) {
+    const reason = getAccessTradeFilterRejection(item, { ...params, keyword, category, platform });
+    if (!reason) {
+      accepted.push(item);
+      continue;
+    }
+    rejectedByReason[reason] = (rejectedByReason[reason] || 0) + 1;
   }
 
-  const platform = normalizeText(params.platform);
-  if (platform && platform !== 'all' && platform !== 'accesstrade') {
-    applyFilter('PLATFORM_FILTERED', (item) => {
-      const haystack = normalizeText(
-          [
-            item.platform,
-            item.campaignName,
-            item.originalUrl,
-            item.affiliateUrl,
-            getRawValueText(item.rawData, 'domain'),
-            getRawValueText(item.rawData, 'merchant'),
-            getRawValueText(item.rawData, 'merchantName'),
-            getRawValueText(item.rawData, 'campaign'),
-            getRawValueText(item.rawData, 'campaign_name'),
-            getRawValueText(item.rawData, 'shop'),
-            getRawValueText(item.rawData, 'shopName'),
-          ].join(' '),
-      );
+  return accepted;
+}
 
-      return haystack.includes(platform) || haystack.includes(platform.replace(/\s+/g, ''));
-    });
+function getAccessTradeFilterRejection(
+    item: NormalizedAccessTradeItem,
+    params: AccessTradeSearchParams & { keyword: string; category: string; platform: string },
+): AccessTradeRejectionReason | null {
+  if (!item.name.trim()) return 'MISSING_TITLE';
+
+  const rawUrls = [
+    ...ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
+    ...ACCESS_TRADE_AFFILIATE_URL_FIELDS,
+    'image', 'image_url', 'imageUrl', 'productImage', 'product_image',
+    'thumbnail', 'thumbnail_url', 'thumbnailUrl',
+  ].map((field) => getRawValueText(item.rawData, field)).filter(Boolean);
+  for (const value of rawUrls) {
+    const safety = validateExternalUrl(value);
+    if (safety.safe) continue;
+    if (safety.code === 'PRIVATE_NETWORK' || safety.code === 'CREDENTIALS_NOT_ALLOWED' || safety.code === 'UNSAFE_PORT') {
+      return 'UNSAFE_DESTINATION';
+    }
+    return 'INVALID_URL';
   }
 
   if (params.kind && params.kind !== 'all') {
-    applyFilter('KIND_FILTERED', params.kind === 'product'
-      ? (item) => item.kind === 'product' || item.kind === 'deal'
-      : (item) => item.kind === params.kind);
+    const matchesKind = params.kind === 'product'
+      ? item.kind === 'product' || item.kind === 'deal'
+      : item.kind === params.kind;
+    if (!matchesKind) return 'TYPE_MISMATCH';
   }
 
-  if (params.imageOnly) {
-    applyFilter('IMAGE_REQUIRED', (item) => Boolean(item.imageUrl));
+  if (params.keyword) {
+    const haystack = [
+      item.name,
+      item.description,
+      item.category,
+      item.merchant,
+      item.shopName,
+      item.merchantDomain,
+      item.campaignName,
+      getRawValueText(item.rawData, 'title'),
+      getRawValueText(item.rawData, 'name'),
+      getRawValueText(item.rawData, 'product_name'),
+      getRawValueText(item.rawData, 'productName'),
+      getRawValueText(item.rawData, 'description'),
+      getRawValueText(item.rawData, 'desc'),
+      getRawValueText(item.rawData, 'category'),
+      getRawValueText(item.rawData, 'cate'),
+      getRawValueText(item.rawData, 'category_name'),
+      getRawValueText(item.rawData, 'merchant'),
+      getRawValueText(item.rawData, 'merchant_name'),
+      getRawValueText(item.rawData, 'shop'),
+      getRawValueText(item.rawData, 'shop_name'),
+      getRawValueText(item.rawData, 'domain'),
+    ].join(' ');
+    if (!matchesSearchQuery(haystack, params.keyword)) return 'KEYWORD_MISMATCH';
   }
 
-  if (params.affiliateLinkOnly) {
-    applyFilter('AFFILIATE_REQUIRED', (item) => Boolean(item.affiliateUrl));
+  if (params.category) {
+    const haystack = [item.category, item.name, item.description].join(' ');
+    if (!matchesSearchQuery(haystack, params.category)) return 'CATEGORY_MISMATCH';
   }
 
-  return filtered;
+  if (params.platform && params.platform !== 'all' && params.platform !== 'accesstrade') {
+    const haystack = normalizeText([
+      item.platform,
+      item.campaignName,
+      item.merchant,
+      item.shopName,
+      item.merchantDomain,
+      item.originalUrl,
+      item.affiliateUrl,
+    ].join(' '));
+    if (!haystack.includes(params.platform) && !haystack.includes(params.platform.replace(/\s+/g, ''))) {
+      return 'PLATFORM_MISMATCH';
+    }
+  }
+
+  if (params.imageOnly && !item.imageUrl) return 'IMAGE_REQUIRED';
+  if (params.affiliateLinkOnly && !item.affiliateUrl) return 'AFFILIATE_LINK_REQUIRED';
+
+  return null;
 }
 
 function sortAccessTradeItems(items: NormalizedAccessTradeItem[]): NormalizedAccessTradeItem[] {
@@ -2330,25 +2442,104 @@ function dedupeNormalizedItems(items: NormalizedAccessTradeItem[]): {
   items: NormalizedAccessTradeItem[];
   duplicateCount: number;
 } {
-  const seen = new Set<string>();
-  const unique: NormalizedAccessTradeItem[] = [];
-  let duplicateCount = 0;
+  const grouped = new Map<string, NormalizedAccessTradeItem[]>();
   for (const item of items) {
-    // AccessTrade product_id/sku is the provider identity. A merchant label is
-    // metadata and must not make the same provider item appear unique twice.
-    const key = normalizeText([
-      'accesstrade',
-      item.sourceEndpoint || 'unknown',
-      item.sourceItemId || item.id,
-    ].join('|'));
-    if (seen.has(key)) {
-      duplicateCount += 1;
-      continue;
-    }
-    seen.add(key);
-    unique.push(item);
+    const key = getNormalizedAccessTradeIdentity(item);
+    grouped.set(key, [...(grouped.get(key) || []), item]);
   }
-  return { items: unique, duplicateCount };
+  const unique = [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, candidates]) => mergeNormalizedAccessTradeCandidates(candidates));
+  return { items: unique, duplicateCount: items.length - unique.length };
+}
+
+function getNormalizedAccessTradeIdentity(item: NormalizedAccessTradeItem): string {
+  const kindGroup = item.kind === 'product' || item.kind === 'deal' ? 'product' : item.kind;
+  const providerIdentity = normalizeText(item.sourceItemId || item.id);
+  if (providerIdentity) return `accesstrade|${kindGroup}|id|${providerIdentity}`;
+  const canonical = item.canonicalProductUrl || item.affiliateDestinationUrl || item.affiliateUrl;
+  if (canonical) return `accesstrade|${kindGroup}|url|${normalizeText(canonical)}`;
+  return `accesstrade|${kindGroup}|fallback|${normalizeText([item.name, item.merchant, item.shopId, item.price, item.salePrice].join('|'))}`;
+}
+
+function mergeNormalizedAccessTradeCandidates(candidates: NormalizedAccessTradeItem[]): NormalizedAccessTradeItem {
+  const sorted = [...candidates].sort((left, right) => {
+    const scoreDifference = normalizedCandidateEvidenceScore(right) - normalizedCandidateEvidenceScore(left);
+    if (scoreDifference) return scoreDifference;
+    return normalizedCandidateSignature(left).localeCompare(normalizedCandidateSignature(right));
+  });
+  const primary = sorted[0];
+  if (sorted.length === 1) return primary;
+
+  const firstText = (field: keyof NormalizedAccessTradeItem): string | undefined => {
+    for (const candidate of sorted) {
+      const value = candidate[field];
+      if (typeof value === 'string' && value) return value;
+    }
+    return undefined;
+  };
+  const firstNumber = (field: keyof NormalizedAccessTradeItem): number | undefined => {
+    for (const candidate of sorted) {
+      const value = candidate[field];
+      if (typeof value === 'number' && value > 0) return value;
+    }
+    return undefined;
+  };
+  const rawData: Record<string, unknown> = {};
+  for (const candidate of [...sorted].reverse()) Object.assign(rawData, candidate.rawData || {});
+  const imageCandidates = [...new Set(sorted.flatMap((candidate) => candidate.imageCandidates || []).filter(Boolean))];
+  const normalizationIssues = [...new Set(sorted.flatMap((candidate) => candidate.normalizationIssues || []))]
+    .filter((reason) => {
+      if (reason === 'MISSING_NAME') return !firstText('name');
+      if (reason === 'MISSING_CANONICAL_URL' || reason === 'INVALID_CANONICAL_URL') return !firstText('canonicalProductUrl');
+      if (reason === 'MISSING_AFFILIATE_URL' || reason === 'INVALID_AFFILIATE_URL') return !firstText('affiliateUrl');
+      if (reason === 'MISSING_IMAGE' || reason === 'INVALID_IMAGE_URL') return !firstText('imageUrl');
+      if (reason === 'MISSING_PRICE' || reason === 'INVALID_PRICE') return !firstNumber('price') && !firstNumber('salePrice');
+      return true;
+    });
+
+  return {
+    ...primary,
+    name: firstText('name') || '',
+    description: firstText('description') || '',
+    imageUrl: firstText('imageUrl') || '',
+    imageCandidates,
+    originalUrl: firstText('originalUrl') || '',
+    canonicalProductUrl: firstText('canonicalProductUrl'),
+    affiliateUrl: firstText('affiliateUrl') || '',
+    affiliateDestinationUrl: firstText('affiliateDestinationUrl'),
+    price: firstNumber('price') || 0,
+    salePrice: firstNumber('salePrice') || 0,
+    category: firstText('category') || '',
+    merchant: firstText('merchant'),
+    merchantDomain: firstText('merchantDomain'),
+    shopId: firstText('shopId'),
+    shopName: firstText('shopName'),
+    sku: firstText('sku'),
+    campaignName: firstText('campaignName'),
+    providerUpdatedAt: firstText('providerUpdatedAt'),
+    normalizationIssues,
+    rawData,
+  };
+}
+
+function normalizedCandidateEvidenceScore(item: NormalizedAccessTradeItem): number {
+  return (item.sourceEndpoint === 'datafeed' ? 40 : 0)
+    + (item.kind === 'product' || item.kind === 'deal' ? 30 : 0)
+    + (item.name ? 8 : 0)
+    + (item.canonicalProductUrl ? 8 : 0)
+    + (item.affiliateUrl ? 6 : 0)
+    + (item.imageUrl ? 4 : 0)
+    + (item.price || item.salePrice ? 4 : 0)
+    + Math.max(0, Math.min(100, item.qualityScore)) / 100;
+}
+
+function normalizedCandidateSignature(item: NormalizedAccessTradeItem): string {
+  return normalizeText([
+    item.sourceEndpoint, item.sourceItemId, item.id, item.name,
+    item.canonicalProductUrl, item.affiliateUrl, item.imageUrl,
+    item.price, item.salePrice, item.merchant,
+  ].join('|'));
 }
 
 // ---- Generic helpers ----
@@ -2442,6 +2633,7 @@ const ACCESS_TRADE_RAW_METADATA_FIELDS = new Set([
   'image', 'image_url', 'imageUrl', 'productImage', 'product_image', 'thumbnail', 'thumbnail_url', 'thumbnailUrl',
   'url', 'link', 'final_url', 'finalUrl', 'originalUrl', 'original_url', 'productUrl', 'product_url',
   'landingPage', 'landing_page', 'merchantUrl', 'merchant_url', 'aff_link', 'affiliate_url', 'affiliateUrl',
+  'affiliate_link', 'affiliateLink', 'tracking_link', 'trackingLink', 'deep_link', 'deepLink', 'deeplink',
   'price', 'sale_price', 'salePrice', 'currentPrice', 'current_price', 'discount', 'discount_price',
   'discountPrice', 'discountedPrice', 'discounted_price', 'originalPrice', 'original_price', 'listPrice',
   'list_price', 'oldPrice', 'old_price', 'marketPrice', 'market_price', 'discount_amount', 'discount_rate',
@@ -2542,7 +2734,6 @@ function getItemId(item: AccessTradeRawItem): string {
 
   const fingerprint = normalizeText(
       [
-        item.__sandealEndpoint,
         getFirstText(item, ['shop_id', 'shopId', 'merchant', 'shop_name', 'shopName', 'domain']),
         getFirstText(item, ['aff_link', 'affiliate_url', 'affiliateUrl']),
         getFirstText(item, ['productUrl', 'product_url', 'url', 'link']),

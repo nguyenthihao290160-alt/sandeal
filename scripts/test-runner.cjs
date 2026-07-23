@@ -394,7 +394,7 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     equal(geminiModels.routeModel(profile, ['gemini-preview'], Date.parse('2026-07-12')), null);
   });
 
-  const geminiCredential = (id, group, billingMode, healthScore, role = 'backup') => ({ id, platform: 'gemini', credentialType: 'api_key', role, label: id, encryptedValue: `b64:${Buffer.from(`secret-${id}`).toString('base64')}`, maskedValue: 'secr****test', status: 'valid', metadata: { billingMode, keyType: 'auth', quotaGroupId: group, supportedModels: ['gemini-3.1-flash-lite'], lightTestStatus: 'available', generationStatus: 'available', failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore }, createdAt: '2026-07-12T00:00:00.000Z', updatedAt: '2026-07-12T00:00:00.000Z' });
+  const geminiCredential = (id, group, billingMode, healthScore, role = 'backup') => ({ id, platform: 'gemini', credentialType: 'api_key', role, label: id, encryptedValue: `b64:${Buffer.from(`secret-${id}`).toString('base64')}`, maskedValue: 'secr****test', status: 'valid', metadata: { billingMode, keyType: 'auth', quotaGroupId: group, supportedModels: ['gemini-3.1-flash-lite'], lightTestStatus: 'available', generationStatus: 'available', generationVerifiedAt: '2026-07-12T00:00:00.000Z', lastSuccessfulRequestAt: '2026-07-12T00:00:00.000Z', failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore }, createdAt: '2026-07-12T00:00:00.000Z', updatedAt: '2026-07-12T00:00:00.000Z' });
 
   await test('V4-06. paid/unknown billing key không được chọn', async () => {
     await adapter.writeCollection('token-vault', [geminiCredential('paid', 'paid-group', 'paid', 100), geminiCredential('unknown', 'unknown-group', 'unknown', 100)]);
@@ -433,10 +433,10 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     const result = await health.checkLinkHealth('https://public.test/redirect'); equal(result.ok, false); assert(['not_allowed', 'forbidden'].includes(result.status));
   });
 
-  await test('V4-12. generation probe strict JSON và 429 không invalid', async () => {
+  await test('V4-12. generation probe strict JSON và 429 rate limit không invalid', async () => {
     const credential = geminiCredential('probe', 'probe-group', 'free_confirmed', 100, 'primary'); await adapter.writeCollection('token-vault', [credential]); await adapter.writeCollection('gemini-pool-state', []);
     let result = await geminiProbe.generationProbeCredential('probe', async () => response(200, { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] })); equal(result.generationStatus, 'available');
-    result = await geminiProbe.generationProbeCredential('probe', async () => new Response('{}', { status: 429 })); equal(result.generationStatus, 'quota_exhausted'); assert(result.status !== 'invalid');
+    result = await geminiProbe.generationProbeCredential('probe', async () => new Response('{}', { status: 429 })); equal(result.generationStatus, 'rate_limited'); equal(result.errorCategory, 'RATE_LIMITED'); assert(result.status !== 'invalid');
   });
 
   await test('V4-13. invalid input không failover mọi key', async () => {

@@ -21,6 +21,9 @@ export interface CredentialTruth {
   cooldownUntil: string | null;
   lastCheckedAt: string | null;
   errorCategory: string | null;
+  testedModel: string | null;
+  httpStatus: number | null;
+  retryable: boolean;
 }
 
 function text(value: unknown): string | null { return typeof value === 'string' && value.trim() ? value.trim().slice(0, 160) : null; }
@@ -34,6 +37,7 @@ export function getCredentialTruth(credential: Pick<SafeCredential | StoredCrede
   const quotaGroup = text(metadata.quotaGroupId);
   const preferredModel = text(metadata.preferredModel);
   const supportedModels = Array.isArray(metadata.supportedModels) ? metadata.supportedModels.map(String).filter(Boolean) : [];
+  const generationVerifiedAt = text(metadata.generationVerifiedAt || metadata.lastSuccessfulRequestAt);
   const billingReady = metadata.billingMode === 'free_confirmed';
   const modelReady = supportedModels.length > 0;
   const disabled = credential.role === 'disabled' || credential.status === 'disabled' || generationStatus === 'disabled';
@@ -41,7 +45,7 @@ export function getCredentialTruth(credential: Pick<SafeCredential | StoredCrede
   const quota = generationStatus === 'quota_exhausted' || Boolean(quotaUntil && Date.parse(quotaUntil) > now);
   const valid = credential.status === 'valid';
   const generationReady = credential.platform === 'gemini' && valid && generationStatus === 'available'
-    && billingReady && Boolean(quotaGroup) && modelReady && !cooldown && !quota && !disabled;
+    && Boolean(generationVerifiedAt) && billingReady && Boolean(quotaGroup) && modelReady && !cooldown && !quota && !disabled;
   const state: CredentialReadinessState = disabled ? 'disabled'
     : credential.status === 'invalid' || generationStatus === 'invalid' ? 'invalid'
       : credential.status === 'missing_permission' || generationStatus === 'missing_permission' ? 'missing_permission'
@@ -54,7 +58,7 @@ export function getCredentialTruth(credential: Pick<SafeCredential | StoredCrede
           : quota ? 'quota_limited' : cooldown ? 'cooldown_active' : generationReady ? 'ready'
             : credential.status === 'unchecked' ? 'credential_not_checked'
               : !valid ? 'credential_not_valid'
-                : generationStatus === 'unchecked' ? 'generation_not_verified'
+                : generationStatus === 'unchecked' || !generationVerifiedAt ? 'generation_not_verified'
                   : ['rate_limited', 'cooldown', 'transient_error'].includes(generationStatus) ? 'generation_temporarily_unavailable'
                     : !billingReady ? 'billing_not_confirmed'
                       : !quotaGroup ? 'quota_group_missing'
@@ -64,7 +68,10 @@ export function getCredentialTruth(credential: Pick<SafeCredential | StoredCrede
     id: credential.id, maskedIdentifier: credential.maskedValue, state, stored: Boolean(credential.maskedValue), valid, generationReady, reasonCode,
     priority: priority(metadata.priority), preferredModel, projectLabel: text(metadata.projectAlias || metadata.projectLabel),
     quotaGroup, cooldownUntil, lastCheckedAt: credential.lastCheckedAt || null,
-    errorCategory: text(metadata.lastErrorCode || credential.lastError),
+    errorCategory: text(metadata.errorCategory || metadata.lastErrorCode || credential.lastError),
+    testedModel: text(metadata.testedModel || metadata.preferredModel),
+    httpStatus: Number.isInteger(Number(metadata.providerHttpStatus)) ? Number(metadata.providerHttpStatus) : null,
+    retryable: metadata.retryable === true,
   };
 }
 

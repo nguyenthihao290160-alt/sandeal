@@ -39,7 +39,7 @@ function initialMetadata(input: CreateCredentialInput): Record<string, unknown> 
 
   return {
     ...allowedMetadata,
-    billingMode: 'unknown', keyType: 'unknown', supportedModels: [], lightTestStatus: 'unchecked',
+    provider: 'gemini', billingMode: 'unknown', keyType: 'unknown', supportedModels: [], lightTestStatus: 'unchecked',
     generationStatus: 'unchecked', failureStreak: 0, requestsTodayEstimated: 0,
     inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore: 50,
   };
@@ -221,7 +221,22 @@ export async function replaceCredentialValue(id: string, newValue: string): Prom
     status: 'unchecked',
     lastCheckedAt: undefined,
     lastError: undefined,
-    metadata: current?.platform === 'gemini' ? { ...current.metadata, lightTestStatus: 'unchecked', generationStatus: 'unchecked', failureStreak: 0 } : current?.metadata,
+    metadata: current?.platform === 'gemini' ? {
+      ...current.metadata,
+      provider: 'gemini',
+      lightTestStatus: 'unchecked',
+      generationStatus: 'unchecked',
+      generationVerifiedAt: undefined,
+      lastSuccessfulRequestAt: undefined,
+      testedModel: undefined,
+      providerHttpStatus: undefined,
+      errorCategory: undefined,
+      retryable: false,
+      cooldownUntil: undefined,
+      nextProbeAt: undefined,
+      quotaExhaustedUntil: undefined,
+      failureStreak: 0,
+    } : current?.metadata,
   } as Partial<StoredCredential>);
   return updated ? toSafeCredential(updated) : null;
 }

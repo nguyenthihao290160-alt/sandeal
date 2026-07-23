@@ -2727,6 +2727,9 @@ tr:hover td {
 .token-vault-gemini-meta { margin-top: 4px; color: var(--text-tertiary); font-size: 10px; line-height: 1.55; }
 .token-vault-credential-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; }
 .token-vault-credential-actions .btn { flex: 0 1 auto; width: auto; max-width: 100%; white-space: normal; }
+.token-vault-priority-control { display: inline-flex; align-items: center; gap: 4px; color: var(--text-tertiary); font-size: 10px; }
+.token-vault-priority-control .input { width: 76px; min-height: 30px; padding: 4px 7px; font-size: 11px; }
+.token-vault-inline-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); margin-top: var(--space-sm); padding: var(--space-sm); border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent); border-radius: var(--radius-md); color: var(--text-secondary); font-size: var(--text-xs); }
 .token-vault-replace-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--space-sm); align-items: center; min-width: 0; margin-top: var(--space-sm); }
 .pipeline-blockers { margin-top: var(--space-md); overflow-wrap: anywhere; }
 .pipeline-blockers ul { margin: var(--space-xs) 0 0; padding-left: 20px; }
@@ -2738,6 +2741,8 @@ tr:hover td {
   .token-card-actions { align-items: stretch; }
   .token-card-actions .btn { width: 100%; }
   .token-vault-credential-actions .btn { flex: 1 1 140px; }
+  .token-vault-priority-control { width: 100%; }
+  .token-vault-priority-control .input { flex: 1 1 auto; width: auto; min-width: 70px; }
   .token-vault-replace-form { grid-template-columns: minmax(0, 1fr); }
   .token-vault-replace-form .btn { width: 100%; }
   .detail-meta-row { align-items: flex-start; flex-direction: column; gap: 3px; }

@@ -103,6 +103,7 @@ type AccessTradeDiagnostics = {
   rawItemCount?: number;
   extractedItemCount?: number;
   normalizedItemCount?: number;
+  acceptedCount?: number;
   returnedCount?: number;
   rejectedCount?: number;
   duplicateCount?: number;
@@ -135,6 +136,26 @@ type AccessTradeResults = {
     nonProducts?: number;
   };
   diagnostics?: AccessTradeDiagnostics;
+};
+
+const ACCESS_TRADE_REJECTION_LABELS: Record<string, string> = {
+  INVALID_RECORD: 'Bản ghi không đúng cấu trúc',
+  EXTRACTION_FAILED: 'Không trích xuất được dữ liệu',
+  NORMALIZATION_FAILED: 'Chuẩn hoá thất bại',
+  MISSING_IDENTITY: 'Thiếu định danh ổn định',
+  MISSING_TITLE: 'Thiếu tên sản phẩm',
+  INVALID_URL: 'URL sai định dạng hoặc giao thức',
+  UNSAFE_DESTINATION: 'Đích URL không an toàn',
+  TYPE_MISMATCH: 'Không phải loại dữ liệu đang tìm',
+  KEYWORD_MISMATCH: 'Không khớp từ khoá',
+  CATEGORY_MISMATCH: 'Không khớp danh mục',
+  PLATFORM_MISMATCH: 'Không khớp nền tảng',
+  IMAGE_REQUIRED: 'Thiếu ảnh khi bộ lọc yêu cầu',
+  AFFILIATE_LINK_REQUIRED: 'Thiếu link tiếp thị khi bộ lọc yêu cầu',
+  DUPLICATE: 'Trùng sản phẩm đã hợp nhất',
+  RESULT_LIMIT: 'Ngoài giới hạn hiển thị',
+  UNSUPPORTED_CLASSIFICATION: 'Không hỗ trợ phân loại',
+  UNSAFE_PROVIDER_DATA: 'Dữ liệu nguồn không an toàn',
 };
 
 type ApiEnvelope<T> = {
@@ -1883,6 +1904,14 @@ export default function ProductSourcesPage() {
                                 <div className="stat-card-label">Đã chuẩn hoá</div>
                               </div>
                               <div>
+                                <strong>{atResults.diagnostics.acceptedCount ?? atResults.diagnostics.returnedCount ?? atResults.items.length}</strong>
+                                <div className="stat-card-label">Được chấp nhận</div>
+                              </div>
+                              <div>
+                                <strong>{atResults.diagnostics.rejectedCount ?? 0}</strong>
+                                <div className="stat-card-label">Bị loại</div>
+                              </div>
+                              <div>
                                 <strong>{atResults.diagnostics.returnedCount ?? atResults.items.length}</strong>
                                 <div className="stat-card-label">Đang hiển thị</div>
                               </div>
@@ -1901,8 +1930,8 @@ export default function ProductSourcesPage() {
                                   </summary>
                                   <div className="flex gap-xs" style={{ flexWrap: 'wrap', marginTop: 'var(--space-xs)' }}>
                                     {Object.entries(atResults.diagnostics.rejectedByReason || {}).map(([reason, count]) => (
-                                        <span className="badge badge-neutral" key={reason}>
-                                          {reason}: {count}
+                                        <span className="badge badge-neutral" key={reason} title={reason}>
+                                          {ACCESS_TRADE_REJECTION_LABELS[reason] || reason}: {count}
                                         </span>
                                     ))}
                                   </div>

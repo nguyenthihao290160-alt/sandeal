@@ -7,9 +7,10 @@
 
 import { NextRequest } from 'next/server';
 import { successResponse, errorResponse, serverErrorResponse } from '@/lib/apiResponse';
-import { getCredentialById, getRawCredentialValue, updateCredential } from '@/lib/storage/tokenVault';
+import { getCredentialById, getRawCredentialValue, getSafeCredentialById, updateCredential } from '@/lib/storage/tokenVault';
 import type { CredentialStatus } from '@/lib/types/tokenVault';
 import { requireAuth } from '@/lib/auth';
+import { lightTestCredential } from '@/lib/ai/geminiCredentialProbe';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,6 +30,13 @@ export async function POST(request: NextRequest) {
       return errorResponse('Không tìm thấy credential.', undefined, 404);
     }
 
+    if (cred.platform === 'gemini') {
+      const diagnostic = await lightTestCredential(id);
+      const updated = await getSafeCredentialById(id);
+      if (!updated) return errorResponse('Không thể tải kết quả kiểm tra.');
+      return successResponse(diagnostic.message, { ...updated, providerDiagnostic: diagnostic });
+    }
+
     const rawValue = await getRawCredentialValue(id);
     if (!rawValue) {
       return errorResponse('Không thể đọc giá trị credential.');
@@ -41,10 +49,6 @@ export async function POST(request: NextRequest) {
     let metadata: Record<string, unknown> | undefined = cred.metadata;
 
     switch (cred.platform) {
-      case 'gemini':
-        ({ status, lastError, metadata } = await testGeminiKey(rawValue, cred.metadata));
-        break;
-
       case 'accesstrade':
         ({ status, lastError } = await testAccessTradeKey(rawValue));
         break;
@@ -107,64 +111,6 @@ export async function POST(request: NextRequest) {
     return successResponse(message, updated);
   } catch (err) {
     return serverErrorResponse('Lỗi khi kiểm tra credential.', err);
-  }
-}
-
-// ---- Gemini Test ----
-
-async function testGeminiKey(apiKey: string, previous?: Record<string, unknown>): Promise<{
-  status: CredentialStatus;
-  lastError?: string;
-  metadata?: Record<string, unknown>;
-}> {
-  // Validate format: Gemini API keys start with "AIza" and are ~39 chars
-  if (!apiKey || apiKey.length < 20) {
-    return {
-      status: 'invalid',
-      lastError: 'API key quá ngắn hoặc không hợp lệ.',
-    };
-  }
-
-  // Light validation: call models.list endpoint (free, no generation cost)
-  try {
-    const res = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models',
-      { method: 'GET', headers: { 'x-goog-api-key': apiKey }, signal: AbortSignal.timeout(10000) }
-    );
-
-    if (res.ok) {
-      const data = await res.json() as { models?: Array<{ name?: string }> };
-      const modelCount = Array.isArray(data.models) ? data.models.length : 0;
-      return {
-        status: 'valid',
-        metadata: {
-          ...previous,
-          lightTestStatus: 'available',
-          lastLightTestAt: new Date().toISOString(),
-          supportedModels: (data.models || []).map((item) => String(item.name || '').replace(/^models\//, '')).filter(Boolean),
-          modelsAvailable: modelCount,
-          note: 'Khóa hợp lệ. Đã xác nhận quyền truy cập Gemini API (chỉ kiểm tra danh sách model, không phát sinh chi phí).',
-        },
-      };
-    }
-
-    if (res.status === 400 || res.status === 403) {
-      return {
-        status: 'invalid',
-        lastError: `Gemini API trả về lỗi ${res.status}. Key có thể không hợp lệ hoặc bị khoá.`,
-      };
-    }
-
-    return {
-      status: 'error',
-      lastError: `Gemini API trả về HTTP ${res.status}.`,
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Lỗi không xác định';
-    return {
-      status: 'error',
-      lastError: `Không thể kết nối Gemini API: ${msg.slice(0, 200)}`,
-    };
   }
 }
 

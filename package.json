@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "node scripts/test-runner.cjs && node scripts/accesstrade-link-safety-tests.cjs && node scripts/prompt13-production-readiness-tests.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs && node scripts/sandeal-end-to-end-hardening-tests.cjs && node scripts/sandeal-durable-health-regression-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
+    "test": "node scripts/test-runner.cjs && node scripts/accesstrade-link-safety-tests.cjs && node scripts/gemini-provider-diagnostics-tests.cjs && node scripts/prompt13-production-readiness-tests.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs && node scripts/sandeal-end-to-end-hardening-tests.cjs && node scripts/sandeal-durable-health-regression-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
     "test:accesstrade": "node scripts/accesstrade-link-safety-tests.cjs",
+    "test:gemini-provider": "node scripts/gemini-provider-diagnostics-tests.cjs",
     "test:dashboard": "node scripts/prompt05b-dashboard-tests.cjs",
     "test:automation": "node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs",
     "test:release-ui": "node scripts/prompt07-release-ui-tests.cjs",

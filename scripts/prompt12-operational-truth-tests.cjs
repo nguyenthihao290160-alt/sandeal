@@ -160,7 +160,7 @@ async function main() {
   await test(61, 'Retry max được tôn trọng', () => assert.ok(source('src/lib/automation/store.ts').includes('job.attemptCount < job.maxAttempts')));
   await test(62, 'Không gọi network thật', () => assert.equal(global.fetch.toString().includes('PROMPT12_NETWORK_FORBIDDEN'), true));
 
-  const storedCredential = { id: 'cred-b', platform: 'gemini', maskedValue: '****abcd', status: 'valid', role: 'backup', metadata: { generationStatus: 'available', billingMode: 'free_confirmed', quotaGroupId: 'group-a', supportedModels: ['gemini-free-fixture'], priority: 2 }, lastCheckedAt: new Date(now).toISOString() };
+  const storedCredential = { id: 'cred-b', platform: 'gemini', maskedValue: '****abcd', status: 'valid', role: 'backup', metadata: { generationStatus: 'available', generationVerifiedAt: new Date(now).toISOString(), lastSuccessfulRequestAt: new Date(now).toISOString(), billingMode: 'free_confirmed', quotaGroupId: 'group-a', supportedModels: ['gemini-free-fixture'], priority: 2 }, lastCheckedAt: new Date(now).toISOString() };
   await test(63, 'API không trả raw key', () => assert.ok(!source('src/app/api/token-vault/list/route.ts').includes('encryptedValue')));
   await test(64, 'Masking đúng', () => assert.equal(secrets.maskSecret('fixture-value-abcd'), '****abcd'));
   await test(65, 'stored không đồng nghĩa valid', () => { const value = credentialTruth.getCredentialTruth({ ...storedCredential, status: 'unchecked' }, now); assert.equal(value.valid, false); });
@@ -221,7 +221,8 @@ async function main() {
     assert.equal(result.summary.blocked, 1);
     assert.equal(result.summary.brokenLinks, 1);
     assert.equal(result.summary.brokenImages, 1);
-    assert.equal(result.summary.blockingSignals, 3);
+    assert.equal(result.summary.blockingSignals, result.summary.issueOccurrences);
+    assert.ok(result.summary.blockingSignals > result.summary.affectedProducts);
   });
   await test(110, 'Projection báo cần sync mà không tự materialize', async () => {
     await reset('product-alerts', 'alert-incidents', 'alert-occurrences');
