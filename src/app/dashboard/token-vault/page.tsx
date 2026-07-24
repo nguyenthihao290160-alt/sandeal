@@ -81,11 +81,39 @@ const GEMINI_ERROR_LABELS: Record<string, string> = {
   UNKNOWN_PROVIDER_ERROR: 'Lỗi nhà cung cấp chưa xác định',
 };
 
+const GEMINI_FAILURE_CLASS_LABELS: Record<NonNullable<NonNullable<SafeCredential['readiness']>['failureClass']>, string> = {
+  permission: 'Quyền tạo nội dung',
+  authentication: 'Xác thực',
+  policy: 'Chính sách Free-only',
+  quota: 'Hạn mức',
+  model: 'Mô hình',
+  adapter: 'Adapter',
+  network: 'Mạng',
+  routing: 'Định tuyến production',
+  unknown: 'Chưa xác định',
+};
+
+const GEMINI_DIMENSION_LABELS: Array<[keyof NonNullable<SafeCredential['readiness']>['dimensions'], string]> = [
+  ['credentialPresent', 'Đã lưu credential'],
+  ['credentialFormatAccepted', 'Định dạng được chấp nhận'],
+  ['authenticationValid', 'Xác thực hợp lệ'],
+  ['modelDiscoveryAvailable', 'Model discovery khả dụng'],
+  ['contentGenerationPermissionAvailable', 'Có quyền tạo nội dung'],
+  ['selectedModelAvailable', 'Model đã chọn khả dụng'],
+  ['quotaAvailable', 'Hạn mức khả dụng'],
+  ['freeOnlyPolicySatisfied', 'Đạt chính sách Free-only'],
+  ['adapterHealthy', 'Adapter hoạt động'],
+  ['productionRouteSelected', 'Đã chọn tuyến production'],
+  ['endToEndMinimalGenerationPassed', 'Minimal generation đã qua'],
+  ['productionReady', 'Sẵn sàng production'],
+];
+
 function geminiReadinessBadge(credential: SafeCredential): { label: string; badge: string } {
   const readiness = credential.readiness;
   const category = readiness?.diagnosticCategory || readiness?.errorCategory || String(credential.metadata?.diagnosticCategory || credential.metadata?.errorCategory || '');
   if (credential.role === 'disabled' || readiness?.state === 'disabled') return { label: 'Đã tắt', badge: 'badge-neutral' };
-  if (readiness?.generationReady) return { label: 'Sẵn sàng tạo nội dung', badge: 'badge-success' };
+  if (readiness?.productionReady) return { label: 'Sẵn sàng production', badge: 'badge-success' };
+  if (readiness?.generationReady) return { label: 'Đã qua probe · chưa chọn production', badge: 'badge-warning' };
   if (category === 'PERMISSION_DENIED' || readiness?.reasonCode === 'missing_permission') return { label: 'Lỗi quyền · Thiếu quyền tạo nội dung', badge: 'badge-danger' };
   if (category === 'QUOTA_EXCEEDED' || category === 'RATE_LIMITED') return { label: 'Hạn mức / tốc độ', badge: 'badge-warning' };
   if (['NETWORK_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'TRANSIENT_ERROR', 'UNKNOWN_PROVIDER_ERROR'].includes(category)) {
@@ -276,7 +304,7 @@ export default function TokenVaultPage() {
       const data = await res.json();
       const stats = data.data;
       const summary = data.ok && stats
-        ? `${stats.total} kết nối · ${stats.validKeys} khóa hợp lệ · ${stats.generationReady} sẵn sàng · ${stats.permissionDenied} thiếu quyền · ${stats.invalidKey} khóa lỗi · ${stats.rateLimited} giới hạn tốc độ · ${stats.quotaExceeded} hết quota · ${stats.modelUnavailable} thiếu model · ${stats.freePolicyUnverified} chưa xác minh Free policy.`
+        ? `${stats.total} kết nối · ${stats.validKeys} khóa hợp lệ · ${stats.generationReady} qua generation probe (chưa đồng nghĩa production-ready) · ${stats.permissionDenied} thiếu quyền · ${stats.invalidKey} khóa lỗi · ${stats.rateLimited} giới hạn tốc độ · ${stats.quotaExceeded} hết quota · ${stats.modelUnavailable} thiếu model · ${stats.freePolicyUnverified} chưa xác minh Free policy.`
         : data.message || 'Đã kiểm tra các kết nối Gemini.';
       showToast(data.ok && Number(stats?.generationReady || 0) > 0 ? 'success' : 'warning', summary);
       await loadCredentials();
@@ -360,9 +388,10 @@ export default function TokenVaultPage() {
   const totalCredentials = groups.reduce((sum, g) => sum + g.credentials.length, 0);
   const geminiRows = groups.find(g => g.platform === 'gemini')?.credentials ?? [];
   const geminiCredentials = geminiRows.length;
-  const geminiReady = geminiRows.filter(credential => credential.readiness?.generationReady).length;
+  const geminiRouteEligible = geminiRows.filter(credential => credential.readiness?.generationReady).length;
+  const geminiProductionReady = geminiRows.filter(credential => credential.readiness?.productionReady).length;
   const geminiPrimary = geminiRows.find(credential => credential.role === 'primary');
-  const geminiUnavailableReason = geminiReady === 0
+  const geminiUnavailableReason = geminiRouteEligible === 0
     ? geminiRows.find(credential => credential.readiness)?.readiness?.reasonCode
     : null;
 
@@ -410,8 +439,8 @@ export default function TokenVaultPage() {
           </div>
           <div className="stat-card">
             <div className="stat-card-icon" style={{ background: 'var(--ds-surface-blue)', color: 'var(--ds-info)' }}><DashboardIcon name="ai" size={21} /></div>
-            <div className="stat-card-value">{geminiReady}/{geminiCredentials}</div>
-            <div className="stat-card-label">Gemini generation-ready</div>
+            <div className="stat-card-value">{geminiProductionReady}/{geminiCredentials}</div>
+            <div className="stat-card-label">Gemini sẵn sàng production</div>
           </div>
           <div className="stat-card">
             <div className="stat-card-icon" style={{ background: 'var(--ds-surface-green)', color: 'var(--ds-success)' }}><DashboardIcon name="source" size={21} /></div>
@@ -430,8 +459,13 @@ export default function TokenVaultPage() {
         </div>
         {geminiCredentials > 0 && (
           <div className="disclosure-banner" data-gemini-summary style={{ marginBottom: 'var(--space-lg)' }}>
-            <strong>Gemini:</strong> {geminiReady}/{geminiCredentials} kết nối sẵn sàng tạo nội dung
-            {' · '}Kết nối chính: {geminiPrimary ? geminiPrimary.label : 'chưa chọn'}
+            <strong>Gemini:</strong> {geminiProductionReady}/{geminiCredentials} kết nối sẵn sàng production
+            {' · '}{geminiRouteEligible}/{geminiCredentials} kết nối đã qua generation probe
+            {' · '}Tuyến chính: {geminiPrimary ? geminiPrimary.label : 'chưa chọn'}
+            {' · '}Chính sách định tuyến: Free-only
+            {geminiProductionReady === 0 && geminiRouteEligible > 0 && (
+              <> · Generation probe thành công chưa đủ: cần chọn kết nối làm tuyến production.</>
+            )}
             {geminiUnavailableReason && (
               <> · {READINESS_REASON_LABELS[geminiUnavailableReason]}</>
             )}
@@ -632,6 +666,9 @@ function PlatformCard({
   const generationReadyCount = group.platform === 'gemini'
     ? group.credentials.filter(credential => credential.readiness?.generationReady).length
     : 0;
+  const productionReadyCount = group.platform === 'gemini'
+    ? group.credentials.filter(credential => credential.readiness?.productionReady).length
+    : 0;
 
   return (
     <div className="glass-card token-vault-platform-card">
@@ -649,8 +686,8 @@ function PlatformCard({
           </div>
         </div>
         {group.platform === 'gemini' && hasCredentials ? (
-           <span className={`badge ${generationReadyCount > 0 ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '10px' }}>
-             {generationReadyCount}/{group.credentials.length} sẵn sàng
+           <span className={`badge ${productionReadyCount > 0 ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '10px' }}>
+             {productionReadyCount} production · {generationReadyCount} qua probe
            </span>
         ) : primary ? (
           <span className={`badge ${primary.status === 'valid' ? 'badge-success' : 'badge-neutral'}`} style={{ fontSize: '10px' }}>
@@ -767,7 +804,7 @@ function CredentialRow({
               {cred.platform === 'gemini' && cred.status === 'valid' ? 'Khóa hợp lệ' : statusConfig.label}
             </span>
             {readinessBadge && (
-              <span className={`badge ${readinessBadge.badge}`} data-generation-ready={String(Boolean(cred.readiness?.generationReady))} style={{ fontSize: '9px', padding: '2px 6px' }}>
+              <span className={`badge ${readinessBadge.badge}`} data-generation-ready={String(Boolean(cred.readiness?.generationReady))} data-production-ready={String(Boolean(cred.readiness?.productionReady))} style={{ fontSize: '9px', padding: '2px 6px' }}>
                 {readinessBadge.label}
               </span>
             )}
@@ -777,7 +814,7 @@ function CredentialRow({
           </div>
           {cred.readiness && (
             <div className="token-vault-readiness-summary">
-              Trạng thái: {cred.readiness.generationReady ? 'sẵn sàng tạo nội dung' : 'chưa sẵn sàng'} · Ưu tiên: {cred.readiness.priority}
+              Production: {cred.readiness.productionReady ? 'sẵn sàng' : 'chưa sẵn sàng'} · Generation probe: {cred.readiness.generationReady ? 'đạt' : 'chưa đạt'} · Ưu tiên: {cred.readiness.priority}
             </div>
           )}
           {cred.platform === 'gemini' && cred.readiness && (
@@ -802,12 +839,24 @@ function CredentialRow({
           )}
           {cred.platform === 'gemini' && (
             <details className="token-vault-gemini-meta">
-              <summary>Chi tiết định tuyến</summary>
-              Nhà cung cấp: Gemini · Mô hình đã thử: {cred.readiness?.testedModel || String(cred.metadata?.testedModel || cred.metadata?.preferredModel || 'chưa có')} · HTTP: {cred.readiness?.httpStatus ?? '—'}<br />
-              Phân loại: {GEMINI_ERROR_LABELS[cred.readiness?.diagnosticCategory || cred.readiness?.errorCategory || ''] || (cred.readiness?.generationReady ? 'Sẵn sàng' : 'Chưa có lỗi đã phân loại')} · Có thể thử lại: {cred.readiness?.retryable ? 'Có' : 'Không'} · Generation ready: {cred.readiness?.generationReady ? 'Có' : 'Không'}<br />
-              Free policy: {cred.readiness?.freePolicyEligible ? 'đã xác minh' : 'chưa xác minh'} · Lần tạo thành công: {cred.readiness?.lastGenerationSucceededAt ? new Date(cred.readiness.lastGenerationSucceededAt).toLocaleString('vi-VN') : 'chưa có'}<br />
-              Lần kiểm tra: {cred.readiness?.lastCheckedAt ? new Date(cred.readiness.lastCheckedAt).toLocaleString('vi-VN') : 'chưa kiểm tra'} · Chờ phục hồi: {cred.readiness?.cooldownUntil ? new Date(cred.readiness.cooldownUntil).toLocaleString('vi-VN') : 'không có'}<br />
-              Dự án: {String(cred.metadata?.projectAlias || 'chưa đặt')} · Nhóm hạn mức: {String(cred.metadata?.quotaGroupId || 'chưa đặt')} · Ưu tiên: {String(cred.metadata?.priority ?? 100)}
+              <summary>Chi tiết readiness và định tuyến</summary>
+              <div className="token-vault-route-summary">
+                Nhà cung cấp đã chọn: {cred.readiness?.selectedProvider === 'gemini' ? 'Gemini' : 'chưa chọn'} · Mô hình đã thử / đã chọn: {cred.readiness?.testedModel || cred.readiness?.preferredModel || 'chưa có'} · Chính sách: {cred.readiness?.routePolicy === 'FREE_ONLY' ? 'Free-only' : 'chưa xác định'}<br />
+                Vai trò: {roleConfig.label} · Sẵn sàng production: {cred.readiness?.productionReady ? 'Có' : 'Không'} · Đủ điều kiện định tuyến: {cred.readiness?.generationReady ? 'Có' : 'Không'} · HTTP: {cred.readiness?.httpStatus ?? '—'}<br />
+                Nhóm lỗi: {cred.readiness?.failureClass ? GEMINI_FAILURE_CLASS_LABELS[cred.readiness.failureClass] : 'Không có'} · Phân loại provider: {GEMINI_ERROR_LABELS[cred.readiness?.diagnosticCategory || cred.readiness?.errorCategory || ''] || 'Chưa có'} · Có thể thử lại: {cred.readiness?.retryable ? 'Có' : 'Không'}<br />
+                Lần tạo tối thiểu thành công: {cred.readiness?.lastGenerationSucceededAt ? new Date(cred.readiness.lastGenerationSucceededAt).toLocaleString('vi-VN') : 'chưa có'} · Lần kiểm tra: {cred.readiness?.lastCheckedAt ? new Date(cred.readiness.lastCheckedAt).toLocaleString('vi-VN') : 'chưa kiểm tra'}<br />
+                Chờ phục hồi: {cred.readiness?.cooldownUntil ? new Date(cred.readiness.cooldownUntil).toLocaleString('vi-VN') : 'không có'} · Nhóm hạn mức: {cred.readiness?.quotaGroup || 'chưa đặt'}
+              </div>
+              {cred.readiness?.dimensions && (
+                <ul className="token-vault-readiness-dimensions" aria-label="Các điều kiện sẵn sàng Gemini">
+                  {GEMINI_DIMENSION_LABELS.map(([key, label]) => (
+                    <li key={key} data-ready={String(cred.readiness!.dimensions[key])}>
+                      <span aria-hidden="true">{cred.readiness!.dimensions[key] ? '✓' : '—'}</span>
+                      {label}: <strong>{cred.readiness!.dimensions[key] ? 'Đạt' : 'Chưa đạt'}</strong>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </details>
           )}
           {primaryDisabledReason && cred.role !== 'primary' && cred.role !== 'disabled' && (

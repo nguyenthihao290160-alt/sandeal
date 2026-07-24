@@ -3,10 +3,10 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
-import type { AutomationJob, AutomationJobType } from '@/lib/automation/types';
+import type { AutomationJobListItem, AutomationJobType } from '@/lib/automation/types';
 import styles from '../operations.module.css';
 
-type SafeJob = Omit<AutomationJob, 'payload'>;
+type SafeJob = AutomationJobListItem;
 const TYPES: Record<AutomationJobType, string> = {
   PRODUCT_SCAN: 'Quét sản phẩm',
   AUTO_PILOT: 'Chế độ tự động',

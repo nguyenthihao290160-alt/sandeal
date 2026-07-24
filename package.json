@@ -38,6 +38,7 @@
     "test:prompt11": "node scripts/prompt11-production-completion-tests.cjs",
     "test:prompt12": "node scripts/prompt12-operational-truth-tests.cjs",
     "test:production-readiness": "node scripts/prompt13-production-readiness-tests.cjs",
+    "test:operator-intelligence": "node scripts/operator-intelligence-regression-tests.cjs",
     "accesstrade:cleanup:prompt12": "node scripts/prompt12-accesstrade-cleanup.cjs",
     "test:stabilization": "node scripts/stabilization-tests.cjs",
     "test:storage": "node scripts/storage-adapter-phase1a-tests.cjs",
@@ -87,7 +88,7 @@
   "packageManager": "npm@11.6.2",
   "dependencies": {
     "mongodb": "7.5.0",
-    "next": "16.2.10",
+    "next": "16.2.11",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
@@ -96,7 +97,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.2.11",
     "typescript": "^5"
   }
 }

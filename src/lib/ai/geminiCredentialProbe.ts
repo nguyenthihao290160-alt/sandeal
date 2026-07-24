@@ -502,7 +502,7 @@ async function persistGenerationSuccess(
   }, 'ACTIVE');
   return resultFromCredential(
     fresh.id,
-    `Đã xác minh tạo nội dung thành công bằng ${modelId}.`,
+    `Đã xác minh tạo nội dung tối thiểu bằng ${modelId}; kết nối chưa tự động trở thành tuyến production.`,
     nowMs,
   );
 }

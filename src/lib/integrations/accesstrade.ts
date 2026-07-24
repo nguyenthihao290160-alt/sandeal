@@ -27,6 +27,10 @@ export interface AccessTradeSearchParams {
   limit?: number;
   imageOnly?: boolean;
   affiliateLinkOnly?: boolean;
+  /** Optional, bounded rejection drilldown. It never changes acceptance rules. */
+  diagnosticReason?: AccessTradeRejectionReason;
+  diagnosticPage?: number;
+  diagnosticPageSize?: number;
 }
 
 export type AccessTradePublicDecision =
@@ -47,17 +51,101 @@ export type AccessTradeRejectionReason =
   | 'MISSING_IDENTITY'
   | 'MISSING_TITLE'
   | 'INVALID_URL'
+  | 'INVALID_IMAGE_URL'
   | 'UNSAFE_DESTINATION'
   | 'IMAGE_REQUIRED'
   | 'AFFILIATE_LINK_REQUIRED'
   | 'TYPE_MISMATCH'
+  | 'VOUCHER_RECORD'
+  | 'CAMPAIGN_RECORD'
   | 'KEYWORD_MISMATCH'
   | 'CATEGORY_MISMATCH'
   | 'PLATFORM_MISMATCH'
   | 'DUPLICATE'
   | 'RESULT_LIMIT'
   | 'UNSUPPORTED_CLASSIFICATION'
-  | 'UNSAFE_PROVIDER_DATA';
+  | 'UNSAFE_PROVIDER_DATA'
+  | 'BLOCKED_MERCHANT'
+  | 'INSUFFICIENT_QUALITY'
+  | 'POLICY_REJECTION'
+  | 'UNKNOWN_REASON';
+
+export const ACCESS_TRADE_REJECTION_REASONS: readonly AccessTradeRejectionReason[] = [
+  'INVALID_RECORD',
+  'EXTRACTION_FAILED',
+  'NORMALIZATION_FAILED',
+  'MISSING_IDENTITY',
+  'MISSING_TITLE',
+  'INVALID_URL',
+  'INVALID_IMAGE_URL',
+  'UNSAFE_DESTINATION',
+  'IMAGE_REQUIRED',
+  'AFFILIATE_LINK_REQUIRED',
+  'TYPE_MISMATCH',
+  'VOUCHER_RECORD',
+  'CAMPAIGN_RECORD',
+  'KEYWORD_MISMATCH',
+  'CATEGORY_MISMATCH',
+  'PLATFORM_MISMATCH',
+  'DUPLICATE',
+  'RESULT_LIMIT',
+  'UNSUPPORTED_CLASSIFICATION',
+  'UNSAFE_PROVIDER_DATA',
+  'BLOCKED_MERCHANT',
+  'INSUFFICIENT_QUALITY',
+  'POLICY_REJECTION',
+  'UNKNOWN_REASON',
+] as const;
+
+export type AccessTradeRejectionCategory =
+  | 'KEYWORD_MISMATCH'
+  | 'MISSING_REQUIRED_DATA'
+  | 'INVALID_RECORD_TYPE'
+  | 'VOUCHER'
+  | 'CAMPAIGN'
+  | 'DUPLICATE'
+  | 'BLOCKED_MERCHANT'
+  | 'INVALID_SOURCE_URL'
+  | 'INVALID_IMAGE_URL'
+  | 'INSUFFICIENT_QUALITY'
+  | 'POLICY_REJECTION'
+  | 'NORMALIZATION_FAILURE'
+  | 'UNKNOWN';
+
+export interface AccessTradeRejectionSample {
+  id: string;
+  reason: AccessTradeRejectionReason;
+  category: AccessTradeRejectionCategory;
+  provider: 'accesstrade';
+  sourceIdentifier: string;
+  sourceEndpoint: 'datafeed' | 'offers' | 'unknown';
+  stage: 'BEFORE_NORMALIZATION' | 'AFTER_NORMALIZATION';
+  originalProviderTitle: string;
+  normalizedTitle: string;
+  normalizedRelevantText: string;
+  itemKind: ProductKind | 'unknown';
+  matcherRule: string;
+  explanationVi: string;
+}
+
+export interface AccessTradeRejectionGroup {
+  reason: AccessTradeRejectionReason;
+  category: AccessTradeRejectionCategory;
+  count: number;
+  percentage: number;
+  matcherRule: string;
+  explanationVi: string;
+  stage: 'BEFORE_NORMALIZATION' | 'AFTER_NORMALIZATION' | 'MIXED';
+  samples: AccessTradeRejectionSample[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalSamples: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+  sampleUnavailableReason?: string;
+}
 
 export type AccessTradeReviewReason =
   | 'MISSING_NAME'
@@ -91,6 +179,12 @@ export interface AccessTradeSearchDiagnostics {
   limitedCount: number;
   rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>;
   reviewByReason: Partial<Record<AccessTradeReviewReason, number>>;
+  rejectionGroups: AccessTradeRejectionGroup[];
+  rejectionSamplePolicy: {
+    defaultSampleSize: number;
+    maximumPageSize: number;
+    selectedReason: AccessTradeRejectionReason | null;
+  };
 }
 
 export interface NormalizedAccessTradeItem {
@@ -523,6 +617,221 @@ export function processAccessTradePayload(
   return buildAccessTradeSearchResult([fetchResult], [request], params, limit);
 }
 
+const DEFAULT_REJECTION_SAMPLE_SIZE = 3;
+const MAX_REJECTION_SAMPLE_PAGE_SIZE = 20;
+const MAX_COLLECTED_REJECTION_SAMPLES_PER_REASON = 200;
+
+type AccessTradeRejectionSampleInput = {
+  raw?: AccessTradeRawItem;
+  item?: NormalizedAccessTradeItem;
+  reason: AccessTradeRejectionReason;
+  stage: AccessTradeRejectionSample['stage'];
+  params: AccessTradeSearchParams;
+};
+
+function safeDiagnosticText(value: unknown, maximumLength = 280): string {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [đã ẩn]')
+    .replace(/([?&](?:access_?token|token|api_?key|signature|secret|password)=)[^&\s]+/gi, '$1[đã ẩn]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maximumLength);
+}
+
+function safeDiagnosticEndpoint(value: unknown): AccessTradeRejectionSample['sourceEndpoint'] {
+  const safe = safeDiagnosticText(value, 240).toLowerCase();
+  // Keep only the stable endpoint class. Provider URLs and query strings can
+  // contain signed credentials and are not needed in operator diagnostics.
+  if (safe === 'datafeed' || /(?:^|[/_-])datafeed(?:$|[/_.?-])/.test(safe)) return 'datafeed';
+  if (safe === 'offers' || /(?:^|[/_-])offers?(?:$|[/_.?-])/.test(safe)) return 'offers';
+  return 'unknown';
+}
+
+function diagnosticSourceIdentifier(raw?: AccessTradeRawItem, item?: NormalizedAccessTradeItem): string {
+  const candidate = item?.sourceItemId || item?.id || (raw && getFirstText(raw, [
+    'product_id', 'productId', 'sku', 'skuId', 'sku_id', 'itemId', 'item_id',
+    'id', '_id', 'sourceId', 'source_id', 'externalId', 'external_id',
+    'campaignId', 'campaign_id', 'offerId', 'offer_id',
+  ]));
+  const safe = safeDiagnosticText(candidate, 100);
+  if (!safe) return `record-${stableHash(JSON.stringify([
+    raw && getFirstText(raw, ['title', 'name', 'product_name', 'productName']),
+    item?.name,
+  ]))}`;
+  return /^[A-Za-z0-9_.:@/-]+$/.test(safe) ? safe : `record-${stableHash(safe)}`;
+}
+
+function rejectionCategory(
+  reason: AccessTradeRejectionReason,
+  itemKind: ProductKind | 'unknown' = 'unknown',
+): AccessTradeRejectionCategory {
+  if (reason === 'KEYWORD_MISMATCH') return 'KEYWORD_MISMATCH';
+  if (reason === 'VOUCHER_RECORD' || itemKind === 'voucher') return 'VOUCHER';
+  if (reason === 'CAMPAIGN_RECORD' || itemKind === 'campaign') return 'CAMPAIGN';
+  if (['MISSING_IDENTITY', 'MISSING_TITLE', 'IMAGE_REQUIRED', 'AFFILIATE_LINK_REQUIRED'].includes(reason)) return 'MISSING_REQUIRED_DATA';
+  if (['INVALID_RECORD', 'EXTRACTION_FAILED', 'TYPE_MISMATCH', 'UNSUPPORTED_CLASSIFICATION'].includes(reason)) return 'INVALID_RECORD_TYPE';
+  if (reason === 'DUPLICATE') return 'DUPLICATE';
+  if (reason === 'BLOCKED_MERCHANT') return 'BLOCKED_MERCHANT';
+  if (reason === 'INVALID_URL' || reason === 'UNSAFE_DESTINATION') return 'INVALID_SOURCE_URL';
+  if (reason === 'INVALID_IMAGE_URL') return 'INVALID_IMAGE_URL';
+  if (reason === 'INSUFFICIENT_QUALITY') return 'INSUFFICIENT_QUALITY';
+  if (reason === 'POLICY_REJECTION' || reason === 'UNSAFE_PROVIDER_DATA') return 'POLICY_REJECTION';
+  if (reason === 'NORMALIZATION_FAILED') return 'NORMALIZATION_FAILURE';
+  return 'UNKNOWN';
+}
+
+function rejectionRule(reason: AccessTradeRejectionReason, params: AccessTradeSearchParams): string {
+  const normalizedQuery = normalizeMatcherText(params.keyword || '');
+  const rules: Partial<Record<AccessTradeRejectionReason, string>> = {
+    INVALID_RECORD: 'EXTRACT_KNOWN_ARRAY_AND_REQUIRE_OBJECT',
+    EXTRACTION_FAILED: 'EXTRACT_KNOWN_PROVIDER_ENVELOPE',
+    NORMALIZATION_FAILED: 'NORMALIZE_PROVIDER_RECORD',
+    MISSING_IDENTITY: 'REQUIRE_STABLE_PROVIDER_ID_OR_IDENTITY_SIGNALS',
+    MISSING_TITLE: 'REQUIRE_NON_EMPTY_NORMALIZED_TITLE',
+    INVALID_URL: 'VALIDATE_HTTP_HTTPS_SOURCE_URL',
+    INVALID_IMAGE_URL: 'VALIDATE_HTTP_HTTPS_IMAGE_URL',
+    UNSAFE_DESTINATION: 'BLOCK_PRIVATE_LOCAL_CREDENTIAL_OR_UNSAFE_PORT_URL',
+    IMAGE_REQUIRED: 'REQUIRE_IMAGE_WHEN_IMAGE_ONLY',
+    AFFILIATE_LINK_REQUIRED: 'REQUIRE_AFFILIATE_LINK_WHEN_REQUESTED',
+    TYPE_MISMATCH: `REQUIRE_KIND_${String(params.kind || 'all').toUpperCase()}`,
+    VOUCHER_RECORD: 'CLASSIFY_VOUCHER_AND_EXCLUDE_FROM_PRODUCT_RESULTS',
+    CAMPAIGN_RECORD: 'CLASSIFY_CAMPAIGN_AND_EXCLUDE_FROM_PRODUCT_RESULTS',
+    KEYWORD_MISMATCH: `MATCH_NORMALIZED_WORD_BOUNDARIES("${safeDiagnosticText(normalizedQuery, 80)}")`,
+    CATEGORY_MISMATCH: `MATCH_NORMALIZED_CATEGORY_WORD_BOUNDARIES("${safeDiagnosticText(params.category, 80)}")`,
+    PLATFORM_MISMATCH: `MATCH_NORMALIZED_PLATFORM("${safeDiagnosticText(params.platform, 80)}")`,
+    DUPLICATE: 'DEDUP_PROVIDER_ID_THEN_CANONICAL_DESTINATION',
+    RESULT_LIMIT: `APPLY_BOUNDED_RESULT_LIMIT(${Math.min(Math.max(params.limit || 20, 1), 50)})`,
+    UNSUPPORTED_CLASSIFICATION: 'REQUIRE_SUPPORTED_PRODUCT_CLASSIFICATION',
+    UNSAFE_PROVIDER_DATA: 'REJECT_UNSAFE_PROVIDER_METADATA',
+    BLOCKED_MERCHANT: 'APPLY_MERCHANT_POLICY_BLOCKLIST',
+    INSUFFICIENT_QUALITY: 'REQUIRE_MINIMUM_SOURCE_QUALITY',
+    POLICY_REJECTION: 'APPLY_SOURCE_POLICY_RULES',
+    UNKNOWN_REASON: 'FAIL_CLOSED_UNKNOWN_REJECTION',
+  };
+  return rules[reason] || 'FAIL_CLOSED_UNKNOWN_REJECTION';
+}
+
+function rejectionExplanation(reason: AccessTradeRejectionReason): string {
+  const explanations: Partial<Record<AccessTradeRejectionReason, string>> = {
+    INVALID_RECORD: 'Bản ghi không phải đối tượng dữ liệu hợp lệ trong mảng được nhà cung cấp hỗ trợ.',
+    EXTRACTION_FAILED: 'Phản hồi có dữ liệu nhưng không nằm trong cấu trúc AccessTrade được hỗ trợ.',
+    NORMALIZATION_FAILED: 'Bản ghi phát sinh lỗi khi chuẩn hóa và được loại theo nguyên tắc fail-closed.',
+    MISSING_IDENTITY: 'Thiếu mã nguồn hoặc tổ hợp thông tin đủ ổn định để theo dõi và chống trùng.',
+    MISSING_TITLE: 'Không có tiêu đề sử dụng được sau khi chuẩn hóa.',
+    INVALID_URL: 'Liên kết nguồn không phải URL HTTP/HTTPS hợp lệ.',
+    INVALID_IMAGE_URL: 'Liên kết ảnh không phải URL HTTP/HTTPS hợp lệ.',
+    UNSAFE_DESTINATION: 'URL hướng tới đích riêng tư, cục bộ, chứa thông tin đăng nhập hoặc dùng cổng không an toàn.',
+    IMAGE_REQUIRED: 'Bộ lọc hiện tại yêu cầu ảnh nhưng bản ghi không có ảnh hợp lệ.',
+    AFFILIATE_LINK_REQUIRED: 'Bộ lọc hiện tại yêu cầu liên kết affiliate nhưng bản ghi không có liên kết hợp lệ.',
+    TYPE_MISMATCH: 'Loại bản ghi không khớp loại mà người vận hành yêu cầu.',
+    VOUCHER_RECORD: 'Đây là voucher; hệ thống giữ phân loại nhưng không đưa vào kết quả sản phẩm thật.',
+    CAMPAIGN_RECORD: 'Đây là chiến dịch; hệ thống giữ phân loại nhưng không đưa vào kết quả sản phẩm thật.',
+    KEYWORD_MISMATCH: 'Các từ khóa chuẩn hóa không xuất hiện theo ranh giới từ an toàn trong nội dung liên quan.',
+    CATEGORY_MISMATCH: 'Danh mục chuẩn hóa không khớp điều kiện tìm kiếm.',
+    PLATFORM_MISMATCH: 'Nền tảng hoặc miền nhà bán không khớp bộ lọc.',
+    DUPLICATE: 'Một bản ghi mạnh hơn có cùng danh tính nguồn hoặc đích chuẩn đã được giữ lại.',
+    RESULT_LIMIT: 'Bản ghi hợp lệ nằm ngoài giới hạn hiển thị; đây không phải lỗi dữ liệu.',
+    UNSUPPORTED_CLASSIFICATION: 'Bản ghi không thể được phân loại vào nhóm được hỗ trợ.',
+    UNSAFE_PROVIDER_DATA: 'Metadata nhà cung cấp không đạt yêu cầu an toàn để đưa vào chẩn đoán.',
+    BLOCKED_MERCHANT: 'Nhà bán bị chặn bởi chính sách hiện hành.',
+    INSUFFICIENT_QUALITY: 'Điểm chất lượng nguồn thấp hơn ngưỡng yêu cầu.',
+    POLICY_REJECTION: 'Bản ghi bị từ chối bởi chính sách nguồn hoặc nội dung.',
+    UNKNOWN_REASON: 'Không xác định được lý do cụ thể; hệ thống giữ trạng thái bị loại để kiểm tra kỹ thuật.',
+  };
+  return explanations[reason] || 'Bản ghi bị loại theo nguyên tắc an toàn.';
+}
+
+function createRejectionSample(input: AccessTradeRejectionSampleInput): AccessTradeRejectionSample {
+  const raw = input.raw || input.item?.rawData as AccessTradeRawItem | undefined;
+  const originalTitle = raw && getFirstText(raw, [
+    'productName', 'product_name', 'title', 'name', 'voucherName', 'voucher_name',
+    'offerName', 'offer_name', 'campaignName', 'campaign_name',
+  ]);
+  const normalizedTitle = input.item?.name || originalTitle || '';
+  const relevantText = input.item
+    ? [input.item.name, input.item.description, input.item.category, input.item.merchant, input.item.shopName].join(' ')
+    : raw
+      ? [
+        getFirstText(raw, ['title', 'name', 'product_name', 'productName']),
+        getFirstText(raw, ['description', 'desc', 'category', 'category_name']),
+        getFirstText(raw, ['merchant', 'merchant_name', 'shop', 'shop_name']),
+      ].join(' ')
+      : '';
+  const itemKind = input.item?.kind || 'unknown';
+  const sourceEndpoint = safeDiagnosticEndpoint(input.item?.sourceEndpoint || raw?.__sandealEndpoint);
+  return {
+    id: `${input.reason.toLowerCase()}-${stableHash(`${diagnosticSourceIdentifier(raw, input.item)}|${normalizedTitle}`)}`,
+    reason: input.reason,
+    category: rejectionCategory(input.reason, itemKind),
+    provider: 'accesstrade',
+    sourceIdentifier: diagnosticSourceIdentifier(raw, input.item),
+    sourceEndpoint,
+    stage: input.stage,
+    originalProviderTitle: safeDiagnosticText(originalTitle || 'Không có tiêu đề từ nhà cung cấp', 220),
+    normalizedTitle: safeDiagnosticText(normalizedTitle || 'Không có tiêu đề sau chuẩn hóa', 220),
+    normalizedRelevantText: safeDiagnosticText(normalizeMatcherText(relevantText), 360),
+    itemKind,
+    matcherRule: rejectionRule(input.reason, input.params),
+    explanationVi: rejectionExplanation(input.reason),
+  };
+}
+
+function addRejectionSample(
+  samples: Map<AccessTradeRejectionReason, AccessTradeRejectionSample[]>,
+  input: AccessTradeRejectionSampleInput,
+): void {
+  const existing = samples.get(input.reason) || [];
+  if (existing.length >= MAX_COLLECTED_REJECTION_SAMPLES_PER_REASON) return;
+  existing.push(createRejectionSample(input));
+  samples.set(input.reason, existing);
+}
+
+function buildRejectionGroups(
+  rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>,
+  samples: Map<AccessTradeRejectionReason, AccessTradeRejectionSample[]>,
+  params: AccessTradeSearchParams,
+): AccessTradeRejectionGroup[] {
+  const totalRejected = Object.entries(rejectedByReason)
+    .reduce((sum, [, count]) => sum + (count || 0), 0);
+  const selectedReason = params.diagnosticReason;
+  const selectedPageSize = selectedReason
+    ? Math.min(Math.max(Math.floor(params.diagnosticPageSize || DEFAULT_REJECTION_SAMPLE_SIZE), 1), MAX_REJECTION_SAMPLE_PAGE_SIZE)
+    : DEFAULT_REJECTION_SAMPLE_SIZE;
+  const requestedPage = selectedReason ? Math.max(1, Math.floor(params.diagnosticPage || 1)) : 1;
+  return (Object.entries(rejectedByReason) as Array<[AccessTradeRejectionReason, number]>)
+    .filter(([, count]) => count > 0)
+    .sort(([leftReason, leftCount], [rightReason, rightCount]) => rightCount - leftCount || leftReason.localeCompare(rightReason))
+    .map(([reason, count]) => {
+      const available = samples.get(reason) || [];
+      const pageSize = selectedReason === reason ? selectedPageSize : DEFAULT_REJECTION_SAMPLE_SIZE;
+      const page = selectedReason === reason ? requestedPage : 1;
+      const start = (page - 1) * pageSize;
+      const pageSamples = available.slice(start, start + pageSize);
+      const stages = new Set(available.map(sample => sample.stage));
+      return {
+        reason,
+        category: pageSamples[0]?.category || rejectionCategory(reason),
+        count,
+        percentage: totalRejected ? Math.round((count / totalRejected) * 10_000) / 100 : 0,
+        matcherRule: rejectionRule(reason, params),
+        explanationVi: rejectionExplanation(reason),
+        stage: stages.size > 1 ? 'MIXED' : available[0]?.stage || (['INVALID_RECORD', 'EXTRACTION_FAILED', 'MISSING_IDENTITY', 'NORMALIZATION_FAILED'].includes(reason) ? 'BEFORE_NORMALIZATION' : 'AFTER_NORMALIZATION'),
+        samples: pageSamples,
+        pagination: {
+          page,
+          pageSize,
+          totalSamples: available.length,
+          totalPages: Math.max(1, Math.ceil(available.length / pageSize)),
+          hasMore: start + pageSamples.length < available.length,
+        },
+        ...(available.length ? {} : { sampleUnavailableReason: 'Nhà cung cấp chỉ cung cấp số lượng hoặc bản ghi không an toàn để lấy mẫu.' }),
+      };
+    });
+}
+
 function buildAccessTradeSearchResult(
     successfulResults: AccessTradeFetchResult[],
     requests: AccessTradeRequestLog[],
@@ -531,6 +840,7 @@ function buildAccessTradeSearchResult(
 ): AccessTradeSearchResult {
   const rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>> = {};
   const reviewByReason: Partial<Record<AccessTradeReviewReason, number>> = {};
+  const rejectionSamples = new Map<AccessTradeRejectionReason, AccessTradeRejectionSample[]>();
   const increment = <T extends string>(bucket: Partial<Record<T, number>>, reason: T, amount = 1) => {
     bucket[reason] = (bucket[reason] || 0) + amount;
   };
@@ -545,6 +855,12 @@ function buildAccessTradeSearchResult(
   for (const rawItem of successfulResults.flatMap((result) => result.items)) {
     if (!hasStableCandidateIdentity(rawItem)) {
       increment(rejectedByReason, 'MISSING_IDENTITY');
+      addRejectionSample(rejectionSamples, {
+        raw: rawItem,
+        reason: 'MISSING_IDENTITY',
+        stage: 'BEFORE_NORMALIZATION',
+        params,
+      });
       continue;
     }
     try {
@@ -553,11 +869,27 @@ function buildAccessTradeSearchResult(
       for (const reason of item.normalizationIssues || []) increment(reviewByReason, reason);
     } catch {
       increment(rejectedByReason, 'NORMALIZATION_FAILED');
+      addRejectionSample(rejectionSamples, {
+        raw: rawItem,
+        reason: 'NORMALIZATION_FAILED',
+        stage: 'BEFORE_NORMALIZATION',
+        params,
+      });
     }
   }
 
-  const { items: uniqueItems, duplicateCount } = dedupeNormalizedItems(normalized);
-  if (duplicateCount) increment(rejectedByReason, 'DUPLICATE', duplicateCount);
+  const { items: uniqueItems, duplicateCount, duplicates } = dedupeNormalizedItems(normalized);
+  if (duplicateCount) {
+    increment(rejectedByReason, 'DUPLICATE', duplicateCount);
+    for (const item of duplicates) {
+      addRejectionSample(rejectionSamples, {
+        item,
+        reason: 'DUPLICATE',
+        stage: 'AFTER_NORMALIZATION',
+        params,
+      });
+    }
+  }
 
   const classifiedProductCount = uniqueItems.filter((item) => item.kind === 'product' || item.kind === 'deal').length;
   const classifiedVoucherCount = uniqueItems.filter((item) => item.kind === 'voucher').length;
@@ -565,11 +897,21 @@ function buildAccessTradeSearchResult(
   const classifiedStoreOfferCount = uniqueItems.filter((item) => item.kind === 'store_offer').length;
   const classifiedUnknownCount = uniqueItems.filter((item) => item.kind === 'unknown').length;
 
-  let items = filterAccessTradeItems(uniqueItems, params, rejectedByReason);
+  let items = filterAccessTradeItems(uniqueItems, params, rejectedByReason, rejectionSamples);
   items = sortAccessTradeItems(items);
   const acceptedCount = items.length;
   const limitedCount = Math.max(0, items.length - limit);
-  if (limitedCount) increment(rejectedByReason, 'RESULT_LIMIT', limitedCount);
+  if (limitedCount) {
+    increment(rejectedByReason, 'RESULT_LIMIT', limitedCount);
+    for (const item of items.slice(limit)) {
+      addRejectionSample(rejectionSamples, {
+        item,
+        reason: 'RESULT_LIMIT',
+        stage: 'AFTER_NORMALIZATION',
+        params,
+      });
+    }
+  }
   items = items.slice(0, limit);
 
   const products = items.filter((item) => item.kind === 'product' || item.kind === 'deal');
@@ -634,6 +976,8 @@ function buildAccessTradeSearchResult(
       limitedCount,
       rejectedByReason,
       reviewByReason,
+      rejectionSamples,
+      params,
     }),
   };
 }
@@ -653,6 +997,8 @@ function buildAccessTradeDiagnostics(input: {
   limitedCount: number;
   rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>;
   reviewByReason: Partial<Record<AccessTradeReviewReason, number>>;
+  rejectionSamples: Map<AccessTradeRejectionReason, AccessTradeRejectionSample[]>;
+  params: AccessTradeSearchParams;
 }): AccessTradeSearchDiagnostics {
   const rawItemCount = input.successfulResults.reduce(
       (sum, result) => sum + (result.rawItemCount ?? result.items.length),
@@ -676,8 +1022,11 @@ function buildAccessTradeDiagnostics(input: {
     'CATEGORY_MISMATCH',
     'PLATFORM_MISMATCH',
     'TYPE_MISMATCH',
+    'VOUCHER_RECORD',
+    'CAMPAIGN_RECORD',
     'MISSING_TITLE',
     'INVALID_URL',
+    'INVALID_IMAGE_URL',
     'UNSAFE_DESTINATION',
     'IMAGE_REQUIRED',
     'AFFILIATE_LINK_REQUIRED',
@@ -711,6 +1060,12 @@ function buildAccessTradeDiagnostics(input: {
     limitedCount: input.limitedCount,
     rejectedByReason: input.rejectedByReason,
     reviewByReason: input.reviewByReason,
+    rejectionGroups: buildRejectionGroups(input.rejectedByReason, input.rejectionSamples, input.params),
+    rejectionSamplePolicy: {
+      defaultSampleSize: DEFAULT_REJECTION_SAMPLE_SIZE,
+      maximumPageSize: MAX_REJECTION_SAMPLE_PAGE_SIZE,
+      selectedReason: input.params.diagnosticReason || null,
+    },
   };
 }
 
@@ -1733,6 +2088,7 @@ function filterAccessTradeItems(
     items: NormalizedAccessTradeItem[],
     params: AccessTradeSearchParams,
     rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>,
+    rejectionSamples?: Map<AccessTradeRejectionReason, AccessTradeRejectionSample[]>,
 ): NormalizedAccessTradeItem[] {
   const keyword = normalizeText(params.keyword);
   const category = normalizeText(params.category);
@@ -1746,6 +2102,14 @@ function filterAccessTradeItems(
       continue;
     }
     rejectedByReason[reason] = (rejectedByReason[reason] || 0) + 1;
+    if (rejectionSamples) {
+      addRejectionSample(rejectionSamples, {
+        item,
+        reason,
+        stage: 'AFTER_NORMALIZATION',
+        params,
+      });
+    }
   }
 
   return accepted;
@@ -1757,26 +2121,33 @@ function getAccessTradeFilterRejection(
 ): AccessTradeRejectionReason | null {
   if (!item.name.trim()) return 'MISSING_TITLE';
 
+  const imageFields = new Set([
+    'image', 'image_url', 'imageUrl', 'productImage', 'product_image',
+    'thumbnail', 'thumbnail_url', 'thumbnailUrl',
+  ]);
   const rawUrls = [
     ...ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS,
     ...ACCESS_TRADE_AFFILIATE_URL_FIELDS,
-    'image', 'image_url', 'imageUrl', 'productImage', 'product_image',
-    'thumbnail', 'thumbnail_url', 'thumbnailUrl',
-  ].map((field) => getRawValueText(item.rawData, field)).filter(Boolean);
-  for (const value of rawUrls) {
+    ...imageFields,
+  ].map((field) => ({ field, value: getRawValueText(item.rawData, field) })).filter(entry => Boolean(entry.value));
+  for (const { field, value } of rawUrls) {
     const safety = validateExternalUrl(value);
     if (safety.safe) continue;
     if (safety.code === 'PRIVATE_NETWORK' || safety.code === 'CREDENTIALS_NOT_ALLOWED' || safety.code === 'UNSAFE_PORT') {
       return 'UNSAFE_DESTINATION';
     }
-    return 'INVALID_URL';
+    return imageFields.has(field) ? 'INVALID_IMAGE_URL' : 'INVALID_URL';
   }
 
   if (params.kind && params.kind !== 'all') {
     const matchesKind = params.kind === 'product'
       ? item.kind === 'product' || item.kind === 'deal'
       : item.kind === params.kind;
-    if (!matchesKind) return 'TYPE_MISMATCH';
+    if (!matchesKind) {
+      if (params.kind === 'product' && item.kind === 'voucher') return 'VOUCHER_RECORD';
+      if (params.kind === 'product' && item.kind === 'campaign') return 'CAMPAIGN_RECORD';
+      return 'TYPE_MISMATCH';
+    }
   }
 
   if (params.keyword) {
@@ -1839,7 +2210,9 @@ function toAccessTradeRejectionCounters(
     keywordMismatch: rejectedByReason.KEYWORD_MISMATCH || 0,
     categoryMismatch: rejectedByReason.CATEGORY_MISMATCH || 0,
     platformMismatch: rejectedByReason.PLATFORM_MISMATCH || 0,
-    kindMismatch: rejectedByReason.TYPE_MISMATCH || 0,
+    kindMismatch: (rejectedByReason.TYPE_MISMATCH || 0)
+      + (rejectedByReason.VOUCHER_RECORD || 0)
+      + (rejectedByReason.CAMPAIGN_RECORD || 0),
     missingImage: rejectedByReason.IMAGE_REQUIRED || 0,
     missingAffiliateUrl: rejectedByReason.AFFILIATE_LINK_REQUIRED || 0,
   };
@@ -2493,6 +2866,7 @@ function hasStableCandidateIdentity(item: AccessTradeRawItem): boolean {
 function dedupeNormalizedItems(items: NormalizedAccessTradeItem[]): {
   items: NormalizedAccessTradeItem[];
   duplicateCount: number;
+  duplicates: NormalizedAccessTradeItem[];
 } {
   const grouped = new Map<string, NormalizedAccessTradeItem[]>();
   for (const item of items) {
@@ -2502,7 +2876,10 @@ function dedupeNormalizedItems(items: NormalizedAccessTradeItem[]): {
   const unique = [...grouped.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([, candidates]) => mergeNormalizedAccessTradeCandidates(candidates));
-  return { items: unique, duplicateCount: items.length - unique.length };
+  const duplicates = [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([, candidates]) => candidates.slice(1));
+  return { items: unique, duplicateCount: items.length - unique.length, duplicates };
 }
 
 function getNormalizedAccessTradeIdentity(item: NormalizedAccessTradeItem): string {
@@ -2930,21 +3307,28 @@ export function isValidHttpUrl(value: unknown): boolean {
   return validateExternalUrl(stringifyValue(value)).safe;
 }
 
-function matchesSearchQuery(haystackValue: string, queryValue: string): boolean {
-  const haystack = normalizeText(haystackValue);
-  const query = normalizeText(queryValue);
+export function normalizeAccessTradeMatcherText(value: unknown): string {
+  return normalizeText(value)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
+const normalizeMatcherText = normalizeAccessTradeMatcherText;
+
+export function matchesAccessTradeSearchQuery(haystackValue: string, queryValue: string): boolean {
+  const haystack = normalizeMatcherText(haystackValue);
+  const query = normalizeMatcherText(queryValue);
   if (!query) return true;
-  if (haystack.includes(query)) return true;
-
-  const tokens = query
-      .split(/\s+/)
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 2);
-
+  const haystackWords = ` ${haystack} `;
+  if (haystackWords.includes(` ${query} `)) return true;
+  const tokens = query.split(' ').filter(token => token.length >= 2);
   if (!tokens.length) return false;
+  return tokens.every(token => haystackWords.includes(` ${token} `));
+}
 
-  return tokens.every((token) => haystack.includes(token));
+function matchesSearchQuery(haystackValue: string, queryValue: string): boolean {
+  return matchesAccessTradeSearchQuery(haystackValue, queryValue);
 }
 
 function stableHash(value: string): string {

@@ -111,6 +111,47 @@ type AccessTradeDiagnostics = {
   limitedCount?: number;
   rejectedByReason?: Record<string, number>;
   reviewByReason?: Record<string, number>;
+  rejectionGroups?: AccessTradeRejectionGroup[];
+  rejectionSamplePolicy?: {
+    defaultSampleSize?: number;
+    maximumPageSize?: number;
+    selectedReason?: string | null;
+  };
+};
+
+type AccessTradeRejectionSample = {
+  id: string;
+  reason: string;
+  category: string;
+  provider: string;
+  sourceIdentifier: string;
+  sourceEndpoint: string;
+  stage: 'BEFORE_NORMALIZATION' | 'AFTER_NORMALIZATION';
+  originalProviderTitle: string;
+  normalizedTitle: string;
+  normalizedRelevantText: string;
+  itemKind: string;
+  matcherRule: string;
+  explanationVi: string;
+};
+
+type AccessTradeRejectionGroup = {
+  reason: string;
+  category: string;
+  count: number;
+  percentage: number;
+  matcherRule: string;
+  explanationVi: string;
+  stage: 'BEFORE_NORMALIZATION' | 'AFTER_NORMALIZATION' | 'MIXED';
+  samples: AccessTradeRejectionSample[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalSamples: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+  sampleUnavailableReason?: string;
 };
 
 type AccessTradeResults = {
@@ -157,8 +198,11 @@ const ACCESS_TRADE_REJECTION_LABELS: Record<string, string> = {
   MISSING_IDENTITY: 'Thiếu định danh ổn định',
   MISSING_TITLE: 'Thiếu tên sản phẩm',
   INVALID_URL: 'URL sai định dạng hoặc giao thức',
+  INVALID_IMAGE_URL: 'URL ảnh sai định dạng hoặc giao thức',
   UNSAFE_DESTINATION: 'Đích URL không an toàn',
   TYPE_MISMATCH: 'Không phải loại dữ liệu đang tìm',
+  VOUCHER_RECORD: 'Voucher không phải sản phẩm',
+  CAMPAIGN_RECORD: 'Chiến dịch không phải sản phẩm',
   KEYWORD_MISMATCH: 'Không khớp từ khoá',
   CATEGORY_MISMATCH: 'Không khớp danh mục',
   PLATFORM_MISMATCH: 'Không khớp nền tảng',
@@ -168,6 +212,10 @@ const ACCESS_TRADE_REJECTION_LABELS: Record<string, string> = {
   RESULT_LIMIT: 'Ngoài giới hạn hiển thị',
   UNSUPPORTED_CLASSIFICATION: 'Không hỗ trợ phân loại',
   UNSAFE_PROVIDER_DATA: 'Dữ liệu nguồn không an toàn',
+  BLOCKED_MERCHANT: 'Nhà bán bị chặn',
+  INSUFFICIENT_QUALITY: 'Điểm chất lượng chưa đủ',
+  POLICY_REJECTION: 'Bị chặn bởi chính sách',
+  UNKNOWN_REASON: 'Lý do chưa xác định',
 };
 
 type ApiEnvelope<T> = {
@@ -223,6 +271,15 @@ type CandidateMapping = {
   duplicateEvidence: Array<'SOURCE_ID_EXACT' | 'CANONICAL_URL_EXACT'>;
   enrichedFields: string[];
   unchangedFields?: string[];
+  preservedFields?: string[];
+  notUpdatedFields?: Array<{
+    field: string;
+    reason: 'EXISTING_EVIDENCE_STRONGER' | 'EXISTING_VALUE_PRESERVED';
+  }>;
+  technicalFields?: {
+    updatedPaths?: string[];
+    unchangedPaths?: string[];
+  };
 };
 
 type CandidateSaveResult = {
@@ -231,6 +288,10 @@ type CandidateSaveResult = {
   existing: boolean;
   duplicateEvidence: CandidateMapping['duplicateEvidence'];
   enrichedFields: string[];
+  preservedFields: string[];
+  notUpdatedFields: NonNullable<CandidateMapping['notUpdatedFields']>;
+  technicalFields?: CandidateMapping['technicalFields'];
+  route: string;
   message: string;
 };
 
@@ -755,6 +816,12 @@ function normalizeAtResults(
         limitedCount: 0,
         rejectedByReason: {},
         reviewByReason: {},
+        rejectionGroups: [],
+        rejectionSamplePolicy: {
+          defaultSampleSize: 3,
+          maximumPageSize: 20,
+          selectedReason: null,
+        },
       },
     };
   }
@@ -957,12 +1024,14 @@ export default function ProductSourcesPage() {
   const [atKeyword, setAtKeyword] = useState('');
   const [atKind, setAtKind] = useState('product');
   const [atLoading, setAtLoading] = useState(false);
+  const [atDiagnosticLoading, setAtDiagnosticLoading] = useState<string | null>(null);
   const [atError, setAtError] = useState('');
   const [atResults, setAtResults] = useState<AccessTradeResults | null>(null);
   const [atSaving, setAtSaving] = useState<string | null>(null);
-  const [existingProducts, setExistingProducts] = useState<Record<string, { id: string; route: string }>>({});
   const [atConfigured, setAtConfigured] = useState(false);
   const [atSaveResults, setAtSaveResults] = useState<Record<string, CandidateSaveResult>>({});
+  const [saveMappingsHydrated, setSaveMappingsHydrated] = useState(false);
+  const saveInFlightRef = useRef(new Set<string>());
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
     if (!mountedRef.current) return;
@@ -1019,14 +1088,49 @@ export default function ProductSourcesPage() {
 
   useEffect(() => {
     mountedRef.current = true;
+    const hydrationTimer = window.setTimeout(() => {
+      try {
+        const stored = window.localStorage.getItem('sandeal:source-candidate-mappings:v1');
+        const parsed = stored ? JSON.parse(stored) as Record<string, CandidateSaveResult> : {};
+        const safeEntries = Object.entries(parsed).filter(([, value]) => (
+          value
+          && typeof value === 'object'
+          && typeof value.productId === 'string'
+          && typeof value.route === 'string'
+          && value.route.startsWith('/dashboard/products/')
+        )).slice(-100).map(([key, value]) => [key, {
+          ...value,
+          duplicateEvidence: Array.isArray(value.duplicateEvidence) ? value.duplicateEvidence : [],
+          enrichedFields: Array.isArray(value.enrichedFields) ? value.enrichedFields : [],
+          preservedFields: Array.isArray(value.preservedFields) ? value.preservedFields : [],
+          notUpdatedFields: Array.isArray(value.notUpdatedFields) ? value.notUpdatedFields : [],
+        }] as const);
+        if (safeEntries.length) setAtSaveResults(Object.fromEntries(safeEntries));
+      } catch {
+        window.localStorage.removeItem('sandeal:source-candidate-mappings:v1');
+      } finally {
+        if (mountedRef.current) setSaveMappingsHydrated(true);
+      }
+    }, 0);
     return () => {
       mountedRef.current = false;
+      window.clearTimeout(hydrationTimer);
       const controller = scanAbortRef.current;
       scanAbortRef.current = null;
       controller?.abort();
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!mountedRef.current || !saveMappingsHydrated) return;
+    try {
+      const recent = Object.fromEntries(Object.entries(atSaveResults).slice(-100));
+      window.localStorage.setItem('sandeal:source-candidate-mappings:v1', JSON.stringify(recent));
+    } catch {
+      // Storage can be unavailable in privacy mode; server-side idempotency remains authoritative.
+    }
+  }, [atSaveResults, saveMappingsHydrated]);
 
 
 
@@ -1154,8 +1258,6 @@ export default function ProductSourcesPage() {
 
     setAtLoading(true);
     setAtError('');
-    setAtResults(null);
-    setAtSaveResults({});
 
     try {
       const res = await fetchWithTimeout('/api/product-sources/accesstrade/search', {
@@ -1191,8 +1293,49 @@ export default function ProductSourcesPage() {
     }
   };
 
+  const handleAtDiagnosticPage = async (reason: string, page: number) => {
+    if (!atConfigured || atDiagnosticLoading) return;
+    const keyword = atKeyword.trim();
+    if (keyword.length < 2) return;
+    setAtDiagnosticLoading(reason);
+    setAtError('');
+    try {
+      const res = await fetchWithTimeout('/api/product-sources/accesstrade/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          keyword,
+          kind: atKind,
+          limit: 20,
+          imageOnly: false,
+          affiliateLinkOnly: false,
+          diagnosticReason: reason,
+          diagnosticPage: Math.max(1, page),
+          diagnosticPageSize: 10,
+        }),
+      }, 40_000);
+      const data = (await res.json().catch(() => null)) as ApiEnvelope<
+        AccessTradeResults | AccessTradeItem[]
+      > | null;
+      if (!mountedRef.current) return;
+      if (res.ok && (data?.ok || data?.success)) {
+        setAtResults(normalizeAtResults(data.data));
+      } else {
+        setAtError(data?.message || data?.error || `Không tải được mẫu bị loại. HTTP ${res.status}`);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setAtError(error instanceof Error ? error.message : 'Không tải được mẫu bị loại.');
+      }
+    } finally {
+      if (mountedRef.current) setAtDiagnosticLoading(null);
+    }
+  };
+
   const handleAtSave = async (item: AccessTradeItem, runScore = false) => {
     const itemId = getAtItemId(item);
+    if (saveInFlightRef.current.has(itemId) || atSaveResults[itemId]) return;
+    saveInFlightRef.current.add(itemId);
     const kind = getAtItemKind(item);
     const isProduct = isRealProductKind(kind);
     const isNonProduct = isNonProductKind(kind);
@@ -1242,7 +1385,13 @@ export default function ProductSourcesPage() {
     try {
       const res = await fetchWithTimeout('/api/products', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': buildIdempotencyKey({
+            scope: 'dashboard:save-source-candidate',
+            values: { source: 'accesstrade', sourceId: itemId },
+          }),
+        },
         body: JSON.stringify({
           title,
           description: description || undefined,
@@ -1356,10 +1505,19 @@ export default function ProductSourcesPage() {
           fieldProvenance: item.fieldProvenance,
 
           rawSourceType: 'accesstrade',
-          rawData:
-              item.rawData && typeof item.rawData === 'object'
-                  ? item.rawData
-                  : item,
+          // The search API intentionally omits the oversized provider payload.
+          // Persist only the bounded, normalized provenance required for audit.
+          rawData: {
+            sourceItemId: getString(item.sourceItemId) || itemId,
+            rawSourceKind: getString(item.rawSourceKind) || kind,
+            merchant: getString(item.merchant) || undefined,
+            merchantDomain: getString(item.merchantDomain) || undefined,
+            shopId: getString(item.shopId) || undefined,
+            shopName: getString(item.shopName) || undefined,
+            sku: getString(item.sku) || undefined,
+            sourceEndpoint: getString(item.sourceEndpoint) || undefined,
+            fetchedAt: getString(item.fetchedAt) || undefined,
+          },
         }),
       });
 
@@ -1385,6 +1543,10 @@ export default function ProductSourcesPage() {
               existing: Boolean(mapping && mapping.outcome !== 'CREATED'),
               duplicateEvidence: mapping?.duplicateEvidence || [],
               enrichedFields: mapping?.enrichedFields || [],
+              preservedFields: mapping?.preservedFields || [],
+              notUpdatedFields: mapping?.notUpdatedFields || [],
+              technicalFields: mapping?.technicalFields,
+              route: `/dashboard/products/${encodeURIComponent(data.data!.id)}`,
               message: data.message || 'Đã lưu candidate.',
             },
           }));
@@ -1407,9 +1569,6 @@ export default function ProductSourcesPage() {
         const existingProductUrl = getString(data?.existingProductUrl || duplicateData?.existingProductUrl);
         const mapping = duplicateData?.mapping;
         const mergeResult = data?.mergeResult || duplicateData?.mergeResult;
-        if (existingProductId && existingProductUrl) {
-          setExistingProducts(current => ({ ...current, [itemId]: { id: existingProductId, route: existingProductUrl } }));
-        }
         if (existingProductId) {
           setAtSaveResults(previous => ({
             ...previous,
@@ -1419,6 +1578,10 @@ export default function ProductSourcesPage() {
               existing: true,
               duplicateEvidence: mapping?.duplicateEvidence || [],
               enrichedFields: mapping?.enrichedFields || mergeResult?.updatedFields || [],
+              preservedFields: mapping?.preservedFields || [],
+              notUpdatedFields: mapping?.notUpdatedFields || [],
+              technicalFields: mapping?.technicalFields,
+              route: existingProductUrl || `/dashboard/products/${encodeURIComponent(existingProductId)}`,
               message: data?.message || 'Sản phẩm đã tồn tại; không tạo thêm bản ghi trùng.',
             },
           }));
@@ -1436,6 +1599,7 @@ export default function ProductSourcesPage() {
     } catch {
       showToast('error', 'Lỗi kết nối.');
     } finally {
+      saveInFlightRef.current.delete(itemId);
       if (mountedRef.current) setAtSaving(null);
     }
   };
@@ -1948,8 +2112,22 @@ export default function ProductSourcesPage() {
                     </div>
                 )}
 
+                {atLoading && !atResults && (
+                    <div className="glass-card" role="status" aria-live="polite" style={{ maxWidth: '960px', marginBottom: 'var(--space-lg)' }}>
+                      <strong>Đang nhận và chuẩn hoá dữ liệu AccessTrade…</strong>
+                      <p style={{ marginTop: 'var(--space-xs)', color: 'var(--text-secondary)' }}>
+                        Kết quả rỗng chỉ được hiển thị sau khi yêu cầu hoàn tất thành công.
+                      </p>
+                    </div>
+                )}
+
                 {atResults && (
                     <div style={{ maxWidth: '960px' }}>
+                      {atLoading && (
+                          <div className="disclosure-banner" role="status" style={{ marginBottom: 'var(--space-md)' }}>
+                            Đang làm mới tìm kiếm; kết quả hợp lệ gần nhất vẫn được giữ trên màn hình.
+                          </div>
+                      )}
                       {atResults.diagnostics && (
                           <div
                               className="glass-card"
@@ -2014,6 +2192,82 @@ export default function ProductSourcesPage() {
                                     ))}
                                   </div>
                                 </details>
+                            )}
+
+                            {(atResults.diagnostics.rejectionGroups || []).length > 0 && (
+                                <div style={{ display: 'grid', gap: 'var(--space-sm)', marginTop: 'var(--space-md)' }}>
+                                  <h3 style={{ margin: 0, fontSize: 'var(--text-base)' }}>Chẩn đoán bản ghi bị loại</h3>
+                                  <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: 'var(--text-sm)' }}>
+                                    Mẫu được giới hạn và làm sạch; payload gốc, token, URL ký và metadata nhạy cảm không được hiển thị.
+                                  </p>
+                                  {(atResults.diagnostics.rejectionGroups || []).map((group) => (
+                                      <details
+                                          key={`${group.reason}-${group.category}`}
+                                          style={{ border: '1px solid var(--ds-border)', borderRadius: 'var(--ds-radius-md)', padding: 'var(--space-sm)' }}
+                                      >
+                                        <summary style={{ cursor: 'pointer', fontWeight: 650 }}>
+                                          {ACCESS_TRADE_REJECTION_LABELS[group.reason] || 'Lý do an toàn khác'}
+                                          {' · '}{group.count} bản ghi ({group.percentage.toLocaleString('vi-VN')}%)
+                                        </summary>
+                                        <div style={{ display: 'grid', gap: 'var(--space-sm)', marginTop: 'var(--space-sm)' }}>
+                                          <div className="disclosure-banner">
+                                            <strong>Quy tắc:</strong> <code>{group.matcherRule}</code><br />
+                                            <strong>Giai đoạn:</strong> {group.stage === 'BEFORE_NORMALIZATION' ? 'Trước chuẩn hoá' : group.stage === 'AFTER_NORMALIZATION' ? 'Sau chuẩn hoá' : 'Nhiều giai đoạn'}<br />
+                                            {group.explanationVi}
+                                          </div>
+                                          {group.samples.map((sample) => (
+                                              <article
+                                                  key={sample.id}
+                                                  style={{ display: 'grid', gap: '6px', padding: 'var(--space-sm)', background: 'var(--ds-surface-muted)', borderRadius: 'var(--ds-radius-sm)' }}
+                                              >
+                                                <div className="flex items-center gap-xs" style={{ flexWrap: 'wrap' }}>
+                                                  <span className="badge badge-neutral">AccessTrade / {sample.sourceEndpoint}</span>
+                                                  <span className="badge badge-neutral">{sample.stage === 'BEFORE_NORMALIZATION' ? 'Trước chuẩn hoá' : 'Sau chuẩn hoá'}</span>
+                                                  <span className="badge badge-neutral">{getKindLabel(sample.itemKind)}</span>
+                                                </div>
+                                                <div><strong>Tiêu đề từ nguồn:</strong> {sample.originalProviderTitle}</div>
+                                                <div><strong>Tiêu đề chuẩn hoá:</strong> {sample.normalizedTitle}</div>
+                                                <div><strong>Văn bản matcher:</strong> <code style={{ overflowWrap: 'anywhere' }}>{sample.normalizedRelevantText || 'Không có'}</code></div>
+                                                <div><strong>Định danh nguồn:</strong> <code>{sample.sourceIdentifier}</code></div>
+                                                <div><strong>Quy tắc từ chối:</strong> <code>{sample.matcherRule}</code></div>
+                                                <div style={{ color: 'var(--text-secondary)' }}>{sample.explanationVi}</div>
+                                              </article>
+                                          ))}
+                                          {group.sampleUnavailableReason && (
+                                              <p style={{ margin: 0, color: 'var(--text-secondary)' }}>{group.sampleUnavailableReason}</p>
+                                          )}
+                                          <div className="flex items-center gap-sm" style={{ flexWrap: 'wrap' }}>
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)' }}>
+                                              Trang mẫu {group.pagination.page}/{group.pagination.totalPages} · {group.pagination.totalSamples} mẫu an toàn
+                                            </span>
+                                            {group.pagination.page > 1 && (
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary btn-sm"
+                                                    disabled={atDiagnosticLoading === group.reason}
+                                                    onClick={() => void handleAtDiagnosticPage(group.reason, group.pagination.page - 1)}
+                                                >
+                                                  Mẫu trước
+                                                </button>
+                                            )}
+                                            {!group.sampleUnavailableReason && group.pagination.hasMore && (
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary btn-sm"
+                                                    disabled={atDiagnosticLoading === group.reason}
+                                                    onClick={() => void handleAtDiagnosticPage(
+                                                        group.reason,
+                                                        group.pagination.pageSize < 10 ? 1 : group.pagination.page + 1,
+                                                    )}
+                                                >
+                                                  {atDiagnosticLoading === group.reason ? 'Đang tải…' : 'Xem thêm mẫu'}
+                                                </button>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </details>
+                                  ))}
+                                </div>
                             )}
                           </div>
                       )}
@@ -2172,7 +2426,6 @@ export default function ProductSourcesPage() {
                         const affiliateInvalid = ['error', 'broken', 'not_allowed', 'invalid'].includes(affiliateState);
                         const imageVerified = imageState === 'ok' || imageState === 'valid';
                         const imageInvalid = ['error', 'broken', 'image_broken', 'invalid_image', 'invalid_content_type'].includes(imageState);
-                        const existingProduct = existingProducts[itemId];
                         const hasPrice = Boolean(
                             getNumber(item.salePrice) || getNumber(item.price),
                         );
@@ -2315,6 +2568,23 @@ export default function ProductSourcesPage() {
                                         Trường đã bổ sung: {saveResult.enrichedFields.join(', ')}.
                                       </div>
                                     )}
+                                    {saveResult.preservedFields.length > 0 && (
+                                      <div style={{ marginTop: 3 }}>
+                                        Dữ liệu được giữ nguyên: {saveResult.preservedFields.join(', ')}.
+                                      </div>
+                                    )}
+                                    {saveResult.notUpdatedFields.length > 0 && (
+                                      <div style={{ marginTop: 3 }}>
+                                        Không cập nhật: {saveResult.notUpdatedFields.map(entry => (
+                                          `${entry.field} (${entry.reason === 'EXISTING_EVIDENCE_STRONGER'
+                                            ? 'bằng chứng hiện có mạnh hơn hoặc đã xác minh'
+                                            : 'giá trị hiện có được ưu tiên'})`
+                                        )).join('; ')}.
+                                      </div>
+                                    )}
+                                    <div style={{ marginTop: 3 }}>
+                                      <strong>Bước tiếp theo:</strong> mở sản phẩm để xem các kiểm tra link, ảnh, giá và blocker trước khi xuất bản.
+                                    </div>
                                     <Link
                                       className="btn btn-sm btn-secondary"
                                       data-canonical-product-id={saveResult.productId}
@@ -2323,6 +2593,15 @@ export default function ProductSourcesPage() {
                                     >
                                       {saveResult.existing ? 'Xem sản phẩm đã có' : 'Xem sản phẩm'}
                                     </Link>
+                                    {(saveResult.technicalFields?.updatedPaths?.length || saveResult.technicalFields?.unchangedPaths?.length) && (
+                                      <details style={{ marginTop: 8 }}>
+                                        <summary style={{ cursor: 'pointer' }}>Chi tiết kỹ thuật</summary>
+                                        <div style={{ marginTop: 4, overflowWrap: 'anywhere' }}>
+                                          Đường dẫn đã cập nhật: {saveResult.technicalFields.updatedPaths?.join(', ') || 'không có'}.
+                                          {' '}Đường dẫn được giữ: {saveResult.technicalFields.unchangedPaths?.join(', ') || 'không có'}.
+                                        </div>
+                                      </details>
+                                    )}
                                   </div>
                                 )}
 
@@ -2333,21 +2612,22 @@ export default function ProductSourcesPage() {
                                       flexWrap: 'wrap',
                                     }}
                                 >
-                                  <button
-                                      type="button"
-                                      className="btn btn-sm btn-primary"
-                                      disabled={Boolean(atSaving)}
-                                      onClick={() => void handleAtSave(item)}
-                                  >
-                                    {atSaving === itemId
-                                        ? 'Đang lưu...'
-                                        : 'Lưu vào hàng chờ'}
-                                  </button>
-
-                                  {existingProduct && (
-                                      <Link className="btn btn-sm btn-secondary" href={existingProduct.route}>
-                                        Xem sản phẩm đã có
-                                      </Link>
+                                  {!saveResult ? (
+                                      <button
+                                          type="button"
+                                          className="btn btn-sm btn-primary"
+                                          disabled={Boolean(atSaving)}
+                                          aria-busy={atSaving === itemId}
+                                          onClick={() => void handleAtSave(item)}
+                                      >
+                                        {atSaving === itemId
+                                            ? 'Đang lưu...'
+                                            : 'Lưu vào hàng chờ'}
+                                      </button>
+                                  ) : (
+                                      <span className="badge badge-success" role="status">
+                                        {saveResult.existing ? 'Sản phẩm đã tồn tại' : 'Đã lưu vào hàng chờ'}
+                                      </span>
                                   )}
 
                                 </div>

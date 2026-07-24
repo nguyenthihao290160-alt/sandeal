@@ -10,6 +10,7 @@ import type { CreateProductInput, ProductPlatform, ProductSource, ProductStatus,
 import { PublicProductQueryError, queryPublicProducts } from '@/lib/product-intelligence/publicProducts';
 import { validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 import { extractAccessTradeAffiliateDestination, normalizeAccessTradeImageUrl } from '@/lib/integrations/accesstrade';
+import { IDEMPOTENCY_KEY_PATTERN } from '@/lib/automation/idempotency';
 
 export const dynamic = 'force-dynamic';
 
@@ -126,6 +127,10 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const authError = await requirePermission(request, 'EDIT_PRODUCTS');
   if (authError) return authError;
+  const idempotencyKey = request.headers.get('idempotency-key');
+  if (idempotencyKey && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+    return errorResponse('Mã chống gửi trùng không hợp lệ.', 'VALIDATION_ERROR', 400);
+  }
 
   try {
     let body: Record<string, unknown>;
@@ -361,8 +366,11 @@ export async function POST(request: NextRequest) {
 
       const existingProductUrl = `/dashboard/products/${encodeURIComponent(result.product.id)}`;
       const mergeResult = {
-        updatedFields: result.mapping.enrichedFields,
-        unchangedFields: result.mapping.unchangedFields,
+        // Preserve the established technical audit contract for API consumers.
+        // The operator UI uses the friendly mapping fields and exposes these
+        // raw paths only inside an explicit technical-details disclosure.
+        updatedFields: result.mapping.technicalFields.updatedPaths,
+        unchangedFields: result.mapping.technicalFields.unchangedPaths,
       };
       return NextResponse.json({
         ok: false,

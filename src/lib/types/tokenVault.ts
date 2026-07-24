@@ -143,6 +143,24 @@ export type SafeCredential = Omit<StoredCredential, 'encryptedValue'> & {
     stored: boolean;
     valid: boolean;
     generationReady: boolean;
+    productionReady: boolean;
+    dimensions: {
+      credentialPresent: boolean;
+      credentialFormatAccepted: boolean;
+      authenticationValid: boolean;
+      modelDiscoveryAvailable: boolean;
+      contentGenerationPermissionAvailable: boolean;
+      selectedModelAvailable: boolean;
+      quotaAvailable: boolean;
+      freeOnlyPolicySatisfied: boolean;
+      adapterHealthy: boolean;
+      productionRouteSelected: boolean;
+      endToEndMinimalGenerationPassed: boolean;
+      productionReady: boolean;
+    };
+    failureClass: 'permission' | 'authentication' | 'policy' | 'quota' | 'model' | 'adapter' | 'network' | 'routing' | 'unknown' | null;
+    selectedProvider: 'gemini' | null;
+    routePolicy: 'FREE_ONLY' | null;
     reasonCode: 'ready' | 'not_applicable' | 'credential_not_checked' | 'credential_not_valid' | 'generation_not_verified' | 'generation_check_stale' | 'generation_temporarily_unavailable' | 'cooldown_active' | 'quota_limited' | 'free_policy_unverified' | 'billing_not_confirmed' | 'quota_group_missing' | 'model_not_verified' | 'model_not_available' | 'region_restricted' | 'provider_unavailable' | 'invalid' | 'disabled' | 'missing_permission' | 'unknown';
     priority: number;
     preferredModel: string | null;

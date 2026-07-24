@@ -8,7 +8,7 @@ import { getProductById } from '@/lib/storage/products';
 import type { Product } from '@/lib/types';
 import { evaluateProductEligibility } from '@/lib/productEligibility';
 
-export type ProductAdminActionType = 'reviewed' | 'data_verified' | 'canary_ready' | 'safe_publish_requested' | 'publish_approved';
+export type ProductAdminActionType = 'reviewed' | 'data_verified' | 'price_verified' | 'canary_ready' | 'safe_publish_requested' | 'publish_approved';
 export interface ProductAdminActionRecord {
   id: string;
   productId: string;

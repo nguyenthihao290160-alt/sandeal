@@ -119,7 +119,7 @@ function product(overrides = {}) {
     equal(result.diagnostics.rejectedByReason.KEYWORD_MISMATCH, 1);
     equal(result.diagnostics.rejectedByReason.INVALID_URL, 1);
     equal(result.diagnostics.rejectedByReason.UNSAFE_DESTINATION, 1);
-    equal(result.diagnostics.rejectedByReason.TYPE_MISMATCH, 1);
+    equal(result.diagnostics.rejectedByReason.VOUCHER_RECORD, 1);
     equal(result.diagnostics.rejectedByReason.IMAGE_REQUIRED, 1);
     equal(result.diagnostics.rejectedByReason.AFFILIATE_LINK_REQUIRED, 1);
     equal(result.diagnostics.rejectedCount, 7);

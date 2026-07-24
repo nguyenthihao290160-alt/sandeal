@@ -10,6 +10,7 @@ export type StorageErrorCode =
   | 'MONGO_TRANSACTION_CONFLICT'
   | 'MONGO_SCHEMA_VERSION_MISMATCH'
   | 'INVALID_COLLECTION_NAME'
+  | 'INVALID_STORAGE_QUERY'
   | 'INVALID_STORAGE_PAYLOAD'
   | 'FILE_STORAGE_UNREACHABLE';
 
@@ -25,6 +26,7 @@ const SAFE_MESSAGES: Record<StorageErrorCode, string> = {
   MONGO_TRANSACTION_CONFLICT: 'Mongo storage transaction detected a revision conflict.',
   MONGO_SCHEMA_VERSION_MISMATCH: 'Mongo storage schema version does not match the expected version.',
   INVALID_COLLECTION_NAME: 'Storage collection name is invalid.',
+  INVALID_STORAGE_QUERY: 'Storage collection query is invalid.',
   INVALID_STORAGE_PAYLOAD: 'Storage collection payload is not safely serializable.',
   FILE_STORAGE_UNREACHABLE: 'File storage directory is not reachable.',
 };

@@ -20,4 +20,9 @@
 .manualForm label { display: grid; gap: 6px; font-size: 13px; font-weight: 650; }
 .manualForm textarea, .manualForm select { width: 100%; border: 1px solid var(--ds-border-strong, #cbd5e1); border-radius: 7px; padding: 9px 10px; background: #fff; color: inherit; font: inherit; }
 .manualForm input[type='checkbox'] { width: 18px; height: 18px; }
+.refreshNotice { display: flex; align-items: center; min-height: 38px; padding: 8px 14px; border-bottom: 1px solid #bfdbfe; background: #eff6ff; color: #1e40af; font-size: 12px; }
+.skeleton { display: grid; gap: 10px; padding: 16px; color: var(--ds-text-muted, #64748b); font-size: 13px; }
+.skeleton i { display: block; height: 34px; border-radius: 6px; background: linear-gradient(90deg, #e8edf4 20%, #f7f9fc 50%, #e8edf4 80%); background-size: 220% 100%; animation: bot-skeleton 1.25s ease-in-out infinite; }
+@keyframes bot-skeleton { to { background-position: -220% 0; } }
 @media (max-width: 760px) { .commandBar > button { flex: 1 1 140px; } .disclosure { grid-template-columns: 1fr 1fr; } }
+@media (prefers-reduced-motion: reduce) { .skeleton i { animation: none; } }

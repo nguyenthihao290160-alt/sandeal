@@ -29,7 +29,7 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
   const { NextRequest } = require('next/server');
 
   async function reset() {
-    for (const collection of ['automation-jobs','automation-control','automation-audit','automation-ai-usage','automation-circuits','products']) await adapter.writeCollection(collection, []);
+    for (const collection of ['automation-jobs','automation-job-projections','automation-job-list-projections-v2','automation-control','automation-audit','automation-ai-usage','automation-circuits','products']) await adapter.writeCollection(collection, []);
     await settingsStore.updateAutomationSettings({ enabled: false, intervalHours: 6, maxItemsPerRun: 10, maxItemsPerDay: 30 });
   }
   function create(overrides = {}) { return store.createAutomationJob({ type: 'HEALTH_CHECK', payload: {}, idempotencyKey: `job:${Date.now()}:${Math.random().toString(36).slice(2)}`, requestedBy: 'test', riskLevel: 'LOW', ...overrides }); }

@@ -285,10 +285,10 @@ export async function disableCredential(id: string): Promise<SafeCredential | nu
  * Set a credential as primary for its platform.
  * Demotes existing primary for the same platform to backup.
  */
-export async function setPrimaryCredential(id: string): Promise<SafeCredential | null> {
+export async function setPrimaryCredential(id: string, now = Date.now()): Promise<SafeCredential | null> {
   const cred = await getCredentialById(id);
   if (!cred) return null;
-  if (cred.platform === 'gemini' && !getCredentialTruth(cred).generationReady) return null;
+  if (cred.platform === 'gemini' && !getCredentialTruth(cred, now).generationReady) return null;
 
   // Demote existing primary
   await demotePrimaryForPlatform(cred.platform, id);

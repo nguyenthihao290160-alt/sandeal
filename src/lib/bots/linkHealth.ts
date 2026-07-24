@@ -88,64 +88,6 @@ export class LinkHealthBot {
     return result.status as LinkHealthStatus;
   }
 
-  /** Retained only for compatibility evidence; active checks use the bounded body-aware checker above. */
-  private async legacyCheckUrl(url: string, isImage = false): Promise<LinkHealthStatus> {
-    try {
-      // Validate URL format
-      const urlObj = new URL(url);
-
-      // Use fetch with timeout
-      const controller = new AbortController();
-      const timeout = isImage ? 5000 : 8000; // Images faster timeout
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      try {
-        const response = await fetch(url, {
-          method: isImage ? 'HEAD' : 'GET',
-          signal: controller.signal,
-          redirect: 'follow',
-          // Don't follow redirects for HEAD requests to images
-          ...(isImage && { redirect: 'manual' }),
-        });
-
-        clearTimeout(timeoutId);
-
-        if (response.status === 200) {
-          return 'ok';
-        }
-
-        if (response.status >= 300 && response.status < 400) {
-          return 'redirect_ok';
-        }
-
-        if (response.status === 404 || response.status === 410) {
-          return 'not_found';
-        }
-
-        if (response.status >= 500) {
-          return 'server_error';
-        }
-
-        if (response.status >= 400 && response.status < 500) {
-          return isImage ? 'image_broken' : 'affiliate_error';
-        }
-
-        return 'needs_manual_check';
-      } catch (fetchError) {
-        clearTimeout(timeoutId);
-
-        if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-          return 'timeout';
-        }
-
-        return 'needs_manual_check';
-      }
-    } catch (error) {
-      // Invalid URL format
-      return 'needs_manual_check';
-    }
-  }
-
   async checkBulkLinks(
     items: Array<{ productId: string; productUrl?: string; affiliateUrl?: string; imageUrl?: string }>
   ): Promise<LinkHealthCheck[]> {

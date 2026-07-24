@@ -107,6 +107,38 @@ export function maskSecret(value: string): string {
 
 // ---- Safe Projection ----
 
+const SAFE_CREDENTIAL_METADATA_KEYS = new Set([
+  'provider', 'priority', 'projectAlias', 'projectLabel', 'quotaGroupId',
+  'billingMode', 'keyType', 'supportedModels', 'supportedGenerateContentModels',
+  'preferredModel', 'testedModel', 'lightTestStatus', 'generationStatus',
+  'generationReady', 'generationReadinessReason', 'freePolicyEligible',
+  'adapterReady', 'runtimeRouteReady', 'diagnosticCategory', 'retryable',
+  'providerHttpStatus', 'discoveredModelCount', 'lastCheckedAt',
+  'lastLightTestAt', 'lastGenerationTestAt', 'generationVerifiedAt',
+  'lastGenerationSucceededAt', 'lastSuccessfulRequestAt', 'lastFailureAt',
+  'lastErrorCode', 'errorCategory', 'failureStreak', 'cooldownUntil',
+  'nextProbeAt', 'quotaExhaustedUntil', 'requestsTodayEstimated',
+  'inputTokensTodayEstimated', 'outputTokensTodayEstimated', 'healthScore',
+]);
+
+function safeCredentialMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!metadata) return undefined;
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!SAFE_CREDENTIAL_METADATA_KEYS.has(key)) continue;
+    if (typeof value === 'string') {
+      safe[key] = value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]').slice(0, 200);
+    } else if (typeof value === 'boolean') {
+      safe[key] = value;
+    } else if (typeof value === 'number' && Number.isFinite(value)) {
+      safe[key] = value;
+    } else if (Array.isArray(value)) {
+      safe[key] = value.slice(0, 100).map(entry => String(entry).slice(0, 160));
+    }
+  }
+  return Object.keys(safe).length ? safe : undefined;
+}
+
 /**
  * Strip sensitive fields from a StoredCredential.
  * Returns a SafeCredential that is safe for frontend/API responses.
@@ -124,7 +156,12 @@ export function toSafeCredential(stored: StoredCredential): SafeCredential {
     && safeGeminiCategories.has(stored.metadata.errorCategory)
     ? stored.metadata.errorCategory
     : undefined;
-  return { ...safe, lastError: category || (lastError ? 'PROVIDER_CHECK_FAILED' : undefined) };
+  return {
+    ...safe,
+    permissions: Array.isArray(safe.permissions) ? safe.permissions.slice(0, 100).map(value => String(value).slice(0, 160)) : undefined,
+    metadata: safeCredentialMetadata(stored.metadata),
+    lastError: category || (lastError ? 'PROVIDER_CHECK_FAILED' : undefined),
+  };
 }
 
 /**

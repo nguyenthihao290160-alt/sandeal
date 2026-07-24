@@ -391,10 +391,10 @@ async function main() {
   await test('Primary selection rejects unready Gemini, accepts ready, and demotes terminal failures', async () => {
     await resetCollections('token-vault', 'gemini-pool-state');
     const unready = await createGemini('unready-primary', ['fixture', 'unready', 'primary'].join('-'));
-    assert.equal(await tokenVault.setPrimaryCredential(unready.id), null);
+    assert.equal(await tokenVault.setPrimaryCredential(unready.id, fixtureNow), null);
     const ready = await createGemini('ready-primary', ['fixture', 'ready', 'primary'].join('-'));
     await geminiProbe.generationProbeCredential(ready.id, async (url) => String(url).endsWith('/models') ? modelListResponse() : generationResponse(), fixtureNow);
-    assert.equal((await tokenVault.setPrimaryCredential(ready.id)).role, 'primary');
+    assert.equal((await tokenVault.setPrimaryCredential(ready.id, fixtureNow)).role, 'primary');
     await geminiProbe.generationProbeCredential(ready.id, async () => new Response('{}', { status: 403 }), fixtureNow + 1);
     assert.equal((await tokenVault.getCredentialById(ready.id)).role, 'backup');
   });
@@ -436,6 +436,10 @@ async function main() {
     await geminiProbe.lightTestCredential(credential.id, async () => modelListResponse(), fixtureNow);
     assert.equal((await geminiProvider.getGeminiProviderReadiness(fixtureNow)).status, 'configured_not_ready');
     await geminiProbe.generationProbeCredential(credential.id, async () => generationResponse(), fixtureNow);
+    const beforeSelection = await geminiProvider.getGeminiProviderReadiness(fixtureNow);
+    assert.equal(beforeSelection.status, 'degraded');
+    assert.equal(beforeSelection.reason, 'READY_CONNECTION_NOT_PRIMARY');
+    await tokenVault.setPrimaryCredential(credential.id, fixtureNow);
     const provider = await geminiProvider.getGeminiProviderReadiness(fixtureNow);
     assert.equal(provider.status, 'ready');
     assert.equal(provider.adapterAvailable, true);
@@ -495,8 +499,8 @@ async function main() {
     assert.equal(enriched.product.id, first.product.id);
     assert.equal(enriched.product.imageUrl, 'https://cdn.example/enrich.jpg');
     assert.equal(enriched.product.price, 350000);
-    assert.ok(enriched.mapping.enrichedFields.includes('image URL'));
-    assert.ok(enriched.mapping.enrichedFields.includes('giá nguồn'));
+    assert.ok(enriched.mapping.enrichedFields.includes('ảnh sản phẩm'));
+    assert.ok(enriched.mapping.enrichedFields.includes('giá từ nguồn'));
   });
 
   await test('Unverified enrichment never overwrites verified canonical fields', async () => {

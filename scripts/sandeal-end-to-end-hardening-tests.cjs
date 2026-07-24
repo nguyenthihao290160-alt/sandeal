@@ -43,7 +43,8 @@ async function test(name, work) {
 
 async function reset() {
   for (const collection of [
-    'products', 'automation-jobs', 'automation-control', 'automation-audit',
+    'products', 'automation-jobs', 'automation-job-projections', 'automation-job-list-projections-v2',
+    'automation-control', 'automation-audit',
     'automation-ai-usage', 'automation-circuits', 'domain-circuit-breakers',
     'runtime-role-leases', 'runtime-role-conflicts', 'pipeline-daily-usage',
   ]) await adapter.writeCollection(collection, []);

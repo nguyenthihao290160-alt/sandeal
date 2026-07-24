@@ -189,6 +189,62 @@ export interface AutomationJob {
   updatedAt: string;
 }
 
+/**
+ * Compact, browser-safe shape for queue and table views.
+ *
+ * Keep this DTO intentionally small. Execution plans, checkpoints, results,
+ * payloads, worker fencing data, audit metadata, and approval narratives are
+ * available only from the explicit job-detail endpoint.
+ */
+export interface AutomationJobListItem {
+  schemaVersion: number;
+  id: string;
+  operationId: string;
+  type: AutomationJobType;
+  capability?: string;
+  botId?: string;
+  status: AutomationJobStatus;
+  outcomeStatus?: AutomationOutcomeStatus;
+  priority: number;
+  requestedBy: string;
+  requestedExecutionMode?: RequestedExecutionMode;
+  executionMode?: ActualExecutionMode;
+  provider?: string;
+  progress?: Pick<AutomationProgress, 'processed' | 'total' | 'succeeded' | 'skipped' | 'failed' | 'percentage' | 'updatedAt'>;
+  externalCallsOccurred: boolean;
+  externalRequestCount: number;
+  aiRequestCount: number;
+  fallbackUsed: boolean;
+  evidenceCoverage?: number;
+  approvalStatus: ApprovalStatus;
+  approvalExpiresAt?: string;
+  riskLevel: AutomationRiskLevel;
+  dryRun: boolean;
+  attemptCount: number;
+  maxAttempts: number;
+  queuedAt: string;
+  scheduledAt: string;
+  nextRetryAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  lastErrorCode?: string;
+  lastErrorCategory?: AutomationErrorCategory;
+  shortStatusReason?: string;
+  retryable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Internal lease fields needed to reconcile the compact read model. */
+export interface AutomationJobListProjection extends AutomationJobListItem {
+  claimedBy?: string;
+  claimToken?: string;
+  workerInstanceId?: string;
+  workerFencingToken?: number;
+  leaseExpiresAt?: string;
+  heartbeatAt?: string;
+}
+
 export interface AutomationControlState {
   schemaVersion: number;
   id: 'automation-control';

@@ -11,13 +11,45 @@ export type CredentialReadinessReason = 'ready' | 'not_applicable' | 'credential
   | 'quota_group_missing' | 'model_not_verified' | 'model_not_available' | 'region_restricted'
   | 'provider_unavailable' | 'invalid' | 'disabled' | 'missing_permission' | 'unknown';
 
+export type GeminiReadinessFailureClass =
+  | 'permission'
+  | 'authentication'
+  | 'policy'
+  | 'quota'
+  | 'model'
+  | 'adapter'
+  | 'network'
+  | 'routing'
+  | 'unknown';
+
+export interface GeminiReadinessDimensions {
+  credentialPresent: boolean;
+  credentialFormatAccepted: boolean;
+  authenticationValid: boolean;
+  modelDiscoveryAvailable: boolean;
+  contentGenerationPermissionAvailable: boolean;
+  selectedModelAvailable: boolean;
+  quotaAvailable: boolean;
+  freeOnlyPolicySatisfied: boolean;
+  adapterHealthy: boolean;
+  productionRouteSelected: boolean;
+  endToEndMinimalGenerationPassed: boolean;
+  productionReady: boolean;
+}
+
 export interface CredentialTruth {
   id: string;
   maskedIdentifier: string;
   state: CredentialReadinessState;
   stored: boolean;
   valid: boolean;
+  /** Eligible for deterministic routing, but not necessarily the selected production route. */
   generationReady: boolean;
+  productionReady: boolean;
+  dimensions: GeminiReadinessDimensions;
+  failureClass: GeminiReadinessFailureClass | null;
+  selectedProvider: 'gemini' | null;
+  routePolicy: 'FREE_ONLY' | null;
   reasonCode: CredentialReadinessReason;
   priority: number;
   preferredModel: string | null;
@@ -106,7 +138,8 @@ export function getCredentialTruth(
     && legacyFreePolicy
     && generationStatus === 'available'
     && successFresh;
-  const adapterReady = (metadata.adapterReady === true && metadata.runtimeRouteReady === true) || legacyRouteProof;
+  const adapterReady = metadata.adapterReady === true || legacyRouteProof;
+  const runtimeRouteReady = metadata.runtimeRouteReady === true || legacyRouteProof;
   const disabled = credential.role === 'disabled' || credential.status === 'disabled' || generationStatus === 'disabled';
   const cooldown = Boolean(cooldownUntil && Date.parse(cooldownUntil) > now);
   const quota = generationStatus === 'quota_exhausted' || Boolean(quotaUntil && Date.parse(quotaUntil) > now);
@@ -119,9 +152,14 @@ export function getCredentialTruth(
     && Boolean(quotaGroup)
     && modelReady
     && adapterReady
+    && runtimeRouteReady
     && !cooldown
     && !quota
     && !disabled;
+  const modelDiscoveryAvailable = supportedModels.length > 0
+    && (Number(metadata.discoveredModelCount || supportedModels.length) > 0);
+  const productionRouteSelected = credential.role === 'primary' && runtimeRouteReady;
+  const productionReady = generationReady && modelDiscoveryAvailable && productionRouteSelected;
   const category = diagnostic(metadata.diagnosticCategory || metadata.lastErrorCode);
   const state: CredentialReadinessState = disabled ? 'disabled'
     : credential.status === 'invalid' || generationStatus === 'invalid' ? 'invalid'
@@ -153,6 +191,34 @@ export function getCredentialTruth(
                                       : !adapterReady ? 'provider_unavailable'
                                         : 'unknown';
 
+  const dimensions: GeminiReadinessDimensions = {
+    credentialPresent: Boolean(credential.maskedValue),
+    credentialFormatAccepted: Boolean(credential.maskedValue) && credential.status !== 'invalid',
+    authenticationValid: valid,
+    modelDiscoveryAvailable,
+    contentGenerationPermissionAvailable: generationStatus === 'available' && successFresh,
+    selectedModelAvailable: modelReady,
+    quotaAvailable: generationStatus === 'available' && successFresh && !quota,
+    freeOnlyPolicySatisfied: freePolicyEligible,
+    adapterHealthy: adapterReady,
+    productionRouteSelected,
+    endToEndMinimalGenerationPassed: successFresh,
+    productionReady,
+  };
+  const failureClass: GeminiReadinessFailureClass | null = productionReady ? null
+    : credential.status === 'invalid' || category === 'INVALID_KEY' || reasonCode === 'credential_not_valid' ? 'authentication'
+      : credential.status === 'missing_permission' || category === 'PERMISSION_DENIED' || reasonCode === 'missing_permission' ? 'permission'
+        : quota || category === 'QUOTA_EXCEEDED' || category === 'RATE_LIMITED' ? 'quota'
+          : category === 'MODEL_NOT_AVAILABLE' || reasonCode === 'model_not_available' ? 'model'
+            : category === 'NETWORK_TIMEOUT' || category === 'TRANSIENT_ERROR' ? 'network'
+              : category === 'PROVIDER_UNAVAILABLE' ? 'adapter'
+                : credential.status === 'unchecked' || !valid ? 'unknown'
+                  : !freePolicyEligible || reasonCode === 'free_policy_unverified' ? 'policy'
+                    : !modelReady || reasonCode === 'model_not_verified' ? 'model'
+                      : !adapterReady ? 'adapter'
+                        : !runtimeRouteReady || (generationReady && !productionRouteSelected) ? 'routing'
+                          : 'unknown';
+
   return {
     id: credential.id,
     maskedIdentifier: credential.maskedValue,
@@ -160,6 +226,11 @@ export function getCredentialTruth(
     stored: Boolean(credential.maskedValue),
     valid,
     generationReady,
+    productionReady,
+    dimensions,
+    failureClass,
+    selectedProvider: credential.platform === 'gemini' ? 'gemini' : null,
+    routePolicy: credential.platform === 'gemini' ? 'FREE_ONLY' : null,
     reasonCode,
     priority: priority(metadata.priority),
     preferredModel,

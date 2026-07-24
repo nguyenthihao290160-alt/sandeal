@@ -16,10 +16,11 @@ import {
 } from './mongoSchema';
 import type { MongoStorageConfig } from './storageConfig';
 import { isStorageError, storageError, storageErrorCode } from './storageErrors';
-import type { StorageAdapter, StorageTransaction } from './types';
+import type { StorageAdapter, StoragePageOptions, StorageTransaction } from './types';
 
 const TRANSACTION_ATTEMPTS = 2;
 const COMMIT_ATTEMPTS = 2;
+const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]*$/;
 
 interface MongoRevisionDocument extends Document {
   _id: string;
@@ -190,6 +191,63 @@ export class MongoStorageAdapter implements StorageAdapter {
       const snapshot = await readSnapshot<T>(db, session, safeCollection);
       await commitWithBoundedRetry(session);
       return snapshot.items;
+    } catch (error) {
+      await abortIfActive(session);
+      if (isStorageError(error)) throw error;
+      throw storageError('MONGO_OPERATION_FAILED', error);
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async readCollectionPage<T>(collection: string, options: StoragePageOptions) {
+    const safeCollection = validateCollectionName(collection);
+    const filterEntries = Object.entries(options.filters || {});
+    const sortField = options.sort?.field;
+    if (
+      filterEntries.some(([field]) => !SAFE_PAGE_FIELD.test(field))
+      || (sortField && !SAFE_PAGE_FIELD.test(sortField))
+    ) {
+      throw storageError('INVALID_STORAGE_QUERY');
+    }
+    const db = await this.database();
+    const session = await this.session();
+    try {
+      session.startTransaction();
+      await assertMongoSchema(db, session);
+      const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
+        .findOne({ _id: safeCollection, kind: 'collection' }, { session });
+      if (!metadata) {
+        await commitWithBoundedRetry(session);
+        return { items: [] as T[], totalItems: 0, queryCount: 1 };
+      }
+      const match: Record<string, unknown> = { revision: metadata.revision };
+      for (const [field, expected] of filterEntries) match[`item.${field}`] = expected;
+      const sort = options.sort
+        ? { [`item.${options.sort.field}`]: options.sort.direction === 'desc' ? -1 : 1, order: 1 }
+        : { order: 1 };
+      const skip = (options.page - 1) * options.pageSize;
+      const [facet] = await db.collection<MongoStoredItem>(safeCollection).aggregate<{
+        rows: MongoStoredItem[];
+        count: Array<{ total: number }>;
+      }>([
+        { $match: match },
+        { $sort: sort },
+        {
+          $facet: {
+            rows: [{ $skip: skip }, { $limit: options.pageSize }],
+            count: [{ $count: 'total' }],
+          },
+        },
+      ], { session }).toArray();
+      await commitWithBoundedRetry(session);
+      return {
+        items: deserializeMongoItems<T>(facet?.rows || []),
+        totalItems: facet?.count[0]?.total || 0,
+        // One metadata lookup plus one aggregation command. The aggregation
+        // returns both the page and total through $facet.
+        queryCount: 2,
+      };
     } catch (error) {
       await abortIfActive(session);
       if (isStorageError(error)) throw error;

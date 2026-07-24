@@ -4,11 +4,12 @@ import { getProductById, publicationIdempotencyKey } from '@/lib/storage/product
 import { createAutomationJob, publicAutomationJob } from './store';
 import type { AutomationExecutionPlanStep, AutomationJobType, AutomationRiskLevel } from './types';
 
-export type ProductAutomationAction = 'health' | 'link' | 'image' | 'score' | 'content' | 'archive' | 'safe_publish';
+export type ProductAutomationAction = 'health' | 'link' | 'affiliate' | 'image' | 'score' | 'content' | 'archive' | 'safe_publish';
 
 const ACTIONS: Record<ProductAutomationAction, { type: AutomationJobType; capability: string; botId: string; risk: AutomationRiskLevel; expectedWrite: string[]; externalCall: boolean }> = {
   health: { type: 'RECHECK_PRODUCT_HEALTH', capability: 'INSPECT_PRODUCT_HEALTH', botId: 'HEALTH_INSPECTOR', risk: 'MEDIUM', expectedWrite: ['product-health'], externalCall: true },
   link: { type: 'RECHECK_PRODUCT_HEALTH', capability: 'INSPECT_PRODUCT_HEALTH', botId: 'HEALTH_INSPECTOR', risk: 'MEDIUM', expectedWrite: ['product-health'], externalCall: true },
+  affiliate: { type: 'RECHECK_PRODUCT_HEALTH', capability: 'INSPECT_PRODUCT_HEALTH', botId: 'HEALTH_INSPECTOR', risk: 'MEDIUM', expectedWrite: ['product-health'], externalCall: true },
   image: { type: 'RECHECK_PRODUCT_HEALTH', capability: 'INSPECT_PRODUCT_HEALTH', botId: 'HEALTH_INSPECTOR', risk: 'MEDIUM', expectedWrite: ['product-health'], externalCall: true },
   score: { type: 'SCORE_PRODUCTS', capability: 'SCORE_PRODUCTS', botId: 'SCORING_ENGINE', risk: 'MEDIUM', expectedWrite: ['product-scores'], externalCall: false },
   content: { type: 'PREPARE_CONTENT_DRAFT', capability: 'PREPARE_CONTENT_DRAFT', botId: 'CONTENT_DRAFT_ASSISTANT', risk: 'MEDIUM', expectedWrite: ['content-drafts'], externalCall: false },
@@ -52,7 +53,7 @@ export async function enqueueProductAction(input: {
     productIds: ids,
     limit: Math.max(1, Math.min(100, Math.floor(input.limit || (ids.length || 50)))),
   };
-  if (input.action === 'link' || input.action === 'image') payload.healthTarget = input.action;
+  if (input.action === 'link' || input.action === 'affiliate' || input.action === 'image') payload.healthTarget = input.action;
   if (input.action === 'archive') { payload.action = 'archive'; payload.reason = input.reason || 'manual_archive_request'; }
   if (input.action === 'safe_publish') payload.productId = ids[0];
   const plan: AutomationExecutionPlanStep[] = [{

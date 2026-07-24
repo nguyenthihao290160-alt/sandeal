@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
   try {
     const { stats, results } = await probeAllGeminiCredentials();
     return successResponse(
-      `Đã kiểm tra ${stats.total} kết nối: ${stats.validKeys} khóa hợp lệ, ${stats.generationReady} sẵn sàng tạo nội dung.`,
+      `Đã kiểm tra ${stats.total} kết nối: ${stats.validKeys} khóa hợp lệ, ${stats.generationReady} vượt generation probe; kết quả này chưa tự động chọn tuyến production.`,
       { ...stats, completed: results.length, results },
     );
   } catch (error) { return serverErrorResponse('Test All Gemini Keys thất bại.', error); }

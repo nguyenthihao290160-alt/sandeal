@@ -1,6 +1,12 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { getServerActor, requirePermission } from '@/lib/auth';
-import { AutomationJobEnqueueError, createAutomationJob, listAutomationJobs, publicAutomationJob } from '@/lib/automation/store';
+import {
+  AUTOMATION_JOB_LIST_PAYLOAD_BUDGET_BYTES,
+  AutomationJobEnqueueError,
+  createAutomationJob,
+  listAutomationJobs,
+  publicAutomationJob,
+} from '@/lib/automation/store';
 import type { AutomationJobStatus, AutomationJobType } from '@/lib/automation/types';
 import { getAutomationPolicy, listAutomationPolicies } from '@/lib/automation/policyRegistry';
 
@@ -14,10 +20,11 @@ export async function GET(request: NextRequest) {
   if (authError) return authError;
   const searchParams = request.nextUrl.searchParams;
   const page = Number(searchParams.get('page') || 1);
-  const pageSize = Number(searchParams.get('pageSize') || 20);
+  const requestedPageSize = Number(searchParams.get('pageSize') || 20);
+  const pageSize = Math.min(requestedPageSize, 50);
   const status = searchParams.get('status') as AutomationJobStatus | null;
   const type = searchParams.get('type') as AutomationJobType | null;
-  if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 50 || (status && !STATUSES.has(status)) || (type && !ALL_TYPES.has(type))) {
+  if (!Number.isInteger(page) || page < 1 || page > 10_000 || !Number.isInteger(requestedPageSize) || requestedPageSize < 1 || (status && !STATUSES.has(status)) || (type && !ALL_TYPES.has(type))) {
     return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Bộ lọc tác vụ không hợp lệ.' }, { status: 400 });
   }
   const result = await listAutomationJobs({ page, pageSize, status: status || undefined, type: type || undefined });
@@ -25,7 +32,18 @@ export async function GET(request: NextRequest) {
     ok: true,
     code: result.pagination.totalItems ? 'OK' : 'EMPTY',
     message: 'Đã tải hàng chờ tác vụ.',
-    data: { ...result, items: result.items.map(publicAutomationJob) },
+    data: {
+      items: result.items,
+      pagination: result.pagination,
+      meta: {
+        projection: 'compact-v2',
+        detailPathTemplate: '/api/automation/jobs/{id}',
+        payloadBudgetBytes: AUTOMATION_JOB_LIST_PAYLOAD_BUDGET_BYTES,
+        pageSizeCap: 50,
+        pageSizeCapped: requestedPageSize > pageSize,
+        dataAccess: result.dataAccess,
+      },
+    },
   });
 }
 

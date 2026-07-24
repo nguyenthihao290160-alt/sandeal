@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 
 import { storageErrorCode } from './storageErrors';
-import type { StorageAdapter, StorageTransaction } from './types';
+import type { StorageAdapter, StoragePageOptions, StorageTransaction } from './types';
 
 function getDataDir(): string {
   return process.env.SANDEAL_DATA_DIR || path.join(process.cwd(), '.data');
@@ -210,6 +210,37 @@ async function readCollection<T>(collection: string): Promise<T[]> {
   return readCollectionUnlocked<T>(collection);
 }
 
+async function readCollectionPage<T>(collection: string, options: StoragePageOptions) {
+  let items = await readCollectionUnlocked<T>(collection);
+  for (const [field, expected] of Object.entries(options.filters || {})) {
+    items = items.filter((item) => (
+      item !== null
+      && typeof item === 'object'
+      && String((item as Record<string, unknown>)[field] ?? '') === expected
+    ));
+  }
+  if (options.sort) {
+    const { field, direction } = options.sort;
+    const multiplier = direction === 'desc' ? -1 : 1;
+    items.sort((left, right) => {
+      const leftValue = left !== null && typeof left === 'object'
+        ? String((left as Record<string, unknown>)[field] ?? '')
+        : '';
+      const rightValue = right !== null && typeof right === 'object'
+        ? String((right as Record<string, unknown>)[field] ?? '')
+        : '';
+      return leftValue.localeCompare(rightValue) * multiplier;
+    });
+  }
+  const totalItems = items.length;
+  const start = (options.page - 1) * options.pageSize;
+  return {
+    items: items.slice(start, start + options.pageSize),
+    totalItems,
+    queryCount: 1,
+  };
+}
+
 async function refreshBackup(filePath: string): Promise<void> {
   const current = await fs.stat(filePath).catch(() => null);
   if (!current) return;
@@ -360,6 +391,7 @@ export const fileStorageAdapter: StorageAdapter = {
   getDataDir,
   ensureDataDir,
   readCollection,
+  readCollectionPage,
   writeCollection,
   backupCollection,
   runTransaction,

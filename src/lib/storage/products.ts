@@ -16,6 +16,7 @@ import { isPublicSafeProduct } from '../publicProductFilter';
 import { evaluateCanonicalProduct, normalizeCanonicalProduct, stableProductHash } from '../canonicalProduct';
 import { isReviewIndexable } from '../editorialReview';
 import { getOperationEnvironment, runGuardedOperation, sanitizeErrorMessage, type OperationEnvironment } from '../safety/operationGuard';
+import { isStorageError } from './storageErrors';
 
 const COLLECTION = 'products';
 let productWriteChain: Promise<unknown> = Promise.resolve();
@@ -392,6 +393,15 @@ export interface SourceCandidateMappingResult {
   duplicateEvidence: ProductSourceDuplicateEvidence[];
   enrichedFields: string[];
   unchangedFields: string[];
+  preservedFields: string[];
+  notUpdatedFields: Array<{
+    field: string;
+    reason: 'EXISTING_EVIDENCE_STRONGER' | 'EXISTING_VALUE_PRESERVED';
+  }>;
+  technicalFields: {
+    updatedPaths: string[];
+    unchangedPaths: string[];
+  };
 }
 
 export interface SourceCandidateUpsertResult {
@@ -478,18 +488,76 @@ function buildSourceMapping(
 
 function sourceCandidateEnrichmentLabel(field: string): string {
   const labels: Record<string, string> = {
-    sourceId: 'source ID',
-    sourceItemId: 'source item ID',
-    externalId: 'external ID',
-    originalUrl: 'original URL',
-    canonicalProductUrl: 'canonical product URL',
-    imageUrl: 'image URL',
-    affiliateUrl: 'affiliate URL',
-    merchant: 'merchant',
-    price: 'giá nguồn',
-    salePrice: 'giá khuyến mãi nguồn',
+    sourceId: 'mã bản ghi nguồn',
+    sourceItemId: 'mã sản phẩm từ nguồn',
+    externalId: 'mã đối chiếu nhà cung cấp',
+    sourceEndpoint: 'điểm cuối nguồn',
+    sourceFetchedAt: 'thời điểm lấy dữ liệu nguồn',
+    rawSourceKind: 'phân loại gốc của nguồn',
+    sourceItemKind: 'loại bản ghi nguồn',
+    originalUrl: 'liên kết sản phẩm gốc',
+    canonicalProductUrl: 'liên kết sản phẩm chuẩn',
+    canonicalUrlStatus: 'trạng thái liên kết sản phẩm',
+    canonicalUrlSource: 'nguồn liên kết sản phẩm',
+    canonicalUrlProvider: 'nhà cung cấp liên kết sản phẩm',
+    canonicalUrlSourceEndpoint: 'điểm cuối liên kết sản phẩm',
+    canonicalUrlSourceField: 'trường liên kết sản phẩm',
+    canonicalUrlFetchedAt: 'thời điểm lấy liên kết sản phẩm',
+    imageUrl: 'ảnh sản phẩm',
+    affiliateUrl: 'liên kết tiếp thị',
+    affiliateDestinationUrl: 'đích liên kết tiếp thị',
+    affiliateUrlStatus: 'trạng thái liên kết tiếp thị',
+    affiliateUrlSource: 'nguồn liên kết tiếp thị',
+    affiliateUrlProvider: 'nhà cung cấp liên kết tiếp thị',
+    affiliateUrlSourceEndpoint: 'điểm cuối liên kết tiếp thị',
+    affiliateUrlSourceField: 'trường liên kết tiếp thị',
+    affiliateUrlCampaignId: 'mã chiến dịch tiếp thị',
+    affiliateUrlFetchedAt: 'thời điểm lấy liên kết tiếp thị',
+    deepLinkSupported: 'khả năng tạo deep-link',
+    merchant: 'nhà bán',
+    merchantDomain: 'miền nhà bán',
+    shopId: 'mã gian hàng',
+    shopName: 'tên gian hàng',
+    sku: 'mã SKU',
+    providerUpdatedAt: 'thời điểm nguồn cập nhật',
+    sourceNormalizationIssues: 'ghi chú chuẩn hoá nguồn',
+    price: 'giá từ nguồn',
+    salePrice: 'giá khuyến mãi từ nguồn',
+    priceObservedAt: 'thời điểm quan sát giá',
+    priceVerificationStatus: 'trạng thái xác minh giá',
+    verifiedSource: 'xác minh nguồn',
+    sourceQualityScore: 'điểm chất lượng nguồn',
   };
-  return labels[field] || field;
+  if (field.startsWith('fieldProvenance.')) {
+    return `bằng chứng nguồn cho ${sourceCandidateEnrichmentLabel(field.slice('fieldProvenance.'.length))}`;
+  }
+  if (field.startsWith('rawData.')) return 'metadata nguồn còn thiếu';
+  return labels[field] || 'dữ liệu nguồn bổ sung';
+}
+
+function sourceCandidateOperatorFields(fields: string[]): string[] {
+  return [...new Set(fields.map(sourceCandidateEnrichmentLabel))];
+}
+
+function sourceCandidateNotUpdatedFields(existing: Product, fields: string[]) {
+  const evidenceField = (path: string): string => {
+    if (path.startsWith('fieldProvenance.')) return path.slice('fieldProvenance.'.length);
+    if (['originalUrl', 'canonicalProductUrl', 'canonicalUrlStatus'].includes(path)) return 'canonicalProductUrl';
+    if (path.startsWith('affiliate')) return 'affiliateUrl';
+    if (path === 'imageUrl') return 'imageUrl';
+    if (['price', 'salePrice', 'priceVerificationStatus', 'priceObservedAt'].includes(path)) return 'price';
+    return path;
+  };
+  const unique = new Map<string, 'EXISTING_EVIDENCE_STRONGER' | 'EXISTING_VALUE_PRESERVED'>();
+  for (const path of fields) {
+    const field = sourceCandidateEnrichmentLabel(path);
+    const provenance = existing.fieldProvenance?.[evidenceField(path)];
+    const reason = provenance?.verificationStatus === 'VERIFIED'
+      ? 'EXISTING_EVIDENCE_STRONGER'
+      : 'EXISTING_VALUE_PRESERVED';
+    if (!unique.has(field) || reason === 'EXISTING_EVIDENCE_STRONGER') unique.set(field, reason);
+  }
+  return [...unique].map(([field, reason]) => ({ field, reason }));
 }
 
 /**
@@ -503,108 +571,168 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
   const source = draft.source;
 
   return withProductWrite(async () => {
-    const products = await readCanonicalProducts();
     const affiliateIdentity = normalizeProductIdentityUrl(draft.affiliateUrl);
     const requestedOriginal = typeof draft.originalUrl === 'string' ? draft.originalUrl : undefined;
     const normalizedRequestedOriginal = normalizeProductIdentityUrl(requestedOriginal);
     // An affiliate/tracking URL is evidence metadata, never a canonical identity.
     const originalUrl = normalizedRequestedOriginal && normalizedRequestedOriginal !== affiliateIdentity ? requestedOriginal : undefined;
     const normalizedOriginalUrl = originalUrl ? normalizedRequestedOriginal : null;
-    const matches: Array<{ index: number; evidence: ProductSourceDuplicateEvidence[] }> = [];
-    for (let index = 0; index < products.length; index += 1) {
-      const evidence = candidateEvidence(products[index], source, sourceId, normalizedOriginalUrl);
-      if (evidence.length) matches.push({ index, evidence });
+    let result: SourceCandidateUpsertResult | null = null;
+    let audit: {
+      productId: string;
+      duplicateEvidence: ProductSourceDuplicateEvidence[];
+      updatedFields: string[];
+      unchangedFields: string[];
+      createdAt: string;
+    } | null = null;
+
+    // This storage transaction is the cross-process idempotency boundary. Two
+    // concurrent saves re-evaluate identity against the same committed
+    // revision; only one can create the canonical product.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      result = null;
+      audit = null;
+      try {
+        await runTransaction<Partial<Product>>(COLLECTION, stored => {
+          const products = stored.map(item => normalizeCanonicalProduct(item));
+          const matches: Array<{ index: number; evidence: ProductSourceDuplicateEvidence[] }> = [];
+          for (let index = 0; index < products.length; index += 1) {
+            const evidence = candidateEvidence(products[index], source, sourceId, normalizedOriginalUrl);
+            if (evidence.length) matches.push({ index, evidence });
+          }
+          if (matches.length > 1) throw new SourceCandidateMappingConflictError();
+          const matchIndex = matches[0]?.index ?? -1;
+          const duplicateEvidence = matches[0]?.evidence || [];
+          const now = new Date().toISOString();
+
+          if (matchIndex < 0) {
+            const id = generateId();
+            const sourceMapping = buildSourceMapping(draft, sourceId, originalUrl, normalizedOriginalUrl, [], undefined, now);
+            const product = normalizeCanonicalProduct({
+              ...draft,
+              sourceId,
+              externalId: String(draft.externalId || sourceId),
+              originalUrl,
+              sourceMappings: [sourceMapping],
+              id,
+              slug: ensureUniqueSlug(generateSlug(String(draft.title)), products, id),
+              createdAt: now,
+              updatedAt: now,
+            });
+            products.push(product);
+            result = {
+              product,
+              created: true,
+              unchanged: false,
+              mapping: {
+                canonicalProductId: product.id,
+                canonicalIdentifier: product.id.slice(0, 8),
+                outcome: 'CREATED',
+                duplicateEvidence: [],
+                enrichedFields: [],
+                unchangedFields: [],
+                preservedFields: [],
+                notUpdatedFields: [],
+                technicalFields: { updatedPaths: [], unchangedPaths: [] },
+              },
+            };
+            return products;
+          }
+
+          const existing = products[matchIndex];
+          const mappings = Array.isArray(existing.sourceMappings) ? existing.sourceMappings : [];
+          const mappingIndex = mappings.findIndex((mapping) => mapping.source === draft.source && mapping.sourceId === sourceId);
+          const nextMapping = buildSourceMapping(
+            draft,
+            sourceId,
+            originalUrl,
+            normalizedOriginalUrl,
+            duplicateEvidence,
+            mappingIndex >= 0 ? mappings[mappingIndex] : undefined,
+            now,
+          );
+          const nextMappings = [...mappings];
+          if (mappingIndex >= 0) nextMappings[mappingIndex] = nextMapping;
+          else nextMappings.push(nextMapping);
+
+          // Only missing values or stronger evidence are adopted. Existing verified
+          // evidence remains authoritative and every decision is returned/audited.
+          const duplicateMerge = mergeDuplicateCandidate(existing, draft as CreateProductInput);
+          const enrichedFields = sourceCandidateOperatorFields(duplicateMerge.updatedFields);
+          const preservedFields = sourceCandidateOperatorFields(duplicateMerge.unchangedFields);
+          const mappingChanged = mappingIndex < 0 || JSON.stringify(mappings[mappingIndex]) !== JSON.stringify(nextMapping);
+          const changed = duplicateMerge.updatedFields.length > 0 || mappingChanged;
+          const merged = normalizeCanonicalProduct({
+            ...duplicateMerge.product,
+            id: existing.id,
+            sourceMappings: nextMappings,
+            updatedAt: changed ? now : existing.updatedAt,
+          });
+          products[matchIndex] = merged;
+          result = {
+            product: merged,
+            created: false,
+            unchanged: enrichedFields.length === 0,
+            mapping: {
+              canonicalProductId: merged.id,
+              canonicalIdentifier: merged.id.slice(0, 8),
+              outcome: enrichedFields.length ? 'EXISTING_ENRICHED' : 'EXISTING_UNCHANGED',
+              duplicateEvidence,
+              enrichedFields,
+              unchangedFields: duplicateMerge.unchangedFields,
+              preservedFields,
+              notUpdatedFields: sourceCandidateNotUpdatedFields(existing, duplicateMerge.unchangedFields),
+              technicalFields: {
+                updatedPaths: duplicateMerge.updatedFields,
+                unchangedPaths: duplicateMerge.unchangedFields,
+              },
+            },
+          };
+          audit = {
+            productId: merged.id,
+            duplicateEvidence,
+            updatedFields: duplicateMerge.updatedFields,
+            unchangedFields: duplicateMerge.unchangedFields,
+            createdAt: now,
+          };
+          return changed ? products : undefined;
+        });
+        break;
+      } catch (error) {
+        const retryableConflict = isStorageError(error) && error.code === 'MONGO_TRANSACTION_CONFLICT';
+        if (!retryableConflict || attempt === 2) throw error;
+      }
     }
-    if (matches.length > 1) throw new SourceCandidateMappingConflictError();
-    const matchIndex = matches[0]?.index ?? -1;
-    const duplicateEvidence = matches[0]?.evidence || [];
 
-    const now = new Date().toISOString();
-    if (matchIndex < 0) {
-      const id = generateId();
-      const mapping = buildSourceMapping(draft, sourceId, originalUrl, normalizedOriginalUrl, [], undefined, now);
-      const product = normalizeCanonicalProduct({
-        ...draft,
-        sourceId,
-        externalId: String(draft.externalId || sourceId),
-        originalUrl,
-        sourceMappings: [mapping],
-        id,
-        slug: ensureUniqueSlug(generateSlug(String(draft.title)), products, id),
-        createdAt: now,
-        updatedAt: now,
-      });
-      products.push(product);
-      await writeCollection(COLLECTION, products);
-      return {
-        product,
-        created: true,
-        unchanged: false,
-        mapping: {
-          canonicalProductId: product.id,
-          canonicalIdentifier: product.id.slice(0, 8),
-          outcome: 'CREATED',
-          duplicateEvidence: [],
-          enrichedFields: [],
-          unchangedFields: [],
-        },
-      };
-    }
-
-    const existing = products[matchIndex];
-    const mappings = Array.isArray(existing.sourceMappings) ? existing.sourceMappings : [];
-    const mappingIndex = mappings.findIndex((mapping) => mapping.source === draft.source && mapping.sourceId === sourceId);
-    const nextMapping = buildSourceMapping(draft, sourceId, originalUrl, normalizedOriginalUrl, duplicateEvidence, mappingIndex >= 0 ? mappings[mappingIndex] : undefined, now);
-    const nextMappings = [...mappings];
-    if (mappingIndex >= 0) nextMappings[mappingIndex] = nextMapping;
-    else nextMappings.push(nextMapping);
-
-    // Reuse the canonical duplicate enrichment policy from origin/master: only
-    // missing values and stronger evidence may be adopted, while verified values
-    // are never overwritten. Source mappings remain the identity authority.
-    const duplicateMerge = mergeDuplicateCandidate(existing, draft as CreateProductInput);
-    const enrichedFields = duplicateMerge.updatedFields.map(sourceCandidateEnrichmentLabel);
-    const mappingChanged = mappingIndex < 0 || JSON.stringify(mappings[mappingIndex]) !== JSON.stringify(nextMapping);
-    const changed = duplicateMerge.updatedFields.length > 0 || mappingChanged;
-    const merged = normalizeCanonicalProduct({
-      ...duplicateMerge.product,
-      id: existing.id,
-      sourceMappings: nextMappings,
-      updatedAt: changed ? now : existing.updatedAt,
-    });
-    products[matchIndex] = merged;
-    if (changed) await writeCollection(COLLECTION, products);
+    const committedResult = result as SourceCandidateUpsertResult | null;
+    if (!committedResult) throw new Error('SOURCE_CANDIDATE_UPSERT_NOT_COMMITTED');
+    const committedAudit = audit as {
+      productId: string;
+      duplicateEvidence: ProductSourceDuplicateEvidence[];
+      updatedFields: string[];
+      unchangedFields: string[];
+      createdAt: string;
+    } | null;
+    if (!committedAudit) return committedResult;
     try {
       await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items.slice(-999), {
         id: generateId(),
-        existingProductId: merged.id,
+        existingProductId: committedAudit.productId,
         source: draft.source,
         sourceItemId: sourceId,
-        duplicateEvidence,
-        updatedFields: duplicateMerge.updatedFields,
-        unchangedFields: duplicateMerge.unchangedFields,
-        createdAt: now,
+        duplicateEvidence: committedAudit.duplicateEvidence,
+        updatedFields: committedAudit.updatedFields,
+        unchangedFields: committedAudit.unchangedFields,
+        createdAt: committedAudit.createdAt,
       }]);
     } catch (error) {
       console.error(JSON.stringify({
         type: 'product_duplicate_merge_audit_failed',
-        productId: merged.id,
+        productId: committedAudit.productId,
         reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'UNKNOWN_ERROR'),
       }));
     }
-    return {
-      product: merged,
-      created: false,
-      unchanged: enrichedFields.length === 0,
-      mapping: {
-        canonicalProductId: merged.id,
-        canonicalIdentifier: merged.id.slice(0, 8),
-        outcome: enrichedFields.length ? 'EXISTING_ENRICHED' : 'EXISTING_UNCHANGED',
-        duplicateEvidence,
-        enrichedFields,
-        unchangedFields: duplicateMerge.unchangedFields,
-      },
-    };
+    return committedResult;
   });
 }
 

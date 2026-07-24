@@ -8,7 +8,11 @@ import { requireAuth } from '@/lib/auth';
 import {
   searchAccessTrade,
   isAccessTradeConfigured,
+  ACCESS_TRADE_REJECTION_REASONS,
+  type AccessTradeSearchResult,
+  type AccessTradeRejectionReason,
   type AccessTradeSearchParams,
+  type NormalizedAccessTradeItem,
 } from '@/lib/integrations/accesstrade';
 
 export const dynamic = 'force-dynamic';
@@ -23,6 +27,9 @@ type AccessTradeSearchBody = {
   limit?: unknown;
   imageOnly?: unknown;
   affiliateLinkOnly?: unknown;
+  diagnosticReason?: unknown;
+  diagnosticPage?: unknown;
+  diagnosticPageSize?: unknown;
 };
 
 const ACCESS_TRADE_KINDS: AccessTradeKind[] = [
@@ -69,6 +76,18 @@ function asLimit(value: unknown): number {
   if (!Number.isFinite(parsed)) return 20;
 
   return Math.min(Math.max(Math.floor(parsed), 1), 50);
+}
+
+function asBoundedInteger(value: unknown, fallback: number, maximum: number): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : fallback;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.floor(parsed), 1), maximum);
+}
+
+function asDiagnosticReason(value: unknown): AccessTradeRejectionReason | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toUpperCase() as AccessTradeRejectionReason;
+  return ACCESS_TRADE_REJECTION_REASONS.includes(normalized) ? normalized : undefined;
 }
 
 function asKind(value: unknown): AccessTradeKind {
@@ -138,7 +157,34 @@ function emptyAccessTradeResult(message: string) {
       limitedCount: 0,
       rejectedByReason: {},
       reviewByReason: {},
+      rejectionGroups: [],
+      rejectionSamplePolicy: {
+        defaultSampleSize: 3,
+        maximumPageSize: 20,
+        selectedReason: null,
+      },
     },
+  };
+}
+
+export function compactPublicAccessTradeItem(item: NormalizedAccessTradeItem) {
+  const { rawData: _rawProviderPayload, ...safe } = item;
+  void _rawProviderPayload;
+  return {
+    ...safe,
+    rawPayloadOmitted: true,
+  };
+}
+
+export function compactPublicAccessTradeResult(result: AccessTradeSearchResult) {
+  return {
+    ...result,
+    items: result.items.map(compactPublicAccessTradeItem),
+    products: result.products.map(compactPublicAccessTradeItem),
+    vouchers: result.vouchers.map(compactPublicAccessTradeItem),
+    campaigns: result.campaigns.map(compactPublicAccessTradeItem),
+    storeOffers: result.storeOffers.map(compactPublicAccessTradeItem),
+    unknown: result.unknown.map(compactPublicAccessTradeItem),
   };
 }
 
@@ -165,9 +211,12 @@ export async function POST(request: NextRequest) {
       limit: asLimit(body.limit),
       imageOnly: asBoolean(body.imageOnly),
       affiliateLinkOnly: asBoolean(body.affiliateLinkOnly),
+      diagnosticReason: asDiagnosticReason(body.diagnosticReason),
+      diagnosticPage: asBoundedInteger(body.diagnosticPage, 1, 100),
+      diagnosticPageSize: asBoundedInteger(body.diagnosticPageSize, 3, 20),
     };
 
-    const result = await searchAccessTrade(params);
+    const result = compactPublicAccessTradeResult(await searchAccessTrade(params));
 
     return successResponse('Đã tải dữ liệu từ AccessTrade.', {
       sourceReady: true,
@@ -179,6 +228,9 @@ export async function POST(request: NextRequest) {
         limit: params.limit || 20,
         imageOnly: Boolean(params.imageOnly),
         affiliateLinkOnly: Boolean(params.affiliateLinkOnly),
+        diagnosticReason: params.diagnosticReason || null,
+        diagnosticPage: params.diagnosticPage || 1,
+        diagnosticPageSize: params.diagnosticPageSize || 3,
       },
       ...result,
       note:

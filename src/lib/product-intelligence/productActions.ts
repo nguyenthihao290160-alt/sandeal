@@ -11,6 +11,9 @@ function actionId(productId: string, action: ProductAdminActionType, operationId
 export async function recordProductAdminAction(input: { productId: string; action: ProductAdminActionType; actor: string; operationId?: string; reason?: string }) {
   const product = await getProductById(input.productId);
   if (!product) throw new Error('PRODUCT_NOT_FOUND');
+  const observedPrice = Number(product.salePrice || product.price || 0);
+  const hasObservedPrice = Number.isFinite(observedPrice) && observedPrice > 0 && product.currency === 'VND';
+  if (input.action === 'price_verified' && !hasObservedPrice) throw new Error('PRICE_VERIFICATION_FAILED');
   if (input.action === 'data_verified') {
     const missing = [!Number(product.salePrice || product.price) && 'price', !(product.originalUrl || product.affiliateUrl) && 'link', !product.imageUrl && 'image', !(product.verifiedSource || product.sourceVerified) && 'source'].filter(Boolean);
     if (missing.length) throw new Error(`DATA_VERIFICATION_FAILED:${missing.join(',')}`);
@@ -30,12 +33,16 @@ export async function recordProductAdminAction(input: { productId: string; actio
     items.push(record); created = true; return items;
   });
   let job: { id: string; status: string } | null = null;
-  if (created && input.action === 'data_verified') {
-    const observedPrice = Number(product.salePrice || product.price || 0);
-    const hasObservedPrice = Number.isFinite(observedPrice) && observedPrice > 0;
+  const verificationAction = input.action === 'data_verified' || input.action === 'price_verified';
+  // If the action record committed but the product write failed, an idempotent
+  // retry is allowed to finish the verification using the original audit time.
+  const verificationIncomplete = hasObservedPrice && product.priceVerificationStatus !== 'VERIFIED';
+  if (verificationAction && (created || verificationIncomplete)) {
+    const verificationReason = input.action === 'price_verified' ? 'OPERATOR_PRICE_VERIFIED' : 'OWNER_DATA_VERIFIED';
+    const verificationAt = record.occurredAt;
     await saveCanonicalProduct(input.productId, {
       priceVerificationStatus: hasObservedPrice ? 'VERIFIED' : 'MISSING',
-      priceObservedAt: hasObservedPrice ? occurredAt : product.priceObservedAt,
+      priceObservedAt: hasObservedPrice ? verificationAt : product.priceObservedAt,
       priceTruthState: hasObservedPrice ? 'FRESH' : 'UNAVAILABLE',
       fieldProvenance: {
         ...(product.fieldProvenance || {}),
@@ -43,8 +50,8 @@ export async function recordProductAdminAction(input: { productId: string; actio
           ...(product.fieldProvenance?.price || { source: product.source }),
           value: hasObservedPrice ? observedPrice : undefined,
           verificationStatus: hasObservedPrice ? 'VERIFIED' : 'MISSING',
-          verifiedAt: hasObservedPrice ? occurredAt : undefined,
-          verificationReason: hasObservedPrice ? 'OWNER_DATA_VERIFIED' : 'PRICE_MISSING',
+          verifiedAt: hasObservedPrice ? verificationAt : undefined,
+          verificationReason: hasObservedPrice ? verificationReason : 'PRICE_MISSING',
         },
       },
       publicHidden: true,

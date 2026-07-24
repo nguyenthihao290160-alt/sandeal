@@ -2725,6 +2725,13 @@ tr:hover td {
 .token-vault-readiness-summary { margin-top: 3px; color: var(--text-secondary); font-size: 10px; }
 .token-vault-readiness-reason { margin-top: 3px; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
 .token-vault-gemini-meta { margin-top: 4px; color: var(--text-tertiary); font-size: 10px; line-height: 1.55; }
+.token-vault-route-summary { margin-top: 8px; }
+.token-vault-readiness-dimensions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 4px 8px; margin: 8px 0 0; padding: 8px; border: 1px solid var(--ds-border, var(--border-primary)); border-radius: 8px; list-style: none; }
+.token-vault-readiness-dimensions li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 4px; align-items: center; min-width: 0; color: var(--ds-text-muted, var(--text-tertiary)); }
+.token-vault-readiness-dimensions li[data-ready='true'] span,
+.token-vault-readiness-dimensions li[data-ready='true'] strong { color: var(--ds-success, #15803d); }
+.token-vault-readiness-dimensions li[data-ready='false'] span,
+.token-vault-readiness-dimensions li[data-ready='false'] strong { color: var(--ds-warning, #a16207); }
 .token-vault-credential-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; }
 .token-vault-credential-actions .btn { flex: 0 1 auto; width: auto; max-width: 100%; white-space: normal; }
 .token-vault-priority-control { display: inline-flex; align-items: center; gap: 4px; color: var(--text-tertiary); font-size: 10px; }

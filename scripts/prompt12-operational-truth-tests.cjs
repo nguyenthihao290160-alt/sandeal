@@ -177,7 +177,10 @@ async function main() {
   const detailSource = source('src/app/dashboard/products/[id]/page.tsx');
   const cssSource = source('src/app/globals.css');
   const alertsSource = source('src/app/dashboard/alerts/page.tsx');
-  await test(75, 'Product detail hiển thị pipeline truth', () => assert.ok(detailSource.includes('Operational truth')));
+  await test(75, 'Product detail hiển thị pipeline truth bằng nhãn vận hành tiếng Việt', () => {
+    assert.ok(detailSource.includes('Trạng thái vận hành'));
+    assert.ok(detailSource.includes('pipelineTruth'));
+  });
   await test(76, 'SafeProductImage fallback', () => assert.ok(source('src/components/safe-product-image.tsx').includes("const FALLBACK = '/product-placeholder.svg'")));
   await test(77, 'Topbar không hard-code black light mode', () => assert.ok(cssSource.includes('.topbar') && !cssSource.match(/\.topbar[^}]*background:\s*#0{3,6}/i)));
   await test(78, 'Input/select dùng theme styles', () => assert.ok(cssSource.includes(':where(input, select, textarea)') && cssSource.includes('var(--ds-surface, var(--bg-input))')));

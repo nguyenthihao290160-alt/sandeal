@@ -3,7 +3,7 @@ import { getServerActor, requirePermission } from '@/lib/auth';
 import { recordProductAdminAction } from '@/lib/product-intelligence/productActions';
 import type { ProductAdminActionType } from '@/lib/product-intelligence/productPipelineTruth';
 
-const ACTIONS = new Set<ProductAdminActionType>(['reviewed', 'data_verified', 'canary_ready', 'safe_publish_requested', 'publish_approved']);
+const ACTIONS = new Set<ProductAdminActionType>(['reviewed', 'data_verified', 'price_verified', 'canary_ready', 'safe_publish_requested', 'publish_approved']);
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const denied = await requirePermission(request, 'EDIT_PRODUCTS');

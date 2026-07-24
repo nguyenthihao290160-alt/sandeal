@@ -38,7 +38,7 @@ const { NextRequest } = require('next/server');
 const auth = `Basic ${Buffer.from('durable-health:local-test-password').toString('base64')}`;
 const jsonHeaders = { authorization: auth, 'content-type': 'application/json' };
 const collections = [
-  'products', 'product-duplicate-merge-audit', 'product-reprocess-audit', 'automation-jobs', 'automation-job-projections',
+  'products', 'product-duplicate-merge-audit', 'product-reprocess-audit', 'automation-jobs', 'automation-job-projections', 'automation-job-list-projections-v2',
   'automation-job-heartbeats', 'automation-control', 'automation-audit', 'runtime-role-leases',
   'runtime-role-conflicts', 'pipeline-daily-usage', 'automation-settings',
 ];

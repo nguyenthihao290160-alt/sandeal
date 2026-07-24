@@ -4,6 +4,8 @@
 // ===========================================
 
 import { BotContext } from './context';
+import { checkImageHealth } from './productHealthCheck';
+import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 
 const PLACEHOLDER_IMAGE = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22300%22%3E%3Crect fill=%22%23f0f0f0%22 width=%22300%22 height=%22300%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 font-size=%2216%22 fill=%22%23999%22 text-anchor=%22middle%22 dominant-baseline=%22middle%22%3EImage Not Available%3C/text%3E%3C/svg%3E';
 
@@ -23,7 +25,7 @@ export class ImageResolverBot {
     if (apiImage && apiImage.trim()) {
       const isValid = await this.validateImageUrl(apiImage);
       if (isValid) {
-        await this.ctx.info('Using API image', { url: apiImage });
+        await this.ctx.info('Using verified API image', { source: 'api_image' });
         return apiImage;
       }
     }
@@ -36,7 +38,7 @@ export class ImageResolverBot {
           const url = String(rawData[field]);
           const isValid = await this.validateImageUrl(url);
           if (isValid) {
-            await this.ctx.info('Using source image field', { field, url });
+            await this.ctx.info('Using verified source image field', { field });
             return url;
           }
         }
@@ -47,7 +49,7 @@ export class ImageResolverBot {
     if (productUrl) {
       const ogImage = await this.extractOGImage(productUrl);
       if (ogImage) {
-        await this.ctx.info('Using OpenGraph image', { url: ogImage });
+        await this.ctx.info('Using verified OpenGraph image');
         return ogImage;
       }
     }
@@ -56,7 +58,7 @@ export class ImageResolverBot {
     if (productUrl) {
       const jsonldImage = await this.extractJsonLDImage(productUrl);
       if (jsonldImage) {
-        await this.ctx.info('Using JSON-LD image', { url: jsonldImage });
+        await this.ctx.info('Using verified JSON-LD image');
         return jsonldImage;
       }
     }
@@ -68,11 +70,8 @@ export class ImageResolverBot {
 
   private async validateImageUrl(url: string): Promise<boolean> {
     try {
-      const response = await fetch(url, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000),
-      });
-      return response.status === 200;
+      const result = await checkImageHealth(url);
+      return result.ok && result.statusCode === 200 && String(result.contentType || '').toLowerCase().startsWith('image/');
     } catch {
       return false;
     }
@@ -80,12 +79,14 @@ export class ImageResolverBot {
 
   private async extractOGImage(url: string): Promise<string | null> {
     try {
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(8000),
-      });
-      const html = await response.text();
+      const fetched = await fetchExternalSafely(url, { timeoutMs: 8_000, maxBytes: 256 * 1024, maxRedirects: 4 });
+      const contentType = String(fetched.response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('text/html')) return null;
+      const html = new TextDecoder().decode(fetched.body);
       const match = html.match(/<meta property=["']og:image["']\s+content=["']([^"']+)["']/i);
-      return match ? match[1] : null;
+      if (!match) return null;
+      const candidate = new URL(match[1], fetched.finalUrl).toString();
+      return validateExternalUrl(candidate).safe && await this.validateImageUrl(candidate) ? candidate : null;
     } catch {
       return null;
     }
@@ -93,17 +94,20 @@ export class ImageResolverBot {
 
   private async extractJsonLDImage(url: string): Promise<string | null> {
     try {
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(8000),
-      });
-      const html = await response.text();
+      const fetched = await fetchExternalSafely(url, { timeoutMs: 8_000, maxBytes: 256 * 1024, maxRedirects: 4 });
+      const contentType = String(fetched.response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('text/html')) return null;
+      const html = new TextDecoder().decode(fetched.body);
       const jsonMatch = html.match(/<script type=["']application\/ld\+json["'][^>]*>([^<]+)<\/script>/i);
       if (!jsonMatch) return null;
 
-      const json = JSON.parse(jsonMatch[1]);
+      const json = JSON.parse(jsonMatch[1]) as { image?: string | { url?: string } | Array<string | { url?: string }> };
       if (json.image) {
         const img = Array.isArray(json.image) ? json.image[0] : json.image;
-        return typeof img === 'string' ? img : img.url;
+        const imageValue = typeof img === 'string' ? img : img?.url;
+        if (!imageValue) return null;
+        const candidate = new URL(imageValue, fetched.finalUrl).toString();
+        return validateExternalUrl(candidate).safe && await this.validateImageUrl(candidate) ? candidate : null;
       }
       return null;
     } catch {
