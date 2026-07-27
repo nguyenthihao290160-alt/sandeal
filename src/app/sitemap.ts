@@ -4,6 +4,7 @@ import { getPublicProducts } from '@/lib/storage/products';
 import { getProductIndexingDecision, stableLastModified } from '@/lib/seo/productSeo';
 import { summarizePublicTaxonomies } from '@/lib/product-intelligence/publicProducts';
 import { taxonomyPath } from '@/lib/seo/taxonomySeo';
+import { verifiedPublicHttpsUrl } from '@/lib/seo/structuredData';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,10 +31,15 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       changeFrequency: 'daily' as const,
       priority: 0.65,
     })),
-    ...products.map((product) => ({
-      url: new URL(`/deals/${encodeURIComponent(product.slug)}`, config.siteUrl).toString(),
-      lastModified: stableLastModified(product), changeFrequency: 'daily' as const, priority: 0.8,
-      images: product.imageUrl ? [product.imageUrl] : undefined,
-    })),
+    ...products.map((product) => {
+      const image = verifiedPublicHttpsUrl(product.imageUrl);
+      return {
+        url: new URL(`/deals/${encodeURIComponent(product.slug)}`, config.siteUrl).toString(),
+        lastModified: stableLastModified(product),
+        changeFrequency: 'daily' as const,
+        priority: 0.8,
+        images: image ? [image] : undefined,
+      };
+    }),
   ];
 }

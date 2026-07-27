@@ -11,6 +11,8 @@ import {
   localizeProductBlocker,
   sanitizeProductTechnicalDetails,
 } from '@/lib/dashboard/productDetailStatus';
+import { clientRequestMessage, requestClientJson } from '@/lib/dashboard/clientRequest';
+import { pollScanJob } from '@/lib/dashboard/scanPolling';
 import styles from './product-detail.module.css';
 import { canonicalBlockerCodes } from '@/lib/productBlockers';
 
@@ -23,6 +25,25 @@ type PipelineTruth = {
   remediationAvailable: boolean;
   eligibility?: { criticalBlockers: string[]; warningBlockers: string[]; nextRequiredAction: string };
   safety: { publishingEnabled: boolean; launchEnabled: boolean; effectiveMode: string };
+};
+
+type Envelope<T> = {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  data?: T;
+};
+
+type ProductActionResult = {
+  jobId?: string;
+  trackingRoute?: string;
+};
+
+type VerificationFeedback = {
+  target: 'link' | 'affiliate' | 'image';
+  jobId: string;
+  status: string;
+  message: string;
 };
 
 const HEALTHY_LINK = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
@@ -135,8 +156,15 @@ export default function ProductDetailPage() {
   const [showTechnical, setShowTechnical] = useState(false);
   const [actionBusy, setActionBusy] = useState('');
   const mountedRef = useRef(true);
+  const productRef = useRef<Product | null>(null);
+  const loadSequenceRef = useRef(0);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const actionAbortRef = useRef<AbortController | null>(null);
+  const actionBusyRef = useRef('');
+  const verificationAbortRef = useRef<AbortController | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [archivePending, setArchivePending] = useState(false);
+  const [verificationFeedback, setVerificationFeedback] = useState<VerificationFeedback | null>(null);
 
   const showToast = useCallback((type: string, message: string) => {
     if (!mountedRef.current) return;
@@ -145,51 +173,145 @@ export default function ProductDetailPage() {
     toastTimerRef.current = setTimeout(() => { if (mountedRef.current) setToast(null); }, 4000);
   }, []);
 
-  const loadProduct = async () => {
+  const loadProduct = useCallback(async (initial = false) => {
     if (!mountedRef.current) return;
-    if (!product) setLoading(true);
+    loadAbortRef.current?.abort(new DOMException('Superseded product request', 'AbortError'));
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+    const sequence = ++loadSequenceRef.current;
+    if (initial || !productRef.current) setLoading(true);
     setLoadError('');
     try {
-      const [productResponse, truthResponse] = await Promise.all([fetch(`/api/products/${id}`), fetch(`/api/dashboard/products/${id}/truth`)]);
-      if (!productResponse.ok || !truthResponse.ok) throw new Error('PRODUCT_LOAD_FAILED');
-      const [data, truthData] = await Promise.all([productResponse.json(), truthResponse.json()]);
-      if (!mountedRef.current) return;
-      if (data.ok) setProduct(data.data);
-      if (truthData.ok) setPipelineTruth(truthData.data);
-    } catch {
-      if (mountedRef.current) setLoadError('Không thể tải trạng thái vận hành mới nhất. Dữ liệu hợp lệ gần nhất vẫn được giữ lại.');
+      const [productResult, truthResult] = await Promise.allSettled([
+        requestClientJson<Envelope<Product>>(`/api/products/${encodeURIComponent(id)}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        }),
+        requestClientJson<Envelope<PipelineTruth>>(`/api/dashboard/products/${encodeURIComponent(id)}/truth`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        }),
+      ]);
+      if (!mountedRef.current || controller.signal.aborted || sequence !== loadSequenceRef.current) return;
+      if (productResult.status !== 'fulfilled' || !productResult.value.ok || !productResult.value.data) {
+        const reason = productResult.status === 'rejected'
+          ? productResult.reason
+          : new Error(productResult.value.message || 'Product data was not returned.');
+        throw reason;
+      }
+      productRef.current = productResult.value.data;
+      setProduct(productResult.value.data);
+      if (truthResult.status === 'fulfilled' && truthResult.value.ok && truthResult.value.data) {
+        setPipelineTruth(truthResult.value.data);
+      } else {
+        const reason = truthResult.status === 'rejected' ? truthResult.reason : undefined;
+        setLoadError(clientRequestMessage(reason, 'Không thể tải trạng thái vận hành mới nhất. Dữ liệu sản phẩm hợp lệ gần nhất vẫn được giữ lại.'));
+      }
+    } catch (reason) {
+      if (mountedRef.current && !controller.signal.aborted && sequence === loadSequenceRef.current) {
+        setLoadError(clientRequestMessage(reason, 'Không thể tải chi tiết sản phẩm. Dữ liệu hợp lệ gần nhất vẫn được giữ lại.'));
+      }
+    } finally {
+      if (loadAbortRef.current === controller) loadAbortRef.current = null;
+      if (mountedRef.current && !controller.signal.aborted && sequence === loadSequenceRef.current) setLoading(false);
     }
-    if (mountedRef.current) setLoading(false);
-  };
+  }, [id]);
 
   useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      fetch(`/api/products/${id}`).then(res => {
-        if (!res.ok) throw new Error('PRODUCT_LOAD_FAILED');
-        return res.json();
-      }),
-      fetch(`/api/dashboard/products/${id}/truth`).then(res => {
-        if (!res.ok) throw new Error('TRUTH_LOAD_FAILED');
-        return res.json();
-      }),
-    ])
-      .then(([data, truthData]) => { if (!cancelled && data.ok) setProduct(data.data); if (!cancelled && truthData.ok) setPipelineTruth(truthData.data); })
-      .catch(() => { if (!cancelled) setLoadError('Không thể tải chi tiết sản phẩm. Vui lòng thử lại.'); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [id]);
+    const timer = window.setTimeout(() => {
+      productRef.current = null;
+      setProduct(null);
+      setPipelineTruth(null);
+      setVerificationFeedback(null);
+      void loadProduct(true);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      loadAbortRef.current?.abort(new DOMException('Product route changed', 'AbortError'));
+      actionAbortRef.current?.abort(new DOMException('Product route changed', 'AbortError'));
+      verificationAbortRef.current?.abort(new DOMException('Product route changed', 'AbortError'));
+      actionBusyRef.current = '';
+    };
+  }, [id, loadProduct]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      loadAbortRef.current?.abort();
+      actionAbortRef.current?.abort();
+      verificationAbortRef.current?.abort();
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
   }, []);
 
+  const monitorVerification = async (
+    target: VerificationFeedback['target'],
+    jobId: string,
+  ) => {
+    verificationAbortRef.current?.abort(new DOMException('Superseded verification monitor', 'AbortError'));
+    const controller = new AbortController();
+    verificationAbortRef.current = controller;
+    setVerificationFeedback({
+      target,
+      jobId,
+      status: 'PENDING',
+      message: 'Tác vụ đã vào hàng đợi; đang chờ kết quả cuối cùng.',
+    });
+    try {
+      const finalSnapshot = await pollScanJob({
+        jobId,
+        signal: controller.signal,
+        maximumDurationMs: 2 * 60_000,
+        requestTimeoutMs: 15_000,
+        onSnapshot: snapshot => {
+          if (!mountedRef.current || controller.signal.aborted) return;
+          setVerificationFeedback({
+            target,
+            jobId,
+            status: snapshot.status,
+            message: snapshot.status === 'RUNNING'
+              ? 'Worker đang kiểm tra bằng chứng ngoài.'
+              : snapshot.status === 'RETRY_SCHEDULED'
+                ? 'Tác vụ đang chờ thử lại theo chính sách.'
+                : 'Đang chờ kết quả kiểm tra cuối cùng.',
+          });
+        },
+      });
+      if (!mountedRef.current || controller.signal.aborted) return;
+      if (finalSnapshot.pollingTimedOut) {
+        setVerificationFeedback({
+          target,
+          jobId,
+          status: finalSnapshot.status,
+          message: 'Tác vụ vẫn đang xử lý. Theo dõi tự động đã dừng sau giới hạn an toàn; bạn có thể tải lại để xem kết quả.',
+        });
+        showToast('info', 'Tác vụ kiểm tra vẫn đang xử lý; theo dõi tự động đã dừng sau thời gian giới hạn.');
+        return;
+      }
+      if (finalSnapshot.status === 'SUCCEEDED') {
+        setVerificationFeedback({ target, jobId, status: 'SUCCEEDED', message: 'Kiểm tra đã hoàn tất; trạng thái sản phẩm đã được tải lại.' });
+        showToast('success', 'Kiểm tra bằng chứng đã hoàn tất.');
+        await loadProduct(false);
+      } else {
+        const reason = finalSnapshot.lastErrorMessage || finalSnapshot.lastErrorCode || finalSnapshot.status;
+        setVerificationFeedback({ target, jobId, status: finalSnapshot.status, message: `Kiểm tra kết thúc nhưng chưa đạt: ${reason}.` });
+        showToast('error', `Kiểm tra kết thúc nhưng chưa đạt: ${reason}.`);
+        await loadProduct(false);
+      }
+    } catch (reason) {
+      if (!mountedRef.current || controller.signal.aborted) return;
+      const message = clientRequestMessage(reason, 'Tạm thời không thể theo dõi kết quả kiểm tra. Bạn có thể tải lại để xem trạng thái mới nhất.');
+      setVerificationFeedback({ target, jobId, status: 'STATUS_UNAVAILABLE', message });
+      showToast('error', message);
+    } finally {
+      if (verificationAbortRef.current === controller) verificationAbortRef.current = null;
+    }
+  };
+
   const handleAction = async (action: string) => {
-    if (actionBusy) return;
+    if (actionBusyRef.current) return;
+    actionBusyRef.current = action;
     setActionBusy(action);
     const semanticActions = new Set(['reviewed', 'data_verified', 'price_verified', 'canary_ready', 'safe_publish_requested']);
     const verificationTargets: Record<string, 'link' | 'affiliate' | 'image'> = {
@@ -209,11 +331,17 @@ export default function ProductDetailPage() {
         ? JSON.stringify({ productId: id, target: verificationTargets[action] })
         : undefined;
     const headers: Record<string, string> = body ? { 'Content-Type': 'application/json' } : {};
+    const controller = new AbortController();
+    actionAbortRef.current = controller;
 
     try {
       if (!url) throw new Error('UNSUPPORTED_ACTION');
-      const res = await fetch(url, { method, body, headers });
-      const data = await res.json();
+      const data = await requestClientJson<Envelope<ProductActionResult>>(url, {
+        method,
+        body,
+        headers,
+        signal: controller.signal,
+      });
       if (!mountedRef.current) return;
       if (data.ok) {
         const messages: Record<string, string> = {
@@ -231,13 +359,19 @@ export default function ProductDetailPage() {
         needs_review: 'Đã chuyển về cần xem xét.',
       };
         showToast('success', messages[action] || 'Thành công.');
-        await loadProduct();
+        const target = verificationTargets[action];
+        if (target && data.data?.jobId) {
+          void monitorVerification(target, data.data.jobId);
+        }
+        await loadProduct(false);
       } else {
         showToast('error', data.message || 'Không thể thực hiện thao tác.');
       }
-    } catch {
-      showToast('error', 'Không thể thực hiện thao tác.');
+    } catch (reason) {
+      if (!controller.signal.aborted) showToast('error', clientRequestMessage(reason, 'Không thể thực hiện thao tác. Dữ liệu hiện tại không bị thay đổi.'));
     } finally {
+      if (actionAbortRef.current === controller) actionAbortRef.current = null;
+      if (actionBusyRef.current === action) actionBusyRef.current = '';
       if (mountedRef.current) setActionBusy('');
     }
   };
@@ -310,6 +444,10 @@ export default function ProductDetailPage() {
           : product.affiliateUrlStatus !== 'verified' || !HEALTHY_LINK.has(String(product.affiliateHealthStatus || ''))
           ? 'Link affiliate chưa vượt qua kiểm tra an toàn.' : '';
   const blockers = canonicalBlockerCodes(product.currentBlockers?.length ? product.currentBlockers : pipelineTruth?.lifecycle.blockers || []);
+  const verificationInProgress = Boolean(
+    verificationFeedback
+      && !['SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED', 'STATUS_UNAVAILABLE'].includes(verificationFeedback.status),
+  );
   const publicStateExplanation = pipelineTruth?.lifecycle.publicHidden === false ? 'Đang hiển thị công khai'
     : product.status === 'archived' ? `Đã lưu trữ${product.archivedReason ? ` · ${localizeProductBlocker(product.archivedReason)}` : ''}`
       : product.lifecycleState === 'QUARANTINED' ? `Đang cách ly · ${product.quarantineReasons?.map(localizeProductBlocker).join(', ') || 'chờ xác minh'}`
@@ -353,7 +491,14 @@ export default function ProductDetailPage() {
 
       <section className={styles.hero}>
         <figure className={styles.imagePanel}>
-          <SafeProductImage originalUrl={product.imageUrl} candidates={product.gallery} healthStatus={product.imageHealthStatus} alt={product.title} className={styles.heroImage} />
+          <SafeProductImage
+            originalUrl={product.imageUrl}
+            candidates={product.gallery}
+            healthStatus={product.imageHealthStatus}
+            alt={product.title}
+            className={styles.heroImage}
+            showFailureStatus
+          />
           <figcaption>
             <strong>{imageFailureReason(product)}</strong>
             <span>Kiểm tra gần nhất: {formatTimestamp(product.imageLastCheckedAt)}</span>
@@ -464,11 +609,19 @@ export default function ProductDetailPage() {
         <article className={styles.card}>
           <div className={styles.cardHeader}><div><span>Không bỏ qua cổng an toàn</span><h3>Hành động theo ngữ cảnh</h3></div></div>
           <div className={styles.actionGroup}><strong>Xác minh bằng chứng ngoài</strong><div>
-            <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('recheck_product_url')} disabled={Boolean(actionBusy) || Boolean(productRecheckDisabledReason)} title={productRecheckDisabledReason || undefined}>{actionBusy === 'recheck_product_url' ? 'Đang tạo job…' : 'Kiểm tra lại URL sản phẩm'}</button>{productRecheckDisabledReason && <small>{productRecheckDisabledReason}</small>}</div>
-            <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('recheck_affiliate_url')} disabled={Boolean(actionBusy) || Boolean(affiliateRecheckDisabledReason)} title={affiliateRecheckDisabledReason || undefined}>{actionBusy === 'recheck_affiliate_url' ? 'Đang tạo job…' : 'Kiểm tra lại affiliate'}</button>{affiliateRecheckDisabledReason && <small>{affiliateRecheckDisabledReason}</small>}</div>
-            <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('recheck_image')} disabled={Boolean(actionBusy) || Boolean(imageRecheckDisabledReason)} title={imageRecheckDisabledReason || undefined}>{actionBusy === 'recheck_image' ? 'Đang tạo job…' : 'Kiểm tra lại ảnh'}</button>{imageRecheckDisabledReason && <small>{imageRecheckDisabledReason}</small>}</div>
+            <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('recheck_product_url')} disabled={Boolean(actionBusy) || verificationInProgress || Boolean(productRecheckDisabledReason)} title={productRecheckDisabledReason || undefined}>{actionBusy === 'recheck_product_url' ? 'Đang tạo job…' : 'Kiểm tra lại URL sản phẩm'}</button>{productRecheckDisabledReason && <small>{productRecheckDisabledReason}</small>}</div>
+            <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('recheck_affiliate_url')} disabled={Boolean(actionBusy) || verificationInProgress || Boolean(affiliateRecheckDisabledReason)} title={affiliateRecheckDisabledReason || undefined}>{actionBusy === 'recheck_affiliate_url' ? 'Đang tạo job…' : 'Kiểm tra lại affiliate'}</button>{affiliateRecheckDisabledReason && <small>{affiliateRecheckDisabledReason}</small>}</div>
+            <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('recheck_image')} disabled={Boolean(actionBusy) || verificationInProgress || Boolean(imageRecheckDisabledReason)} title={imageRecheckDisabledReason || undefined}>{actionBusy === 'recheck_image' ? 'Đang tạo job…' : 'Kiểm tra lại ảnh'}</button>{imageRecheckDisabledReason && <small>{imageRecheckDisabledReason}</small>}</div>
             <div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('price_verified')} disabled={Boolean(actionBusy) || Boolean(priceVerificationDisabledReason)} title={priceVerificationDisabledReason || undefined}>{actionBusy === 'price_verified' ? 'Đang ghi nhận…' : 'Xác minh giá hiện tại'}</button>{priceVerificationDisabledReason && <small>{priceVerificationDisabledReason}</small>}</div>
-          </div></div>
+          </div>
+          {verificationFeedback && (
+            <div className={styles.verificationFeedback} role="status">
+              <strong>{verificationFeedback.target === 'image' ? 'Kiểm tra ảnh' : verificationFeedback.target === 'affiliate' ? 'Kiểm tra affiliate' : 'Kiểm tra URL'} · {verificationFeedback.status}</strong>
+              <span>{verificationFeedback.message}</span>
+              <small>Job {truncateIdentifier(verificationFeedback.jobId)}</small>
+            </div>
+          )}
+          </div>
           <div className={styles.actionGroup}><strong>Chính sách, bằng chứng và review</strong><div>
             <Link href="/dashboard/compliance" className="btn btn-secondary">Xem chính sách merchant</Link>
             <Link href="/dashboard/quality" className="btn btn-secondary">Xem bằng chứng chất lượng</Link>

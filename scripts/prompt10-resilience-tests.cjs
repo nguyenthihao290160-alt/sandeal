@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -23,19 +24,35 @@ function abortError(message = 'fixture timeout') {
 
 function publishedProduct(id, overrides = {}) {
   const now = new Date().toISOString();
-  return {
+  const sourceHash = crypto.createHash('sha256').update(`resilience-source-${id}`).digest('hex');
+  const base = {
     schemaVersion: 2, id, title: `Resilient Bluetooth headset ${id}`, slug: `resilient-headset-${id}`,
     description: 'Source-backed fixture for isolated health resilience verification.',
     kind: 'product', recordType: 'PRODUCT', lifecycleState: 'PUBLISHED', platform: 'website', source: 'manual',
-    originalUrl: `https://${id}.example/product`, affiliateUrl: `https://${id}.example/go`, imageUrl: `https://${id}.example/primary.jpg`,
+    originalUrl: `https://${id}.example/product`, canonicalProductUrl: `https://${id}.example/product`,
+    canonicalUrlStatus: 'verified', canonicalUrlVerifiedAt: now,
+    affiliateUrl: `https://${id}.example/go`, affiliateUrlStatus: 'verified', affiliateUrlVerifiedAt: now,
+    imageUrl: `https://${id}.example/primary.jpg`, imageUrlHttpStatus: 200, imageContentType: 'image/jpeg',
     gallery: [`https://${id}.example/fallback.jpg`], price: 1500000, salePrice: 1200000, currency: 'VND',
-    category: 'Audio', tags: [], benefits: [], warnings: [], riskLevel: 'low', status: 'published', publicHidden: false,
+    priceObservedAt: now, priceVerificationStatus: 'VERIFIED', priceTruthState: 'FRESH',
+    category: 'Audio', brand: 'Resilience Fixture', specifications: { connection: 'Bluetooth', warranty: '12 months' },
+    tags: [], benefits: [], warnings: [], riskLevel: 'low', status: 'published', publicDecision: 'published', publicHidden: false,
     autoPublished: true, needsVerification: false, verifiedSource: true, sourceVerified: true, autoPublishEligible: true,
     linkHealthStatus: 'ok', affiliateHealthStatus: 'ok', imageHealthStatus: 'ok',
     linkLastCheckedAt: now, affiliateLastCheckedAt: now, imageLastCheckedAt: now,
-    duplicateStatus: 'CLEAR', claimValidationStatus: 'VERIFIED', createdAt: now, updatedAt: now,
+    duplicateStatus: 'CLEAR', claimValidationStatus: 'VERIFIED',
+    sourceHash, contentHash: sourceHash, publicationEffectKey: `publish-effect:${id}`,
+    publicationJobId: `publication-job:${id}`, publishedAt: now,
+    confidences: {
+      classification: .99, source: .99, price: .99, image: .99, health: .99,
+      duplicate: .99, contentEvidenceCoverage: 1, editorial: .99, publish: .99,
+      calculatedAt: now, ruleVersion: 'resilience-fixture-v1',
+    },
+    createdAt: now, updatedAt: now,
     ...overrides,
   };
+  const editorial = require('../src/lib/editorialReview.ts');
+  return { ...base, reviewContent: editorial.generateEditorialReview(base, [], now) };
 }
 
 function geminiCredential(id, group, healthScore = 100) {
@@ -45,7 +62,10 @@ function geminiCredential(id, group, healthScore = 100) {
     metadata: {
       billingMode: 'free_confirmed', keyType: 'auth', quotaGroupId: group,
       supportedModels: ['gemini-3.1-flash-lite', 'gemini-3.5-flash'], lightTestStatus: 'available', generationStatus: 'available',
+      testedModel: 'gemini-3.1-flash-lite',
       generationVerifiedAt: new Date().toISOString(), lastSuccessfulRequestAt: new Date().toISOString(),
+      generationReady: true, generationReadinessReason: 'GENERATION_READY', freePolicyEligible: true,
+      adapterReady: true, runtimeRouteReady: true,
       failureStreak: 0, requestsTodayEstimated: 0, inputTokensTodayEstimated: 0, outputTokensTodayEstimated: 0, healthScore,
     },
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -79,7 +99,7 @@ async function main() {
     let calls = 0;
     const timeoutFetch = async () => { calls++; throw abortError(); };
     const result = await health.checkLinkHealth('https://timeout-link.example/product', { fetchImpl: timeoutFetch, resolveDns: false });
-    assert.equal(result.status, 'timeout'); assert.equal(result.retryable, true); assert.equal(calls, 2);
+    assert.equal(result.status, 'timeout'); assert.equal(result.retryable, true); assert.equal(calls, 1);
 
     const base = Date.parse('2026-07-16T00:00:00.000Z');
     const first = await circuits.recordDomainHealth('https://timeout-link.example/product', 'timeout', base, { baseDelayMs: 1000, maximumDelayMs: 60_000, jitterRatio: .2, random: () => .5 });
@@ -124,9 +144,9 @@ async function main() {
     await clear('products', 'domain-circuit-breakers');
     const fixture = publishedProduct('image-fallback');
     await adapter.writeCollection('products', [fixture]);
-    const fetchFixture = async (url, init) => {
+    const fetchFixture = async (url) => {
       const value = String(url);
-      if (init?.method === 'HEAD' && value.endsWith('/go')) return new Response('', { status: 200 });
+      if (!value.endsWith('.jpg')) return new Response('<html>Verified product page</html>', { status: 200, headers: { 'content-type': 'text/html' } });
       if (value.includes('primary.jpg')) return new Response('', { status: 200, headers: { 'content-type': 'text/html', 'content-length': '2048' } });
       return new Response('', { status: 200, headers: { 'content-type': 'image/jpeg', 'content-length': '8192' } });
     };
@@ -137,7 +157,7 @@ async function main() {
     assert.equal(saved.status, 'published'); assert.equal(saved.publicHidden, false);
   });
 
-  await test('durable health job uses circuits and image fallback without hiding a published product', async () => {
+  await test('durable health job uses circuits and image fallback while a link timeout remains fail-closed', async () => {
     await clear('products', 'domain-circuit-breakers', 'automation-jobs', 'automation-control', 'automation-audit');
     await automationStore.updateAutomationControl({
       mode: 'CANARY', effectiveMode: 'CANARY', publishPaused: false, ingestionPaused: false,
@@ -145,7 +165,9 @@ async function main() {
     }, 'resilience-test');
     const fixture = publishedProduct('durable-health', {
       originalUrl: 'https://durable-link.example/product',
+      canonicalProductUrl: 'https://durable-link.example/product',
       affiliateUrl: 'https://durable-affiliate.example/go',
+      affiliateDestinationUrl: 'https://durable-affiliate.example/go',
       imageUrl: 'https://durable-images.example/primary.jpg',
       gallery: ['https://durable-images.example/fallback.jpg'],
     });
@@ -155,7 +177,10 @@ async function main() {
       const value = String(url);
       requests.push({ url: value, method: init?.method });
       if (value.includes('durable-link.example')) throw abortError();
-      if (value.includes('durable-affiliate.example')) return new Response('', { status: 200 });
+      if (value.includes('durable-affiliate.example')) return new Response('<html>Verified affiliate destination</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      });
       if (value.includes('primary.jpg')) return new Response('', { status: 200, headers: { 'content-type': 'text/html', 'content-length': '2048' } });
       if (value.includes('fallback.jpg')) return new Response('', { status: 200, headers: { 'content-type': 'image/jpeg', 'content-length': '8192' } });
       throw new Error(`UNEXPECTED_DURABLE_HEALTH_REQUEST:${value}`);
@@ -172,21 +197,21 @@ async function main() {
       automationStore.getAutomationJob(queued.job.id),
       circuits.getDomainCircuitDecision(fixture.originalUrl),
     ]);
-    assert.equal(saved.status, 'published'); assert.equal(saved.publicHidden, false);
+    assert.equal(saved.status, 'needs_review'); assert.equal(saved.publicHidden, true);
     assert.equal(saved.linkHealthStatus, 'timeout'); assert.ok(saved.sourceHealthCooldownUntil);
     assert.match(saved.sourceHealthReason, /link:timeout/);
     assert.equal(saved.affiliateHealthStatus, 'ok');
     assert.equal(saved.imageUrl, fixture.gallery[0]); assert.equal(saved.imageHealthStatus, 'ok');
     assert.equal(requests.filter(request => request.url.includes('durable-affiliate.example')).length, 1);
-    assert.equal(requests.length, 5);
+    assert.equal(requests.length, 4);
     assert.equal(circuit.failureStreak, 1);
     assert.equal(completed.status, 'SUCCEEDED');
-    assert.equal(completed.result.failed, 1); assert.equal(completed.result.fallbackImages, 1);
+    assert.equal(completed.result.failed, 0); assert.equal(completed.result.unhealthy, 1); assert.equal(completed.result.fallbackImages, 1);
     assert.equal(completed.result.retryScheduled, 1);
     assert.equal(completed.result.externalRequests, 4);
   });
 
-  await test('durable health job skips network access while a domain circuit is open', async () => {
+  await test('durable health job skips network access while an open circuit remains fail-closed', async () => {
     await clear('products', 'domain-circuit-breakers', 'automation-jobs', 'automation-control', 'automation-audit');
     await automationStore.updateAutomationControl({
       mode: 'CANARY', effectiveMode: 'CANARY', publishPaused: false, ingestionPaused: false,
@@ -209,7 +234,7 @@ async function main() {
       automationStore.getAutomationJob(queued.job.id),
     ]);
     assert.equal(requests, 0);
-    assert.equal(saved.status, 'published'); assert.equal(saved.publicHidden, false);
+    assert.equal(saved.status, 'needs_review'); assert.equal(saved.publicHidden, true);
     assert.equal(saved.linkHealthStatus, 'timeout'); assert.equal(saved.sourceHealthCooldownUntil, retryAfter);
     assert.equal(completed.status, 'SUCCEEDED');
     assert.equal(completed.result.circuitSkipped, 1); assert.equal(completed.result.externalRequests, 0);

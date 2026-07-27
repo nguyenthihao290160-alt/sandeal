@@ -30,6 +30,7 @@ import {
   getProductIndexingDecision,
 } from '@/lib/seo/productSeo';
 import { publicTaxonomySlug, taxonomyPath } from '@/lib/seo/taxonomySeo';
+import { serializeJsonLd } from '@/lib/seo/structuredData';
 
 export const dynamic = 'force-dynamic';
 
@@ -93,12 +94,12 @@ export default async function DealDetailPage({
       <PublicViewTracker productId={detail.id} contentPageId={contentPageId} />
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd).replace(/</g, '\\u003c') }}
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(breadcrumbJsonLd) }}
       />
       {productJsonLd ? (
         <script
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd).replace(/</g, '\\u003c') }}
+          dangerouslySetInnerHTML={{ __html: serializeJsonLd(productJsonLd) }}
         />
       ) : null}
 

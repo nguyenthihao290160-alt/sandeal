@@ -6,15 +6,17 @@ import { getLatestRuntimeHealth, providerHealth } from '@/lib/automation/runtime
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { deriveSystemCapabilityStatus } from '@/lib/health/systemCapability';
 import { getGeminiProviderReadiness } from '@/lib/ai/geminiProviderStatus';
+import { buildAutomationOperationalHealth } from '@/lib/automation/operationalHealth';
 
 export async function GET(request: NextRequest) {
   const authError = await requireAuth(request); if (authError) return authError;
   try {
-    const [data, geminiReadiness, accessTradeVault, runtime] = await Promise.all([
+    const [data, geminiReadiness, accessTradeVault, runtime, operational] = await Promise.all([
       buildAutomationDashboard('today'),
       getGeminiProviderReadiness(),
       getPrimaryCredential('accesstrade'),
       getLatestRuntimeHealth(),
+      buildAutomationOperationalHealth(),
     ]);
     const accessTradeConfigured = Boolean(accessTradeVault && accessTradeVault.status !== 'disabled') || Boolean(process.env.ACCESS_TRADE_API_KEY?.trim());
     const runtimeGemini = runtime?.providers.gemini;
@@ -62,9 +64,13 @@ export async function GET(request: NextRequest) {
       worker: data.worker, scheduler: data.scheduler,
       queue: data.queue, aiUsage: data.aiUsage, circuits: data.circuits, policy: data.policy,
       providers, providerDetails: { gemini: geminiReadiness }, runtime: runtime ? {
-        publishSafe: runtime.publishSafe, reasons: runtime.reasons, historicalReasons: runtime.historicalReasons || [],
+        publishSafe: runtime.publishSafe,
+        reasons: operational.currentActiveReasons,
+        currentReasons: operational.currentActiveReasons,
+        historicalReasons: operational.historicalAuditReasons,
         restart: runtime.restart || null, storage: runtime.storage, duplicateRoles: runtime.duplicateRoles, checkedAt: runtime.checkedAt,
       } : null,
+      operational,
       control: data.control,
       killSwitch: data.control.killSwitch, updatedAt: data.updatedAt,
     } });

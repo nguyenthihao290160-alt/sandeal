@@ -9,6 +9,10 @@ import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
 import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
+import {
+  getAutomationExecutionDescriptor,
+  selectCompatibleWorkerJobs,
+} from './executionPolicy';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -19,6 +23,7 @@ import type {
   AutomationExecutionPlanStep,
   AutomationErrorCategory,
   AutomationJob,
+  AutomationJobAttempt,
   AutomationJobListItem,
   AutomationJobListProjection,
   AutomationJobStatus,
@@ -29,6 +34,7 @@ import type {
 } from './types';
 
 const JOBS = 'automation-jobs';
+const JOB_ATTEMPTS = 'automation-job-attempts';
 const JOB_HEARTBEATS = 'automation-job-heartbeats';
 const JOB_PROJECTIONS = 'automation-job-projections';
 const JOB_LIST_PROJECTIONS = 'automation-job-list-projections-v2';
@@ -1053,6 +1059,37 @@ function runnableCreatedAt(job: AutomationJob): number {
   return Number.isFinite(value) ? value : 0;
 }
 
+function deriveJobRunnableContext(
+  job: Pick<AutomationJob, 'createdAt' | 'scheduledAt'>,
+  retryEligibleAt?: string,
+): {
+  runnableAt: string;
+  runnableReason: AutomationJobAttempt['runnableReason'];
+} {
+  const retryAt = Date.parse(retryEligibleAt || '');
+  if (Number.isFinite(retryAt)) {
+    return {
+      runnableAt: new Date(retryAt).toISOString(),
+      runnableReason: 'RETRY_ELIGIBLE_AT',
+    };
+  }
+  const createdAt = Date.parse(job.createdAt);
+  const scheduledAt = Date.parse(job.scheduledAt);
+  if (Number.isFinite(scheduledAt)
+    && (!Number.isFinite(createdAt) || scheduledAt > createdAt)) {
+    return {
+      runnableAt: new Date(scheduledAt).toISOString(),
+      runnableReason: 'SCHEDULED_AT',
+    };
+  }
+  return {
+    runnableAt: Number.isFinite(createdAt)
+      ? new Date(createdAt).toISOString()
+      : new Date(scheduledAt).toISOString(),
+    runnableReason: 'CREATED_AT',
+  };
+}
+
 /** Priority is respected for fresh work; overdue work gets a guaranteed FIFO slot. */
 export function selectFairRunnableJobs(items: AutomationJob[], limit: number, nowMs = Date.now()): AutomationJob[] {
   const maximum = Math.max(0, Math.min(limit, 10));
@@ -1088,6 +1125,11 @@ export async function claimAutomationJobs(
   leaseMs = 60_000,
   nowMs = Date.now(),
   ownership?: RuntimeRoleOwnership,
+  options: {
+    maximumInFlight?: number;
+    criticalReservedCapacity?: number;
+    enforceExecutionCompatibility?: boolean;
+  } = {},
 ): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
   if (control.workerPaused) return [];
@@ -1103,6 +1145,9 @@ export async function claimAutomationJobs(
   // large queue a second time merely to reserve the same key again.
   const candidateQuotaDenied = new Set<string>();
   let oldestNotRunnable: AutomationJob | undefined;
+  let poolActiveSlots = 0;
+  let poolAvailableSlots = 0;
+  let claimBlockReason: 'WORKER_CAPACITY_FULL' | 'EXECUTION_RESOURCE_CONFLICT' | 'SCHEDULED_FOR_FUTURE' = 'SCHEDULED_FOR_FUTURE';
   await runTransaction<AutomationJob>(JOBS, items => {
     let changed = false;
     for (const item of items) {
@@ -1136,6 +1181,8 @@ export async function claimAutomationJobs(
         if (effectiveLease && Date.parse(effectiveLease) <= nowMs) {
         item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
         item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
+        item.runnableAt = item.nextRetryAt;
+        item.runnableReason = item.nextRetryAt ? 'RETRY_ELIGIBLE_AT' : item.runnableReason;
         item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorCategory = 'PROVIDER_TIMEOUT'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.';
         item.retryable = item.status === 'RETRY_SCHEDULED'; item.deadLetterReason = item.retryable ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED'; item.claimedBy = undefined; item.updatedAt = now;
         item.claimedAt = undefined; item.claimToken = undefined; item.workerOwnerId = undefined; item.workerInstanceId = undefined; item.workerFencingToken = undefined; item.leaseExpiresAt = undefined;
@@ -1144,7 +1191,16 @@ export async function claimAutomationJobs(
         changed = true;
         }
       }
-      if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) { item.status = 'PENDING'; item.scheduledAt = item.nextRetryAt; item.nextRetryAt = undefined; changed = true; }
+      if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) {
+        const retryEligibleAt = item.nextRetryAt;
+        const runnable = deriveJobRunnableContext(item, retryEligibleAt);
+        item.status = 'PENDING';
+        item.scheduledAt = retryEligibleAt;
+        item.nextRetryAt = undefined;
+        item.runnableAt = runnable.runnableAt;
+        item.runnableReason = runnable.runnableReason;
+        changed = true;
+      }
       if (item.status === 'PENDING' && item.type === 'PROCESS_CANDIDATE' && candidateQuotaDenied.has(item.id)) {
         item.status = 'BLOCKED';
         item.lastErrorCode = 'DAILY_PRODUCT_LIMIT_REACHED';
@@ -1155,23 +1211,89 @@ export async function claimAutomationJobs(
         changed = true;
       }
     }
+    const activeJobs = items.filter(item => item.status === 'RUNNING');
+    poolActiveSlots = activeJobs.length;
+    const availableCapacity = Number.isInteger(options.maximumInFlight)
+      ? Math.max(0, Math.min(limit, Number(options.maximumInFlight) - activeJobs.length))
+      : limit;
+    poolAvailableSlots = availableCapacity;
     const eligible = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
       && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN'));
-    const due = selectFairRunnableJobs(eligible, limit, nowMs);
+    const due = options.enforceExecutionCompatibility
+      ? selectCompatibleWorkerJobs(
+          eligible,
+          activeJobs,
+          availableCapacity,
+          nowMs,
+          selectFairRunnableJobs,
+          options.criticalReservedCapacity,
+        )
+      : selectFairRunnableJobs(eligible, availableCapacity, nowMs);
     if (!due.length) {
+      claimBlockReason = availableCapacity <= 0
+        ? 'WORKER_CAPACITY_FULL'
+        : eligible.length > 0 && options.enforceExecutionCompatibility
+          ? 'EXECUTION_RESOURCE_CONFLICT'
+          : 'SCHEDULED_FOR_FUTURE';
       oldestNotRunnable = items
         .filter(item => item.status === 'PENDING')
         .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
     }
     for (const item of due) {
+      const execution = getAutomationExecutionDescriptor(item);
+      const runnable = item.runnableAt && item.runnableReason
+        ? { runnableAt: item.runnableAt, runnableReason: item.runnableReason }
+        : deriveJobRunnableContext(item);
       item.status = 'RUNNING'; item.claimedBy = workerId; item.claimedAt = now; item.heartbeatAt = now;
       item.claimToken = generateId(); item.workerOwnerId = ownership?.ownerId; item.workerInstanceId = ownership?.instanceId; item.workerFencingToken = ownership?.fencingToken;
+      item.executionConcurrencyClass = execution.concurrencyClass;
+      item.executionResourceKeys = execution.resourceKeys;
+      item.executionExclusive = execution.exclusive;
+      item.executionCritical = execution.critical;
+      item.runnableAt = runnable.runnableAt;
+      item.runnableReason = runnable.runnableReason;
       item.leaseExpiresAt = new Date(nowMs + leaseMs).toISOString(); item.startedAt ||= now; item.attemptCount += 1; item.updatedAt = now;
       claimed.push(structuredClone(item));
       changed = true;
     }
     return changed ? items : undefined;
   });
+  if (claimed.length) {
+    try {
+      await runTransaction<AutomationJobAttempt>(JOB_ATTEMPTS, attempts => {
+        const existingIds = new Set(attempts.map(attempt => attempt.id));
+        for (const job of claimed) {
+          const id = `${job.id}:attempt:${job.attemptCount}`;
+          if (existingIds.has(id)) continue;
+          attempts.push({
+            schemaVersion: 1,
+            id,
+            jobId: job.id,
+            jobType: job.type,
+            operationId: job.operationId,
+            attemptNumber: job.attemptCount,
+            runnableAt: job.runnableAt!,
+            runnableReason: job.runnableReason!,
+            createdAt: job.createdAt,
+            scheduledAt: job.scheduledAt,
+            retryEligibleAt: job.runnableReason === 'RETRY_ELIGIBLE_AT' ? job.runnableAt : undefined,
+            claimedAt: job.claimedAt!,
+            claimTokenHash: createHash('sha256').update(job.claimToken || '').digest('hex'),
+            workerId,
+            workerFencingToken: job.workerFencingToken,
+          });
+          existingIds.add(id);
+        }
+        return attempts.slice(-10_000);
+      });
+    } catch (error) {
+      console.error(JSON.stringify({
+        type: 'automation_job_attempt_persistence_failed',
+        claimedJobs: claimed.length,
+        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'UNKNOWN_ERROR'),
+      }));
+    }
+  }
   for (const job of [...claimed, ...requeued, ...timedOut, ...rejectedBeforeClaim.map(item => item.job)]) {
     await syncJobReadModelsBestEffort(job);
   }
@@ -1197,8 +1319,19 @@ export async function claimAutomationJobs(
     notRunnableLogTimes.set(notRunnable.id, nowMs);
     logAutomationJobEvent('job_not_runnable', notRunnable, {
       workerId,
-      reasonCode: control.killSwitch && notRunnable.type !== 'RUNTIME_GUARDIAN' ? 'KILL_SWITCH_ACTIVE' : 'SCHEDULED_FOR_FUTURE',
+      reasonCode: control.killSwitch && notRunnable.type !== 'RUNTIME_GUARDIAN' ? 'KILL_SWITCH_ACTIVE' : claimBlockReason,
     });
+  }
+  if (options.enforceExecutionCompatibility && (claimed.length > 0 || claimBlockReason !== 'SCHEDULED_FOR_FUTURE')) {
+    console.info(JSON.stringify({
+      type: 'worker_pool_claim',
+      workerId,
+      activeSlotsBeforeClaim: poolActiveSlots,
+      availableSlotsBeforeClaim: poolAvailableSlots,
+      claimedSlots: claimed.length,
+      criticalSlotsClaimed: claimed.filter(job => job.executionCritical === true).length,
+      reasonCode: claimed.length ? 'WORKER_POOL_SLOTS_FILLED' : claimBlockReason,
+    }));
   }
   for (const rejected of rejectedBeforeClaim) {
     logAutomationJobEvent('job_skipped', rejected.job, { workerId, reasonCode: rejected.validation.code || 'SCHEMA_VALIDATION_FAILED' });
@@ -1353,6 +1486,8 @@ export async function failAutomationJob(id: string, workerId: string, code: stri
       ? new Date(requestedRetryAt).toISOString()
       : new Date(Date.now() + retryDelayMs(job.type, job.attemptCount)).toISOString()
       : undefined;
+    job.runnableAt = job.nextRetryAt;
+    job.runnableReason = job.nextRetryAt ? 'RETRY_ELIGIBLE_AT' : job.runnableReason;
     job.lastErrorCode = code; job.lastErrorCategory = options.errorCategory || defaultErrorCategory(code);
     job.lastErrorMessage = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
     if (options.result) job.result = sanitizeAutomationData(options.result) as Record<string, unknown>;
@@ -1402,7 +1537,8 @@ export async function retryAutomationJob(id: string, actor: string): Promise<Aut
   await runTransaction<AutomationJob>(JOBS, items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'FAILED' || job.attemptCount >= job.maxAttempts) return undefined;
-    job.status = 'PENDING'; job.nextRetryAt = undefined; job.completedAt = undefined; job.retryable = undefined; job.deadLetterReason = undefined; job.updatedAt = now; retried = { ...job }; return items;
+    job.status = 'PENDING'; job.scheduledAt = now; job.nextRetryAt = undefined; job.runnableAt = now; job.runnableReason = 'RETRY_ELIGIBLE_AT';
+    job.completedAt = undefined; job.retryable = undefined; job.deadLetterReason = undefined; job.updatedAt = now; retried = { ...job }; return items;
   });
   const retriedJob = retried as AutomationJob | null;
   if (retriedJob) {

@@ -8,11 +8,21 @@ import {
   type CanaryState,
 } from './canaryController';
 import type { RuntimeHealthSnapshot } from './runtimeGuardian';
+import { getFeatureRolloutState, type FeatureRolloutMode } from './featureRollout';
+import {
+  advanceRuntimeRecoveryState,
+  confirmRuntimeRecoveryClosed,
+  getRuntimeRecoveryPolicy,
+  type RuntimeRecoveryEvidenceSummary,
+  type RuntimeRecoveryMeasurementState,
+  type RuntimeRecoveryState,
+} from './runtimeRecoveryState';
 import { getAutomationControl, updateAutomationControl } from './store';
-import type { AutomationControlState, AutomationJob } from './types';
+import type { AutomationControlState, AutomationJob, AutomationJobAttempt } from './types';
 
 const SNAPSHOT_COLLECTION = 'automation-slo-snapshots';
 const JOB_COLLECTION = 'automation-jobs';
+const JOB_ATTEMPT_COLLECTION = 'automation-job-attempts';
 const RUNTIME_COLLECTION = 'runtime-health';
 const PUBLICATION_AUDIT_COLLECTION = 'publication-audit';
 const OUTBOUND_COLLECTION = 'automation-outbound-events';
@@ -23,7 +33,7 @@ export const DEFAULT_SLO_WINDOW_MS = 24 * 60 * 60_000;
 export const DEFAULT_SLO_MINIMUM_SAMPLES = 5;
 export const DEFAULT_RUNTIME_FRESHNESS_MS = 2 * 60_000;
 
-type MetricStatus = 'PASS' | 'BREACH' | 'NO_DATA';
+type MetricStatus = 'PASS' | 'BREACH' | 'NO_DATA' | 'NOT_APPLICABLE';
 type EvaluationStatus = 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA';
 
 export interface SloMetric {
@@ -44,6 +54,8 @@ export interface SloMetric {
   value: number | boolean | null;
   sampleSize: number;
   status: MetricStatus;
+  measurementState: RuntimeRecoveryMeasurementState;
+  stateReason: string;
   target: string;
 }
 
@@ -51,7 +63,7 @@ export interface AutomationSloMeasurement {
   schemaVersion: number;
   id: string;
   ruleVersion: string;
-  dataStatus: 'MEASURED' | 'INSUFFICIENT_DATA';
+  dataStatus: RuntimeRecoveryMeasurementState;
   windowStartedAt: string;
   windowEndedAt: string;
   minimumSamples: number;
@@ -59,7 +71,11 @@ export interface AutomationSloMeasurement {
   sourceCounts: {
     jobs: number;
     terminalJobs: number;
+    pickupAttempts: number;
+    retryPickupAttempts: number;
+    neverClaimedPending: number;
     monitorOutcomes: number;
+    pendingMonitorTargets: number;
     runtimeSnapshots: number;
     publicationAttempts: number;
     outboundEvents: number;
@@ -67,7 +83,15 @@ export interface AutomationSloMeasurement {
   };
   workerHeartbeatFresh: boolean | null;
   schedulerHeartbeatFresh: boolean | null;
+  pickupLatencyP50Ms: number | null;
   pickupLatencyP95Ms: number | null;
+  pickupLatencyLegacyP95Ms: number | null;
+  pickupLatencyRunnableAtP95Ms: number | null;
+  retryPickupLatencyP95Ms: number | null;
+  pickupLatencyMode: 'LEGACY_CREATED_AT' | 'RUNNABLE_AT';
+  pickupLatencyFeatureMode: FeatureRolloutMode;
+  pendingQueueAgeMs: number | null;
+  pendingQueueCount: number;
   terminalOutcomeRate: number | null;
   errorRate: number | null;
   healthPassRate: number | null;
@@ -105,6 +129,8 @@ export interface AppliedErrorBudget {
   previousEffectiveMode: AutomationControlState['effectiveMode'];
   control: AutomationControlState;
   canary: CanaryState;
+  recovery: RuntimeRecoveryState;
+  recoveryFeatureMode: FeatureRolloutMode;
   publishPausedByBudget: boolean;
   ingestionAvailable: boolean;
 }
@@ -159,14 +185,104 @@ function ratio(numerator: number, denominator: number): number | null {
   return denominator > 0 ? numerator / denominator : null;
 }
 
-function p95(values: number[]): number | null {
+function percentile(values: number[], percentileValue: number): number | null {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)];
+  return sorted[Math.max(0, Math.ceil(sorted.length * percentileValue) - 1)];
+}
+
+function p50(values: number[]): number | null {
+  return percentile(values, 0.5);
+}
+
+function p95(values: number[]): number | null {
+  return percentile(values, 0.95);
+}
+
+export interface RunnableAtContext {
+  runnableAt: number;
+  runnableReason: AutomationJobAttempt['runnableReason'];
+}
+
+type RunnableAtSource = Pick<AutomationJob, 'createdAt' | 'scheduledAt' | 'runnableAt' | 'runnableReason' | 'nextRetryAt'>
+  | Pick<AutomationJobAttempt, 'createdAt' | 'scheduledAt' | 'runnableAt' | 'runnableReason' | 'retryEligibleAt'>;
+
+export interface PickupLatencyObservation {
+  runnableAt: number;
+  claimedAt: number;
+  latencyMs: number;
+  runnableReason: AutomationJobAttempt['runnableReason'];
+  retryAttempt: boolean;
+}
+
+export function deriveRunnableAt(source: RunnableAtSource): RunnableAtContext | null {
+  const explicitRunnableAt = validTimestamp(source.runnableAt);
+  if (explicitRunnableAt !== null && source.runnableReason) {
+    return {
+      runnableAt: explicitRunnableAt,
+      runnableReason: source.runnableReason,
+    };
+  }
+
+  const retrySource = 'retryEligibleAt' in source
+    ? source.retryEligibleAt
+    : 'nextRetryAt' in source
+      ? source.nextRetryAt
+      : undefined;
+  const retryEligibleAt = validTimestamp(retrySource);
+  if (retryEligibleAt !== null) {
+    return {
+      runnableAt: retryEligibleAt,
+      runnableReason: 'RETRY_ELIGIBLE_AT',
+    };
+  }
+
+  const createdAt = validTimestamp(source.createdAt);
+  const scheduledAt = validTimestamp(source.scheduledAt);
+  if (scheduledAt !== null && (createdAt === null || scheduledAt > createdAt)) {
+    return {
+      runnableAt: scheduledAt,
+      runnableReason: 'SCHEDULED_AT',
+    };
+  }
+  return createdAt === null
+    ? null
+    : {
+        runnableAt: createdAt,
+        runnableReason: 'CREATED_AT',
+      };
+}
+
+export function derivePickupLatencyObservation(
+  source: RunnableAtSource & { claimedAt?: string },
+  windowStartedAt: number,
+  windowEndedAt: number,
+): PickupLatencyObservation | null {
+  const runnable = deriveRunnableAt(source);
+  const claimedAt = validTimestamp(source.claimedAt);
+  if (!runnable || claimedAt === null || claimedAt < runnable.runnableAt) return null;
+  const runnableInsideWindow = runnable.runnableAt >= windowStartedAt && runnable.runnableAt <= windowEndedAt;
+  const claimInsideWindow = claimedAt >= windowStartedAt && claimedAt <= windowEndedAt;
+  if (!runnableInsideWindow && !claimInsideWindow) return null;
+  return {
+    runnableAt: runnable.runnableAt,
+    claimedAt,
+    latencyMs: claimedAt - runnable.runnableAt,
+    runnableReason: runnable.runnableReason,
+    retryAttempt: runnable.runnableReason === 'RETRY_ELIGIBLE_AT',
+  };
 }
 
 function booleanMetric(key: SloMetric['key'], value: boolean | null, target: string): SloMetric {
-  return { key, value, sampleSize: value === null ? 0 : 1, status: value === null ? 'NO_DATA' : value ? 'PASS' : 'BREACH', target };
+  return {
+    key,
+    value,
+    sampleSize: value === null ? 0 : 1,
+    status: value === null ? 'NO_DATA' : value ? 'PASS' : 'BREACH',
+    measurementState: value === null ? 'INSUFFICIENT_DATA' : 'MEASURED',
+    stateReason: value === null ? 'METRIC_EVIDENCE_MISSING' : 'METRIC_MEASURED',
+    target,
+  };
 }
 
 function upperBoundMetric(key: SloMetric['key'], value: number | null, sampleSize: number, maximum: number, target: string, minimumSamples = 1): SloMetric {
@@ -175,6 +291,8 @@ function upperBoundMetric(key: SloMetric['key'], value: number | null, sampleSiz
     value,
     sampleSize,
     status: value === null || sampleSize < minimumSamples ? 'NO_DATA' : value <= maximum ? 'PASS' : 'BREACH',
+    measurementState: value === null || sampleSize < minimumSamples ? 'INSUFFICIENT_DATA' : 'MEASURED',
+    stateReason: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
     target,
   };
 }
@@ -185,7 +303,18 @@ function lowerBoundMetric(key: SloMetric['key'], value: number | null, sampleSiz
     value,
     sampleSize,
     status: value === null || sampleSize < minimumSamples ? 'NO_DATA' : value >= minimum ? 'PASS' : 'BREACH',
+    measurementState: value === null || sampleSize < minimumSamples ? 'INSUFFICIENT_DATA' : 'MEASURED',
+    stateReason: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
     target,
+  };
+}
+
+function notApplicableMetric(metric: SloMetric, stateReason: string): SloMetric {
+  return {
+    ...metric,
+    status: 'NOT_APPLICABLE',
+    measurementState: 'NOT_APPLICABLE',
+    stateReason,
   };
 }
 
@@ -241,8 +370,9 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const minimumSamples = Math.max(1, options.minimumSamples ?? DEFAULT_SLO_MINIMUM_SAMPLES);
   const runtimeFreshnessMs = Math.max(30_000, options.runtimeFreshnessMs ?? DEFAULT_RUNTIME_FRESHNESS_MS);
   const startedAt = now - windowMs;
-  const [allJobs, runtimeSnapshots, allAudits, allEvents, allProducts] = await Promise.all([
+  const [allJobs, allAttempts, runtimeSnapshots, allAudits, allEvents, allProducts] = await Promise.all([
     readPersistedTelemetry<AutomationJob>(JOB_COLLECTION),
+    readPersistedTelemetry<AutomationJobAttempt>(JOB_ATTEMPT_COLLECTION),
     readPersistedTelemetry<RuntimeHealthSnapshot>(RUNTIME_COLLECTION),
     readPersistedTelemetry<PublicationAuditRecord>(PUBLICATION_AUDIT_COLLECTION),
     readPersistedTelemetry<OutboundPublicationEvent>(OUTBOUND_COLLECTION),
@@ -251,13 +381,41 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
 
   const jobs = allJobs.filter(job => inWindow(jobObservationTime(job), startedAt, now) && (validTimestamp(job.scheduledAt) || 0) <= now + 60_000);
   const terminals = jobs.filter(terminalJob);
-  const pickupLatencies = jobs.flatMap(job => {
+  const legacyPickupLatencies = jobs.flatMap(job => {
     const created = validTimestamp(job.createdAt);
     const claimed = validTimestamp(job.claimedAt);
     return created !== null && claimed !== null && claimed >= created ? [claimed - created] : [];
   });
+  const persistedAttemptKeys = new Set(allAttempts.map(attempt => `${attempt.jobId}:${attempt.attemptNumber}`));
+  const attemptPickupObservations = allAttempts.flatMap(attempt => {
+    const observation = derivePickupLatencyObservation(attempt, startedAt, now);
+    return observation ? [observation] : [];
+  });
+  const legacyJobPickupObservations = allJobs.flatMap(job => {
+    if (persistedAttemptKeys.has(`${job.id}:${job.attemptCount}`)) return [];
+    const observation = derivePickupLatencyObservation(job, startedAt, now);
+    return observation ? [observation] : [];
+  });
+  const pickupObservations = [...attemptPickupObservations, ...legacyJobPickupObservations];
+  const runnableAtPickupLatencies = pickupObservations.map(observation => observation.latencyMs);
+  const retryPickupLatencies = pickupObservations
+    .filter(observation => observation.retryAttempt)
+    .map(observation => observation.latencyMs);
+  const pendingQueueAges = allJobs.flatMap(job => {
+    if (!['PENDING', 'RETRY_SCHEDULED'].includes(job.status) || job.attemptCount > 0) return [];
+    const runnable = deriveRunnableAt(job);
+    if (!runnable || runnable.runnableAt > now) return [];
+    return [now - runnable.runnableAt];
+  });
+  const pickupLatencyFeature = getFeatureRolloutState('SLO_RUNNABLE_AT_V2');
+  const pickupLatencyMode: AutomationSloMeasurement['pickupLatencyMode'] =
+    pickupLatencyFeature.mode === 'ACTIVE' ? 'RUNNABLE_AT' : 'LEGACY_CREATED_AT';
+  const pickupLatencies = pickupLatencyMode === 'RUNNABLE_AT'
+    ? runnableAtPickupLatencies
+    : legacyPickupLatencies;
   const failed = terminals.filter(job => ['FAILED', 'BLOCKED'].includes(job.status));
   const monitorOutcomes = terminals.filter(job => job.type === 'POST_PUBLISH_MONITOR' && ['HEALTHY', 'TEMPORARY_FAILURE', 'CONFIRMED_BROKEN'].includes(String(job.result?.outcome)));
+  const pendingMonitorTargets = jobs.filter(job => job.type === 'POST_PUBLISH_MONITOR' && !terminalJob(job));
   const healthyMonitorOutcomes = monitorOutcomes.filter(job => job.result?.outcome === 'HEALTHY');
   const zeroTouchJobs = terminals.filter(isZeroTouchJob);
   const zeroTouchCompleted = zeroTouchJobs.filter(job => job.status === 'SUCCEEDED');
@@ -296,38 +454,99 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const runtimePublishSafe = latestRuntime ? latestRuntime.publishSafe === true : null;
   const runtimeReasons = latestRuntime ? [...new Set(latestRuntime.reasons || [])].slice(0, 20) : [];
 
+  const pickupLatencyP50Ms = p50(pickupLatencies);
   const pickupLatencyP95Ms = p95(pickupLatencies);
+  const pickupLatencyLegacyP95Ms = p95(legacyPickupLatencies);
+  const pickupLatencyRunnableAtP95Ms = p95(runnableAtPickupLatencies);
+  const retryPickupLatencyP95Ms = p95(retryPickupLatencies);
+  const pendingQueueAgeMs = pendingQueueAges.length ? Math.max(...pendingQueueAges) : null;
   const terminalOutcomeRate = ratio(terminals.length, jobs.length);
   const errorRate = ratio(failed.length, terminals.length);
   const healthPassRate = ratio(healthyMonitorOutcomes.length, monitorOutcomes.length);
   const rollbackRate = ratio(rollbacks.length, publicationAttempts.length);
   const zeroTouchRate = ratio(zeroTouchCompleted.length, zeroTouchJobs.length);
+  const noLegitimateMonitorTarget = publicProducts.length === 0
+    && monitorOutcomes.length === 0
+    && pendingMonitorTargets.length === 0;
+  const noPublicationActivity = publicationAttempts.length === 0
+    && events.length === 0
+    && publicProducts.length === 0;
   const metrics: SloMetric[] = [
     booleanMetric('worker_heartbeat_fresh', workerHeartbeatFresh, 'true within 120 seconds'),
     booleanMetric('scheduler_heartbeat_fresh', schedulerHeartbeatFresh, 'true within 120 seconds'),
     upperBoundMetric('job_pickup_latency_p95_ms', pickupLatencyP95Ms, pickupLatencies.length, 30_000, '<= 30000 ms'),
     lowerBoundMetric('terminal_outcome_rate', terminalOutcomeRate, jobs.length, 0.95, '>= 0.95', minimumSamples),
     upperBoundMetric('terminal_error_rate', errorRate, terminals.length, 0.05, '<= 0.05', minimumSamples),
-    lowerBoundMetric('post_publish_health_pass_rate', healthPassRate, monitorOutcomes.length, 0.9, '>= 0.90'),
-    upperBoundMetric('duplicate_publish_count', duplicatePublishCount, events.length + publishedAudits.length, 0, '= 0'),
-    upperBoundMetric('unsafe_publish_count', unsafeProducts.length, publicProducts.length, 0, '= 0'),
+    noLegitimateMonitorTarget
+      ? notApplicableMetric(
+          lowerBoundMetric('post_publish_health_pass_rate', null, 0, 0.9, '>= 0.90'),
+          'NO_PUBLIC_PRODUCT_OR_LEGITIMATE_MONITOR_TARGET',
+        )
+      : lowerBoundMetric('post_publish_health_pass_rate', healthPassRate, monitorOutcomes.length, 0.9, '>= 0.90'),
+    noPublicationActivity
+      ? notApplicableMetric(
+          upperBoundMetric('duplicate_publish_count', null, 0, 0, '= 0'),
+          'NO_PUBLICATION_ACTIVITY_IN_WINDOW',
+        )
+      : upperBoundMetric('duplicate_publish_count', duplicatePublishCount, events.length + publishedAudits.length, 0, '= 0'),
+    publicProducts.length === 0
+      ? notApplicableMetric(
+          upperBoundMetric('unsafe_publish_count', null, 0, 0, '= 0'),
+          'NO_PUBLIC_PRODUCTS_IN_WINDOW',
+        )
+      : upperBoundMetric('unsafe_publish_count', unsafeProducts.length, publicProducts.length, 0, '= 0'),
     upperBoundMetric('storage_lock_timeout_count', storageLockTimeoutCount, terminals.length, 0, '= 0'),
-    upperBoundMetric('rollback_rate', rollbackRate, publicationAttempts.length, 0.02, '<= 0.02'),
+    publicationAttempts.length === 0
+      ? notApplicableMetric(
+          upperBoundMetric('rollback_rate', null, 0, 0.02, '<= 0.02'),
+          'NO_PUBLICATION_ATTEMPTS_IN_WINDOW',
+        )
+      : upperBoundMetric('rollback_rate', rollbackRate, publicationAttempts.length, 0.02, '<= 0.02'),
     lowerBoundMetric('zero_touch_completion_rate', zeroTouchRate, zeroTouchJobs.length, 0.9, '>= 0.90', minimumSamples),
     booleanMetric('runtime_publish_safe', runtimePublishSafe, 'true'),
     booleanMetric('public_route_healthy', publicRouteHealthy, 'true'),
   ];
-  const dataStatus: AutomationSloMeasurement['dataStatus'] = terminals.length >= minimumSamples
+  const allApplicableMetricsMeasured = metrics.every(metric =>
+    metric.measurementState === 'MEASURED' || metric.measurementState === 'NOT_APPLICABLE');
+  const measurementComplete = terminals.length >= minimumSamples
     && runtimeObserved
     && publicRouteHealthy !== null
-    && publicationAttempts.length > 0
-    && monitorOutcomes.length > 0
-      ? 'MEASURED'
-      : 'INSUFFICIENT_DATA';
+    && allApplicableMetricsMeasured;
+  const dataStatus: AutomationSloMeasurement['dataStatus'] = measurementComplete
+    ? noLegitimateMonitorTarget ? 'RECOVERY' : 'MEASURED'
+    : runtimeObserved || terminals.length > 0 ? 'INSUFFICIENT_DATA' : 'BOOTSTRAP';
   const measuredAt = new Date(now).toISOString();
   const evidence = {
-    sourceCounts: [jobs.length, terminals.length, monitorOutcomes.length, runtimeWindow.length, publicationAttempts.length, events.length, publicProducts.length],
-    values: metrics.map(metric => [metric.key, metric.value, metric.sampleSize, metric.status]),
+    sourceCounts: [
+      jobs.length,
+      terminals.length,
+      pickupObservations.length,
+      retryPickupLatencies.length,
+      pendingQueueAges.length,
+      monitorOutcomes.length,
+      runtimeWindow.length,
+      publicationAttempts.length,
+      events.length,
+      publicProducts.length,
+    ],
+    pickupLatency: {
+      mode: pickupLatencyMode,
+      featureMode: pickupLatencyFeature.mode,
+      p50Ms: pickupLatencyP50Ms,
+      p95Ms: pickupLatencyP95Ms,
+      legacyP95Ms: pickupLatencyLegacyP95Ms,
+      runnableAtP95Ms: pickupLatencyRunnableAtP95Ms,
+      retryP95Ms: retryPickupLatencyP95Ms,
+      pendingQueueAgeMs,
+    },
+    values: metrics.map(metric => [
+      metric.key,
+      metric.value,
+      metric.sampleSize,
+      metric.status,
+      metric.measurementState,
+      metric.stateReason,
+    ]),
     unsafeProductIds: unsafeProducts.map(product => product.id).sort(),
     windowStartedAt: new Date(startedAt).toISOString(),
     windowEndedAt: measuredAt,
@@ -345,7 +564,11 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     sourceCounts: {
       jobs: jobs.length,
       terminalJobs: terminals.length,
+      pickupAttempts: pickupObservations.length,
+      retryPickupAttempts: retryPickupLatencies.length,
+      neverClaimedPending: pendingQueueAges.length,
       monitorOutcomes: monitorOutcomes.length,
+      pendingMonitorTargets: pendingMonitorTargets.length,
       runtimeSnapshots: runtimeWindow.length,
       publicationAttempts: publicationAttempts.length,
       outboundEvents: events.length,
@@ -353,7 +576,15 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     },
     workerHeartbeatFresh,
     schedulerHeartbeatFresh,
+    pickupLatencyP50Ms,
     pickupLatencyP95Ms,
+    pickupLatencyLegacyP95Ms,
+    pickupLatencyRunnableAtP95Ms,
+    retryPickupLatencyP95Ms,
+    pickupLatencyMode,
+    pickupLatencyFeatureMode: pickupLatencyFeature.mode,
+    pendingQueueAgeMs,
+    pendingQueueCount: pendingQueueAges.length,
     terminalOutcomeRate,
     errorRate,
     healthPassRate,
@@ -406,7 +637,7 @@ export function evaluateAutomationErrorBudget(measurement: AutomationSloMeasurem
   const severeReasons = uniqueReasons.filter(reason => severeSet.has(reason));
   const status: EvaluationStatus = uniqueReasons.length
     ? 'BREACH'
-    : measurement.dataStatus === 'MEASURED' ? 'PASS' : 'INSUFFICIENT_DATA';
+    : ['MEASURED', 'RECOVERY'].includes(measurement.dataStatus) ? 'PASS' : 'INSUFFICIENT_DATA';
   const evaluatedAt = measurement.measuredAt;
   const idHash = createHash('sha256').update(JSON.stringify({ measurementId: measurement.id, status, reasons: uniqueReasons })).digest('hex').slice(0, 12);
   return {
@@ -477,9 +708,60 @@ function degradedMode(mode: AutomationControlState['effectiveMode']): Automation
   return mode;
 }
 
+function recoveryEvidenceSummary(
+  measurement: AutomationSloMeasurement,
+  evaluation: ErrorBudgetEvaluation,
+): RuntimeRecoveryEvidenceSummary {
+  const noDataReasons = measurement.metrics
+    .filter(metric => metric.measurementState !== 'MEASURED' && metric.measurementState !== 'NOT_APPLICABLE')
+    .map(metric => metric.stateReason);
+  return {
+    measurementState: measurement.dataStatus,
+    evaluationStatus: evaluation.status,
+    evaluatedAt: evaluation.evaluatedAt,
+    maximumEvidenceAgeMs: getRuntimeRecoveryPolicy().maximumEvidenceAgeMs,
+    reasonCodes: [...new Set([
+      ...evaluation.reasons,
+      ...noDataReasons,
+      ...(measurement.dataStatus === 'RECOVERY' ? ['ZERO_PUBLIC_PRODUCT_RECOVERY_EVIDENCE'] : []),
+    ])],
+    terminalJobSamples: measurement.sourceCounts.terminalJobs,
+    pickupLatencyP95Ms: measurement.pickupLatencyP95Ms,
+    pendingQueueAgeMs: measurement.pendingQueueAgeMs,
+    publicationAttempts: measurement.sourceCounts.publicationAttempts,
+    monitorOutcomes: measurement.sourceCounts.monitorOutcomes,
+    publicProducts: measurement.sourceCounts.publicProducts,
+  };
+}
+
+function recoveryEligibilityReasons(
+  control: AutomationControlState,
+  measurement: AutomationSloMeasurement,
+  evaluation: ErrorBudgetEvaluation,
+  now: number,
+): string[] {
+  const reasons: string[] = [];
+  if (control.publishPausedByOperator) reasons.push('OPERATOR_PUBLISH_PAUSE_ACTIVE');
+  if (control.killSwitch || control.mode === 'EMERGENCY_STOP') reasons.push('EMERGENCY_STOP_ACTIVE');
+  if (control.publishBlockedByPolicy) reasons.push('PROVIDER_OR_POLICY_BLOCK_ACTIVE');
+  if (measurement.workerHeartbeatFresh !== true) reasons.push('WORKER_LEASE_NOT_FRESH');
+  if (measurement.schedulerHeartbeatFresh !== true) reasons.push('SCHEDULER_LEASE_NOT_FRESH');
+  if (measurement.publicRouteHealthy !== true) reasons.push('PUBLIC_HEALTH_NOT_READY');
+  if (measurement.runtimePublishSafe !== true) reasons.push('RUNTIME_GUARDIAN_NOT_SAFE');
+  if (!['MEASURED', 'RECOVERY'].includes(measurement.dataStatus)) reasons.push('RECOVERY_EVIDENCE_INSUFFICIENT');
+  if (evaluation.severeReasons.length) reasons.push(...evaluation.severeReasons);
+  const evaluatedAt = Date.parse(evaluation.evaluatedAt);
+  if (!Number.isFinite(evaluatedAt) || now - evaluatedAt > getRuntimeRecoveryPolicy().maximumEvidenceAgeMs) {
+    reasons.push('RECOVERY_EVIDENCE_STALE');
+  }
+  return [...new Set(reasons)];
+}
+
 export async function applyAutomationErrorBudget(options: MeasureAutomationSloOptions & { actor?: string } = {}): Promise<AppliedErrorBudget> {
+  const now = options.now ?? Date.now();
   const measurement = await measureAutomationSlo(options);
   const evaluation = evaluateAutomationErrorBudget(measurement);
+  const recoveryFeature = getFeatureRolloutState('RUNTIME_RECOVERY_V2');
   await persistMeasurement(measurement, evaluation);
   let previous = await getAutomationControl();
   let control = previous;
@@ -492,39 +774,28 @@ export async function applyAutomationErrorBudget(options: MeasureAutomationSloOp
     if (claimed) {
       previous = await getAutomationControl();
       const nextMode = degradedMode(previous.effectiveMode);
-      publishPausedByBudget = evaluation.severeReasons.length > 0 || nextMode === 'SHADOW';
+      publishPausedByBudget = true;
       control = await updateAutomationControl({
         effectiveMode: nextMode,
-        publishBlockedByRuntime: publishPausedByBudget,
-        publishRuntimeReasons: publishPausedByBudget ? evaluation.reasons : [],
+        publishBlockedByRuntime: true,
+        publishRuntimeReasons: evaluation.reasons,
         degradedAt: evaluation.evaluatedAt,
         degradedReason: evaluation.reasons.join(','),
         reason: evaluation.reasons.join(','),
       }, options.actor || 'error-budget-controller');
-      if (publishPausedByBudget) {
-        canary = await applyCanarySafetyDecision({
-          pause: true,
-          reasons: evaluation.reasons,
-          evaluatedAt: evaluation.evaluatedAt,
-          evaluationId: evaluation.id,
-        });
-      }
-      applied = nextMode !== previous.effectiveMode || publishPausedByBudget && !previous.publishBlockedByRuntime;
+      canary = await applyCanarySafetyDecision({
+        pause: true,
+        reasons: evaluation.reasons,
+        evaluatedAt: evaluation.evaluatedAt,
+        evaluationId: evaluation.id,
+      });
+      applied = nextMode !== previous.effectiveMode || !previous.publishBlockedByRuntime;
       await completeControlApplication(measurement.id, previous.effectiveMode, control.effectiveMode, control.publishPaused, evaluation.evaluatedAt);
     } else {
       control = await getAutomationControl();
       canary = await getCanaryState();
     }
   } else if (evaluation.status === 'PASS') {
-    if (previous.publishBlockedByRuntime) {
-      control = await updateAutomationControl({
-        publishBlockedByRuntime: false,
-        publishRuntimeReasons: [],
-        degradedReason: undefined,
-        reason: 'Runtime stability window and all measured safety gates passed.',
-      }, options.actor || 'error-budget-controller');
-      applied = true;
-    }
     canary = await advanceCanaryWaveAfterHealthyEvaluation({
       evaluationId: evaluation.id,
       status: evaluation.status,
@@ -534,6 +805,34 @@ export async function applyAutomationErrorBudget(options: MeasureAutomationSloOp
     });
   }
 
+  control = await getAutomationControl();
+  const recoveryTransition = await advanceRuntimeRecoveryState({
+    evaluationId: evaluation.id,
+    evaluationStatus: evaluation.status,
+    applicableReasons: evaluation.reasons,
+    recoveryEligibilityReasons: recoveryEligibilityReasons(control, measurement, evaluation, now),
+    evidenceSummary: recoveryEvidenceSummary(measurement, evaluation),
+    publishBlockedByRuntime: control.publishBlockedByRuntime === true,
+    featureMode: recoveryFeature.mode,
+    nowMs: now,
+  });
+  let recovery = recoveryTransition.state;
+  if (recoveryTransition.shouldClearRuntimeBlock) {
+    control = await updateAutomationControl({
+      publishBlockedByRuntime: false,
+      publishRuntimeReasons: [],
+      degradedReason: undefined,
+      reason: 'Runtime recovery reached the required consecutive healthy confirmation count.',
+    }, options.actor || 'error-budget-controller');
+    recovery = await confirmRuntimeRecoveryClosed({
+      expectedStateVersion: recovery.stateVersion,
+      nowMs: now,
+      evidenceSummary: recovery.evidenceSummary,
+    });
+    applied = true;
+  }
+  publishPausedByBudget = control.publishBlockedByRuntime === true;
+
   return {
     measurement,
     evaluation,
@@ -541,6 +840,8 @@ export async function applyAutomationErrorBudget(options: MeasureAutomationSloOp
     previousEffectiveMode: previous.effectiveMode,
     control,
     canary,
+    recovery,
+    recoveryFeatureMode: recoveryFeature.mode,
     publishPausedByBudget,
     ingestionAvailable: !control.ingestionPaused,
   };

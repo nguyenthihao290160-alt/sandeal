@@ -15,8 +15,15 @@ import {
   readMongoSchemaVersion,
 } from './mongoSchema';
 import type { MongoStorageConfig } from './storageConfig';
+import { applyStorageBulkMutations } from './bulkMutation';
 import { isStorageError, storageError, storageErrorCode } from './storageErrors';
-import type { StorageAdapter, StoragePageOptions, StorageTransaction } from './types';
+import type {
+  StorageAdapter,
+  StorageBulkMutation,
+  StorageBulkResult,
+  StoragePageOptions,
+  StorageTransaction,
+} from './types';
 
 const TRANSACTION_ATTEMPTS = 2;
 const COMMIT_ATTEMPTS = 2;
@@ -125,6 +132,19 @@ async function writeRevision(
 
 export class MongoStorageAdapter implements StorageAdapter {
   readonly driver = 'mongo' as const;
+  readonly capabilities = {
+    schemaVersion: 1 as const,
+    driver: 'mongo' as const,
+    transactions: true,
+    atomicCollectionRevision: true,
+    boundedBulkMutation: true,
+    partialFailureReporting: true,
+    // The adapter writes one transactionally selected collection revision.
+    // It does not claim MongoDB's item-level bulkWrite API.
+    nativeBulkWrite: false,
+    maximumBulkItems: 100,
+    optimizedBulkFeatureFlag: 'MONGO_BULK_WRITE' as const,
+  };
 
   constructor(
     private readonly config: MongoStorageConfig,
@@ -320,6 +340,28 @@ export class MongoStorageAdapter implements StorageAdapter {
     } finally {
       await session.endSession();
     }
+  }
+
+  async bulkMutateCollection<T extends { id: string }>(
+    collection: string,
+    mutations: StorageBulkMutation<T>[],
+    options: { optimized?: boolean } = {},
+  ): Promise<StorageBulkResult> {
+    let output!: StorageBulkResult;
+    await this.runTransaction<T>(collection, items => {
+      const applied = applyStorageBulkMutations(items, mutations);
+      output = {
+        schemaVersion: 1,
+        driver: 'mongo',
+        mode: options.optimized ? 'MONGO_OPT_IN_REVISION' : 'MONGO_COMPATIBILITY_REVISION',
+        requested: mutations.length,
+        applied: applied.applied,
+        failed: applied.failed,
+        results: applied.results,
+      };
+      return applied.applied > 0 ? applied.items : undefined;
+    });
+    return output;
   }
 
   async checkHealth() {

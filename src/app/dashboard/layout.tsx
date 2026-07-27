@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { dashboardStrings } from '@/lib/dashboard/strings';
+import { isDashboardRouteActive } from '@/lib/dashboard/navigation';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
 
 type NavigationItem = { label: string; href: string; icon: DashboardIconName; badge?: string };
@@ -65,11 +66,6 @@ const LEGACY_ITEMS: NavigationItem[] = [
   { label: 'Kiểm soát tuân thủ', href: '/dashboard/compliance', icon: 'approval' },
 ];
 
-function isRouteActive(pathname: string, href: string) {
-  if (href === '/dashboard') return pathname === '/dashboard';
-  return pathname === href || pathname.startsWith(`${href}/`);
-}
-
 function getPageTitle(pathname: string) {
   const allItems = [...NAV_GROUPS.flatMap((group) => group.items), ...LEGACY_ITEMS];
 
@@ -83,8 +79,8 @@ function getPageTitle(pathname: string) {
 }
 
 function getPageGroup(pathname: string) {
-  const group = NAV_GROUPS.find((item) => item.items.some((entry) => isRouteActive(pathname, entry.href)));
-  return group?.label || (LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href)) ? 'Khác' : 'Tổng quan');
+  const group = NAV_GROUPS.find((item) => item.items.some((entry) => isDashboardRouteActive(pathname, entry.href)));
+  return group?.label || (LEGACY_ITEMS.some((item) => isDashboardRouteActive(pathname, item.href)) ? 'Khác' : 'Tổng quan');
 }
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -94,7 +90,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     Object.fromEntries(NAV_GROUPS.map((group) => [group.id, true])),
   );
   const [legacyOpen, setLegacyOpen] = useState(
-      LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href)),
+      LEGACY_ITEMS.some((item) => isDashboardRouteActive(pathname, item.href)),
   );
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -105,11 +101,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const activeGroup = NAV_GROUPS.find((group) => group.items.some((item) => isRouteActive(pathname, item.href)));
+      const activeGroup = NAV_GROUPS.find((group) => group.items.some((item) => isDashboardRouteActive(pathname, item.href)));
       if (activeGroup) {
         setOpenGroups((current) => current[activeGroup.id] ? current : { ...current, [activeGroup.id]: true });
       }
-      if (LEGACY_ITEMS.some((item) => isRouteActive(pathname, item.href))) setLegacyOpen(true);
+      if (LEGACY_ITEMS.some((item) => isDashboardRouteActive(pathname, item.href))) setLegacyOpen(true);
       setSidebarOpen(false);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -179,7 +175,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
                   {openGroups[group.id] && <div id={`dashboard-nav-${group.id}`}>
                   {group.items.map((item) => {
-                    const isActive = isRouteActive(pathname, item.href);
+                    const isActive = isDashboardRouteActive(pathname, item.href);
 
                     return (
                         <Link
@@ -217,7 +213,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
               {legacyOpen &&
                   LEGACY_ITEMS.map((item) => {
-                    const isActive = isRouteActive(pathname, item.href);
+                    const isActive = isDashboardRouteActive(pathname, item.href);
 
                     return (
                         <Link

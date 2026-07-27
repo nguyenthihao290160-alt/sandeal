@@ -56,6 +56,21 @@ function secretScan() {
     const publicExampleDefaults = new Set([
       'SANDEAL_STORAGE_DRIVER=file',
       'MONGODB_DATABASE=sandeal',
+      'RUNTIME_RECOVERY_V2=SHADOW',
+      'RECOVERY_CANARY=OFF',
+      'RECOVERY_CANARY_MAX_ACTIVE=1',
+      'RECOVERY_CANARY_TTL_MS=1800000',
+      'WORKER_CONTINUOUS_POOL_V2=OFF',
+      'SLO_RUNNABLE_AT_V2=SHADOW',
+      'AI_CLOUD_FALLBACK=OFF',
+      'AI_LOCAL_FALLBACK=OFF',
+      'OPERATOR_ALERTING=OFF',
+      'SMART_CATEGORIZATION_V2=SHADOW',
+      'MONGO_BULK_WRITE=OFF',
+      'MULTI_AFFILIATE_OFFER=SHADOW',
+      'PROGRAMMATIC_SEO_V2=SHADOW',
+      'RUNTIME_RECOVERY_REQUIRED_HEALTHY_COUNT=3',
+      'RUNTIME_RECOVERY_MAX_EVIDENCE_AGE_MS=120000',
     ]);
     fs.readFileSync(example, 'utf8').split(/\r?\n/).forEach((line, index) => {
       const normalizedLine = line.trim();

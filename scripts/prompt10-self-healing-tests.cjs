@@ -50,8 +50,15 @@ function publishedProduct(id, overrides = {}) {
     source: 'manual',
     sourceId: `auralink-${id}`,
     originalUrl: `https://merchant.example/products/${id}`,
+    canonicalProductUrl: `https://merchant.example/products/${id}`,
+    canonicalUrlStatus: 'verified',
+    canonicalUrlVerifiedAt: now,
     affiliateUrl: `https://merchant.example/products/${id}?ref=sandeal`,
+    affiliateUrlStatus: 'verified',
+    affiliateUrlVerifiedAt: now,
     imageUrl: `https://merchant.example/assets/${id}.jpg`,
+    imageUrlHttpStatus: 200,
+    imageContentType: 'image/jpeg',
     gallery: [`https://merchant.example/assets/${id}-gallery.jpg`],
     price: 1500000,
     salePrice: 1200000,
@@ -83,6 +90,8 @@ function publishedProduct(id, overrides = {}) {
     qualityScore: 98,
     lastSeenAt: now,
     priceObservedAt: now,
+    priceVerificationStatus: 'VERIFIED',
+    priceTruthState: 'FRESH',
     sourceHash: sourceHash(id),
     contentHash: sourceHash(id),
     publicationEffectKey: `publish-effect:${id}:${sourceHash(id)}`,
@@ -300,7 +309,11 @@ async function main() {
     const publishRun = await worker.processAutomationBatch('self-heal-worker-recovery-publish', 1);
     assert.equal(publishRun.succeeded, 1, JSON.stringify(await store.getAutomationJob(publishJobs[0].id)));
     ready = await products.getProductById(seeded.id);
-    assert.equal(ready.lifecycleState, 'PUBLISHED');
+    assert.equal(ready.lifecycleState, 'PUBLISHED', JSON.stringify({
+      product: ready,
+      publishJob: await store.getAutomationJob(publishJobs[0].id),
+      publicationAudits: await adapter.readCollection('publication-audit'),
+    }));
     assert.equal(ready.status, 'published');
     assert.equal(ready.publicHidden, false);
     const outbound = (await adapter.readCollection('automation-outbound-events')).filter(event => event.productId === seeded.id);

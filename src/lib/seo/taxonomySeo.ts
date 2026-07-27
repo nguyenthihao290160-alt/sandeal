@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 
 import { config } from '../config';
+import { structuredDataText, verifiedPublicHttpsUrl } from './structuredData';
 
 export type PublicTaxonomyKind = 'category' | 'brand';
 
@@ -62,30 +63,32 @@ export function taxonomyIndexingDecision(input: TaxonomySeoInput): { indexable: 
 
 export function buildTaxonomyMetadata(input: TaxonomySeoInput): Metadata {
   const label = input.kind === 'category' ? `danh mục ${input.name}` : `thương hiệu ${input.name}`;
-  const title = `Deal ${input.name} đã kiểm tra${input.page > 1 ? ` - Trang ${input.page}` : ''} | SanDeal`;
+  const pageTitle = `Deal ${input.name} đã kiểm tra${input.page > 1 ? ` - Trang ${input.page}` : ''}`;
+  const socialTitle = `${pageTitle} | SanDeal`;
   const description = `Khám phá sản phẩm thuộc ${label} đã vượt cổng công khai, kèm giá, nguồn, thời điểm cập nhật và dữ kiện hiện có.`;
   const path = taxonomyPath(input.kind, input.slug, input.page);
   const canonical = new URL(path, config.siteUrl).toString();
   const indexing = taxonomyIndexingDecision(input);
+  const imageUrl = verifiedPublicHttpsUrl(input.imageUrl);
   return {
-    title,
+    title: pageTitle,
     description,
     alternates: { canonical },
     robots: { index: indexing.indexable, follow: true, googleBot: { index: indexing.indexable, follow: true } },
     openGraph: {
-      title,
+      title: socialTitle,
       description,
       url: canonical,
       type: 'website',
       locale: 'vi_VN',
       siteName: 'SanDeal',
-      images: input.imageUrl ? [{ url: input.imageUrl, alt: `Sản phẩm ${input.name}` }] : [],
+      images: imageUrl ? [{ url: imageUrl, alt: `Sản phẩm ${input.name}` }] : [],
     },
     twitter: {
-      card: input.imageUrl ? 'summary_large_image' : 'summary',
-      title,
+      card: imageUrl ? 'summary_large_image' : 'summary',
+      title: socialTitle,
       description,
-      images: input.imageUrl ? [input.imageUrl] : [],
+      images: imageUrl ? [imageUrl] : [],
     },
   };
 }
@@ -97,7 +100,7 @@ export function buildTaxonomyBreadcrumbJsonLd(input: Pick<TaxonomySeoInput, 'kin
     itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'Trang chủ', item: config.siteUrl },
       { '@type': 'ListItem', position: 2, name: 'Deal', item: new URL('/deals', config.siteUrl).toString() },
-      { '@type': 'ListItem', position: 3, name: input.name, item: new URL(taxonomyPath(input.kind, input.slug), config.siteUrl).toString() },
+      { '@type': 'ListItem', position: 3, name: structuredDataText(input.name, 160), item: new URL(taxonomyPath(input.kind, input.slug), config.siteUrl).toString() },
     ],
   };
 }
@@ -114,7 +117,7 @@ export function buildTaxonomyItemListJsonLd(
     itemListElement: items.map((item, index) => ({
       '@type': 'ListItem',
       position: (input.page - 1) * 12 + index + 1,
-      name: item.title,
+      name: structuredDataText(item.title, 240),
       url: new URL(`/deals/${encodeURIComponent(item.slug)}`, config.siteUrl).toString(),
     })),
   };
@@ -140,8 +143,8 @@ export function buildFaqJsonLd(items: Array<{ question: string; answer: string }
     '@type': 'FAQPage',
     mainEntity: items.map(item => ({
       '@type': 'Question',
-      name: item.question,
-      acceptedAnswer: { '@type': 'Answer', text: item.answer },
+      name: structuredDataText(item.question, 500),
+      acceptedAnswer: { '@type': 'Answer', text: structuredDataText(item.answer, 2_000) },
     })),
   };
 }

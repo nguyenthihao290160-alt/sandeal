@@ -6,6 +6,8 @@ import { isReviewIndexable } from '../editorialReview';
 import { PRODUCT_INTELLIGENCE_CONFIG } from '../product-intelligence/config';
 import { commerceQualityScore, isDiscoverableCommerceProduct } from '../product-intelligence/searchRanking';
 import { publicTaxonomySlug, taxonomyPath } from './taxonomySeo';
+import { futureStructuredDataDate, structuredDataText, verifiedPublicHttpsUrl } from './structuredData';
+import { getFeatureRolloutState } from '../automation/featureRollout';
 
 export function canonicalProductUrl(product: Pick<Product, 'slug'>): string {
   return new URL(`/deals/${encodeURIComponent(product.slug)}`, config.siteUrl).toString();
@@ -18,7 +20,9 @@ export function getProductIndexingDecision(product?: Product | null): { indexabl
   if ((product.duplicateConfidence || 0) >= PRODUCT_INTELLIGENCE_CONFIG.thresholds.duplicateHigh) reasons.push('duplicate_high_confidence');
   if (!isReviewIndexable(product)) reasons.push(...(product.reviewContent?.reviewBlockReasons || ['review_not_ready']));
   if (!product.imageUrl || product.imageHealthStatus !== 'ok') reasons.push('broken_image');
+  if (product.imageUrl && !verifiedPublicHttpsUrl(product.imageUrl)) reasons.push('unsafe_image_url');
   if (product.status !== 'published' || product.publicHidden !== false) reasons.push('not_public');
+  if (product.runtimeRecoveryCanaryObservationPending) reasons.push('runtime_recovery_canary_observation_pending');
   if (!isDiscoverableCommerceProduct(product)) reasons.push(`price_or_lifecycle_not_discoverable:${product.priceTruthState || product.lifecycleState || 'unknown'}`);
   if (product.schemaVersion === 2 && product.autoPublished === true) {
     if (!String(product.category || '').trim()) reasons.push('category_missing');
@@ -31,7 +35,7 @@ export function getProductIndexingDecision(product?: Product | null): { indexabl
 }
 
 export function buildProductMetadata(product?: Product | null): Metadata {
-  if (!product) return { title: 'Không tìm thấy sản phẩm | SanDeal', robots: { index: false, follow: true } };
+  if (!product) return { title: 'Không tìm thấy sản phẩm', robots: { index: false, follow: true } };
   const review = product.reviewContent;
   const indexing = getProductIndexingDecision(product);
   const title = review?.reviewTitle || `${product.title} | Thông tin đang được xác minh`;
@@ -55,25 +59,71 @@ export function buildProductMetadata(product?: Product | null): Metadata {
 export function buildProductJsonLd(product: Product): Record<string, unknown> | null {
   if (!getProductIndexingDecision(product).indexable || !product.reviewContent) return null;
   const currentPrice = Number(product.salePrice || product.price || 0);
+  const priceVerified = currentPrice > 0
+    && ['FRESH', 'AGING'].includes(String(product.priceTruthState || ''))
+    && Number.isFinite(Date.parse(product.priceObservedAt || ''))
+    && (
+      Number(product.confidences?.price || 0) >= 0.75
+      || product.priceVerificationStatus === 'VERIFIED'
+    );
+  const title = structuredDataText(product.title, 240);
+  const description = structuredDataText(product.reviewContent.reviewSummary, 4_096);
+  if (!title || !description) return null;
+  const image = verifiedPublicHttpsUrl(product.imageUrl);
+  const brand = structuredDataText(product.brand, 160);
+  const sku = structuredDataText(product.sku, 160);
+  const gtin = structuredDataText(product.gtin, 160);
+  const mpn = structuredDataText(product.mpn, 160);
+  const bestOffer = product.offers?.find(offer => offer.id === product.bestOfferId);
+  const priceValidUntil = futureStructuredDataDate(bestOffer?.expiresAt);
   const data: Record<string, unknown> = {
-    '@context': 'https://schema.org', '@type': 'Product', name: product.title,
-    image: product.imageUrl ? [product.imageUrl] : undefined,
-    description: product.reviewContent.reviewSummary,
+    '@context': 'https://schema.org', '@type': 'Product', name: title,
+    image: image ? [image] : undefined,
+    description,
     url: canonicalProductUrl(product),
-    brand: product.brand ? { '@type': 'Brand', name: product.brand } : undefined,
-    sku: product.sku || undefined, gtin: product.gtin || undefined, mpn: product.mpn || undefined,
-    offers: currentPrice > 0 ? {
-      '@type': 'Offer', price: currentPrice, priceCurrency: product.currency,
+    brand: brand ? { '@type': 'Brand', name: brand } : undefined,
+    sku, gtin, mpn,
+    offers: priceVerified ? {
+      '@type': 'Offer',
+      price: currentPrice,
+      priceCurrency: product.currency,
       url: new URL(`/go/${encodeURIComponent(product.id)}`, config.siteUrl).toString(),
+      ...(priceValidUntil
+        ? { priceValidUntil }
+        : {}),
     } : undefined,
   };
   return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
 }
 
+export function getProgrammaticSeoV2State(
+  product: Product,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): {
+  mode: string;
+  eligible: boolean;
+  emitsV2: boolean;
+  reasons: string[];
+} {
+  const rollout = getFeatureRolloutState('PROGRAMMATIC_SEO_V2', environment);
+  const indexing = getProductIndexingDecision(product);
+  const structured = buildProductJsonLd(product);
+  return {
+    mode: rollout.mode,
+    eligible: indexing.indexable && Boolean(structured),
+    emitsV2: rollout.valid && rollout.mode === 'ACTIVE' && indexing.indexable && Boolean(structured),
+    reasons: indexing.reasons.length
+      ? indexing.reasons
+      : structured
+        ? ['verified_structured_data_ready']
+        : ['structured_data_not_ready'],
+  };
+}
+
 export function buildBreadcrumbJsonLd(product: Product): Record<string, unknown> {
   const categorySlug = product.category ? publicTaxonomySlug(product.category) : '';
   const middle = categorySlug
-    ? [{ '@type': 'ListItem', position: 3, name: product.category, item: new URL(taxonomyPath('category', categorySlug), config.siteUrl).toString() }]
+    ? [{ '@type': 'ListItem', position: 3, name: structuredDataText(product.category, 160), item: new URL(taxonomyPath('category', categorySlug), config.siteUrl).toString() }]
     : [];
   return {
     '@context': 'https://schema.org', '@type': 'BreadcrumbList',
@@ -81,7 +131,7 @@ export function buildBreadcrumbJsonLd(product: Product): Record<string, unknown>
       { '@type': 'ListItem', position: 1, name: 'Trang chủ', item: config.siteUrl },
       { '@type': 'ListItem', position: 2, name: 'Sản phẩm', item: new URL('/deals', config.siteUrl).toString() },
       ...middle,
-      { '@type': 'ListItem', position: middle.length ? 4 : 3, name: product.title, item: canonicalProductUrl(product) },
+      { '@type': 'ListItem', position: middle.length ? 4 : 3, name: structuredDataText(product.title, 240), item: canonicalProductUrl(product) },
     ],
   };
 }

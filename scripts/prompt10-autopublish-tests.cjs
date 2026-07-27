@@ -19,8 +19,12 @@ function readyProduct(id, overrides = {}) {
     schemaVersion: 2, id, title: `Verified autonomous Bluetooth headset ${id}`, slug: `verified-autonomous-headset-${id}`,
     description: `Source-backed product ${id} with verified price, URLs, image, identity, and editorial evidence.`,
     kind: 'product', recordType: 'PRODUCT', lifecycleState: 'READY_FOR_PUBLISH', platform: 'website', source: 'manual',
-    originalUrl: `https://merchant.example/product/${id}`, affiliateUrl: `https://merchant.example/product/${id}?affiliate=fixture`, imageUrl: `https://merchant.example/image/${id}.jpg`,
-    price: 1500000, salePrice: 1200000, currency: 'VND', category: 'Audio', brand: 'Fixture', sku: `AUTO-${id}`, specifications: { connection: 'Bluetooth', warranty: '12 months' },
+    originalUrl: `https://merchant.example/product/${id}`, canonicalProductUrl: `https://merchant.example/product/${id}`,
+    canonicalUrlStatus: 'verified', canonicalUrlVerifiedAt: now,
+    affiliateUrl: `https://merchant.example/product/${id}?affiliate=fixture`, affiliateUrlStatus: 'verified', affiliateUrlVerifiedAt: now,
+    imageUrl: `https://merchant.example/image/${id}.jpg`, imageUrlHttpStatus: 200, imageContentType: 'image/jpeg',
+    price: 1500000, salePrice: 1200000, currency: 'VND', priceObservedAt: now, priceVerificationStatus: 'VERIFIED', priceTruthState: 'FRESH',
+    category: 'Audio', brand: 'Fixture', sku: `AUTO-${id}`, specifications: { connection: 'Bluetooth', warranty: '12 months' },
     tags: [], benefits: [], warnings: [], riskLevel: 'low', status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
     verifiedSource: true, sourceVerified: true, autoPublishEligible: true,
     linkHealthStatus: 'ok', affiliateHealthStatus: 'ok', imageHealthStatus: 'ok', linkLastCheckedAt: now, affiliateLastCheckedAt: now, imageLastCheckedAt: now,
@@ -62,9 +66,13 @@ async function main() {
   const journal = require('../src/lib/automation/operationJournal.ts');
   const settings = require('../src/lib/storage/automationSettings.ts');
   const sourceQuality = require('../src/lib/autonomous/sourceQuality.ts');
+  const runtimeRoles = require('../src/lib/automation/runtimeRoles.ts');
+  const runtimeRecovery = require('../src/lib/automation/runtimeRecoveryState.ts');
+  const recoveryCanary = require('../src/lib/automation/runtimeRecoveryCanary.ts');
   global.fetch = async () => { throw new Error('NETWORK_FORBIDDEN_IN_PROMPT10_AUTOPUBLISH'); };
   async function reset(mode = 'AUTONOMOUS') {
-    for (const collection of ['products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-canary', 'operation-journal', 'automation-outbound-events', 'publication-audit', 'source-quality']) await adapter.writeCollection(collection, []);
+    delete process.env.RECOVERY_CANARY;
+    for (const collection of ['products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-canary', 'operation-journal', 'automation-outbound-events', 'publication-audit', 'source-quality', 'runtime-role-leases', 'runtime-recovery-state', 'runtime-recovery-canary-permits']) await adapter.writeCollection(collection, []);
     await settings.updateAutomationSettings({ launchEnabled: true });
     await store.updateAutomationControl({ mode, effectiveMode: mode, publishPaused: false, ingestionPaused: false, workerPaused: false, schedulerPaused: false, killSwitch: false }, 'autopublish-test');
     const initial = await canary.getCanaryState();
@@ -74,6 +82,71 @@ async function main() {
       approvedBy: 'autopublish-test', approvedAt: now, approvalReason: 'Isolated controlled launch fixture for durable publication tests.',
       wavePublishedBaseline: initial.publishedEffectKeys.length, paused: false, pauseReasons: [], updatedAt: now,
     }]);
+  }
+
+  async function prepareRuntimeRecoveryCanary(suffix, publishPayload = {}) {
+    await reset();
+    process.env.RECOVERY_CANARY = 'ACTIVE';
+    const nowMs = Date.now();
+    const workerId = `recovery-canary-worker-${suffix}`;
+    const role = await runtimeRoles.acquireRuntimeRole({
+      role: 'WORKER',
+      ownerId: workerId,
+      instanceId: `recovery-canary-instance-${suffix}`,
+      leaseMs: 60_000,
+      now: nowMs,
+    });
+    assert.equal(role.acquired, true);
+    const schedulerRole = await runtimeRoles.acquireRuntimeRole({
+      role: 'SCHEDULER',
+      ownerId: `recovery-canary-scheduler-${suffix}`,
+      instanceId: `recovery-canary-scheduler-instance-${suffix}`,
+      leaseMs: 60_000,
+      now: nowMs,
+    });
+    assert.equal(schedulerRole.acquired, true);
+    await store.updateAutomationControl({
+      mode: 'AUTONOMOUS',
+      effectiveMode: 'AUTONOMOUS',
+      publishPausedByOperator: false,
+      publishBlockedByRuntime: true,
+      publishBlockedByPolicy: false,
+      killSwitch: false,
+    }, 'runtime-guardian');
+    const initialRecovery = await runtimeRecovery.ensureRuntimeRecoveryState({
+      publishBlockedByRuntime: true,
+      reasons: ['HISTORICAL_RUNTIME_BREACH'],
+      nowMs,
+    });
+    await runtimeRecovery.updateRuntimeRecoveryState({
+      expectedStateVersion: initialRecovery.stateVersion,
+      nowMs,
+      mutate: current => ({
+        ...current,
+        state: 'RECOVERY_OBSERVING',
+        currentApplicableReasons: [],
+        consecutiveHealthyCount: 1,
+        lastHealthyEvaluation: new Date(nowMs).toISOString(),
+        lastHealthyEvaluationId: `recovery-canary-evaluation-${suffix}`,
+        evidenceSummary: {
+          measurementState: 'RECOVERY',
+          evaluationStatus: 'PASS',
+          evaluatedAt: new Date(nowMs).toISOString(),
+          maximumEvidenceAgeMs: 120_000,
+          reasonCodes: [],
+          terminalJobSamples: 20,
+          pickupLatencyP95Ms: 5_000,
+          pendingQueueAgeMs: 0,
+          publicationAttempts: 0,
+          monitorOutcomes: 0,
+          publicProducts: 0,
+        },
+      }),
+    });
+    const product = await hydratePersistedEvidence(readyProduct(`recovery-canary-${suffix}`));
+    await adapter.writeCollection('products', [product]);
+    const queued = await publishJob(store, product, `recovery-canary-${suffix}`, publishPayload);
+    return { workerId, ownership: role.ownership, product, queued };
   }
 
   await test('eligible product auto-publishes without approval or user action', async () => {
@@ -105,7 +178,125 @@ async function main() {
     assert.ok(blocked.quarantineReasons.includes('risk_not_low'));
     const lifecycleEvents = (await adapter.readCollection('product-lifecycle-events')).filter(event => event.productId === product.id);
     assert.deepEqual(lifecycleEvents.map(event => `${event.previousState}->${event.nextState}`), ['READY_FOR_PUBLISH->QUARANTINED']);
+    const audits = await adapter.readCollection('publication-audit');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].action, 'publish_blocked');
+    assert.equal(audits[0].operationId, queued.job.operationId);
+    assert.ok(audits[0].productReasonCodes.includes('risk_not_low'));
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+  });
+
+  await test('blocked publication state resumes after a crash and writes exactly one audit', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('blocked-state-crash', { riskLevel: 'high' }));
+    await adapter.writeCollection('products', [product]);
+    const queued = await publishJob(store, product, 'blocked-state-crash', { simulateCrashAfterBlockedState: true });
+    const firstRun = await worker.processAutomationBatch('auto-publish-worker-blocked-state-crash-1', 1);
+    assert.equal(firstRun.failed, 1);
+    const afterCrash = await products.getProductById(product.id);
+    assert.equal(afterCrash.lifecycleState, 'QUARANTINED');
+    assert.equal(afterCrash.publicHidden, true);
+    assert.equal(afterCrash.lastBlockedPublicationDecision.operationId, queued.job.operationId);
     assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const retry = jobs.find(item => item.id === queued.job.id);
+      retry.nextRetryAt = new Date(0).toISOString();
+      return jobs;
+    });
+    const replay = await worker.processAutomationBatch('auto-publish-worker-blocked-state-crash-2', 1);
+    assert.equal(replay.succeeded, 1, JSON.stringify(await store.getAutomationJob(queued.job.id)));
+    const audits = (await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].effectKey, afterCrash.lastBlockedPublicationDecision.effectKey);
+    assert.equal((await journal.getOperationJournal(queued.job.operationId)).reconciliationStatus, 'CONSISTENT');
+  });
+
+  await test('blocked publication audit replay suppresses a duplicate after an interrupted journal completion', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('blocked-audit-crash', { riskLevel: 'high' }));
+    await adapter.writeCollection('products', [product]);
+    const queued = await publishJob(store, product, 'blocked-audit-crash', { simulateCrashAfterBlockedAuditWrite: true });
+    const firstRun = await worker.processAutomationBatch('auto-publish-worker-blocked-audit-crash-1', 1);
+    assert.equal(firstRun.failed, 1);
+    const firstAudits = (await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked');
+    assert.equal(firstAudits.length, 1);
+    const firstAuditId = firstAudits[0].id;
+    assert.equal((await products.getPublicProducts()).some(item => item.id === product.id), false);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const retry = jobs.find(item => item.id === queued.job.id);
+      retry.nextRetryAt = new Date(0).toISOString();
+      return jobs;
+    });
+    const replay = await worker.processAutomationBatch('auto-publish-worker-blocked-audit-crash-2', 1);
+    assert.equal(replay.succeeded, 1, JSON.stringify(await store.getAutomationJob(queued.job.id)));
+    const replayedAudits = (await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked');
+    assert.equal(replayedAudits.length, 1);
+    assert.equal(replayedAudits[0].id, firstAuditId);
+    assert.equal((await journal.getOperationJournal(queued.job.operationId)).reconciliationStatus, 'CONSISTENT');
+  });
+
+  await test('a runtime block after a normal journal starts records one separate durable blocked effect', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('runtime-block-after-journal'));
+    await adapter.writeCollection('products', [product]);
+    const queued = await publishJob(store, product, 'runtime-block-after-journal');
+    const snapshotHash = require('../src/lib/autonomous/publishPolicy.ts').readinessSnapshotHash(product);
+    const effectKey = `publish-effect:${product.id}:${snapshotHash}`;
+    await journal.ensureOperationJournal({
+      operationId: queued.job.operationId,
+      jobId: queued.job.id,
+      operationType: 'AUTO_SAFE_PUBLISH',
+      effects: [
+        { id: 'publish-product', description: 'Publish canonical product exactly once.', idempotencyKey: effectKey, intendedValue: { productId: product.id, snapshotHash } },
+        { id: 'outbound-event', description: 'Emit one publication event.', idempotencyKey: `${effectKey}:event` },
+        { id: 'monitor-job', description: 'Create one post-publish monitoring chain.', idempotencyKey: `${effectKey}:monitor` },
+      ],
+    });
+    await store.updateAutomationControl({
+      publishBlockedByRuntime: true,
+      publishPausedByOperator: false,
+      publishBlockedByPolicy: false,
+    }, 'runtime-guardian');
+    const run = await worker.processAutomationBatch('runtime-block-after-journal-worker', 1);
+    assert.equal(run.succeeded, 1);
+    const audit = (await adapter.readCollection('publication-audit')).find(item => item.action === 'publish_blocked');
+    assert.ok(audit);
+    assert.ok(audit.reasonCodes.includes('publish_blocked_by_runtime'));
+    assert.deepEqual(audit.productReasonCodes, []);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+    const journals = await adapter.readCollection('operation-journal');
+    assert.equal(journals.filter(item => item.operationType === 'AUTO_SAFE_PUBLISH_BLOCKED').length, 1);
+    assert.equal(journals.find(item => item.operationType === 'AUTO_SAFE_PUBLISH_BLOCKED').reconciliationStatus, 'CONSISTENT');
+  });
+
+  await test('operator publication pause remains distinct from the runtime block in blocked audit evidence', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('operator-paused-audit'));
+    await adapter.writeCollection('products', [product]);
+    await store.updateAutomationControl({
+      publishPausedByOperator: true,
+      publishBlockedByRuntime: false,
+      publishBlockedByPolicy: false,
+    }, 'operator-test');
+    await publishJob(store, product, 'operator-paused-audit');
+    const run = await worker.processAutomationBatch('operator-paused-audit-worker', 1);
+    assert.equal(run.succeeded, 1);
+    const audit = (await adapter.readCollection('publication-audit')).find(item => item.action === 'publish_blocked');
+    assert.ok(audit.reasonCodes.includes('publish_paused_by_operator'));
+    assert.equal(audit.runtimeReasonCodes.includes('publish_blocked_by_runtime'), false);
+    assert.deepEqual(audit.productReasonCodes, []);
+    assert.equal(audit.riskLevel, 'LOW');
+    const control = await store.getAutomationControl();
+    assert.equal(control.publishPausedByOperator, true);
+    assert.equal(control.publishBlockedByRuntime, false);
   });
 
   await test('client-created AUTO_SAFE_PUBLISH cannot forge an autonomous actor', async () => {
@@ -170,6 +361,7 @@ async function main() {
     const afterCrash = await products.getProductById(product.id);
     assert.equal(afterCrash.status, 'published'); assert.equal(afterCrash.lifecycleState, 'PUBLISHING'); const publishedAt = afterCrash.publishedAt;
     assert.equal((await products.getPublicProducts()).some(item => item.id === product.id), false);
+    await adapter.writeCollection('publication-audit', []);
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
     assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
     await adapter.runTransaction('automation-jobs', jobs => { const job = jobs.find(item => item.id === queued.job.id); job.nextRetryAt = new Date(0).toISOString(); return jobs; });
@@ -179,8 +371,12 @@ async function main() {
     assert.equal(recovered.publishedAt, publishedAt); assert.equal(recovered.lifecycleState, 'PUBLISHED');
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 1);
     assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.productId === product.id && item.action === 'published').length, 1);
+    assert.equal((await adapter.readCollection('publication-audit')).find(item => item.productId === product.id).previousState, 'needs_review');
     assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 1);
     assert.equal((await adapter.readCollection('product-lifecycle-events')).filter(event => event.productId === product.id).length, 2);
+    const reconciledJournal = await journal.getOperationJournal(queued.job.operationId);
+    assert.equal(reconciledJournal.intendedEffects.find(effect => effect.id === 'publication-audit').status, 'COMPLETED');
+    assert.equal(reconciledJournal.reconciliationStatus, 'CONSISTENT');
   });
 
   await test('an effect owned by another execution blocks success until explicit release, then replays exactly once', async () => {
@@ -231,7 +427,7 @@ async function main() {
     assert.equal(blocked.lifecycleState, 'QUARANTINED'); assert.equal(blocked.publicHidden, true);
     assert.ok(blocked.quarantineReasons.includes('persisted_evidence_unverified'));
     assert.ok(blocked.quarantineReasons.includes('evidence_snapshot_active_set_mismatch'));
-    assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked').length, 1);
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
   });
 
@@ -244,7 +440,7 @@ async function main() {
     const blocked = await products.getProductById(product.id);
     assert.equal(blocked.lifecycleState, 'QUARANTINED');
     assert.ok(blocked.quarantineReasons.includes('snapshot_evidence_inactive_or_expired'));
-    assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked').length, 1);
   });
 
   await test('foreign product evidence fact cannot be attached to a publish snapshot', async () => {
@@ -260,7 +456,7 @@ async function main() {
     const blocked = await products.getProductById(product.id);
     assert.equal(blocked.lifecycleState, 'QUARANTINED');
     assert.ok(blocked.quarantineReasons.includes('snapshot_evidence_owner_mismatch'), JSON.stringify(blocked.quarantineReasons));
-    assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked').length, 1);
   });
 
   await test('conflicting active canonical facts invalidate an otherwise fresh persisted snapshot', async () => {
@@ -282,7 +478,7 @@ async function main() {
     const blocked = await products.getProductById(product.id);
     assert.equal(blocked.lifecycleState, 'QUARANTINED');
     assert.ok(blocked.quarantineReasons.includes('canonical_fact_conflict:title'), JSON.stringify(blocked.quarantineReasons));
-    assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked').length, 1);
   });
 
   await test('canonical product mutation after evidence capture is detected server-side', async () => {
@@ -295,7 +491,7 @@ async function main() {
     const blocked = await products.getProductById(product.id);
     assert.equal(blocked.lifecycleState, 'QUARANTINED');
     assert.ok(blocked.quarantineReasons.includes('canonical_fact_mismatch:title'), JSON.stringify(blocked.quarantineReasons));
-    assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.action === 'publish_blocked').length, 1);
   });
 
   await test('controlled CANARY wave 1 publishes at most ten products and pauses the eleventh', async () => {
@@ -337,6 +533,110 @@ async function main() {
     assert.equal((await products.getProductById(recoveryProduct.id)).lifecycleState, 'PUBLISHED');
     assert.equal((await products.getAllProducts()).filter(product => product.status === 'published' && product.lifecycleState === 'PUBLISHED').length, 10);
     assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.productId === recoveryProduct.id && item.action === 'published').length, 1);
+  });
+
+  await test('an enabled recovery canary uses the real publication and monitor path without becoming discoverable early', async () => {
+    const fixture = await prepareRuntimeRecoveryCanary('healthy');
+    const publishedRun = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
+    assert.equal(publishedRun.succeeded, 1, JSON.stringify(await store.getAutomationJob(fixture.queued.job.id)));
+    const observing = await products.getProductById(fixture.product.id);
+    assert.equal(observing.status, 'published');
+    assert.equal(observing.lifecycleState, 'PUBLISHED');
+    assert.equal(observing.runtimeRecoveryCanaryObservationPending, true);
+    assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), false);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 1);
+    const monitorJobs = (await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR');
+    assert.equal(monitorJobs.length, 1);
+    assert.equal(typeof monitorJobs[0].payload.runtimeRecoveryCanaryPermitId, 'string');
+
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const monitor = jobs.find(item => item.id === monitorJobs[0].id);
+      monitor.scheduledAt = new Date(0).toISOString();
+      monitor.payload.healthOutcome = 'HEALTHY';
+      monitor.payload.publicPageStatus = 200;
+      return jobs;
+    });
+    const monitored = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
+    assert.equal(monitored.succeeded, 1);
+    const healthy = await products.getProductById(fixture.product.id);
+    const permit = await recoveryCanary.getRuntimeRecoveryCanaryPermit(observing.runtimeRecoveryCanaryPermitId);
+    assert.equal(healthy.runtimeRecoveryCanaryObservationPending, false);
+    const publicFilter = require('../src/lib/publicProductFilter.ts');
+    assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), true, JSON.stringify({
+      reason: publicFilter.getPublicProductBlockReason(healthy),
+      status: healthy.status,
+      lifecycleState: healthy.lifecycleState,
+      publicHidden: healthy.publicHidden,
+      publicBlocked: healthy.publicBlocked,
+      publicDecision: healthy.publicDecision,
+      publicBlockReasons: healthy.publicBlockReasons,
+      currentBlockers: healthy.currentBlockers,
+      autoPublishEligible: healthy.autoPublishEligible,
+      evidenceCoverage: healthy.evidenceCoverage,
+      publishConfidence: healthy.confidences?.publish,
+    }));
+    assert.equal(permit.status, 'SUCCEEDED');
+    assert.equal((await store.getAutomationControl()).publishBlockedByRuntime, true);
+    assert.equal((await runtimeRecovery.getRuntimeRecoveryState()).state, 'RECOVERY_OBSERVING');
+  });
+
+  await test('a recovery canary resumes its committed publication effects exactly once after worker restart', async () => {
+    const fixture = await prepareRuntimeRecoveryCanary('restart-replay', { simulateCrashAfterProductWrite: true });
+    const firstRun = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
+    assert.equal(firstRun.failed, 1);
+    const afterCrash = await products.getProductById(fixture.product.id);
+    assert.equal(afterCrash.status, 'published');
+    assert.equal(afterCrash.lifecycleState, 'PUBLISHING');
+    assert.equal(afterCrash.runtimeRecoveryCanaryObservationPending, true);
+    assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), false);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+    const permitAfterCrash = await recoveryCanary.getRuntimeRecoveryCanaryPermit(afterCrash.runtimeRecoveryCanaryPermitId);
+    assert.equal(permitAfterCrash.status, 'CONSUMED');
+
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const retry = jobs.find(item => item.id === fixture.queued.job.id);
+      retry.nextRetryAt = new Date(0).toISOString();
+      return jobs;
+    });
+    const replay = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
+    assert.equal(replay.succeeded, 1, JSON.stringify(await store.getAutomationJob(fixture.queued.job.id)));
+    const recovered = await products.getProductById(fixture.product.id);
+    assert.equal(recovered.lifecycleState, 'PUBLISHED');
+    assert.equal(recovered.runtimeRecoveryCanaryObservationPending, true);
+    assert.equal(recovered.runtimeRecoveryCanaryPermitId, permitAfterCrash.id);
+    assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), false);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 1);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 1);
+    assert.equal((await adapter.readCollection('publication-audit')).filter(item => item.productId === fixture.product.id && item.action === 'published').length, 1);
+    assert.equal((await recoveryCanary.listRuntimeRecoveryCanaryPermits()).length, 1);
+    assert.equal((await journal.getOperationJournal(fixture.queued.job.operationId)).reconciliationStatus, 'CONSISTENT');
+  });
+
+  await test('an unhealthy recovery canary is hidden immediately and preserves the runtime block', async () => {
+    const fixture = await prepareRuntimeRecoveryCanary('unhealthy');
+    const publishedRun = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
+    assert.equal(publishedRun.succeeded, 1);
+    const observing = await products.getProductById(fixture.product.id);
+    const monitorJob = (await store.getAllAutomationJobs()).find(job => job.type === 'POST_PUBLISH_MONITOR');
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const monitor = jobs.find(item => item.id === monitorJob.id);
+      monitor.scheduledAt = new Date(0).toISOString();
+      monitor.payload.healthOutcome = 'TEMPORARY_FAILURE';
+      return jobs;
+    });
+    const monitored = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
+    assert.equal(monitored.succeeded, 1, JSON.stringify(await store.getAutomationJob(monitorJob.id)));
+    const hidden = await products.getProductById(fixture.product.id);
+    const permit = await recoveryCanary.getRuntimeRecoveryCanaryPermit(observing.runtimeRecoveryCanaryPermitId);
+    assert.equal(hidden.lifecycleState, 'HIDDEN');
+    assert.equal(hidden.status, 'needs_review');
+    assert.equal(hidden.publicHidden, true);
+    assert.equal(hidden.runtimeRecoveryCanaryObservationPending, false);
+    assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), false);
+    assert.equal(permit.status, 'FAILED');
+    assert.equal((await store.getAutomationControl()).publishBlockedByRuntime, true);
+    assert.equal((await runtimeRecovery.getRuntimeRecoveryState()).state, 'OPEN_BLOCKED');
   });
 
   console.log(`\nPROMPT10 Gate 5 auto publish: ${passed} passed, ${failed} failed`);

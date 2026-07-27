@@ -167,6 +167,10 @@ export interface ProductOffer {
   expiresAt?: string;
   confidence: number;
   primary: boolean;
+  disclosureVerified?: boolean;
+  affiliateDisclosure?: string;
+  trackingVerified?: boolean;
+  destinationUrl?: string;
 }
 
 export type ReviewStatus = 'pending' | 'generated' | 'needs_review' | 'approved' | 'rejected' | 'stale';
@@ -258,6 +262,34 @@ export interface ProductEligibilitySnapshot {
   reviewQuality: ReviewQualityAssessment;
 }
 
+export interface BlockedPublicationDecisionRecord {
+  schemaVersion: 1;
+  operationId: string;
+  effectKey: string;
+  jobId: string;
+  attemptId: string;
+  productId: string;
+  candidateId?: string;
+  previousLifecycleState: ProductLifecycleState;
+  resultingLifecycleState: ProductLifecycleState;
+  previousStatus: ProductStatus;
+  resultingStatus: ProductStatus;
+  decisionRuleVersion: string;
+  reasonCodes: string[];
+  runtimeReasonCodes: string[];
+  productReasonCodes: string[];
+  sourceHash?: string;
+  reviewVersion?: number;
+  riskLevel: ProductRiskLevel;
+  dryRun: boolean;
+  actor: {
+    type: 'worker';
+    id: string;
+  };
+  releaseIdentity: string;
+  recordedAt: string;
+}
+
 export type ProductScoreLabel =
   | "Bỏ qua"
   | "Cần xem xét"
@@ -341,6 +373,24 @@ export interface Product {
   priceNote?: string;
 
   category?: string;
+  categorySuggestion?: {
+    schemaVersion: number;
+    ruleVersion: string;
+    category: string;
+    label: string;
+    confidence: number;
+    margin: number;
+    evaluatedAt: string;
+    inputHash: string;
+    evidence: Array<{
+      field: 'title' | 'description' | 'tags' | 'brand' | 'merchant';
+      term: string;
+      weight: number;
+      valueHash: string;
+    }>;
+    rolloutMode: 'OFF' | 'SHADOW' | 'OBSERVE' | 'CANARY' | 'ACTIVE';
+    applied: boolean;
+  };
   merchant?: string;
   tags: string[];
 
@@ -509,6 +559,17 @@ export interface Product {
   sourceMappings?: ProductSourceMapping[];
   offers?: ProductOffer[];
   bestOfferId?: string;
+  offerSelectionSuggestion?: {
+    schemaVersion: number;
+    ruleVersion: string;
+    selectedOfferId: string;
+    publicRedirectPath: string;
+    evaluatedAt: string;
+    inputHash: string;
+    reasons: string[];
+    rolloutMode: 'OFF' | 'SHADOW' | 'OBSERVE' | 'CANARY' | 'ACTIVE';
+    applied: boolean;
+  };
   priceTruthState?: PriceTruthState;
   priceObservedAt?: string;
   priceTruthConfidence?: number;
@@ -522,6 +583,12 @@ export interface Product {
   claimValidationStatus?: 'VERIFIED' | 'PARTIAL' | 'UNSAFE' | 'MISSING_EVIDENCE';
   publicationEffectKey?: string;
   publicationJobId?: string;
+  publicationPreviousStatus?: ProductStatus;
+  publicationPreviousLifecycleState?: ProductLifecycleState;
+  lastBlockedPublicationDecision?: BlockedPublicationDecisionRecord;
+  runtimeRecoveryCanaryPermitId?: string;
+  runtimeRecoveryCanaryObservationPending?: boolean;
+  runtimeRecoveryCanaryObservationExpiresAt?: string;
   monitoringScheduledAt?: string;
   consecutiveHealthFailures?: number;
   lastHealthyAt?: string;

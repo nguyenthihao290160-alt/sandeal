@@ -8,6 +8,7 @@ fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
 process.env.NODE_ENV = 'test';
 process.env.ALLOW_PAID_AI = 'false';
+process.env.RUNTIME_RECOVERY_V2 = 'ACTIVE';
 require('./register-typescript.cjs');
 
 let passed = 0;
@@ -117,6 +118,7 @@ async function main() {
     for (const collection of [
       'automation-canary', 'automation-slo-snapshots', 'automation-jobs', 'runtime-health',
       'publication-audit', 'automation-outbound-events', 'products', 'automation-control', 'automation-audit',
+      'runtime-recovery-state',
     ]) await adapter.writeCollection(collection, []);
     await store.updateAutomationControl({
       mode,
@@ -173,6 +175,26 @@ async function main() {
       monitor.result = { outcome: 'CONFIRMED_BROKEN' };
       return jobs;
     });
+  }
+
+  async function seedZeroProductRecoveryEvidence(now, monitorOutcome) {
+    const types = ['AUTO_PILOT', 'PROCESS_CANDIDATE', 'PROCESS_CANDIDATE', 'RECONCILE_AUTOMATION', 'AUTO_SAFE_PUBLISH'];
+    const jobs = types.map((type, index) => job(now, index, {
+      type,
+      requestedBy: type === 'AUTO_PILOT' ? 'scheduler' : 'autopilot-worker',
+    }));
+    if (monitorOutcome) {
+      jobs[4] = job(now, 4, {
+        type: 'POST_PUBLISH_MONITOR',
+        requestedBy: 'autopilot-worker',
+        result: { outcome: monitorOutcome },
+      });
+    }
+    await adapter.writeCollection('automation-jobs', jobs);
+    await adapter.writeCollection('runtime-health', [runtimeSnapshot(now)]);
+    await adapter.writeCollection('publication-audit', []);
+    await adapter.writeCollection('automation-outbound-events', []);
+    await adapter.writeCollection('products', []);
   }
 
   async function seedControlledWave(wave, publishedCount = 0) {
@@ -242,7 +264,7 @@ async function main() {
   await test('empty persisted telemetry is insufficient data and never reports SLO PASS', async () => {
     await reset('AUTONOMOUS'); const now = Date.now();
     const measured = await slo.measureAutomationSlo({ now });
-    assert.equal(measured.dataStatus, 'INSUFFICIENT_DATA');
+    assert.equal(measured.dataStatus, 'BOOTSTRAP');
     assert.equal(slo.evaluateAutomationErrorBudget(measured).status, 'INSUFFICIENT_DATA');
     assert.deepEqual(new Set(measured.metrics.map(metric => metric.key)), new Set([
       'worker_heartbeat_fresh', 'scheduler_heartbeat_fresh', 'job_pickup_latency_p95_ms', 'terminal_outcome_rate',
@@ -254,27 +276,72 @@ async function main() {
     assert.equal((await adapter.readCollection('automation-slo-snapshots')).length, 1);
   });
 
-  await test('healthy persisted outcomes clear only the runtime publish block and preserve operator pause', async () => {
-    await reset('AUTONOMOUS'); const now = Date.now(); await seedHealthyEvidence(now);
+  await test('operator pause prevents runtime recovery progress and remains untouched', async () => {
+    await reset('AUTONOMOUS'); const now = Date.now(); await seedZeroProductRecoveryEvidence(now);
     await store.updateAutomationControl({
       publishPausedByOperator: true,
       publishBlockedByRuntime: true,
       publishRuntimeReasons: ['REPEATED_PROCESS_RESTART'],
     }, 'slo-test');
     const result = await slo.applyAutomationErrorBudget({ now });
-    assert.equal(result.measurement.dataStatus, 'MEASURED');
+    assert.equal(result.measurement.dataStatus, 'RECOVERY');
     assert.equal(result.evaluation.status, 'PASS', JSON.stringify(result.measurement.metrics));
-    assert.equal(result.measurement.zeroTouchRate, 1);
-    assert.equal(result.measurement.duplicatePublishCount, 0);
-    assert.equal(result.measurement.unsafePublishCount, 0);
     assert.equal(result.control.mode, 'AUTONOMOUS'); assert.equal(result.control.effectiveMode, 'AUTONOMOUS');
-    assert.equal(result.control.publishBlockedByRuntime, false);
+    assert.equal(result.control.publishBlockedByRuntime, true);
     assert.equal(result.control.publishPausedByOperator, true);
     assert.equal(result.control.publishPaused, true);
-    assert.equal(result.applied, true); assert.equal(result.ingestionAvailable, true);
+    assert.equal(result.recovery.consecutiveHealthyCount, 0);
+    assert.equal(result.recovery.lastResetReason, 'OPERATOR_PUBLISH_PAUSE_ACTIVE');
+    assert.equal(result.applied, false); assert.equal(result.ingestionAvailable, true);
   });
 
-  await test('a non-severe error-rate breach degrades one step without pausing canary publication', async () => {
+  await test('zero public products recover after three distinct healthy evaluations without fabricated monitor evidence', async () => {
+    await reset('AUTONOMOUS');
+    const firstNow = Math.floor(Date.now() / 60_000) * 60_000 + 5_000;
+    await store.updateAutomationControl({
+      publishBlockedByRuntime: true,
+      publishRuntimeReasons: ['HISTORICAL_RUNTIME_BREACH'],
+    }, 'slo-test');
+    let result;
+    for (let index = 0; index < 3; index += 1) {
+      const now = firstNow + index * 61_000;
+      await seedZeroProductRecoveryEvidence(now);
+      result = await slo.applyAutomationErrorBudget({ now });
+      assert.equal(result.measurement.dataStatus, 'RECOVERY');
+      assert.equal(result.evaluation.status, 'PASS');
+      const monitorMetric = result.measurement.metrics.find(metric => metric.key === 'post_publish_health_pass_rate');
+      assert.equal(monitorMetric.measurementState, 'NOT_APPLICABLE');
+      assert.equal(monitorMetric.stateReason, 'NO_PUBLIC_PRODUCT_OR_LEGITIMATE_MONITOR_TARGET');
+      if (index < 2) {
+        assert.equal(result.control.publishBlockedByRuntime, true);
+        assert.equal(result.recovery.consecutiveHealthyCount, index + 1);
+      }
+    }
+    assert.equal(result.control.publishBlockedByRuntime, false);
+    assert.equal(result.recovery.state, 'CLOSED_HEALTHY');
+    assert.equal((await adapter.readCollection('publication-audit')).length, 0);
+    assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+  });
+
+  await test('a real unhealthy monitor is measured as a breach and cannot authorize recovery', async () => {
+    await reset('AUTONOMOUS');
+    const now = Date.now();
+    await seedZeroProductRecoveryEvidence(now, 'CONFIRMED_BROKEN');
+    await store.updateAutomationControl({
+      publishBlockedByRuntime: true,
+      publishRuntimeReasons: ['HEALTH_SLO_FAILED'],
+    }, 'slo-test');
+    const result = await slo.applyAutomationErrorBudget({ now });
+    const monitorMetric = result.measurement.metrics.find(metric => metric.key === 'post_publish_health_pass_rate');
+    assert.equal(monitorMetric.measurementState, 'MEASURED');
+    assert.equal(monitorMetric.status, 'BREACH');
+    assert.equal(result.evaluation.status, 'BREACH');
+    assert.equal(result.control.publishBlockedByRuntime, true);
+    assert.equal(result.recovery.consecutiveHealthyCount, 0);
+  });
+
+  await test('an error-rate breach degrades one step and remains fail-closed', async () => {
     await reset('AUTONOMOUS'); const now = Date.now(); await seedHealthyEvidence(now);
     await adapter.runTransaction('automation-jobs', jobs => {
       jobs[0].status = 'FAILED';
@@ -284,8 +351,9 @@ async function main() {
     });
     const result = await slo.applyAutomationErrorBudget({ now });
     assert.deepEqual(result.evaluation.reasons, ['ERROR_BUDGET_EXCEEDED']);
-    assert.equal(result.control.effectiveMode, 'CANARY'); assert.equal(result.control.publishPaused, false);
-    assert.equal(result.canary.paused, false); assert.equal(result.control.ingestionPaused, false);
+    assert.equal(result.control.effectiveMode, 'CANARY'); assert.equal(result.control.publishPaused, true);
+    assert.equal(result.control.publishBlockedByRuntime, true);
+    assert.equal(result.canary.paused, true); assert.equal(result.control.ingestionPaused, false);
   });
 
   await test('severe persisted faults degrade AUTONOMOUS to paused CANARY while ingestion remains available', async () => {

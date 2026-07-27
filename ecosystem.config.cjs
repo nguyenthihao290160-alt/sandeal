@@ -35,6 +35,7 @@ const shared = {
   env: {
     NODE_ENV: 'production',
     SANDEAL_DATA_DIR: dataDir,
+    SANDEAL_BUILD_MANIFEST_COMMIT: releaseId,
     SANDEAL_RELEASE_ID: releaseId,
     SANDEAL_BUILD_COMMIT: releaseId,
     NEXT_PUBLIC_SANDEAL_RELEASE_ID: releaseId,

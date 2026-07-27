@@ -335,7 +335,9 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     assert.match(layout, /summary_large_image/);
     assert.match(layout, /locale: 'vi_VN'/);
     assert.match(manifest, /name: 'SanDeal'/);
-    assert.match(manifest, /512-maskable\.png/);
+    assert.match(manifest, /src: '\/icon'/);
+    assert.match(manifest, /src: '\/apple-icon'/);
+    assert.doesNotMatch(manifest, /src: '\/icons\//);
     assert.match(productSeo, /indexing\.indexable \? `\$\{canonical\}\/opengraph-image` : new URL\('\/opengraph-image'/);
     assert.match(dynamicPreview, /getPublicProductBySlugSafe/);
     assert.doesNotMatch(dynamicPreview, /imageUrl/);

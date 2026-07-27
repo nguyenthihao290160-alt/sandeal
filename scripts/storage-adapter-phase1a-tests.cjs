@@ -45,6 +45,7 @@ async function main() {
   await test('the compatibility facade keeps every existing named export', () => {
     for (const name of [
       'getDataDir', 'ensureDataDir', 'readCollection', 'writeCollection', 'runTransaction',
+      'getStorageCapabilities', 'bulkMutateCollection',
       'findById', 'insertOne', 'updateOne', 'deleteOne', 'generateId',
     ]) {
       assert.equal(typeof facade[name], 'function', `${name} must remain exported`);
@@ -139,6 +140,38 @@ async function main() {
       return [{ ...items[0], value: current + 1 }];
     })));
     assert.equal((await facade.readCollection('counter-fixture'))[0].value, 6);
+  });
+
+  await test('file capabilities and bounded bulk mutation report per-item partial failures atomically', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    const capabilities = facade.getStorageCapabilities();
+    assert.equal(capabilities.driver, 'file');
+    assert.equal(capabilities.boundedBulkMutation, true);
+    assert.equal(capabilities.maximumBulkItems, 100);
+    await facade.writeCollection('bulk-fixture', [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+    ]);
+    const result = await facade.bulkMutateCollection('bulk-fixture', [
+      { mutationId: 'm1', type: 'UPSERT', itemId: 'one', value: { id: 'one', value: 10 } },
+      { mutationId: 'm2', type: 'DELETE', itemId: 'missing' },
+      { mutationId: 'm3', type: 'DELETE', itemId: 'two' },
+      { mutationId: 'm4', type: 'UPSERT', itemId: 'bad-value', value: { id: 'different' } },
+    ]);
+    assert.equal(result.mode, 'FILE_ATOMIC_REVISION');
+    assert.equal(result.applied, 2);
+    assert.equal(result.failed, 2);
+    assert.deepEqual(result.results.map(item => item.code), [
+      'UPSERTED',
+      'ITEM_NOT_FOUND',
+      'DELETED',
+      'INVALID_VALUE',
+    ]);
+    assert.deepEqual(await facade.readCollection('bulk-fixture'), [{ id: 'one', value: 10 }]);
+    await assert.rejects(
+      () => facade.bulkMutateCollection('bulk-fixture', []),
+      /STORAGE_BULK_SIZE_INVALID/,
+    );
   });
 
   await test('file storage health checks the isolated directory without changing data', async () => {

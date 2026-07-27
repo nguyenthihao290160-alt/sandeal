@@ -17,6 +17,7 @@ import { evaluateCanonicalProduct, normalizeCanonicalProduct, stableProductHash 
 import { isReviewIndexable } from '../editorialReview';
 import { getOperationEnvironment, runGuardedOperation, sanitizeErrorMessage, type OperationEnvironment } from '../safety/operationGuard';
 import { isStorageError } from './storageErrors';
+import { getReleaseIdentity } from '../releaseIdentity';
 
 const COLLECTION = 'products';
 let productWriteChain: Promise<unknown> = Promise.resolve();
@@ -246,7 +247,9 @@ export async function getProductBySlug(slug: string): Promise<Product | null> {
 
 export async function getPublishedProducts(): Promise<Product[]> {
   const products = await readCanonicalProducts();
-  const filtered = products.filter(isPublicSafeProduct);
+  const filtered = products.filter(product => (
+    isPublicSafeProduct(product) && product.runtimeRecoveryCanaryObservationPending !== true
+  ));
   // Normalize to ensure consistent public schema
   return filtered.map(p => normalizeProductForPublic(p));
 }
@@ -257,7 +260,9 @@ export async function getPublicProducts(filters?: ProductFilters): Promise<Produ
     // reuse existing listProducts filtering by delegating
     products = await listProducts(filters);
   }
-  const filtered = products.filter(isPublicSafeProduct);
+  const filtered = products.filter(product => (
+    isPublicSafeProduct(product) && product.runtimeRecoveryCanaryObservationPending !== true
+  ));
   return filtered.map(p => normalizeProductForPublic(p));
 }
 
@@ -838,6 +843,7 @@ export interface PublicationOperationContext {
   dryRun?: boolean;
   idempotencyKey?: string;
   publicationEffectKey?: string;
+  runtimeRecoveryCanaryPermitId?: string;
 }
 
 async function requireDurablePublishAuthorization(
@@ -858,7 +864,34 @@ async function requireDurablePublishAuthorization(
   if (!settings.safePublish || !settings.freeOnly || settings.allowPaidAi) {
     throw new Error('SAFE_PUBLISH_POLICY_BLOCKED');
   }
-  if (control.publishPaused) throw new Error('PUBLISH_LANE_PAUSED');
+  let recoveryCanaryAuthorized = false;
+  if (control.publishPaused
+    && context.runtimeRecoveryCanaryPermitId
+    && context.publicationEffectKey
+    && context.operationId
+    && job?.claimToken
+    && job.workerOwnerId
+    && job.workerInstanceId
+    && Number.isInteger(job.workerFencingToken)
+    && Number(job.workerFencingToken) > 0) {
+    const { validateRuntimeRecoveryCanaryPermitForOperation } = await import('../automation/runtimeRecoveryCanary');
+    const permit = await validateRuntimeRecoveryCanaryPermitForOperation({
+      permitId: context.runtimeRecoveryCanaryPermitId,
+      operationId: context.operationId,
+      productId,
+      jobId: job.id,
+      claimToken: job.claimToken,
+      ownership: {
+        ownerId: job.workerOwnerId,
+        instanceId: job.workerInstanceId,
+        fencingToken: Number(job.workerFencingToken),
+      },
+      productEligibleExceptRuntime: true,
+      publicationEffectKey: context.publicationEffectKey,
+    });
+    recoveryCanaryAuthorized = permit.allowed;
+  }
+  if (control.publishPaused && !recoveryCanaryAuthorized) throw new Error('PUBLISH_LANE_PAUSED');
   if (!settings.launchEnabled) throw new Error('PUBLISH_LAUNCH_DISABLED');
   if (!['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode)) throw new Error('PUBLISH_MODE_BLOCKED');
   if (!job || !['SAFE_PUBLISH', 'AUTO_SAFE_PUBLISH'].includes(job.type) || job.status !== 'RUNNING') {
@@ -922,17 +955,26 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
       throw new Error('AUTONOMOUS_LIFECYCLE_NOT_PUBLISHING');
     }
     const requestedSlug = updates.slug || previous.slug || generateStableSlug(previous.title, previous.sourceHash || previous.id);
-    const candidate = evaluateCanonicalProduct({
+    const evaluatedCandidate = evaluateCanonicalProduct({
       ...previous,
       ...updates,
       id,
       publicationEffectKey,
       publicationJobId: job.id,
+      publicationPreviousStatus: previous.status,
+      publicationPreviousLifecycleState: previous.lifecycleState,
       lifecycleState: authorization.autonomous ? 'PUBLISHING' : 'PUBLISHED',
       lifecycleUpdatedAt: authorization.autonomous ? previous.lifecycleUpdatedAt : now,
       slug: ensureUniqueSlug(requestedSlug, products.filter((item) => item.id !== id), previous.sourceHash || previous.id),
       updatedAt: now,
     }, now);
+    const candidate = authorization.autonomous && evaluatedCandidate.status === 'published'
+      ? {
+          ...evaluatedCandidate,
+          lifecycleState: 'PUBLISHING' as const,
+          lifecycleUpdatedAt: previous.lifecycleUpdatedAt,
+        }
+      : evaluatedCandidate;
     const guarded = await runGuardedOperation({
       operationType: 'safe_publish',
       operationId: job.operationId,
@@ -964,7 +1006,28 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
           ? { ...confirmed, lifecycleState: 'PUBLISHED' as const }
           : confirmed;
         if (candidate.status === 'published' && (!isPublicSafeProduct(publicProjection) || !isReviewIndexable(confirmed))) throw new Error('public_selector_inconsistent');
-        await appendPublicationAudit({ operationId: job.operationId, runId: audit.runId || job.id, candidateId: audit.candidateId, productId: id, action: candidate.status === 'published' ? 'published' : 'publish_blocked', previousState: previous.status, nextState: candidate.status, reasonCodes: candidate.publicBlockReasons || [], sourceHash: candidate.sourceHash, reviewVersion: candidate.reviewContent?.reviewVersion, riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM', dryRun: false, timestamp: now });
+        await appendPublicationAuditOnce({
+          effectKey: `${publicationEffectKey}:audit`.slice(0, 240),
+          operationId: job.operationId,
+          runId: audit.runId || job.id,
+          jobId: job.id,
+          attemptId: job.claimToken || `${job.id}:attempt:${job.attemptCount}`,
+          candidateId: audit.candidateId,
+          productId: id,
+          action: candidate.status === 'published' ? 'published' : 'publish_blocked',
+          previousState: previous.status,
+          nextState: candidate.status,
+          previousLifecycleState: previous.lifecycleState,
+          nextLifecycleState: candidate.lifecycleState,
+          reasonCodes: candidate.publicBlockReasons || [],
+          sourceHash: candidate.sourceHash,
+          reviewVersion: candidate.reviewContent?.reviewVersion,
+          riskLevel: candidate.status === 'published' ? 'HIGH' : 'MEDIUM',
+          dryRun: false,
+          actor: { type: 'worker', id: audit.workerId || authorization.actor },
+          releaseIdentity: getReleaseIdentity().releaseId,
+          timestamp: now,
+        });
         return confirmed;
       } catch (error) {
         if (committed) {
@@ -986,9 +1049,68 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
   });
 }
 
-interface PublicationAudit { operationId?: string; runId: string; candidateId?: string; productId: string; action: string; previousState: string; nextState: string; reasonCodes: string[]; sourceHash?: string; reviewVersion?: number; riskLevel: 'MEDIUM' | 'HIGH'; dryRun: boolean; timestamp: string; }
+export interface PublicationAudit {
+  schemaVersion?: number;
+  id?: string;
+  effectKey?: string;
+  operationId?: string;
+  runId: string;
+  jobId?: string;
+  attemptId?: string;
+  candidateId?: string;
+  productId: string;
+  action: string;
+  previousState: string;
+  nextState: string;
+  previousLifecycleState?: string;
+  nextLifecycleState?: string;
+  reasonCodes: string[];
+  runtimeReasonCodes?: string[];
+  productReasonCodes?: string[];
+  decisionRuleVersion?: string;
+  sourceHash?: string;
+  reviewVersion?: number;
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN';
+  dryRun: boolean;
+  actor?: {
+    type: 'worker';
+    id: string;
+  };
+  releaseIdentity?: string;
+  timestamp: string;
+}
+
 async function appendPublicationAudit(event: PublicationAudit): Promise<void> {
   await runTransaction<PublicationAudit>('publication-audit', (existing) => [...existing.slice(-999), event]);
+}
+
+export async function appendPublicationAuditOnce(
+  event: PublicationAudit & { effectKey: string },
+): Promise<{ event: PublicationAudit; created: boolean }> {
+  const normalizedEffectKey = event.effectKey.trim();
+  if (!normalizedEffectKey || normalizedEffectKey.length > 240) {
+    throw new Error('PUBLICATION_AUDIT_EFFECT_KEY_INVALID');
+  }
+  let output!: { event: PublicationAudit; created: boolean };
+  await runTransaction<PublicationAudit>('publication-audit', (existing) => {
+    const duplicate = existing.find((item) => item.effectKey === normalizedEffectKey);
+    if (duplicate) {
+      output = { event: duplicate, created: false };
+      return undefined;
+    }
+    const durableEvent: PublicationAudit = {
+      ...event,
+      schemaVersion: 2,
+      id: event.id || generateId(),
+      effectKey: normalizedEffectKey,
+      reasonCodes: [...new Set(event.reasonCodes.map(String).filter(Boolean))],
+      runtimeReasonCodes: [...new Set((event.runtimeReasonCodes || []).map(String).filter(Boolean))],
+      productReasonCodes: [...new Set((event.productReasonCodes || []).map(String).filter(Boolean))],
+    };
+    output = { event: durableEvent, created: true };
+    return [...existing.slice(-999), durableEvent];
+  });
+  return structuredClone(output);
 }
 
 function generateStableSlug(title: string, seed: string): string {

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { AffiliateDisclosure, PublicFooter, PublicHeader } from '@/components/public';
 import styles from '@/components/public/public.module.css';
 import { config } from '@/lib/config';
+import { serializeJsonLd } from '@/lib/seo/structuredData';
 
 export const metadata: Metadata = {
   title: 'SanDeal đánh giá sản phẩm như thế nào?',
@@ -29,7 +30,7 @@ export default function ReviewMethodologyPage() {
     ],
   };
   return <div className={styles.shell}>
-    <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumb).replace(/</g, '\\u003c') }} />
+    <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(breadcrumb) }} />
     <PublicHeader />
     <main>
       <section className={styles.section}>

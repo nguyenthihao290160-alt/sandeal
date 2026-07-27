@@ -53,4 +53,5 @@ next-env.d.ts
 # local release artifacts and verified backups
 /.release/
 /.backups/
+/.sandeal-build-manifest.json
 .idea/*.xml~

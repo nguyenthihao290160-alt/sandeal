@@ -82,7 +82,18 @@ export interface RuntimeHealthSnapshot {
   schemaVersion: number;
   id: string;
   ruleVersion: string;
-  web: { status: WebHealthStatus; buildAvailable: boolean; publicRouteHealthy: boolean | null; buildId: string | null; releaseId: string; releaseMatchesBuild: boolean | null };
+  web: {
+    status: WebHealthStatus;
+    buildAvailable: boolean;
+    publicRouteHealthy: boolean | null;
+    buildId: string | null;
+    releaseId: string;
+    embeddedReleaseId?: string;
+    runtimeReleaseId?: string;
+    publicBuildId?: string;
+    releaseMatchesBuild: boolean | null;
+    releaseMismatchReasons?: string[];
+  };
   worker: { status: WorkerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
   scheduler: { status: SchedulerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
   providers: Record<string, ProviderHealthStatus>;
@@ -196,6 +207,11 @@ export async function runRuntimeGuardian(options: {
   if (!['active', 'paused'].includes(workerStatus)) reasons.push(`WORKER_${workerStatus.toUpperCase()}`);
   if (!['active', 'paused', 'disabled'].includes(schedulerStatus)) reasons.push(`SCHEDULER_${schedulerStatus.toUpperCase()}`);
   if (['unhealthy', 'build_missing', 'build_mismatch'].includes(webStatus)) reasons.push(`WEB_${webStatus.toUpperCase()}`);
+  if (release.releaseMismatch) reasons.push('RELEASE_MISMATCH');
+  if (workerStatus === 'active' && !workerLease?.releaseId) reasons.push('WORKER_RELEASE_ID_MISSING');
+  if (schedulerStatus === 'active' && !schedulerLease?.releaseId) reasons.push('SCHEDULER_RELEASE_ID_MISSING');
+  if (workerLease?.releaseId && workerLease.releaseId !== release.releaseId) reasons.push('WORKER_RELEASE_MISMATCH');
+  if (schedulerLease?.releaseId && schedulerLease.releaseId !== release.releaseId) reasons.push('SCHEDULER_RELEASE_MISMATCH');
   if (storage.status !== 'healthy') reasons.push(`STORAGE_${storage.status.toUpperCase()}`);
   if (staleJobs) reasons.push('STALE_JOB');
   if (stuck) reasons.push('QUEUE_STUCK');
@@ -213,7 +229,18 @@ export async function runRuntimeGuardian(options: {
   ])];
   const snapshot: RuntimeHealthSnapshot = {
     schemaVersion: 2, id: `runtime-health:${Math.floor(now / 30_000)}`, ruleVersion: RUNTIME_GUARDIAN_RULE_VERSION,
-    web: { status: webStatus, buildAvailable, publicRouteHealthy: options.publicRouteHealthy ?? null, buildId: artifactBuildId, releaseId: release.releaseId, releaseMatchesBuild },
+    web: {
+      status: webStatus,
+      buildAvailable,
+      publicRouteHealthy: options.publicRouteHealthy ?? null,
+      buildId: artifactBuildId,
+      releaseId: release.releaseId,
+      embeddedReleaseId: release.embeddedBuildId,
+      runtimeReleaseId: release.runtimeReleaseId,
+      publicBuildId: release.publicBuildId,
+      releaseMatchesBuild,
+      releaseMismatchReasons: release.releaseMismatchReasons,
+    },
     worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt, releaseId: workerLease?.releaseId },
     scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt, releaseId: schedulerLease?.releaseId },
     providers: options.providers || {},

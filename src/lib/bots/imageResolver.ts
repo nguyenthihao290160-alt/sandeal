@@ -5,7 +5,8 @@
 
 import { BotContext } from './context';
 import { checkImageHealth } from './productHealthCheck';
-import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
+import { extractDeterministicProductData } from '@/lib/product-intelligence/deterministicExtraction';
+import { fetchExternalSafely } from '@/lib/product-intelligence/urlSafety';
 
 const PLACEHOLDER_IMAGE = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22300%22%3E%3Crect fill=%22%23f0f0f0%22 width=%22300%22 height=%22300%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 font-size=%2216%22 fill=%22%23999%22 text-anchor=%22middle%22 dominant-baseline=%22middle%22%3EImage Not Available%3C/text%3E%3C/svg%3E';
 
@@ -45,25 +46,19 @@ export class ImageResolverBot {
       }
     }
 
-    // Priority 3: OpenGraph image from product URL
+    // Priority 3: bounded deterministic JSON-LD/OpenGraph extraction.
     if (productUrl) {
-      const ogImage = await this.extractOGImage(productUrl);
-      if (ogImage) {
-        await this.ctx.info('Using verified OpenGraph image');
-        return ogImage;
+      const extracted = await this.extractPageImage(productUrl);
+      if (extracted) {
+        await this.ctx.info('Using verified deterministic page image', {
+          source: extracted.source,
+          ruleVersion: extracted.ruleVersion,
+        });
+        return extracted.url;
       }
     }
 
-    // Priority 4: JSON-LD Product image
-    if (productUrl) {
-      const jsonldImage = await this.extractJsonLDImage(productUrl);
-      if (jsonldImage) {
-        await this.ctx.info('Using verified JSON-LD image');
-        return jsonldImage;
-      }
-    }
-
-    // Priority 5: Professional placeholder
+    // Priority 4: Professional placeholder
     await this.ctx.info('Using placeholder image - no real image found');
     return PLACEHOLDER_IMAGE;
   }
@@ -77,37 +72,29 @@ export class ImageResolverBot {
     }
   }
 
-  private async extractOGImage(url: string): Promise<string | null> {
+  private async extractPageImage(url: string): Promise<{
+    url: string;
+    source: string;
+    ruleVersion: string;
+  } | null> {
     try {
-      const fetched = await fetchExternalSafely(url, { timeoutMs: 8_000, maxBytes: 256 * 1024, maxRedirects: 4 });
+      const fetched = await fetchExternalSafely(url, {
+        timeoutMs: 8_000,
+        maxBytes: 512 * 1024,
+        maxRedirects: 4,
+      });
       const contentType = String(fetched.response.headers.get('content-type') || '').toLowerCase();
       if (!contentType.includes('text/html')) return null;
       const html = new TextDecoder().decode(fetched.body);
-      const match = html.match(/<meta property=["']og:image["']\s+content=["']([^"']+)["']/i);
-      if (!match) return null;
-      const candidate = new URL(match[1], fetched.finalUrl).toString();
-      return validateExternalUrl(candidate).safe && await this.validateImageUrl(candidate) ? candidate : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async extractJsonLDImage(url: string): Promise<string | null> {
-    try {
-      const fetched = await fetchExternalSafely(url, { timeoutMs: 8_000, maxBytes: 256 * 1024, maxRedirects: 4 });
-      const contentType = String(fetched.response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('text/html')) return null;
-      const html = new TextDecoder().decode(fetched.body);
-      const jsonMatch = html.match(/<script type=["']application\/ld\+json["'][^>]*>([^<]+)<\/script>/i);
-      if (!jsonMatch) return null;
-
-      const json = JSON.parse(jsonMatch[1]) as { image?: string | { url?: string } | Array<string | { url?: string }> };
-      if (json.image) {
-        const img = Array.isArray(json.image) ? json.image[0] : json.image;
-        const imageValue = typeof img === 'string' ? img : img?.url;
-        if (!imageValue) return null;
-        const candidate = new URL(imageValue, fetched.finalUrl).toString();
-        return validateExternalUrl(candidate).safe && await this.validateImageUrl(candidate) ? candidate : null;
+      const extraction = extractDeterministicProductData(html, fetched.finalUrl);
+      for (const candidate of extraction.images) {
+        if (await this.validateImageUrl(candidate.value)) {
+          return {
+            url: candidate.value,
+            source: candidate.provenance.source,
+            ruleVersion: extraction.ruleVersion,
+          };
+        }
       }
       return null;
     } catch {

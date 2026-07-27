@@ -30,10 +30,27 @@ export function resolveBuildCommit(input: {
 }
 
 const buildCommit = resolveBuildCommit();
+const contentSecurityPolicy = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' https:",
+    "media-src 'self' https:",
+    "manifest-src 'self'",
+    "worker-src 'self' blob:",
+    ...(process.env.NODE_ENV === 'production' ? ['upgrade-insecure-requests'] : []),
+].join('; ');
 
 const nextConfig: NextConfig = {
     deploymentId: buildCommit,
     env: {
+        SANDEAL_BUILD_MANIFEST_COMMIT: buildCommit,
         SANDEAL_BUILD_COMMIT: buildCommit,
         NEXT_PUBLIC_SANDEAL_RELEASE_ID: buildCommit,
     },
@@ -134,6 +151,26 @@ const nextConfig: NextConfig = {
                     {
                         key: 'X-SanDeal-Release-Id',
                         value: buildCommit,
+                    },
+                    {
+                        key: 'Content-Security-Policy',
+                        value: contentSecurityPolicy,
+                    },
+                    {
+                        key: 'Referrer-Policy',
+                        value: 'strict-origin-when-cross-origin',
+                    },
+                    {
+                        key: 'X-Content-Type-Options',
+                        value: 'nosniff',
+                    },
+                    {
+                        key: 'Permissions-Policy',
+                        value: 'camera=(), microphone=(), geolocation=()',
+                    },
+                    {
+                        key: 'Cross-Origin-Opener-Policy',
+                        value: 'same-origin',
                     },
                 ],
             },

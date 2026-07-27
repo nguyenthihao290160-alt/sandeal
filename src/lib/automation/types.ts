@@ -169,12 +169,18 @@ export interface AutomationJob {
   queuedAt: string;
   scheduledAt: string;
   nextRetryAt?: string;
+  runnableAt?: string;
+  runnableReason?: 'RETRY_ELIGIBLE_AT' | 'SCHEDULED_AT' | 'CREATED_AT';
   claimedAt?: string;
   claimedBy?: string;
   claimToken?: string;
   workerOwnerId?: string;
   workerInstanceId?: string;
   workerFencingToken?: number;
+  executionConcurrencyClass?: string;
+  executionResourceKeys?: string[];
+  executionExclusive?: boolean;
+  executionCritical?: boolean;
   leaseExpiresAt?: string;
   heartbeatAt?: string;
   startedAt?: string;
@@ -187,6 +193,24 @@ export interface AutomationJob {
   deadLetterReason?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AutomationJobAttempt {
+  schemaVersion: 1;
+  id: string;
+  jobId: string;
+  jobType: AutomationJobType;
+  operationId: string;
+  attemptNumber: number;
+  runnableAt: string;
+  runnableReason: 'RETRY_ELIGIBLE_AT' | 'SCHEDULED_AT' | 'CREATED_AT';
+  createdAt: string;
+  scheduledAt: string;
+  retryEligibleAt?: string;
+  claimedAt: string;
+  claimTokenHash: string;
+  workerId: string;
+  workerFencingToken?: number;
 }
 
 /**

@@ -11,7 +11,7 @@
 // - Affiliate deeplink domains handled correctly
 // ===========================================
 
-import { assertPublicDns, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
+import { fetchExternalSafely } from '@/lib/product-intelligence/urlSafety';
 
 // ---- Link Health Check ----
 
@@ -254,54 +254,30 @@ async function fetchSafeRedirects(
   customHeaders?: Record<string, string>,
   options: HealthCheckRequestOptions = {},
 ): Promise<Response> {
-  let currentUrl = url;
-  let redirects = 0;
-  const deadline = Date.now() + timeoutMs;
-  const visited = new Set<string>();
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   // Injected transports can disable DNS for isolated tests; runtime requests resolve every hop.
   const resolveDns = options.resolveDns ?? fetchImpl === INITIAL_FETCH;
-  while (redirects < 5) {
-    const validation = validateExternalUrl(currentUrl);
-    if (!validation.safe || !validation.normalizedUrl) {
-      throw new Error(`SSRF blocked: ${validation.code || 'INVALID_URL'}`);
-    }
-    currentUrl = validation.normalizedUrl;
-    if (visited.has(currentUrl)) throw new Error('Too many redirects: redirect loop');
-    visited.add(currentUrl);
-    const parsed = new URL(currentUrl);
-    if (resolveDns) {
-      try {
-        await assertPublicDns(parsed.hostname);
-      } catch (error) {
-        if (error instanceof Error && error.message === 'PRIVATE_NETWORK') {
-          throw new Error(`SSRF blocked: ${parsed.hostname}`);
-        }
-        throw error;
-      }
-    }
-    const headers = customHeaders || (method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : undefined);
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) throw new DOMException('Request timeout', 'TimeoutError');
-    const res = await fetchImpl(currentUrl, {
+  const headers = customHeaders || (method === 'GET' ? { Range: `bytes=0-${MAX_BODY_BYTES - 1}` } : {});
+  const imageRequest = String(headers.Accept || headers.accept || '').toLowerCase().includes('image/');
+  try {
+    const fetched = await fetchExternalSafely(url, {
       method,
       headers,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(remainingMs)
+      timeoutMs,
+      maxBytes: imageRequest ? MAX_IMAGE_PROBE_BYTES : MAX_BODY_BYTES,
+      maxRedirects: 4,
+      resolveDns,
+      fetchImpl: options.fetchImpl || (fetchImpl === INITIAL_FETCH ? undefined : fetchImpl),
+      allowPartialBody: method === 'GET' && imageRequest,
     });
-    if (res.status >= 300 && res.status < 400 && res.headers.has('location')) {
-      const location = res.headers.get('location');
-      if (!location) return res;
-      try { await res.body?.cancel(); } catch { /* ignore */ }
-      currentUrl = new URL(location, currentUrl).toString();
-      redirects++;
-    } else {
-      // Attach finalUrl so caller knows where it ended up
-      Object.defineProperty(res, 'url', { value: currentUrl });
-      return res;
-    }
+    return fetched.response;
+  } catch (error) {
+    const code = error instanceof Error ? error.message : String(error);
+    if (code === 'PRIVATE_NETWORK') throw new Error('SSRF blocked: private network target');
+    if (code === 'REDIRECT_LOOP') throw new Error('Too many redirects: redirect loop');
+    if (code === 'TOO_MANY_REDIRECTS') throw new Error('Too many redirects');
+    throw error;
   }
-  throw new Error('Too many redirects');
 }
 
 function isValidHttpUrl(url: string): boolean {
@@ -441,8 +417,10 @@ async function readLimitedBody(response: Response, maxBytes: number): Promise<st
     while (totalRead < maxBytes) {
       const { done, value } = await reader.read();
       if (done || !value) break;
-      chunks.push(value);
-      totalRead += value.length;
+      const remaining = maxBytes - totalRead;
+      const retained = value.length > remaining ? value.slice(0, remaining) : value;
+      chunks.push(retained);
+      totalRead += retained.length;
     }
 
     // Cancel the rest — we don't need more data
@@ -630,6 +608,20 @@ export async function checkLinkHealth(url: string, options: HealthCheckRequestOp
     // Check HTTP status
     const statusResult = classifyGetResponse(getResponse.status, retryAfterIso(getResponse.headers.get('retry-after')));
     if (statusResult) return { ...statusResult, finalUrl: getResponse.url || url };
+
+    const responseMime = String(getResponse.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const strictMime = (options.fetchImpl || globalThis.fetch) === INITIAL_FETCH;
+    if ((responseMime && !['text/html', 'application/xhtml+xml'].includes(responseMime)) || (!responseMime && strictMime)) {
+      return {
+        status: 'error',
+        ok: false,
+        retryable: false,
+        reason: responseMime ? `Unsafe product-page MIME type: ${responseMime}` : 'Product-page MIME type is missing',
+        statusCode: getResponse.status,
+        finalUrl: getResponse.url || url,
+        errorCode: responseMime ? 'UNSAFE_CONTENT_TYPE' : 'MIME_TYPE_UNVERIFIED',
+      };
+    }
 
     // Response is 2xx or 3xx — read limited body to check for error content
     const body = await readLimitedBody(getResponse, MAX_BODY_BYTES);

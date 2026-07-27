@@ -7,8 +7,10 @@ import { BulkProductActions } from '@/components/dashboard/bulk-product-actions'
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
 import { SavedViewsToolbar } from '@/components/dashboard/saved-views-toolbar';
 import { TaskStatus } from '@/components/dashboard/task-status';
+import { SafeProductImage } from '@/components/safe-product-image';
 import type { DashboardOperation } from '@/lib/dashboard/operations';
 import type { DashboardProductItem, DashboardProductsResult } from '@/lib/dashboard/products';
+import { ClientRequestError, clientRequestMessage, requestClientJson } from '@/lib/dashboard/clientRequest';
 import type { AutomationJob } from '@/lib/automation/types';
 import { buildIdempotencyKey } from '@/lib/automation/idempotency';
 import type { SavedView } from '@/lib/product-intelligence/types';
@@ -53,17 +55,14 @@ function formatPrice(value: number | null): string {
 }
 
 function SafeImage({ item }: { item: DashboardProductItem }) {
-  const [failedImage, setFailedImage] = useState<string | null>(null);
-  let safeImage = '';
-  try {
-    const parsed = new URL(item.image || '');
-    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
-    if (parsed.protocol === 'https:') safeImage = parsed.href;
-  } catch { safeImage = ''; }
-  if (!safeImage || failedImage === safeImage) return <div className={styles.imageFallback} aria-label="Chưa có ảnh">SP</div>;
-  // Remote product hosts are dynamic and cannot be safely allow-listed for next/image.
-  // eslint-disable-next-line @next/next/no-img-element
-  return <img className={styles.productImage} src={safeImage} alt={`Ảnh ${item.title}`} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailedImage(safeImage)} />;
+  return (
+    <SafeProductImage
+      originalUrl={item.image}
+      alt={`Ảnh ${item.title}`}
+      healthStatus={item.health.image}
+      className={styles.productImage}
+    />
+  );
 }
 
 function Badge({ children, tone = 'neutral' }: { children: React.ReactNode; tone?: 'neutral' | 'success' | 'warning' | 'danger' | 'info' }) {
@@ -130,6 +129,13 @@ export default function ProductsDashboard() {
   const [sourceForm, setSourceForm] = useState({ name: '', url: '', platform: 'website', kind: 'product', enabled: true, scanSchedule: '', description: '' });
   const dialogFocusRef = useRef<HTMLInputElement>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
+  const connectionsAbortRef = useRef<AbortController | null>(null);
+  const itemActionAbortRef = useRef<AbortController | null>(null);
+  const operationAbortRef = useRef<AbortController | null>(null);
+  const sourceAbortRef = useRef<AbortController | null>(null);
+  const itemBusyRef = useRef<string | null>(null);
+  const operationBusyRef = useRef(false);
+  const sourceBusyRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
@@ -195,17 +201,22 @@ export default function ProductsDashboard() {
     const controller = new AbortController();
     const params = new URLSearchParams();
     FILTER_KEYS.forEach((key) => { const value = searchParams.get(key); if (value) params.set(key, value); });
-    void fetch(`/api/dashboard/products?${params.toString()}`, { cache: 'no-store', signal: controller.signal })
-      .then(async (response) => {
-        const body = await response.json().catch(() => null) as Envelope<DashboardProductsResult> | null;
-        if (!response.ok || !body?.ok || !body.data) throw { code: body?.code || 'UNAVAILABLE', message: body?.message || 'Không thể tải kết quả bot.' };
+    void requestClientJson<Envelope<DashboardProductsResult>>(`/api/dashboard/products?${params.toString()}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+      .then((body) => {
+        if (!body?.ok || !body.data) throw { code: body?.code || 'UNAVAILABLE', message: body?.message || 'Không thể tải kết quả bot.' };
         setData(body.data);
         setError(null);
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
         const issue = reason as { code?: string; message?: string };
-        setError({ code: issue.code || 'UNAVAILABLE', message: issue.message || 'Không thể tải kết quả bot. Dữ liệu hiện tại không bị thay đổi. Vui lòng thử lại.' });
+        setError({
+          code: issue.code || 'UNAVAILABLE',
+          message: clientRequestMessage(reason, 'Không thể tải kết quả bot. Dữ liệu hiện tại không bị thay đổi. Vui lòng thử lại.'),
+        });
       })
       .finally(() => { if (!controller.signal.aborted) { setLoading(false); setRefreshing(false); } });
     return () => controller.abort();
@@ -214,24 +225,29 @@ export default function ProductsDashboard() {
   }, [queryString, refreshKey]);
 
   const loadConnections = useCallback(async () => {
-    const [sourceResponse, configResponse, healthResponse] = await Promise.all([
-      fetch('/api/product-sources', { cache: 'no-store' }),
-      fetch('/api/dashboard/config', { cache: 'no-store' }),
-      fetch('/api/app-health', { cache: 'no-store' }),
-    ]);
-    const sourceBody = await sourceResponse.json().catch(() => null) as Envelope<unknown[]> | null;
-    const configBody = await configResponse.json().catch(() => null) as Envelope<{ publicUrl: string | null }> | null;
-    const healthBody = await healthResponse.json().catch(() => null) as Envelope<{ integrations?: { accesstrade?: { configured?: boolean } } }> | null;
-    if (!mountedRef.current) return;
-    setSourceCount(Array.isArray(sourceBody?.data) ? sourceBody.data.length : 0);
-    setPublicUrl(configBody?.data?.publicUrl || null);
-    setPublicMessage(configBody?.message || 'Chưa thiết lập địa chỉ trang công khai.');
-    setAccessTradeReady(Boolean(healthBody?.data?.integrations?.accesstrade?.configured));
+    connectionsAbortRef.current?.abort(new DOMException('Superseded connection request', 'AbortError'));
+    const controller = new AbortController();
+    connectionsAbortRef.current = controller;
+    try {
+      const [sourceBody, configBody, healthBody] = await Promise.all([
+        requestClientJson<Envelope<unknown[]>>('/api/product-sources', { cache: 'no-store', signal: controller.signal }),
+        requestClientJson<Envelope<{ publicUrl: string | null }>>('/api/dashboard/config', { cache: 'no-store', signal: controller.signal }),
+        requestClientJson<Envelope<{ integrations?: { accesstrade?: { configured?: boolean } } }>>('/api/app-health', { cache: 'no-store', signal: controller.signal }),
+      ]);
+      if (!mountedRef.current || controller.signal.aborted) return;
+      setSourceCount(Array.isArray(sourceBody?.data) ? sourceBody.data.length : 0);
+      setPublicUrl(configBody?.data?.publicUrl || null);
+      setPublicMessage(configBody?.message || 'Chưa thiết lập địa chỉ trang công khai.');
+      setAccessTradeReady(Boolean(healthBody?.data?.integrations?.accesstrade?.configured));
+    } finally {
+      if (connectionsAbortRef.current === controller) connectionsAbortRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadConnections().catch(() => {
+      void loadConnections().catch((reason) => {
+        if (reason instanceof ClientRequestError && reason.code === 'REQUEST_ABORTED') return;
         if (mountedRef.current) { setAccessTradeReady(false); setPublicMessage('Tạm thời chưa thể kiểm tra cấu hình.'); }
       });
     }, 0);
@@ -251,6 +267,13 @@ export default function ProductsDashboard() {
       const controller = pollAbortRef.current;
       pollAbortRef.current = null;
       controller?.abort();
+      connectionsAbortRef.current?.abort();
+      itemActionAbortRef.current?.abort();
+      operationAbortRef.current?.abort();
+      sourceAbortRef.current?.abort();
+      itemBusyRef.current = null;
+      operationBusyRef.current = false;
+      sourceBusyRef.current = false;
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     };
   }, []);
@@ -258,20 +281,25 @@ export default function ProductsDashboard() {
   const refresh = () => { setError(null); setSelectedIds([]); setRefreshing(true); setRefreshKey((value) => value + 1); };
 
   const runItemAction = async (action: 'approve' | 'archive', item: DashboardProductItem) => {
-    setBusy(`${action}:${item.id}`);
+    if (itemBusyRef.current) return;
+    const busyKey = `${action}:${item.id}`;
+    itemBusyRef.current = busyKey;
+    setBusy(busyKey);
     const endpoint = `/api/products/${item.id}/${action}`;
+    const controller = new AbortController();
+    itemActionAbortRef.current = controller;
     try {
-      const response = await fetch(endpoint, {
+      const body = await requestClientJson<Envelope<ProductActionTracking>>(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           operationId: crypto.randomUUID(),
           reason: action === 'approve' ? 'Yêu cầu Safe Publish từ Product Operations' : 'Lưu trữ từ Product Operations',
         }),
+        signal: controller.signal,
       });
-      const body = await response.json().catch(() => null) as Envelope<ProductActionTracking> | null;
       if (!mountedRef.current) return;
-      if (!response.ok || !body?.ok || !body.data?.job) throw new Error(body?.message || 'Không thể tạo tác vụ. Dữ liệu chưa được thay đổi. Vui lòng thử lại.');
+      if (!body?.ok || !body.data?.job) throw new Error(body?.message || 'Không thể tạo tác vụ. Dữ liệu chưa được thay đổi. Vui lòng thử lại.');
       const next = toDashboardOperation(body.data.job);
       setOperation(next);
       showToast('info', body.message);
@@ -285,8 +313,13 @@ export default function ProductsDashboard() {
           } : current);
         });
       }
-    } catch (reason) { showToast('error', reason instanceof Error ? reason.message : 'Không thể thực hiện thao tác. Dữ liệu chưa được thay đổi. Vui lòng thử lại.'); }
-    finally { if (mountedRef.current) setBusy(null); }
+    } catch (reason) {
+      if (!controller.signal.aborted) showToast('error', clientRequestMessage(reason, 'Không thể thực hiện thao tác. Dữ liệu chưa được thay đổi. Vui lòng thử lại.'));
+    } finally {
+      if (itemActionAbortRef.current === controller) itemActionAbortRef.current = null;
+      if (itemBusyRef.current === busyKey) itemBusyRef.current = null;
+      if (mountedRef.current) setBusy(null);
+    }
   };
 
   const pollOperation = async (jobId: string) => {
@@ -296,10 +329,12 @@ export default function ProductsDashboard() {
     for (let attempt = 0; attempt < 45 && !controller.signal.aborted; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
       if (!mountedRef.current || controller.signal.aborted) return;
-      const response = await fetch(`/api/automation/jobs/${jobId}`, { cache: 'no-store', signal: controller.signal });
-      const body = await response.json().catch(() => null) as Envelope<SafeAutomationJob> | null;
+      const body = await requestClientJson<Envelope<SafeAutomationJob>>(`/api/automation/jobs/${jobId}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
       if (!mountedRef.current || controller.signal.aborted) return;
-      if (!response.ok || !body?.data) throw new Error(body?.message || 'Không thể cập nhật trạng thái tác vụ.');
+      if (!body?.data) throw new Error(body?.message || 'Không thể cập nhật trạng thái tác vụ.');
       const next = toDashboardOperation(body.data);
       setOperation(next);
       if (['completed', 'failed', 'cancelled', 'blocked'].includes(next.status)) {
@@ -314,42 +349,70 @@ export default function ProductsDashboard() {
   };
 
   const submitOperation = async () => {
-    if (!operationDialog || operationBusy) return;
+    if (!operationDialog || operationBusyRef.current) return;
+    operationBusyRef.current = true;
     setOperationBusy(true);
+    const controller = new AbortController();
+    operationAbortRef.current = controller;
     try {
       const operationId = crypto.randomUUID();
-      const response = await fetch('/api/automation/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        type: operationDialog === 'source_scan' ? 'PRODUCT_SCAN' : 'AUTO_PILOT', dryRun, operationId,
-        idempotencyKey: buildIdempotencyKey({
-          scope: `dashboard:${operationDialog}`,
-          values: { dryRun, limit },
-        }), payload: { limit },
-      }) });
-      const body = await response.json().catch(() => null) as Envelope<SafeAutomationJob> | null;
+      const body = await requestClientJson<Envelope<SafeAutomationJob>>('/api/automation/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: operationDialog === 'source_scan' ? 'PRODUCT_SCAN' : 'AUTO_PILOT', dryRun, operationId,
+          idempotencyKey: buildIdempotencyKey({
+            scope: `dashboard:${operationDialog}`,
+            values: { dryRun, limit },
+          }), payload: { limit },
+        }),
+        signal: controller.signal,
+      });
       if (!mountedRef.current) return;
-      if (!response.ok || !body?.ok || !body.data) throw new Error(body?.message || 'Không thể tạo tác vụ. Dữ liệu chưa được thay đổi.');
+      if (!body?.ok || !body.data) throw new Error(body?.message || 'Không thể tạo tác vụ. Dữ liệu chưa được thay đổi.');
       setOperation(toDashboardOperation(body.data)); setOperationDialog(null); showToast('info', body.message);
       void pollOperation(body.data.id).catch((reason) => {
         if (mountedRef.current) setOperation((current) => current ? { ...current, errorCode: 'STATUS_UNAVAILABLE', message: reason instanceof Error ? reason.message : 'Tạm thời không thể cập nhật trạng thái tác vụ.' } : current);
       });
-    } catch (reason) { showToast('error', reason instanceof Error ? reason.message : 'Không thể thực hiện tác vụ. Dữ liệu hiện tại không bị thay đổi.'); }
-    finally { if (mountedRef.current) setOperationBusy(false); }
+    } catch (reason) {
+      if (!controller.signal.aborted) showToast('error', clientRequestMessage(reason, 'Không thể thực hiện tác vụ. Dữ liệu hiện tại không bị thay đổi.'));
+    } finally {
+      if (operationAbortRef.current === controller) operationAbortRef.current = null;
+      operationBusyRef.current = false;
+      if (mountedRef.current) setOperationBusy(false);
+    }
   };
 
   const submitSource = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (sourceBusy) return;
+    if (sourceBusyRef.current) return;
+    sourceBusyRef.current = true;
     setSourceBusy(true); setSourceFields({});
+    const controller = new AbortController();
+    sourceAbortRef.current = controller;
     try {
-      const response = await fetch('/api/product-sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sourceForm) });
-      const body = await response.json().catch(() => null) as Envelope<unknown> | null;
+      const body = await requestClientJson<Envelope<unknown>>('/api/product-sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sourceForm),
+        signal: controller.signal,
+      });
       if (!mountedRef.current) return;
-      if (!response.ok || !body?.ok) { setSourceFields(body?.fields || {}); throw new Error(body?.message || 'Không thể lưu nguồn. Dữ liệu chưa được thay đổi.'); }
+      if (!body?.ok) { setSourceFields(body?.fields || {}); throw new Error(body?.message || 'Không thể lưu nguồn. Dữ liệu chưa được thay đổi.'); }
       showToast('success', body.message); setSourceDialog(false);
       setSourceForm({ name: '', url: '', platform: 'website', kind: 'product', enabled: true, scanSchedule: '', description: '' });
       await loadConnections();
-    } catch (reason) { showToast('error', reason instanceof Error ? reason.message : 'Không thể lưu nguồn. Dữ liệu chưa được thay đổi.'); }
-    finally { if (mountedRef.current) setSourceBusy(false); }
+    } catch (reason) {
+      if (reason instanceof ClientRequestError && reason.details && typeof reason.details === 'object' && 'fields' in reason.details) {
+        const fields = (reason.details as { fields?: unknown }).fields;
+        if (fields && typeof fields === 'object') setSourceFields(fields as Record<string, string>);
+      }
+      if (!controller.signal.aborted) showToast('error', clientRequestMessage(reason, 'Không thể lưu nguồn. Dữ liệu chưa được thay đổi.'));
+    } finally {
+      if (sourceAbortRef.current === controller) sourceAbortRef.current = null;
+      sourceBusyRef.current = false;
+      if (mountedRef.current) setSourceBusy(false);
+    }
   };
 
   const clearFilters = () => { setSearchDraft({ base: '', value: '' }); setError(null); setRefreshing(true); router.replace('/dashboard/products', { scroll: false }); };

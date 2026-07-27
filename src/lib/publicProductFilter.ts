@@ -1030,7 +1030,14 @@ export function getPublicProductBlockReason(
     return 'Nội dung đánh giá chưa vượt cổng chất lượng và SEO.';
   }
 
-  const eligibility = evaluateProductEligibility(product);
+  const eligibility = evaluateProductEligibility(retainDuringMonitoring
+    ? {
+        ...product,
+        linkHealthStatus: 'ok',
+        affiliateHealthStatus: 'ok',
+        imageHealthStatus: 'ok',
+      }
+    : product);
   if (!eligibility.eligibleForPublic) {
     const blocker = eligibility.criticalBlockers[0]
       || (product.publicHidden !== false ? 'public_hidden' : 'public_blocked');

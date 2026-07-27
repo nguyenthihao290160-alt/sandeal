@@ -4,8 +4,15 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { applyStorageBulkMutations } from './bulkMutation';
 import { storageErrorCode } from './storageErrors';
-import type { StorageAdapter, StoragePageOptions, StorageTransaction } from './types';
+import type {
+  StorageAdapter,
+  StorageBulkMutation,
+  StorageBulkResult,
+  StoragePageOptions,
+  StorageTransaction,
+} from './types';
 
 function getDataDir(): string {
   return process.env.SANDEAL_DATA_DIR || path.join(process.cwd(), '.data');
@@ -358,6 +365,27 @@ async function runTransaction<T>(collection: string, fn: StorageTransaction<T>):
   });
 }
 
+async function bulkMutateCollection<T extends { id: string }>(
+  collection: string,
+  mutations: StorageBulkMutation<T>[],
+): Promise<StorageBulkResult> {
+  let output!: StorageBulkResult;
+  await runTransaction<T>(collection, items => {
+    const applied = applyStorageBulkMutations(items, mutations);
+    output = {
+      schemaVersion: 1,
+      driver: 'file',
+      mode: 'FILE_ATOMIC_REVISION',
+      requested: mutations.length,
+      applied: applied.applied,
+      failed: applied.failed,
+      results: applied.results,
+    };
+    return applied.applied > 0 ? applied.items : undefined;
+  });
+  return output;
+}
+
 async function checkHealth() {
   const startedAt = Date.now();
   const checkedAt = new Date().toISOString();
@@ -388,6 +416,16 @@ async function checkHealth() {
 
 export const fileStorageAdapter: StorageAdapter = {
   driver: 'file',
+  capabilities: {
+    schemaVersion: 1,
+    driver: 'file',
+    transactions: true,
+    atomicCollectionRevision: true,
+    boundedBulkMutation: true,
+    partialFailureReporting: true,
+    nativeBulkWrite: false,
+    maximumBulkItems: 100,
+  },
   getDataDir,
   ensureDataDir,
   readCollection,
@@ -395,5 +433,6 @@ export const fileStorageAdapter: StorageAdapter = {
   writeCollection,
   backupCollection,
   runTransaction,
+  bulkMutateCollection,
   checkHealth,
 };

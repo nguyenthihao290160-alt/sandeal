@@ -7,24 +7,51 @@ import {
   type PersistedEvidenceVerification,
 } from '@/lib/autonomous/publishPolicy';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
+import { createHash } from 'node:crypto';
 import {
   getLifecycleTransitionEvent,
   persistLifecycleTransition,
 } from '@/lib/autonomous/lifecycleStore';
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
-import { getAllProducts, getProductById, publishCanonicalProductTransaction, saveCanonicalProduct } from '@/lib/storage/products';
+import {
+  appendPublicationAuditOnce,
+  getAllProducts,
+  getProductById,
+  publishCanonicalProductTransaction,
+  saveCanonicalProduct,
+} from '@/lib/storage/products';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
+import type { BlockedPublicationDecisionRecord } from '@/lib/types';
 import { canPublishInCurrentWave, completeCanaryEffect, reserveCanaryEffect } from './canaryController';
 import { claimJournalEffect, completeJournalEffect, ensureOperationJournal, failJournalEffect, getOperationJournal } from './operationJournal';
+import {
+  consumeRuntimeRecoveryCanaryPermit,
+  finalizeRuntimeRecoveryCanaryPermit,
+  getRuntimeRecoveryCanaryPermit,
+  issueRuntimeRecoveryCanaryPermit,
+  type RuntimeRecoveryCanaryPermit,
+  validateRuntimeRecoveryCanaryPermitForOperation,
+} from './runtimeRecoveryCanary';
 import { createAutomationJob, getAutomationControl } from './store';
 import type { AutomationJob } from './types';
 import { vietnamDayKey } from './timezone';
 
 const OUTBOUND_COLLECTION = 'automation-outbound-events';
-const RUNTIME_BLOCK_REASONS = new Set([
+const CONTROL_BLOCK_REASONS = new Set([
   'mode_disallows_publish',
   'kill_switch_active',
   'publish_lane_paused',
+  'publish_paused_by_operator',
+  'publish_blocked_by_runtime',
+  'publish_blocked_by_policy',
+  'publish_budget_exceeded',
+  'canary_wave_exceeded',
+]);
+const RUNTIME_BLOCK_REASONS = new Set([
+  'mode_disallows_publish',
+  'kill_switch_active',
+  'publish_blocked_by_runtime',
   'publish_budget_exceeded',
   'canary_wave_exceeded',
 ]);
@@ -127,11 +154,30 @@ async function applyBlockedDecision(
   workerId: string,
   productId: string,
   decision: AutonomousPublishDecision,
-): Promise<{ runtimeOnly: boolean; quarantined: boolean }> {
-  const runtimeOnly = decision.reasons.length > 0 && decision.reasons.every(reason => RUNTIME_BLOCK_REASONS.has(reason));
+  effectKey: string,
+): Promise<{ runtimeOnly: boolean; quarantined: boolean; record: BlockedPublicationDecisionRecord }> {
+  const runtimeOnly = decision.reasons.length > 0 && decision.reasons.every(reason => CONTROL_BLOCK_REASONS.has(reason));
   const nextRetryAt = new Date(Date.now() + (runtimeOnly ? 30 : 6 * 60) * 60_000).toISOString();
   let current = await getProductById(productId);
   if (!current) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
+  const existingRecord = current.lastBlockedPublicationDecision?.operationId === job.operationId
+    && current.lastBlockedPublicationDecision.effectKey === effectKey
+    ? current.lastBlockedPublicationDecision
+    : undefined;
+  if (existingRecord) {
+    return {
+      runtimeOnly: existingRecord.productReasonCodes.length === 0,
+      quarantined: existingRecord.resultingLifecycleState === 'QUARANTINED',
+      record: existingRecord,
+    };
+  }
+
+  const transitionType = runtimeOnly ? 'retry-scheduled' : 'quarantined';
+  const transitionEvent = await getLifecycleTransitionEvent(lifecycleTransitionKey(job.id, transitionType));
+  const previousLifecycleState = transitionEvent?.productId === productId
+    ? transitionEvent.previousState
+    : current.lifecycleState || 'STAGED';
+  const previousStatus = current.status;
 
   if (runtimeOnly && current.lifecycleState === 'PUBLISHING') {
     const transitioned = await persistLifecycleTransition({
@@ -156,14 +202,232 @@ async function applyBlockedDecision(
   }
 
   const quarantined = current.lifecycleState === 'QUARANTINED';
-  await saveCanonicalProduct(productId, {
+  const runtimeReasonCodes = decision.reasons.filter(reason => RUNTIME_BLOCK_REASONS.has(reason));
+  const productReasonCodes = decision.reasons.filter(reason => !CONTROL_BLOCK_REASONS.has(reason));
+  const recordedAt = new Date().toISOString();
+  const record: BlockedPublicationDecisionRecord = {
+    schemaVersion: 1,
+    operationId: job.operationId,
+    effectKey,
+    jobId: job.id,
+    attemptId: job.claimToken || `${job.id}:attempt:${job.attemptCount}`,
+    productId,
+    candidateId: typeof job.payload.candidateId === 'string' ? job.payload.candidateId : undefined,
+    previousLifecycleState,
+    resultingLifecycleState: current.lifecycleState || 'STAGED',
+    previousStatus,
+    resultingStatus: quarantined ? 'needs_review' : current.status,
+    decisionRuleVersion: decision.ruleVersion,
+    reasonCodes: [...new Set(decision.reasons)],
+    runtimeReasonCodes: [...new Set(runtimeReasonCodes)],
+    productReasonCodes: [...new Set(productReasonCodes)],
+    sourceHash: current.sourceHash,
+    reviewVersion: current.reviewContent?.reviewVersion,
+    riskLevel: current.riskLevel,
+    dryRun: job.dryRun,
+    actor: {
+      type: 'worker',
+      id: workerId,
+    },
+    releaseIdentity: getReleaseIdentity().releaseId,
+    recordedAt,
+  };
+  const saved = await saveCanonicalProduct(productId, {
     quarantineReasons: quarantined ? [...new Set([...(current.quarantineReasons || []), ...decision.reasons])] : current.quarantineReasons,
     nextAutomaticAction: quarantined ? 'RECHECK_QUARANTINED_PRODUCT' : 'RETRY_AUTO_SAFE_PUBLISH',
     nextRetryAt,
     publicHidden: true,
     ...(quarantined ? { status: 'needs_review' as const } : {}),
+    lastBlockedPublicationDecision: record,
   });
-  return { runtimeOnly, quarantined };
+  if (!saved?.lastBlockedPublicationDecision || saved.lastBlockedPublicationDecision.effectKey !== effectKey) {
+    throw new Error('BLOCKED_PUBLICATION_STATE_NOT_DURABLE');
+  }
+  return { runtimeOnly, quarantined, record: saved.lastBlockedPublicationDecision };
+}
+
+function blockedAuditFromRecord(record: BlockedPublicationDecisionRecord) {
+  return {
+    effectKey: record.effectKey,
+    operationId: record.operationId,
+    runId: record.jobId,
+    jobId: record.jobId,
+    attemptId: record.attemptId,
+    candidateId: record.candidateId,
+    productId: record.productId,
+    action: 'publish_blocked',
+    previousState: record.previousStatus,
+    nextState: record.resultingStatus,
+    previousLifecycleState: record.previousLifecycleState,
+    nextLifecycleState: record.resultingLifecycleState,
+    reasonCodes: record.reasonCodes,
+    runtimeReasonCodes: record.runtimeReasonCodes,
+    productReasonCodes: record.productReasonCodes,
+    decisionRuleVersion: record.decisionRuleVersion,
+    sourceHash: record.sourceHash,
+    reviewVersion: record.reviewVersion,
+    riskLevel: record.riskLevel.toUpperCase() as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN',
+    dryRun: record.dryRun,
+    actor: record.actor,
+    releaseIdentity: record.releaseIdentity,
+    timestamp: record.recordedAt,
+  };
+}
+
+async function ensurePublishedPublicationAudit(
+  job: AutomationJob,
+  workerId: string,
+  productId: string,
+  effectKey: string,
+): Promise<{ auditId: string; effectKey: string }> {
+  const product = await getProductById(productId);
+  if (!product
+    || product.publicationEffectKey !== effectKey
+    || product.status !== 'published'
+    || product.publicHidden !== false
+    || !['PUBLISHING', 'PUBLISHED'].includes(String(product.lifecycleState || ''))) {
+    throw new Error('PUBLICATION_AUDIT_COMMITTED_PRODUCT_REQUIRED');
+  }
+  const durable = await appendPublicationAuditOnce({
+    effectKey: `${effectKey}:audit`.slice(0, 240),
+    operationId: job.operationId,
+    runId: job.id,
+    jobId: job.id,
+    attemptId: job.claimToken || `${job.id}:attempt:${job.attemptCount}`,
+    candidateId: typeof job.payload.candidateId === 'string' ? job.payload.candidateId : undefined,
+    productId,
+    action: 'published',
+    previousState: product.publicationPreviousStatus || 'needs_review',
+    nextState: 'published',
+    previousLifecycleState: product.publicationPreviousLifecycleState,
+    nextLifecycleState: product.lifecycleState,
+    reasonCodes: [],
+    sourceHash: product.sourceHash,
+    reviewVersion: product.reviewContent?.reviewVersion,
+    riskLevel: 'HIGH',
+    dryRun: false,
+    actor: { type: 'worker', id: workerId },
+    releaseIdentity: getReleaseIdentity().releaseId,
+    timestamp: product.publishedAt || new Date().toISOString(),
+  });
+  if (!durable.event.id) throw new Error('PUBLICATION_AUDIT_NOT_DURABLE');
+  return { auditId: durable.event.id, effectKey: durable.event.effectKey! };
+}
+
+function blockedResult(record: BlockedPublicationDecisionRecord): Record<string, unknown> {
+  return {
+    executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
+    executionMode: 'LOCAL_RULES',
+    provider: 'local',
+    published: false,
+    quarantined: record.resultingLifecycleState === 'QUARANTINED',
+    reasons: record.reasonCodes,
+    rulesVersion: record.decisionRuleVersion,
+    evidenceVerified: false,
+    blockedAuditEffectKey: record.effectKey,
+    aiRequests: 0,
+    externalRequests: 0,
+  };
+}
+
+async function executeBlockedDecision(
+  job: AutomationJob,
+  workerId: string,
+  productId: string,
+  decision?: AutonomousPublishDecision,
+  journalOperationId = job.operationId,
+): Promise<Record<string, unknown>> {
+  const effectKey = `publish-blocked:${job.operationId}:${productId}`.slice(0, 240);
+  await ensureOperationJournal({
+    operationId: journalOperationId,
+    jobId: job.id,
+    operationType: 'AUTO_SAFE_PUBLISH_BLOCKED',
+    effects: [
+      {
+        id: 'blocked-state',
+        description: 'Persist the blocked publication decision before its audit.',
+        idempotencyKey: `${effectKey}:state`.slice(0, 240),
+        intendedValue: { productId },
+      },
+      {
+        id: 'blocked-audit',
+        description: 'Record one durable blocked publication audit.',
+        idempotencyKey: effectKey,
+      },
+    ],
+  });
+
+  const ownerId = `auto-safe-publish-blocked:${job.id}`;
+  let record: BlockedPublicationDecisionRecord | undefined;
+  let activeEffectId: string | undefined;
+  const acquireEffect = async (effectId: string): Promise<boolean> => {
+    const claim = await claimJournalEffect(journalOperationId, effectId, ownerId);
+    if (claim.status === 'IN_PROGRESS') {
+      throw new Error(`TEMPORARY_ERROR:JOURNAL_EFFECT_IN_PROGRESS:${effectId}`);
+    }
+    if (claim.status === 'COMPLETED') return false;
+    activeEffectId = effectId;
+    return true;
+  };
+  const finishEffect = async (effectId: string, actualValue: unknown): Promise<void> => {
+    await completeJournalEffect(journalOperationId, effectId, actualValue, { ownerId });
+    if (activeEffectId === effectId) activeEffectId = undefined;
+  };
+
+  try {
+    const stateRequired = await acquireEffect('blocked-state');
+    if (stateRequired) {
+      const product = await getProductById(productId);
+      const persistedRecord = product?.lastBlockedPublicationDecision?.operationId === job.operationId
+        && product.lastBlockedPublicationDecision.effectKey === effectKey
+        ? product.lastBlockedPublicationDecision
+        : undefined;
+      if (persistedRecord) {
+        record = persistedRecord;
+      } else {
+        if (!decision) throw new Error('BLOCKED_PUBLICATION_DECISION_MISSING');
+        const applied = await applyBlockedDecision(job, workerId, productId, decision, effectKey);
+        record = applied.record;
+      }
+      if (process.env.NODE_ENV === 'test' && job.payload.simulateCrashAfterBlockedState === true && job.attemptCount === 1) {
+        throw new Error('TEMPORARY_ERROR:SIMULATED_CRASH_AFTER_BLOCKED_STATE');
+      }
+      await finishEffect('blocked-state', {
+        productId,
+        effectKey,
+        resultingLifecycleState: record.resultingLifecycleState,
+      });
+    } else {
+      const product = await getProductById(productId);
+      record = product?.lastBlockedPublicationDecision?.operationId === job.operationId
+        ? product.lastBlockedPublicationDecision
+        : undefined;
+    }
+    if (!record || record.effectKey !== effectKey) {
+      throw new Error('BLOCKED_PUBLICATION_STATE_RECONCILIATION_FAILED');
+    }
+
+    if (await acquireEffect('blocked-audit')) {
+      const durableAudit = await appendPublicationAuditOnce(blockedAuditFromRecord(record));
+      if (process.env.NODE_ENV === 'test' && job.payload.simulateCrashAfterBlockedAuditWrite === true && job.attemptCount === 1) {
+        throw new Error('TEMPORARY_ERROR:SIMULATED_CRASH_AFTER_BLOCKED_AUDIT_WRITE');
+      }
+      await finishEffect('blocked-audit', {
+        auditId: durableAudit.event.id,
+        effectKey,
+      });
+    }
+    const journal = await getOperationJournal(journalOperationId);
+    if (!journal || journal.reconciliationStatus !== 'CONSISTENT') {
+      throw new Error('TEMPORARY_ERROR:BLOCKED_PUBLICATION_JOURNAL_INCOMPLETE');
+    }
+    return blockedResult(record);
+  } catch (error) {
+    if (activeEffectId) {
+      await failJournalEffect(journalOperationId, activeEffectId, error, { ownerId });
+    }
+    throw error;
+  }
 }
 
 function replayDecision(productId: string, effectSnapshot: string, product: Awaited<ReturnType<typeof getProductById>>): AutonomousPublishDecision {
@@ -180,9 +444,44 @@ function replayDecision(productId: string, effectSnapshot: string, product: Awai
   };
 }
 
+function recoveryCanaryPermitIdFromJournal(
+  journal: Awaited<ReturnType<typeof getOperationJournal>>,
+): string | undefined {
+  const effect = journal?.intendedEffects.find(item => item.id === 'recovery-canary-permit');
+  const prefix = 'recovery-canary-permit:';
+  return effect?.idempotencyKey.startsWith(prefix)
+    ? effect.idempotencyKey.slice(prefix.length)
+    : undefined;
+}
+
+function contextualizeBlockedDecision(
+  decision: AutonomousPublishDecision,
+  control: Awaited<ReturnType<typeof getAutomationControl>>,
+): AutonomousPublishDecision {
+  if (!decision.reasons.includes('publish_lane_paused')) return decision;
+  const provenanceReasons = [
+    ...(control.publishPausedByOperator ? ['publish_paused_by_operator'] : []),
+    ...(control.publishBlockedByRuntime ? ['publish_blocked_by_runtime'] : []),
+    ...(control.publishBlockedByPolicy ? ['publish_blocked_by_policy'] : []),
+  ];
+  return {
+    ...decision,
+    reasons: [...new Set([...decision.reasons, ...provenanceReasons])],
+  };
+}
+
+function blockedJournalOperationId(operationId: string, productId: string): string {
+  const identity = createHash('sha256').update(`${operationId}:${productId}`).digest('hex').slice(0, 24);
+  return `blocked:${operationId.slice(0, 120)}:${identity}`.slice(0, 160);
+}
+
 export async function executeAutoSafePublish(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
   const productId = typeof job.payload.productId === 'string' ? job.payload.productId : '';
   if (!productId) throw new Error('VALIDATION_PRODUCT_ID_REQUIRED');
+  const existingJournal = await getOperationJournal(job.operationId);
+  if (existingJournal?.operationType === 'AUTO_SAFE_PUBLISH_BLOCKED') {
+    return executeBlockedDecision(job, workerId, productId);
+  }
   const product = await getProductById(productId);
   if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
   const control = await getAutomationControl();
@@ -203,6 +502,18 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
     && product.publicationEffectKey === effectKey
     && product.status === 'published'
     && product.publicHidden === false;
+  const journalCanaryPermitId = recoveryCanaryPermitIdFromJournal(existingJournal);
+  let recoveryCanaryPermit: RuntimeRecoveryCanaryPermit | undefined;
+  if (journalCanaryPermitId) {
+    const permit = await getRuntimeRecoveryCanaryPermit(journalCanaryPermitId);
+    if (permit
+      && permit.operationId === job.operationId
+      && permit.productId === productId
+      && permit.publicationEffectKey === effectKey
+      && (permit.status === 'CONSUMED' || replayingCompletedProductWrite)) {
+      recoveryCanaryPermit = permit;
+    }
+  }
   const wave = await canPublishInCurrentWave(control.effectiveMode, effectKey);
   const withinBudget = replayingCompletedProductWrite || await withinDailyPublishBudget();
   let evidenceVerification: PersistedEvidenceVerification | undefined;
@@ -224,26 +535,103 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
     evidenceVerification = evaluated.evidence;
   }
 
+  if (!decision.eligible
+    && control.publishBlockedByRuntime
+    && !control.publishPausedByOperator
+    && !control.publishBlockedByPolicy
+    && !control.killSwitch
+    && decision.reasons.length === 1
+    && decision.reasons[0] === 'publish_lane_paused') {
+    const recoveryEvaluation = await evaluatePersistedAutonomousPublish(product, {
+      mode: control.effectiveMode,
+      killSwitch: control.killSwitch,
+      publishPaused: false,
+      workerId,
+      jobType: job.type,
+      jobClaimedBy: job.claimedBy,
+      withinBudget,
+      withinCanaryWave: wave.allowed,
+    });
+    if (recoveryEvaluation.decision.eligible) {
+      if (recoveryCanaryPermit
+        && job.claimToken
+        && job.workerOwnerId
+        && job.workerInstanceId
+        && Number.isInteger(job.workerFencingToken)
+        && Number(job.workerFencingToken) > 0) {
+        const resumed = await validateRuntimeRecoveryCanaryPermitForOperation({
+          permitId: recoveryCanaryPermit.id,
+          operationId: job.operationId,
+          productId,
+          jobId: job.id,
+          claimToken: job.claimToken,
+          ownership: {
+            ownerId: job.workerOwnerId,
+            instanceId: job.workerInstanceId,
+            fencingToken: Number(job.workerFencingToken),
+          },
+          productEligibleExceptRuntime: true,
+          publicationEffectKey: effectKey,
+        });
+        if (resumed.allowed && resumed.permit) {
+          recoveryCanaryPermit = resumed.permit;
+          decision = recoveryEvaluation.decision;
+          evidenceVerification = recoveryEvaluation.evidence;
+        } else {
+          recoveryCanaryPermit = undefined;
+        }
+      } else if (job.claimToken
+        && job.workerOwnerId
+        && job.workerInstanceId
+        && Number.isInteger(job.workerFencingToken)
+        && Number(job.workerFencingToken) > 0) {
+        const ownership = {
+          ownerId: job.workerOwnerId,
+          instanceId: job.workerInstanceId,
+          fencingToken: Number(job.workerFencingToken),
+        };
+        const issued = await issueRuntimeRecoveryCanaryPermit({
+          operationId: job.operationId,
+          productId,
+          jobId: job.id,
+          claimToken: job.claimToken,
+          ownership,
+          readinessSnapshotHash: effectSnapshot,
+          productEligibleExceptRuntime: true,
+        });
+        if (issued.allowed && issued.permit) {
+          const consumed = await consumeRuntimeRecoveryCanaryPermit({
+            operationId: job.operationId,
+            productId,
+            jobId: job.id,
+            claimToken: job.claimToken,
+            ownership,
+            permitId: issued.permit.id,
+            productEligibleExceptRuntime: true,
+            publicationEffectKey: effectKey,
+          });
+          if (consumed.allowed && consumed.permit) {
+            recoveryCanaryPermit = consumed.permit;
+            decision = recoveryEvaluation.decision;
+            evidenceVerification = recoveryEvaluation.evidence;
+          }
+        }
+      }
+    }
+  }
+
   if (!decision.eligible) {
-    const blocked = await applyBlockedDecision(job, workerId, productId, decision);
-    return {
-      executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
-      executionMode: 'LOCAL_RULES',
-      provider: 'local',
-      published: false,
-      quarantined: blocked.quarantined,
-      reasons: decision.reasons,
-      rulesVersion: decision.ruleVersion,
-      evidenceVerified: decision.evidenceVerified,
-      aiRequests: 0,
-      externalRequests: 0,
-    };
+    const blockedDecision = contextualizeBlockedDecision(decision, control);
+    const journalOperationId = existingJournal?.operationType === 'AUTO_SAFE_PUBLISH'
+      ? blockedJournalOperationId(job.operationId, productId)
+      : job.operationId;
+    return executeBlockedDecision(job, workerId, productId, blockedDecision, journalOperationId);
   }
   if (!replayingCompletedProductWrite) {
     assertAutonomousPublishEligible(product, {
       mode: control.effectiveMode,
       killSwitch: control.killSwitch,
-      publishPaused: control.publishPaused,
+      publishPaused: recoveryCanaryPermit ? false : control.publishPaused,
       workerId,
       jobType: job.type,
       jobClaimedBy: job.claimedBy,
@@ -252,12 +640,29 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
     }, evidenceVerification);
   }
 
+  const publicationAuditJournalEffect = !existingJournal
+    || existingJournal.intendedEffects.some(effect => effect.id === 'publication-audit');
   await ensureOperationJournal({
     operationId: job.operationId,
     jobId: job.id,
     operationType: 'AUTO_SAFE_PUBLISH',
     effects: [
+      ...(recoveryCanaryPermit ? [{
+        id: 'recovery-canary-permit',
+        description: 'Consume one scoped runtime recovery canary permit.',
+        idempotencyKey: `recovery-canary-permit:${recoveryCanaryPermit.id}`,
+        intendedValue: {
+          permitId: recoveryCanaryPermit.id,
+          operationId: job.operationId,
+          productId,
+        },
+      }] : []),
       { id: 'publish-product', description: 'Publish canonical product exactly once.', idempotencyKey: effectKey, intendedValue: { productId, snapshotHash: effectSnapshot } },
+      ...(publicationAuditJournalEffect ? [{
+        id: 'publication-audit',
+        description: 'Record one durable publication audit after the canonical product commit.',
+        idempotencyKey: `${effectKey}:audit`,
+      }] : []),
       { id: 'outbound-event', description: 'Emit one publication event.', idempotencyKey: `${effectKey}:event` },
       { id: 'monitor-job', description: 'Create one post-publish monitoring chain.', idempotencyKey: `${effectKey}:monitor` },
     ],
@@ -292,6 +697,13 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
   };
 
   try {
+    if (recoveryCanaryPermit && await acquireEffect('recovery-canary-permit')) {
+      await finishEffect('recovery-canary-permit', {
+        permitId: recoveryCanaryPermit.id,
+        operationId: job.operationId,
+        productId,
+      });
+    }
     await ensurePublishingLifecycle(job, workerId, productId);
     if (process.env.NODE_ENV === 'test' && job.payload.simulateCrashAfterPublishingTransition === true && job.attemptCount === 1) {
       throw new Error('TEMPORARY_ERROR:SIMULATED_CRASH_AFTER_PUBLISHING_TRANSITION');
@@ -310,6 +722,11 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
         status: 'published',
         autoPublished: true,
         relatedJobId: job.id,
+        ...(recoveryCanaryPermit ? {
+          runtimeRecoveryCanaryPermitId: recoveryCanaryPermit.id,
+          runtimeRecoveryCanaryObservationPending: true,
+          runtimeRecoveryCanaryObservationExpiresAt: recoveryCanaryPermit.expiresAt,
+        } : {}),
       }, {
         jobId: job.id,
         workerId,
@@ -317,6 +734,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
         runId: job.id,
         idempotencyKey: job.idempotencyKey,
         publicationEffectKey: effectKey,
+        runtimeRecoveryCanaryPermitId: recoveryCanaryPermit?.id,
         dryRun: false,
       });
       if (!published || published.status !== 'published' || published.publicHidden !== false || published.lifecycleState !== 'PUBLISHING') {
@@ -328,6 +746,14 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
       await finishEffect('publish-product', { productId, effectKey, publishedAt: published.publishedAt });
     }
 
+    if (publicationAuditJournalEffect) {
+      if (await acquireEffect('publication-audit')) {
+        const audit = await ensurePublishedPublicationAudit(job, workerId, productId, effectKey);
+        await finishEffect('publication-audit', audit);
+      }
+    } else {
+      await ensurePublishedPublicationAudit(job, workerId, productId, effectKey);
+    }
     await ensurePublishedLifecycle(job, workerId, productId);
 
     if (await acquireEffect('outbound-event')) {
@@ -342,7 +768,15 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
       const scheduledAt = new Date(Date.now() + 15 * 60_000).toISOString();
       const monitor = await createAutomationJob({
         type: 'POST_PUBLISH_MONITOR',
-        payload: { productId, interval: '15m', sequence: 0, publicationEffectKey: effectKey },
+        payload: {
+          productId,
+          interval: '15m',
+          sequence: 0,
+          publicationEffectKey: effectKey,
+          ...(recoveryCanaryPermit ? {
+            runtimeRecoveryCanaryPermitId: recoveryCanaryPermit.id,
+          } : {}),
+        },
         idempotencyKey: `monitor:${productId}:${effectSnapshot}:15m`.slice(0, 160),
         operationId: `monitor:${productId}:${effectSnapshot}`.slice(0, 160),
         parentJobId: job.id,
@@ -387,6 +821,17 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
     const mustPreserveCanaryReservation = durableProductWrite?.publicationEffectKey === effectKey
       && durableProductWrite.status === 'published'
       && durableProductWrite.publicHidden === false;
+    if (recoveryCanaryPermit && !mustPreserveCanaryReservation) {
+      await finalizeRuntimeRecoveryCanaryPermit({
+        permitId: recoveryCanaryPermit.id,
+        productId,
+        healthy: false,
+        reasonCode: 'RECOVERY_CANARY_PUBLICATION_ABORTED',
+        publicationEffectKey: effectKey,
+        preserveRuntimeBlock: true,
+        finalStatus: 'REVOKED',
+      });
+    }
     if (!mustPreserveCanaryReservation) await completeCanaryEffect(control.effectiveMode, effectKey, false);
     throw error;
   }

@@ -20,6 +20,7 @@ import {
   createAutomationJob,
   failAutomationJob,
   getAutomationControl,
+  getAllAutomationJobs,
   getAutomationJob,
   heartbeatAutomationJob,
   logAutomationJobEvent,
@@ -42,11 +43,28 @@ function assertUnhandledJobType(type: never): never {
 export interface WorkerRunResult {
   workerId: string;
   claimed: number;
+  criticalClaimed: number;
+  normalClaimed: number;
   succeeded: number;
   failed: number;
   skipped: number;
   waitingManual: number;
   waitingChildren: number;
+}
+
+export interface WorkerBatchOptions {
+  maximumInFlight?: number;
+  criticalReservedCapacity?: number;
+  enforceExecutionCompatibility?: boolean;
+}
+
+export interface ContinuousWorkerPoolResult extends WorkerRunResult {
+  maxConcurrency: number;
+  peakInFlight: number;
+  replacementClaims: number;
+  claimAttempts: number;
+  drained: boolean;
+  stopRequested: boolean;
 }
 
 function hashValue(value: unknown): string {
@@ -497,15 +515,32 @@ async function executeJob(job: AutomationJob, workerId: string): Promise<Record<
   }
 }
 
-export async function processAutomationBatch(workerId: string, limit = 2, ownership?: RuntimeRoleOwnership): Promise<WorkerRunResult> {
-  const result: WorkerRunResult = { workerId, claimed: 0, succeeded: 0, failed: 0, skipped: 0, waitingManual: 0, waitingChildren: 0 };
+export async function processAutomationBatch(
+  workerId: string,
+  limit = 2,
+  ownership?: RuntimeRoleOwnership,
+  options: WorkerBatchOptions = {},
+): Promise<WorkerRunResult> {
+  const result: WorkerRunResult = {
+    workerId,
+    claimed: 0,
+    criticalClaimed: 0,
+    normalClaimed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    waitingManual: 0,
+    waitingChildren: 0,
+  };
   const initialControl = await getAutomationControl();
   const lastHeartbeat = Date.parse(initialControl.workerHeartbeatAt || '');
   if (initialControl.workerId !== workerId || !Number.isFinite(lastHeartbeat) || Date.now() - lastHeartbeat >= 15_000) {
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
   }
-  const claimed = await claimAutomationJobs(workerId, limit, 60_000, Date.now(), ownership);
+  const claimed = await claimAutomationJobs(workerId, limit, 60_000, Date.now(), ownership, options);
   result.claimed = claimed.length;
+  result.criticalClaimed = claimed.filter(job => job.executionCritical === true).length;
+  result.normalClaimed = claimed.length - result.criticalClaimed;
 
   const processJob = async (job: AutomationJob): Promise<void> => {
     if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) throw new Error('WORKER_FENCING_REJECTED');
@@ -518,6 +553,7 @@ export async function processAutomationBatch(workerId: string, limit = 2, owners
     }
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
     let workerLeaseLost = false;
+    let workerFencingRejected = false;
     const heartbeat = setInterval(() => {
       void heartbeatAutomationJob(job.id, workerId, 60_000, job.claimToken, ownership).then(updated => {
         if (!updated) workerLeaseLost = true;
@@ -619,6 +655,7 @@ export async function processAutomationBatch(workerId: string, limit = 2, owners
       }
       const code = errorCode(error);
       if (code === 'WORKER_FENCING_REJECTED') {
+        workerFencingRejected = true;
         logAutomationJobEvent('job_skipped', job, { workerId, reasonCode: code });
         result.skipped += 1;
         return;
@@ -634,11 +671,19 @@ export async function processAutomationBatch(workerId: string, limit = 2, owners
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);
-      if (job.type === 'PROCESS_CANDIDATE') {
+      if (job.type === 'PROCESS_CANDIDATE' && !workerFencingRejected) {
         if (businessExecutionStarted) await commitProductProcessingCapacity(productProcessingReservationKey(job), 1);
         else await releaseProductProcessingCapacity(productProcessingReservationKey(job));
       }
-      await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: undefined }, workerId);
+      if (!workerFencingRejected) {
+        const remainingJob = (await getAllAutomationJobs()).find(item =>
+          item.status === 'RUNNING' && item.claimedBy === workerId && item.id !== job.id);
+        await updateAutomationControl({
+          workerHeartbeatAt: new Date().toISOString(),
+          workerId,
+          workerCurrentJobId: remainingJob?.id,
+        }, workerId);
+      }
     }
   };
   if (claimed.every(job => job.type === 'PROCESS_CANDIDATE')) {
@@ -647,4 +692,135 @@ export async function processAutomationBatch(workerId: string, limit = 2, owners
     for (const job of claimed) await processJob(job);
   }
   return result;
+}
+
+function mergeWorkerRunResult(target: WorkerRunResult, source: WorkerRunResult): void {
+  target.claimed += source.claimed;
+  target.criticalClaimed += source.criticalClaimed;
+  target.normalClaimed += source.normalClaimed;
+  target.succeeded += source.succeeded;
+  target.failed += source.failed;
+  target.skipped += source.skipped;
+  target.waitingManual += source.waitingManual;
+  target.waitingChildren += source.waitingChildren;
+}
+
+function boundedPoolValue(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(parsed)));
+}
+
+export async function runContinuousWorkerPool(options: {
+  workerId: string;
+  ownership?: RuntimeRoleOwnership;
+  maxConcurrency: number;
+  maximumClaims: number;
+  criticalReservedCapacity?: number;
+  shouldStop?: () => boolean;
+  drainTimeoutMs?: number;
+  stopPollMs?: number;
+  runBatch?: (
+    workerId: string,
+    ownership: RuntimeRoleOwnership | undefined,
+    batchOptions: WorkerBatchOptions,
+  ) => Promise<WorkerRunResult>;
+}): Promise<ContinuousWorkerPoolResult> {
+  const maxConcurrency = boundedPoolValue(options.maxConcurrency, 1, 1, 32);
+  const maximumClaims = boundedPoolValue(options.maximumClaims, maxConcurrency, 1, 1_000);
+  const criticalReservedCapacity = maxConcurrency > 1
+    ? boundedPoolValue(options.criticalReservedCapacity, 1, 0, maxConcurrency - 1)
+    : 0;
+  const drainTimeoutMs = boundedPoolValue(options.drainTimeoutMs, 12_000, 1_000, 60_000);
+  const stopPollMs = boundedPoolValue(options.stopPollMs, 100, 10, 1_000);
+  const aggregate: ContinuousWorkerPoolResult = {
+    workerId: options.workerId,
+    claimed: 0,
+    criticalClaimed: 0,
+    normalClaimed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    waitingManual: 0,
+    waitingChildren: 0,
+    maxConcurrency,
+    peakInFlight: 0,
+    replacementClaims: 0,
+    claimAttempts: 0,
+    drained: true,
+    stopRequested: false,
+  };
+  const runBatch = options.runBatch || ((workerId, ownership, batchOptions) =>
+    processAutomationBatch(workerId, 1, ownership, batchOptions));
+  const active = new Map<number, Promise<{
+    slotId: number;
+    result?: WorkerRunResult;
+    error?: unknown;
+  }>>();
+  let nextSlotId = 1;
+  let startedAttempts = 0;
+  let initialAttemptBoundary: number | undefined;
+  let claimBlockedUntilCompletion = false;
+  let stopObservedAt: number | undefined;
+
+  const startClaim = () => {
+    const slotId = nextSlotId;
+    nextSlotId += 1;
+    startedAttempts += 1;
+    aggregate.claimAttempts += 1;
+    const promise = runBatch(options.workerId, options.ownership, {
+      maximumInFlight: maxConcurrency,
+      criticalReservedCapacity,
+      enforceExecutionCompatibility: true,
+    }).then(result => ({ slotId, result }), error => ({ slotId, error }));
+    active.set(slotId, promise);
+    aggregate.peakInFlight = Math.max(aggregate.peakInFlight, active.size);
+  };
+
+  while (true) {
+    const stopRequested = options.shouldStop?.() === true;
+    if (stopRequested) {
+      aggregate.stopRequested = true;
+      stopObservedAt ||= Date.now();
+    }
+    if (!stopRequested && !claimBlockedUntilCompletion) {
+      const unobservedClaimCapacity = active.size;
+      const remainingClaims = maximumClaims - aggregate.claimed - unobservedClaimCapacity;
+      const availableSlots = maxConcurrency - active.size;
+      const launchCount = Math.max(0, Math.min(availableSlots, remainingClaims));
+      for (let index = 0; index < launchCount; index += 1) startClaim();
+      initialAttemptBoundary ??= startedAttempts;
+    }
+
+    if (!active.size) {
+      if (aggregate.stopRequested || aggregate.claimed >= maximumClaims || claimBlockedUntilCompletion) break;
+      if (startedAttempts > 0) {
+        claimBlockedUntilCompletion = true;
+        continue;
+      }
+    }
+
+    if (aggregate.stopRequested && stopObservedAt && Date.now() - stopObservedAt >= drainTimeoutMs) {
+      aggregate.drained = false;
+      break;
+    }
+    const wake = new Promise<{ wake: true }>(resolve => {
+      setTimeout(() => resolve({ wake: true }), stopPollMs);
+    });
+    const completed = await Promise.race([...active.values(), wake]);
+    if ('wake' in completed) continue;
+    active.delete(completed.slotId);
+    if (completed.error) throw completed.error;
+    const result = completed.result!;
+    mergeWorkerRunResult(aggregate, result);
+    if (result.claimed > 0) {
+      if (completed.slotId > (initialAttemptBoundary || 0)) aggregate.replacementClaims += result.claimed;
+      claimBlockedUntilCompletion = false;
+    } else if (active.size > 0) {
+      claimBlockedUntilCompletion = true;
+    } else {
+      break;
+    }
+  }
+  return aggregate;
 }

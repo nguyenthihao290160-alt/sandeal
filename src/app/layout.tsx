@@ -4,6 +4,7 @@ import { config } from '@/lib/config';
 import { buildSiteJsonLd } from '@/lib/seo/siteSeo';
 import { BuildMismatchGuard } from '@/components/public/BuildMismatchGuard';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
+import { serializeJsonLd } from '@/lib/seo/structuredData';
 
 export const viewport: Viewport = {
   themeColor: "#3157c8",
@@ -58,7 +59,7 @@ export default function RootLayout({
         {structuredData.map((value, index) => (
           <script
             type="application/ld+json"
-            dangerouslySetInnerHTML={{ __html: JSON.stringify(value).replace(/</g, '\\u003c') }}
+            dangerouslySetInnerHTML={{ __html: serializeJsonLd(value) }}
             key={index}
           />
         ))}

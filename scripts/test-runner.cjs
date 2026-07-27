@@ -58,6 +58,7 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
     affiliateUrlStatus: 'verified', affiliateUrlVerifiedAt: fixtureLinkCheckedAt,
     productUrlHttpStatus: 200, affiliateUrlHttpStatus: 200,
     imageUrlHttpStatus: 200, imageContentType: 'image/jpeg',
+    priceVerificationStatus: 'VERIFIED',
     ...o,
   });
   const indexableProduct = (o = {}) => { const base = verifiedBaseProduct({ category: 'Thiết bị thử nghiệm', brand: 'SanDeal Test', ...o }); const reviewContent = editorial.generateEditorialReview(base, []); return safe.applySafePublishDecision({ ...base, reviewContent }); };

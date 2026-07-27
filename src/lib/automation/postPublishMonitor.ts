@@ -21,6 +21,7 @@ import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intellig
 import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import type { LinkHealthStatus, Product, ProductLifecycleState, ProductOffer } from '@/lib/types';
 import { createAutomationJob, getAutomationControl } from './store';
+import { finalizeRuntimeRecoveryCanaryPermit } from './runtimeRecoveryCanary';
 import type { AutomationJob } from './types';
 
 const RULES_VERSION = 'post-publish-monitor-v2';
@@ -370,13 +371,22 @@ async function persistObservation(
     evidenceSnapshotAt: evidence.snapshot.createdAt,
     evidenceSnapshotHash: evidence.snapshot.snapshotHash,
     confidences,
-  });
+  }, { verifiedHealthUpdate: true });
   if (!saved) throw new Error('POST_PUBLISH_MONITOR_PRODUCT_WRITE_FAILED');
   return saved;
 }
 
 function recoveryReadinessReasons(product: Product, evidenceValid: boolean, evidenceReasons: string[]): string[] {
-  const safe = evaluateSafePublish({ ...product, autoPublishEligible: true, lifecycleState: 'READY_FOR_PUBLISH' });
+  const safe = evaluateSafePublish({
+    ...product,
+    autoPublishEligible: true,
+    lifecycleState: 'READY_FOR_PUBLISH',
+    publicBlocked: false,
+    publicBlockReason: undefined,
+    publicBlockReasons: [],
+    currentBlockers: [],
+    quarantineReasons: [],
+  });
   const reasons = [...safe.reasons];
   if (!evidenceValid) reasons.push('persisted_evidence_unverified', ...evidenceReasons);
   if (product.recordType !== 'PRODUCT') reasons.push('record_type_not_product');
@@ -404,6 +414,62 @@ async function ensureRepublishChild(job: AutomationJob, product: Product): Promi
   });
   await saveCanonicalProduct(product.id, { relatedJobId: child.job.id });
   return child.job.id;
+}
+
+async function hideUnhealthyRecoveryCanary(
+  job: AutomationJob,
+  workerId: string,
+  product: Product,
+  result: MonitorProbeResult,
+  permitId: string,
+  publicationEffectKey: string | undefined,
+): Promise<{ product: Product; childJobId: string }> {
+  const checkedAt = stableCheckedAt(job);
+  const reasonCode = `RECOVERY_CANARY_MONITOR_${result.outcome}`;
+  let hidden = await transitionProduct(
+    product.id,
+    'HIDDEN',
+    job,
+    workerId,
+    'recovery-canary-hidden',
+    [reasonCode],
+  );
+  hidden = (await saveCanonicalProduct(product.id, {
+    status: 'needs_review',
+    publicHidden: true,
+    needsVerification: true,
+    autoPublished: false,
+    autoPublishEligible: false,
+    publicDecision: 'blocked',
+    hiddenAt: checkedAt,
+    hiddenReason: 'runtime_recovery_canary_monitor_failed',
+    publicBlocked: true,
+    publicBlockReason: reasonCode,
+    publicBlockReasons: [reasonCode],
+    blockersCheckedAt: checkedAt,
+    quarantineReasons: [...new Set([...(hidden.quarantineReasons || []), reasonCode])],
+    nextAutomaticAction: 'RECHECK_HIDDEN_PRODUCT',
+    runtimeRecoveryCanaryObservationPending: false,
+    runtimeRecoveryCanaryObservationExpiresAt: undefined,
+  })) || hidden;
+  await finalizeRuntimeRecoveryCanaryPermit({
+    permitId,
+    productId: product.id,
+    healthy: false,
+    reasonCode,
+    publicationEffectKey,
+    preserveRuntimeBlock: true,
+  });
+  const childJobId = await scheduleNextMonitor(
+    job,
+    product.id,
+    DAY,
+    sequenceOf(job) + 1,
+    '24h',
+    'recovery-canary-hidden-recheck',
+    true,
+  );
+  return { product: hidden, childJobId };
 }
 
 async function hideConfirmedProduct(
@@ -460,6 +526,12 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
   if (!workerId || job.status !== 'RUNNING' || job.claimedBy !== workerId) throw new Error('POST_PUBLISH_MONITOR_DURABLE_CLAIM_REQUIRED');
   let product = await getProductById(productId);
   if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
+  const recoveryCanaryPermitId = typeof job.payload.runtimeRecoveryCanaryPermitId === 'string'
+    ? job.payload.runtimeRecoveryCanaryPermitId
+    : product.runtimeRecoveryCanaryPermitId;
+  const recoveryCanaryPublicationEffectKey = typeof job.payload.publicationEffectKey === 'string'
+    ? job.payload.publicationEffectKey
+    : product.publicationEffectKey;
 
   const checkedAt = stableCheckedAt(job);
   const sequence = sequenceOf(job);
@@ -531,7 +603,8 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
       product = (await saveCanonicalProduct(productId, {
         status: 'needs_review', publicHidden: true, needsVerification: false, autoPublished: false,
         autoPublishEligible: true, publicDecision: 'ready_for_publish', hiddenReason: undefined,
-        publicBlockReason: undefined, publicBlockReasons: [], quarantineReasons: [],
+        publicBlocked: false, publicBlockReason: undefined, publicBlockReasons: [],
+        currentBlockers: [], blockersCheckedAt: checkedAt, quarantineReasons: [],
         nextAutomaticAction: 'AUTO_SAFE_PUBLISH', nextRetryAt: undefined,
       })) || product;
       const childJobId = await ensureRepublishChild(job, product);
@@ -551,6 +624,19 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
       publicDecision: 'published', hiddenReason: undefined, publicBlockReason: undefined, publicBlockReasons: [],
       nextAutomaticAction: 'POST_PUBLISH_MONITOR',
     });
+    if (recoveryCanaryPermitId) {
+      await finalizeRuntimeRecoveryCanaryPermit({
+        permitId: recoveryCanaryPermitId,
+        productId,
+        healthy: true,
+        reasonCode: 'RECOVERY_CANARY_MONITOR_HEALTHY',
+        publicationEffectKey: recoveryCanaryPublicationEffectKey,
+      });
+      await saveCanonicalProduct(productId, {
+        runtimeRecoveryCanaryObservationPending: false,
+        runtimeRecoveryCanaryObservationExpiresAt: undefined,
+      });
+    }
     const interval = sequence === 0 ? '6h' : sequence === 1 ? '24h' : 'periodic';
     const delay = sequence === 0 ? 6 * HOUR : DAY;
     const childJobId = await scheduleNextMonitor(job, productId, delay, sequence + 1, interval, 'periodic', false);
@@ -558,6 +644,30 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
       executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
       outcome: 'HEALTHY', recovered: false, childJobId, statuses: probeResult.statuses,
       rulesVersion: RULES_VERSION, aiRequests: 0, externalRequests: probeResult.externalRequests,
+    };
+  }
+
+  if (recoveryCanaryPermitId && startedPublic && !recoveryFlow) {
+    const hidden = await hideUnhealthyRecoveryCanary(
+      job,
+      workerId,
+      product,
+      probeResult,
+      recoveryCanaryPermitId,
+      recoveryCanaryPublicationEffectKey,
+    );
+    return {
+      executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
+      executionMode: 'LOCAL_RULES',
+      provider: 'local',
+      outcome: probeResult.outcome,
+      hidden: true,
+      recoveryCanaryFailed: true,
+      childJobId: hidden.childJobId,
+      statuses: probeResult.statuses,
+      rulesVersion: RULES_VERSION,
+      aiRequests: 0,
+      externalRequests: probeResult.externalRequests,
     };
   }
 

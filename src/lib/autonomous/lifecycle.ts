@@ -121,6 +121,7 @@ const DEFINITIONS: LifecycleTransitionDefinition[] = [
   definition('PUBLISHING', 'RETRY_SCHEDULED', [publishWorker()], { precondition: 'publish_effect_failed_transiently', output: 'publish_retry_scheduled', sideEffect: 'SCHEDULE_RETRY', retryable: true }),
   definition('PUBLISHING', 'QUARANTINED', [publishWorker()], { precondition: 'publish_effect_failed_policy', output: 'record_quarantined' }),
   definition('PUBLISHED', 'DEGRADED', [monitorWorker()], { precondition: 'temporary_post_publish_failure_observed', output: 'public_product_degraded', retryable: true }),
+  definition('PUBLISHED', 'HIDDEN', [monitorWorker()], { precondition: 'runtime_recovery_canary_monitor_failed', output: 'recovery_canary_hidden', sideEffect: 'HIDE_PUBLIC_PRODUCT' }),
   definition('PUBLISHED', 'RECHECKING', [monitorWorker(), reconciler()], { precondition: 'post_publish_recheck_is_due', output: 'health_recheck_started', retryable: true }),
   definition('DEGRADED', 'RECHECKING', [monitorWorker(), reconciler()], { precondition: 'degraded_recheck_is_due', output: 'health_recheck_started', retryable: true }),
   definition('DEGRADED', 'PUBLISHED', [monitorWorker()], { precondition: 'temporary_failure_recovered', output: 'public_product_healthy' }),

@@ -15,7 +15,7 @@ import { getPublicComparison } from '@/lib/product-intelligence/publicProducts';
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  title: 'So sánh sản phẩm | SanDeal',
+  title: 'So sánh sản phẩm',
   description: 'So sánh tối đa bốn sản phẩm bằng các trường dữ liệu đã có trên SanDeal.',
   alternates: { canonical: '/compare' },
   robots: { index: false, follow: true },

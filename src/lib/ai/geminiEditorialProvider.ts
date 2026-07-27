@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { Product, ReviewContent } from '../types';
+import { parseStrictEditorialProposal } from './canonicalDataContract';
 import { executeGeminiRequest } from './geminiCredentialRouter';
 import { routeModel, type TaskProfile } from './geminiModels';
 
@@ -31,22 +32,26 @@ export async function generateGeminiEditorialReview(product: Product, profile: T
     return null;
   }
   if (!response.ok) return null;
-  const parsed = parseReviewResponse(response.data); if (!parsed) return null;
+  const parsed = parseReviewResponse(
+    response.data,
+    new Set(product.reviewContent?.keyFacts.map(fact => fact.id) || []),
+  );
+  if (!parsed) return null;
   const fallback = localFallback();
-  if (parsed.reviewTitle!.trim().length < 12 || parsed.reviewSummary!.trim().length < 80) return null;
   const contentUpdatedAt = new Date().toISOString();
   const review: ReviewContent = { ...fallback, ...parsed, reviewVersion: 2, reviewMethod: 'source_data_analysis', reviewerType: 'automated_editorial', sourceHash: product.sourceHash || '', reviewedAt: contentUpdatedAt, contentUpdatedAt, reviewContentHash: '' };
   review.reviewContentHash = createHash('sha256').update(JSON.stringify({ title: review.reviewTitle, summary: review.reviewSummary, verdict: review.reviewVerdict, strengths: review.strengths, limitations: review.limitations, suitableFor: review.suitableFor, buyingConsiderations: review.buyingConsiderations })).digest('hex');
   return { review, modelId: model.modelId, promptVersion: PROMPT_VERSION, generationFingerprint: fingerprint, responseHash: createHash('sha256').update(JSON.stringify(parsed)).digest('hex'), generatedAt: new Date().toISOString() };
 }
 
-function parseReviewResponse(data: unknown): Partial<ReviewContent> | null {
+function parseReviewResponse(
+  data: unknown,
+  allowedEvidenceIds: ReadonlySet<string>,
+): Partial<ReviewContent> | null {
   try {
     const root = data as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const text = root.candidates?.[0]?.content?.parts?.[0]?.text; if (!text) return null;
-    const parsed = JSON.parse(text) as Partial<ReviewContent>;
-    if (typeof parsed.reviewTitle !== 'string' || typeof parsed.reviewSummary !== 'string' || !Array.isArray(parsed.factualClaims) || !Array.isArray(parsed.inferredClaims)) return null;
-    return parsed;
+    return parseStrictEditorialProposal(JSON.parse(text), allowedEvidenceIds);
   } catch { return null; }
 }
 

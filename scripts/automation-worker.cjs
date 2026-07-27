@@ -2,9 +2,10 @@
 require('./register-typescript.cjs');
 const crypto = require('node:crypto');
 const os = require('node:os');
-const { processAutomationBatch } = require('../src/lib/automation/worker.ts');
+const { processAutomationBatch, runContinuousWorkerPool } = require('../src/lib/automation/worker.ts');
 const { getAutomationSettings } = require('../src/lib/storage/automationSettings.ts');
 const { acquireRuntimeRole, heartbeatRuntimeRole, releaseRuntimeRole } = require('../src/lib/automation/runtimeRoles.ts');
+const { getFeatureRolloutState } = require('../src/lib/automation/featureRollout.ts');
 
 const hostname = os.hostname();
 const workerId = `worker:${hostname}`;
@@ -13,8 +14,20 @@ const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 100
 const once = process.argv.includes('--once');
 let stopping = false;
 let roleLeaseLost = false;
-process.on('SIGINT', () => { stopping = true; });
-process.on('SIGTERM', () => { stopping = true; });
+let forcedShutdown = false;
+function requestShutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(JSON.stringify({
+    type: 'worker_shutdown',
+    workerId: instanceId,
+    phase: 'requested',
+    signal,
+    reasonCode: 'WORKER_SHUTDOWN_REQUESTED',
+  }));
+}
+process.on('SIGINT', () => requestShutdown('SIGINT'));
+process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
@@ -78,7 +91,29 @@ async function waitForWorkerRole() {
       try {
         const settings = await getAutomationSettings();
         const concurrency = Math.max(1, Math.min(4, Number(settings.maxConcurrency) || 1));
-        result = await processAutomationBatch(instanceId, concurrency, ownership);
+        const continuousPoolActive = getFeatureRolloutState('WORKER_CONTINUOUS_POOL_V2').mode === 'ACTIVE';
+        result = continuousPoolActive
+          ? await runContinuousWorkerPool({
+              workerId: instanceId,
+              ownership,
+              maxConcurrency: concurrency,
+              maximumClaims: Math.max(1, Math.min(50, Number(settings.maxItemsPerRun) || concurrency)),
+              criticalReservedCapacity: concurrency > 1 ? 1 : 0,
+              shouldStop: () => stopping || roleLeaseLost,
+              drainTimeoutMs: 12_000,
+            })
+          : await processAutomationBatch(instanceId, concurrency, ownership);
+        if (continuousPoolActive && !result.drained) {
+          forcedShutdown = true;
+          console.error(JSON.stringify({
+            type: 'worker_shutdown',
+            workerId: instanceId,
+            phase: 'drain_timeout',
+            peakInFlight: Math.max(0, result.peakInFlight),
+            reasonCode: 'WORKER_SHUTDOWN_DRAIN_TIMEOUT',
+          }));
+          break;
+        }
       } catch (error) {
         const reasonCode = error instanceof Error ? error.message : 'UNKNOWN_ERROR';
         console.error(JSON.stringify({ type: 'worker_tick_failed', workerId: instanceId, reasonCode }));
@@ -102,7 +137,18 @@ async function waitForWorkerRole() {
     } while (!once && !stopping);
   } finally {
     clearInterval(roleHeartbeat);
-    if (!roleLeaseLost) await releaseRuntimeRole('WORKER', ownership);
+    const released = !roleLeaseLost && !forcedShutdown
+      ? await releaseRuntimeRole('WORKER', ownership)
+      : false;
+    console.log(JSON.stringify({
+      type: 'worker_shutdown',
+      workerId: instanceId,
+      phase: 'completed',
+      released,
+      forced: forcedShutdown,
+      reasonCode: forcedShutdown ? 'WORKER_SHUTDOWN_DRAIN_TIMEOUT' : 'WORKER_SHUTDOWN_COMPLETED',
+    }));
+    if (forcedShutdown) setImmediate(() => process.exit(1));
   }
 })().catch(error => {
   console.error(JSON.stringify({ type: 'worker_failed', workerId: instanceId, reasonCode: error instanceof Error ? error.message : 'UNKNOWN_ERROR' }));

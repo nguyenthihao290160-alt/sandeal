@@ -8,6 +8,7 @@ import {
   taxonomyFaq,
   taxonomyPath,
 } from '@/lib/seo/taxonomySeo';
+import { serializeJsonLd } from '@/lib/seo/structuredData';
 
 import { AffiliateDisclosure } from './ProductSections';
 import { DealCard } from './DealCard';
@@ -53,7 +54,7 @@ export function TaxonomyLanding({
       {[breadcrumbJsonLd, itemListJsonLd, faqJsonLd].map((value, index) => (
         <script
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(value).replace(/</g, '\\u003c') }}
+          dangerouslySetInnerHTML={{ __html: serializeJsonLd(value) }}
           key={index}
         />
       ))}

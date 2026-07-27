@@ -10,8 +10,14 @@
   --warning: var(--ds-warning, #a16207);
   --danger: var(--ds-danger, #dc2626);
   display: grid;
+  width: 100%;
+  min-width: 0;
   gap: 20px;
   color: var(--text);
+}
+
+.productsPage > * {
+  min-width: 0;
 }
 
 .pageHeader {
@@ -350,6 +356,7 @@
 .cardSelect { width: fit-content; font-size: 12px; }
 
 .tableWrap {
+  max-width: 100%;
   margin-top: 14px;
   overflow-x: auto;
   border: 1px solid var(--border);

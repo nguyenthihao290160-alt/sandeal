@@ -83,20 +83,21 @@ export async function generateMetadata({ searchParams }: { searchParams: Promise
   try {
     const result = await getPublicSearch(params.toString());
     const pageSuffix = result.pagination.page > 1 ? ` - Trang ${result.pagination.page}` : '';
-    const title = `Danh sách deal đã kiểm tra${pageSuffix} | SanDeal`;
+    const pageTitle = `Danh sách deal đã kiểm tra${pageSuffix}`;
+    const socialTitle = `${pageTitle} | SanDeal`;
     const canonical = result.pagination.page > 1 ? `/deals?page=${result.pagination.page}` : '/deals';
     const indexable = curated && !result.pagination.outOfRange;
     return {
-      title,
+      title: pageTitle,
       description,
       alternates: { canonical },
       robots: { index: indexable, follow: true, googleBot: { index: indexable, follow: true } },
-      openGraph: { title, description, url: canonical, type: 'website', locale: 'vi_VN', siteName: 'SanDeal' },
-      twitter: { card: 'summary', title, description },
+      openGraph: { title: socialTitle, description, url: canonical, type: 'website', locale: 'vi_VN', siteName: 'SanDeal' },
+      twitter: { card: 'summary', title: socialTitle, description },
     };
   } catch {
     return {
-      title: 'Danh sách deal đã kiểm tra | SanDeal',
+      title: 'Danh sách deal đã kiểm tra',
       description,
       alternates: { canonical: '/deals' },
       robots: { index: false, follow: true },

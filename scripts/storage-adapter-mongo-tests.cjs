@@ -435,6 +435,28 @@ async function main() {
     assert.equal(database.commits, 1);
   });
 
+  await test('mongo capabilities expose opt-in revision bulk and preserve partial item results', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    assert.equal(adapter.capabilities.driver, 'mongo');
+    assert.equal(adapter.capabilities.nativeBulkWrite, false);
+    assert.equal(adapter.capabilities.optimizedBulkFeatureFlag, 'MONGO_BULK_WRITE');
+    await adapter.writeCollection('products', [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+    ]);
+    const result = await adapter.bulkMutateCollection('products', [
+      { mutationId: 'm1', type: 'UPSERT', itemId: 'one', value: { id: 'one', value: 10 } },
+      { mutationId: 'm2', type: 'DELETE', itemId: 'missing' },
+      { mutationId: 'm3', type: 'DELETE', itemId: 'two' },
+    ], { optimized: true });
+    assert.equal(result.mode, 'MONGO_OPT_IN_REVISION');
+    assert.equal(result.applied, 2);
+    assert.equal(result.failed, 1);
+    assert.deepEqual(result.results.map(item => item.code), ['UPSERTED', 'ITEM_NOT_FOUND', 'DELETED']);
+    assert.deepEqual(await adapter.readCollection('products'), [{ id: 'one', value: 10 }]);
+  });
+
   await test('callback throw aborts and preserves the original callback error', async () => {
     const database = new FakeDatabase();
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));

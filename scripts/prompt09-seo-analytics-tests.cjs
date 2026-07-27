@@ -59,7 +59,7 @@ function product(id, overrides = {}) {
     publicHidden: true, needsVerification: true,
     linkHealthStatus: 'ok', affiliateHealthStatus: 'ok', imageHealthStatus: 'ok', imageUrlHttpStatus: 200, imageContentType: 'image/jpeg',
     linkLastCheckedAt: TEST_NOW, affiliateLastCheckedAt: TEST_NOW, imageLastCheckedAt: TEST_NOW, lastSeenAt: TEST_NOW,
-    priceObservedAt: TEST_NOW, priceTruthState: 'FRESH',
+    priceObservedAt: TEST_NOW, priceTruthState: 'FRESH', priceVerificationStatus: 'VERIFIED',
     availability: 'available', sourceHash: `source-${id}`,
     qualityScore: 88, qualityBand: 'good', opportunityScore: 80, opportunityBand: 'recommended',
     dealScore: 84, dealBand: 'featured', dealReasons: ['Dữ liệu fixture đã vượt cổng kiểm tra.'],

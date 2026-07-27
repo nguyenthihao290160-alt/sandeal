@@ -144,7 +144,25 @@ test('release CI có đủ gate và tuyệt đối không deploy', () => {
 
 test('env example chỉ chứa placeholder rỗng hoặc default storage không nhạy cảm', () => {
   const lines = read('.env.example').split(/\r?\n/).filter(line => /^[A-Z][A-Z0-9_]*=/.test(line));
-  const safeDefaults = new Set(['SANDEAL_STORAGE_DRIVER=file', 'MONGODB_DATABASE=sandeal']);
+  const safeDefaults = new Set([
+    'SANDEAL_STORAGE_DRIVER=file',
+    'MONGODB_DATABASE=sandeal',
+    'RUNTIME_RECOVERY_V2=SHADOW',
+    'RECOVERY_CANARY=OFF',
+    'RECOVERY_CANARY_MAX_ACTIVE=1',
+    'RECOVERY_CANARY_TTL_MS=1800000',
+    'WORKER_CONTINUOUS_POOL_V2=OFF',
+    'SLO_RUNNABLE_AT_V2=SHADOW',
+    'AI_CLOUD_FALLBACK=OFF',
+    'AI_LOCAL_FALLBACK=OFF',
+    'OPERATOR_ALERTING=OFF',
+    'SMART_CATEGORIZATION_V2=SHADOW',
+    'MONGO_BULK_WRITE=OFF',
+    'MULTI_AFFILIATE_OFFER=SHADOW',
+    'PROGRAMMATIC_SEO_V2=SHADOW',
+    'RUNTIME_RECOVERY_REQUIRED_HEALTHY_COUNT=3',
+    'RUNTIME_RECOVERY_MAX_EVIDENCE_AGE_MS=120000',
+  ]);
   assert(lines.length > 10);
   for (const line of lines) assert(/^[A-Z][A-Z0-9_]*=$/.test(line) || safeDefaults.has(line), line.split('=')[0]);
 });

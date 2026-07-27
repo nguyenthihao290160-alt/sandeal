@@ -30,7 +30,7 @@ export interface CanaryState {
 export interface CanaryHealthEvidence {
   evaluationId: string;
   status: 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA';
-  dataStatus: 'MEASURED' | 'INSUFFICIENT_DATA';
+  dataStatus: AutomationSloMeasurement['dataStatus'];
   sampleSize: number;
   evaluatedAt: string;
 }

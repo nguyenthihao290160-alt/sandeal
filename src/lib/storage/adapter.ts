@@ -1,8 +1,16 @@
 // Compatibility facade. Keep existing imports pointed at this module while
 // storage implementations are selected behind the adapter factory.
 
+import { getFeatureRolloutState } from '@/lib/automation/featureRollout';
 import { getStorageAdapter } from './storageFactory';
-import type { StoragePage, StoragePageOptions, StorageTransaction } from './types';
+import type {
+  StorageBulkMutation,
+  StorageBulkResult,
+  StorageCapabilities,
+  StoragePage,
+  StoragePageOptions,
+  StorageTransaction,
+} from './types';
 
 export function getDataDir(): string {
   return getStorageAdapter().getDataDir();
@@ -10,6 +18,24 @@ export function getDataDir(): string {
 
 export function ensureDataDir(): Promise<void> {
   return getStorageAdapter().ensureDataDir();
+}
+
+export function getStorageCapabilities(): StorageCapabilities {
+  return { ...getStorageAdapter().capabilities };
+}
+
+export function bulkMutateCollection<T extends { id: string }>(
+  collection: string,
+  mutations: StorageBulkMutation<T>[],
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<StorageBulkResult> {
+  const adapter = getStorageAdapter();
+  if (!adapter.bulkMutateCollection) {
+    throw new Error(`STORAGE_BULK_UNSUPPORTED:${adapter.driver}`);
+  }
+  const optimized = adapter.driver === 'mongo'
+    && getFeatureRolloutState('MONGO_BULK_WRITE', environment).mode === 'ACTIVE';
+  return adapter.bulkMutateCollection(collection, mutations, { optimized });
 }
 
 export function readCollection<T>(collection: string): Promise<T[]> {

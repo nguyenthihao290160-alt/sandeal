@@ -31,7 +31,7 @@ export async function generateMetadata({
     return buildTaxonomyMetadata({ kind: 'brand', name: 'không hợp lệ', slug: 'invalid', totalItems: 0, page: 1, totalPages: 1, curated: false });
   }
   const data = await getLanding(slug, parsed.page);
-  if (!data) return { title: 'Không tìm thấy thương hiệu | SanDeal', robots: { index: false, follow: true } };
+  if (!data) return { title: 'Không tìm thấy thương hiệu', robots: { index: false, follow: true } };
   return buildTaxonomyMetadata({
     kind: 'brand',
     name: data.taxonomy.name,
