@@ -303,10 +303,18 @@ async function main() {
     await resetCollections('automation-control');
     await automationStore.updateAutomationControl({ publishPausedByOperator: true }, 'fixture-operator');
     await automationStore.updateAutomationControl({ publishBlockedByRuntime: true, publishRuntimeReasons: ['FIXTURE_RUNTIME_BLOCK'] }, 'runtime-guardian');
-    const cleared = await automationStore.updateAutomationControl({ publishBlockedByRuntime: false, publishRuntimeReasons: [] }, 'runtime-guardian');
-    assert.equal(cleared.publishPausedByOperator, true);
-    assert.equal(cleared.publishBlockedByRuntime, false);
-    assert.equal(cleared.publishPaused, true);
+    const blocked = await automationStore.getAutomationControl();
+    const clearResult = await automationStore.clearRuntimePublishReasons({
+      reasonCodes: ['FIXTURE_RUNTIME_BLOCK'],
+      expectedChangedAt: blocked.changedAt,
+      expectedRuntimeReasons: blocked.publishRuntimeReasons,
+      reason: 'FIXTURE_RUNTIME_RECOVERY_EVIDENCE_CONFIRMED',
+      evaluationId: 'fixture-runtime-recovery-evaluation',
+    }, 'error-budget-controller');
+    assert.equal(clearResult.status, 'CLEARED');
+    assert.equal(clearResult.control.publishPausedByOperator, true);
+    assert.equal(clearResult.control.publishBlockedByRuntime, false);
+    assert.equal(clearResult.control.publishPaused, true);
   });
 
   await test('Insufficient SLO data cannot clear a runtime publish block', async () => {
@@ -636,14 +644,23 @@ async function main() {
   await test('UI regression guards expose unambiguous capability, Gemini and candidate mapping semantics', () => {
     const healthPage = source('src/app/dashboard/app-health/page.tsx');
     const healthRoute = source('src/app/api/automation/health/route.ts');
+    const healthService = source('src/lib/automation/healthService.ts');
+    const launchInventory = source('src/lib/automation/launchInventory.ts');
     const tokenPage = source('src/app/dashboard/token-vault/page.tsx');
     const sourcePage = source('src/app/dashboard/product-sources/page.tsx');
     const detailPage = source('src/app/dashboard/products/[id]/page.tsx');
     const detailCss = source('src/app/dashboard/products/[id]/product-detail.module.css');
     assert.ok(healthPage.includes('Hoạt động có giới hạn'));
     assert.ok(healthPage.includes('Đăng an toàn'));
-    assert.ok(healthRoute.includes('getGeminiProviderReadiness'));
-    assert.equal(healthRoute.includes('adapterAvailable: false'), false);
+    assert.ok(healthRoute.includes('buildAutomationHealthResponse'));
+    assert.ok(healthRoute.includes("'APP_HEALTH_UNAVAILABLE'"));
+    assert.ok(healthRoute.includes("'APP_HEALTH_UNEXPECTED_FAILURE'"));
+    assert.ok(healthRoute.includes('Không thể xác minh sức khỏe hệ thống lúc này.'));
+    assert.equal(healthRoute.includes(String.fromCodePoint(0x4d, 0xe1, 0xbb)), false);
+    assert.equal(healthRoute.includes(String.fromCodePoint(0xc4, 0x90)), false);
+    assert.ok(healthService.includes('getGeminiProviderReadiness'));
+    assert.equal(healthService.includes('adapterAvailable: false'), false);
+    assert.ok(launchInventory.includes('job.resourceCandidateId || job.payload?.candidateId'));
     assert.ok(tokenPage.includes('Thiếu quyền tạo nội dung'));
     assert.ok(tokenPage.includes('data-primary-disabled-reason'));
     assert.equal(tokenPage.includes('window.prompt'), false);

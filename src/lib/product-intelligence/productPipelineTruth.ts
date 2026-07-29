@@ -1,7 +1,13 @@
 import { config } from '@/lib/config';
 import { classifyRecord } from '@/lib/autonomous/recordClassification';
-import { getAllAutomationJobs, getAutomationControl } from '@/lib/automation/store';
-import type { AutomationJob } from '@/lib/automation/types';
+import { getAutomationControl } from '@/lib/automation/store';
+import { readBoundedAutomationJobProjections } from '@/lib/automation/jobHealthSummary';
+import type { AutomationJob, AutomationJobListProjection } from '@/lib/automation/types';
+import {
+  classifyAutomationJobEvidence,
+  completeAutomationJobEvidence,
+  type AutomationJobEvidence,
+} from '@/lib/automation/truth';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { readCollection } from '@/lib/storage/adapter';
 import { getProductById } from '@/lib/storage/products';
@@ -20,10 +26,15 @@ export interface ProductAdminActionRecord {
   occurredAt: string;
 }
 
-function jobTargetsProduct(job: AutomationJob, product: Product): boolean {
+type PipelineJob = AutomationJob | AutomationJobListProjection;
+
+function jobTargetsProduct(job: PipelineJob, product: Product): boolean {
   if (product.relatedJobId === job.id) return true;
-  if (job.payload.productId === product.id) return true;
-  return Array.isArray(job.payload.productIds) && job.payload.productIds.map(String).includes(product.id);
+  if ('payload' in job) {
+    if (job.payload.productId === product.id) return true;
+    if (Array.isArray(job.payload.productIds) && job.payload.productIds.map(String).includes(product.id)) return true;
+  }
+  return 'resourceProductIds' in job && Boolean(job.resourceProductIds?.includes(product.id));
 }
 
 function health(value: string | undefined, hasValue: boolean): string {
@@ -41,13 +52,15 @@ function verifiedUrlHealth(value: string | undefined, hasValue: boolean, verifie
 
 export function buildProductPipelineTruth(input: {
   product: Product;
-  jobs: AutomationJob[];
+  jobs: PipelineJob[];
+  jobEvidence?: AutomationJobEvidence;
   actions: ProductAdminActionRecord[];
   launchEnabled: boolean;
   effectiveMode: string;
   now: number;
 }) {
   const { product, now } = input;
+  const jobEvidence = input.jobEvidence || completeAutomationJobEvidence();
   const classification = product.classification || classifyRecord(product as unknown as Record<string, unknown>);
   const eligibility = evaluateProductEligibility(product, now);
   const actions = input.actions.filter(item => item.productId === product.id);
@@ -57,7 +70,9 @@ export function buildProductPipelineTruth(input: {
   const productJobs = input.jobs.filter(job => jobTargetsProduct(job, product)).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const activeJob = productJobs.find(job => ['PENDING', 'RUNNING', 'RETRY_SCHEDULED', 'WAITING_APPROVAL', 'WAITING_FOR_MANUAL_INPUT', 'WAITING_CHILDREN'].includes(job.status)) || productJobs[0];
   const staleRunning = Boolean(activeJob?.status === 'RUNNING' && (!activeJob.leaseExpiresAt || Date.parse(activeJob.leaseExpiresAt) <= now || (activeJob.heartbeatAt && now - Date.parse(activeJob.heartbeatAt) > 90_000)));
-  const status = staleRunning ? 'STALE' : activeJob?.status || null;
+  const status = staleRunning
+    ? 'STALE'
+    : activeJob?.status || (jobEvidence.currentStateComplete ? null : 'UNKNOWN');
   const reviewed = hasAction('reviewed');
   const dataVerified = hasAction('data_verified');
   const canaryReady = hasAction('canary_ready') && eligibility.eligibleForCanary;
@@ -87,6 +102,10 @@ export function buildProductPipelineTruth(input: {
       workerOwner: activeJob?.claimedBy || null, lastRunAt: activeJob?.startedAt || null,
       lastSuccessAt: productJobs.find(job => job.status === 'SUCCEEDED')?.completedAt || null,
       lastProcessedAt: activeJob?.updatedAt || product.updatedAt || null,
+      evidence: jobEvidence,
+      evidenceMessage: jobEvidence.status === 'COMPLETE'
+        ? null
+        : 'Chưa thể xác minh đầy đủ tác vụ liên quan từ bản đọc giới hạn.',
     },
     health: {
       link: productLinkHealth,
@@ -110,10 +129,20 @@ export function buildProductPipelineTruth(input: {
 }
 
 export async function getProductPipelineTruth(productId: string, now = Date.now()) {
-  const [product, jobs, actions, settings, control] = await Promise.all([
-    getProductById(productId), getAllAutomationJobs(), readCollection<ProductAdminActionRecord>('product-admin-actions'),
+  const [product, jobRead, actions, settings, control] = await Promise.all([
+    getProductById(productId),
+    readBoundedAutomationJobProjections(),
+    readCollection<ProductAdminActionRecord>('product-admin-actions'),
     getAutomationSettings(), getAutomationControl(),
   ]);
   if (!product) return null;
-  return buildProductPipelineTruth({ product, jobs, actions, launchEnabled: settings.launchEnabled, effectiveMode: control.effectiveMode, now });
+  return buildProductPipelineTruth({
+    product,
+    jobs: jobRead.items,
+    jobEvidence: classifyAutomationJobEvidence(jobRead),
+    actions,
+    launchEnabled: settings.launchEnabled,
+    effectiveMode: control.effectiveMode,
+    now,
+  });
 }

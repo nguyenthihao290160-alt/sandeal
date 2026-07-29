@@ -2,7 +2,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { inspectCriticalStorage, type CriticalStorageInspection } from '@/lib/autonomous/backupManager';
 import { getDataDir, readCollection, runTransaction } from '@/lib/storage/adapter';
-import { DEFAULT_CONTROL, getAllAutomationJobs, getAutomationControl, updateAutomationControl } from './store';
+import { getAutomationJobHealthView } from './jobHealthSummary';
+import { DEFAULT_CONTROL, getAutomationControl, updateAutomationControl } from './store';
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases } from './runtimeRoles';
 import { applyAutomationErrorBudget } from './sloErrorBudget';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
@@ -97,7 +98,17 @@ export interface RuntimeHealthSnapshot {
   worker: { status: WorkerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
   scheduler: { status: SchedulerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
   providers: Record<string, ProviderHealthStatus>;
-  queue: { pending: number; running: number; stuck: number; staleJobs: number };
+  queue: {
+    pending: number;
+    running: number;
+    stuck: number;
+    staleJobs: number;
+    evidenceClassification?: 'COMPLETE' | 'INCOMPLETE' | 'UNAVAILABLE';
+    currentStateComplete?: boolean;
+    historyComplete?: boolean;
+    truncated?: boolean;
+    source?: string;
+  };
   storage: { status: 'healthy' | 'degraded' | 'blocked'; staleLocks: number; freeBytes: number | null; criticalCollections: CriticalStorageInspection };
   duplicateRoles: string[];
   publishSafe: boolean;
@@ -166,9 +177,9 @@ export async function runRuntimeGuardian(options: {
   const now = options.now ?? Date.now();
   const checkedAt = new Date(now).toISOString();
   const storage = await inspectStorage(now);
-  const [control, jobs, roles, conflicts, previousSnapshots] = await Promise.all([
+  const [control, jobHealth, roles, conflicts, previousSnapshots] = await Promise.all([
     getAutomationControl().catch(() => ({ ...DEFAULT_CONTROL })),
-    getAllAutomationJobs().catch(() => []),
+    getAutomationJobHealthView(now),
     listRuntimeRoleLeases().catch(() => []),
     listRecentRuntimeRoleConflicts(now - 2 * 60_000).catch(() => []),
     readCollection<RuntimeHealthSnapshot>(HEALTH_COLLECTION).catch(() => []),
@@ -193,8 +204,8 @@ export async function runRuntimeGuardian(options: {
     : releaseMatchesBuild === false || release.releaseMismatch ? 'build_mismatch'
     : options.webAlive === false || options.publicRouteHealthy === false ? 'unhealthy'
       : options.webAlive === true && options.publicRouteHealthy === true ? 'ready' : 'alive';
-  const staleJobs = jobs.filter(job => job.status === 'RUNNING' && (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= now)).length;
-  const stuck = jobs.filter(job => ['PENDING', 'RETRY_SCHEDULED'].includes(job.status) && now - Date.parse(job.updatedAt) > 30 * 60_000).length;
+  const staleJobs = jobHealth.staleRunningCount;
+  const stuck = jobHealth.stuckPendingCount;
   const currentConflicts = conflicts.filter(conflict => {
     const lease = roles.find(item => item.role === conflict.role);
     const processStartedAt = Date.parse(lease?.processStartedAt || lease?.acquiredAt || '');
@@ -213,6 +224,9 @@ export async function runRuntimeGuardian(options: {
   if (workerLease?.releaseId && workerLease.releaseId !== release.releaseId) reasons.push('WORKER_RELEASE_MISMATCH');
   if (schedulerLease?.releaseId && schedulerLease.releaseId !== release.releaseId) reasons.push('SCHEDULER_RELEASE_MISMATCH');
   if (storage.status !== 'healthy') reasons.push(`STORAGE_${storage.status.toUpperCase()}`);
+  if (jobHealth.availability === 'UNAVAILABLE') reasons.push('JOB_HEALTH_SUMMARY_UNAVAILABLE');
+  else if (jobHealth.stale) reasons.push('JOB_HEALTH_SUMMARY_STALE');
+  else if (!jobHealth.currentStateComplete) reasons.push('JOB_HEALTH_CURRENT_STATE_INCOMPLETE');
   if (staleJobs) reasons.push('STALE_JOB');
   if (stuck) reasons.push('QUEUE_STUCK');
   if (duplicateRoles.length) reasons.push('DUPLICATE_PROCESS_ROLE');
@@ -244,7 +258,17 @@ export async function runRuntimeGuardian(options: {
     worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt, releaseId: workerLease?.releaseId },
     scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt, releaseId: schedulerLease?.releaseId },
     providers: options.providers || {},
-    queue: { pending: jobs.filter(job => job.status === 'PENDING').length, running: jobs.filter(job => job.status === 'RUNNING').length, stuck, staleJobs },
+    queue: {
+      pending: jobHealth.statusCounts.PENDING,
+      running: jobHealth.statusCounts.RUNNING,
+      stuck,
+      staleJobs,
+      evidenceClassification: jobHealth.evidenceClassification,
+      currentStateComplete: jobHealth.currentStateComplete,
+      historyComplete: jobHealth.historyComplete,
+      truncated: jobHealth.truncated,
+      source: jobHealth.source,
+    },
     storage, duplicateRoles, publishSafe, reasons, historicalReasons, restart,
     recommendation: { pausePublish: !publishSafe, pauseIngestion: false, effectiveMode: !publishSafe ? 'SHADOW' : undefined },
     checkedAt,

@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
-import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import {
+  generateId,
+  readBoundedCollectionSnapshot,
+  readCollection,
+  runTransaction,
+} from '@/lib/storage/adapter';
 import { getFeatureRolloutState } from './featureRollout';
 import {
   getRuntimeRecoveryState,
@@ -8,9 +13,16 @@ import {
   type RuntimeRecoveryState,
 } from './runtimeRecoveryState';
 import { isRuntimeRoleOwner, listRuntimeRoleLeases, type RuntimeRoleOwnership } from './runtimeRoles';
-import { getAutomationControl, updateAutomationControl } from './store';
+import {
+  applyRuntimePublishBlock,
+  flushRuntimeControlApplicationAudits,
+  getAutomationControl,
+} from './store';
 
 const COLLECTION = 'runtime-recovery-canary-permits';
+const HEALTH_SUMMARY_COLLECTION = 'runtime-recovery-canary-health-v1';
+const HEALTH_SUMMARY_ID = 'runtime-recovery-canary-health';
+const HEALTH_SUMMARY_MAXIMUM_BYTES = 256 * 1024;
 
 export const RUNTIME_RECOVERY_CANARY_SCHEMA_VERSION = 1;
 export const DEFAULT_RECOVERY_CANARY_MAX_ACTIVE = 1;
@@ -73,6 +85,39 @@ export interface RuntimeRecoveryCanaryPermitDecision {
   permit?: RuntimeRecoveryCanaryPermit;
 }
 
+interface RuntimeRecoveryCanaryHealthSummary {
+  schemaVersion: 1;
+  id: typeof HEALTH_SUMMARY_ID;
+  releaseIdentity: string;
+  generation: number;
+  appliedGeneration: number;
+  pendingMutations: Array<{ token: string; generation: number }>;
+  currentStateComplete: boolean;
+  activeCount: number;
+  activePermits: RuntimeRecoveryCanaryPermit[];
+  latestPermit: RuntimeRecoveryCanaryPermit | null;
+  durableHistoryCount: number;
+  historyComplete: boolean;
+  truncated: boolean;
+  observedRange: { earliestIssuedAt: string | null; latestIssuedAt: string | null };
+  source: 'runtime-recovery-canary-health-v1';
+  updatedAt: string;
+}
+
+export interface RuntimeRecoveryCanaryHealthView {
+  activeCount: number;
+  activePermits: RuntimeRecoveryCanaryPermit[];
+  latestPermit: RuntimeRecoveryCanaryPermit | null;
+  currentStateComplete: boolean;
+  historyComplete: boolean;
+  truncated: boolean;
+  durableHistoryCount: number | null;
+  source: 'runtime-recovery-canary-health-v1';
+  reasonCodes: string[];
+  observedRange: { earliestIssuedAt: string | null; latestIssuedAt: string | null };
+  updatedAt: string | null;
+}
+
 interface PermitOwnershipInput {
   operationId: string;
   productId: string;
@@ -119,6 +164,130 @@ function clonePermit(permit: RuntimeRecoveryCanaryPermit): RuntimeRecoveryCanary
   return structuredClone(permit);
 }
 
+function validPermitTimestamp(value: unknown): number | null {
+  const parsed = Date.parse(typeof value === 'string' ? value : '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function latestPermitFrom(permits: RuntimeRecoveryCanaryPermit[]): RuntimeRecoveryCanaryPermit | null {
+  return [...permits]
+    .sort((left, right) =>
+      (validPermitTimestamp(right.issuedAt) || 0) - (validPermitTimestamp(left.issuedAt) || 0))[0] || null;
+}
+
+function permitObservedRange(
+  permits: RuntimeRecoveryCanaryPermit[],
+): RuntimeRecoveryCanaryHealthSummary['observedRange'] {
+  const timestamps = permits
+    .map(permit => validPermitTimestamp(permit.issuedAt))
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right);
+  return {
+    earliestIssuedAt: timestamps.length ? new Date(timestamps[0]).toISOString() : null,
+    latestIssuedAt: timestamps.length ? new Date(timestamps[timestamps.length - 1]).toISOString() : null,
+  };
+}
+
+async function beginPermitHealthMutation(): Promise<{ token: string; generation: number }> {
+  const token = generateId();
+  let generation = 1;
+  const now = new Date().toISOString();
+  await runTransaction<RuntimeRecoveryCanaryHealthSummary>(HEALTH_SUMMARY_COLLECTION, items => {
+    const current = items[0];
+    generation = Math.max(0, Number(current?.generation) || 0) + 1;
+    return [{
+      schemaVersion: 1,
+      id: HEALTH_SUMMARY_ID,
+      releaseIdentity: getReleaseIdentity().releaseId,
+      generation,
+      appliedGeneration: Math.max(0, Number(current?.appliedGeneration) || 0),
+      pendingMutations: [
+        ...(Array.isArray(current?.pendingMutations) ? current.pendingMutations : []),
+        { token, generation },
+      ].slice(-100),
+      currentStateComplete: false,
+      activeCount: Math.max(0, Number(current?.activeCount) || 0),
+      activePermits: Array.isArray(current?.activePermits) ? current.activePermits : [],
+      latestPermit: current?.latestPermit || null,
+      durableHistoryCount: Math.max(0, Number(current?.durableHistoryCount) || 0),
+      historyComplete: current?.historyComplete === true,
+      truncated: current?.truncated === true,
+      observedRange: current?.observedRange || { earliestIssuedAt: null, latestIssuedAt: null },
+      source: 'runtime-recovery-canary-health-v1',
+      updatedAt: now,
+    }];
+  });
+  return { token, generation };
+}
+
+async function completePermitHealthMutation(
+  mutation: { token: string; generation: number },
+  permits: RuntimeRecoveryCanaryPermit[],
+  nowMs: number,
+): Promise<void> {
+  const activePermits = permits.filter(permit => isActivePermit(permit, nowMs));
+  const latestPermit = latestPermitFrom(permits);
+  const updatedAt = new Date(nowMs).toISOString();
+  await runTransaction<RuntimeRecoveryCanaryHealthSummary>(HEALTH_SUMMARY_COLLECTION, items => {
+    const current = items[0];
+    const pendingMutations = (Array.isArray(current?.pendingMutations) ? current.pendingMutations : [])
+      // This snapshot was read under the durable permit lock after every older
+      // mutation, so it safely reconciles abandoned older dirty markers.
+      .filter(item => item.generation > mutation.generation && item.token !== mutation.token);
+    const shouldApplySnapshot = mutation.generation >= Math.max(0, Number(current?.appliedGeneration) || 0);
+    const payload = shouldApplySnapshot ? {
+      activeCount: activePermits.length,
+      activePermits: activePermits
+        .sort((left, right) =>
+          (validPermitTimestamp(right.issuedAt) || 0) - (validPermitTimestamp(left.issuedAt) || 0))
+        .slice(0, HARD_MAXIMUM_RECOVERY_CANARY_PERMITS + 1)
+        .map(clonePermit),
+      latestPermit: latestPermit ? clonePermit(latestPermit) : null,
+      durableHistoryCount: permits.length,
+      historyComplete: permits.length <= 1,
+      truncated: permits.length > 1,
+      observedRange: permitObservedRange(permits),
+      appliedGeneration: mutation.generation,
+    } : {
+      activeCount: Math.max(0, Number(current?.activeCount) || 0),
+      activePermits: Array.isArray(current?.activePermits) ? current.activePermits : [],
+      latestPermit: current?.latestPermit || null,
+      durableHistoryCount: Math.max(0, Number(current?.durableHistoryCount) || 0),
+      historyComplete: current?.historyComplete === true,
+      truncated: current?.truncated === true,
+      observedRange: current?.observedRange || { earliestIssuedAt: null, latestIssuedAt: null },
+      appliedGeneration: Math.max(0, Number(current?.appliedGeneration) || 0),
+    };
+    return [{
+      schemaVersion: 1,
+      id: HEALTH_SUMMARY_ID,
+      releaseIdentity: getReleaseIdentity().releaseId,
+      generation: Math.max(mutation.generation, Number(current?.generation) || 0),
+      pendingMutations,
+      currentStateComplete: pendingMutations.length === 0
+        && payload.activeCount <= HARD_MAXIMUM_RECOVERY_CANARY_PERMITS,
+      ...payload,
+      source: 'runtime-recovery-canary-health-v1',
+      updatedAt,
+    }];
+  });
+}
+
+async function runPermitTransaction(
+  nowMs: number,
+  mutate: (permits: RuntimeRecoveryCanaryPermit[]) => RuntimeRecoveryCanaryPermit[] | undefined,
+): Promise<void> {
+  const mutation = await beginPermitHealthMutation();
+  let snapshot: RuntimeRecoveryCanaryPermit[] | null = null;
+  await runTransaction<RuntimeRecoveryCanaryPermit>(COLLECTION, permits => {
+    const result = mutate(permits);
+    snapshot = structuredClone(result || permits);
+    return result;
+  });
+  if (!snapshot) throw new Error('RECOVERY_CANARY_HEALTH_SNAPSHOT_MISSING');
+  await completePermitHealthMutation(mutation, snapshot, nowMs);
+}
+
 function isActivePermit(permit: RuntimeRecoveryCanaryPermit, nowMs: number): boolean {
   return permit.status === 'CONSUMED'
     || (permit.status === 'ISSUED' && Date.parse(permit.expiresAt) > nowMs);
@@ -153,6 +322,9 @@ function recoveryStateReady(state: RuntimeRecoveryState | null, nowMs: number): 
     || state.evidenceSummary.evaluationStatus !== 'PASS'
     || state.currentApplicableReasons.length > 0) {
     return 'RECOVERY_CANARY_RECOVERY_STATE_NOT_READY';
+  }
+  if (state.releaseIdentity !== getReleaseIdentity().releaseId) {
+    return 'RECOVERY_CANARY_RELEASE_MISMATCH';
   }
   const evaluatedAt = Date.parse(state.evidenceSummary.evaluatedAt || '');
   if (!Number.isFinite(evaluatedAt)
@@ -198,8 +370,9 @@ async function evaluateLiveSafety(
 async function transitionRecoveryStateForPermit(
   permitId: string | undefined,
   targetState: 'HALF_OPEN' | 'RECOVERY_OBSERVING' | 'OPEN_BLOCKED',
-  reasonCode: string | undefined,
+  reasonCodes: string[],
   nowMs: number,
+  resetReasonCode?: string,
 ): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const current = await getRuntimeRecoveryState();
@@ -208,16 +381,80 @@ async function transitionRecoveryStateForPermit(
       await updateRuntimeRecoveryState({
         expectedStateVersion: current.stateVersion,
         nowMs,
-        mutate: state => ({
-          ...state,
-          state: targetState,
-          currentCanaryPermitReference: permitId,
-          ...(targetState === 'OPEN_BLOCKED' ? {
+        mutate: state => {
+          if (targetState !== 'OPEN_BLOCKED') {
+            if (targetState === 'HALF_OPEN') {
+              const readinessReason = recoveryStateReady(state, nowMs);
+              if (readinessReason) throw new Error(readinessReason);
+            }
+            return {
+              ...state,
+              state: state.currentApplicableReasons.length > 0 ? 'OPEN_BLOCKED' : targetState,
+              currentCanaryPermitReference: permitId,
+            };
+          }
+
+          const resetReason = String(
+            resetReasonCode || reasonCodes[reasonCodes.length - 1] || 'RECOVERY_CANARY_UNHEALTHY',
+          ).trim();
+          const applicableReasons = [...new Set([
+            ...state.currentApplicableReasons,
+            ...reasonCodes,
+            resetReason,
+          ].map(String).map(reason => reason.trim()).filter(Boolean))].slice(0, 50);
+          const existingProgress = new Map(state.reasonProgress.map(progress => [progress.reasonCode, progress]));
+          const interruptedAt = new Date(nowMs).toISOString();
+          const canaryEvaluationId = permitId
+            ? `recovery-canary-${permitId}`.slice(0, 200)
+            : 'recovery-canary-unhealthy';
+
+          return {
+            ...state,
+            state: 'OPEN_BLOCKED',
+            currentCanaryPermitReference: undefined,
+            originatingBreachReasons: [...new Set([
+              ...state.originatingBreachReasons,
+              ...applicableReasons,
+            ])].slice(0, 50),
+            currentApplicableReasons: applicableReasons,
+            reasonProgress: applicableReasons.map(reasonCode => {
+              const previous = existingProgress.get(reasonCode);
+              const isCanaryFailure = reasonCode === resetReason;
+              return {
+                reasonCode,
+                metricKey: previous?.metricKey || reasonCode,
+                measurement: isCanaryFailure ? 'BREACH' as const : 'INSUFFICIENT_DATA' as const,
+                consecutiveHealthyCount: 0,
+                requiredHealthyCount: state.requiredHealthyCount,
+                lastEvaluationId: canaryEvaluationId,
+                lastHealthyEvaluation: previous?.lastHealthyEvaluation,
+                qualifiedWindowStartedAt: undefined,
+                lastQualifiedObservationAt: previous?.lastQualifiedObservationAt,
+                lastReleaseIdentity: previous?.lastReleaseIdentity,
+                lastEvidenceReferences: previous?.lastEvidenceReferences || [],
+                qualificationReasons: [
+                  isCanaryFailure
+                    ? 'RUNTIME_RECOVERY_CANARY_FAILURE_OBSERVED'
+                    : 'RUNTIME_RECOVERY_CANARY_FAILURE_INTERRUPTED_STREAK',
+                ],
+                interruptedAt,
+                lastTransitionAt: interruptedAt,
+              };
+            }),
             consecutiveHealthyCount: 0,
-            currentApplicableReasons: [reasonCode || 'RECOVERY_CANARY_UNHEALTHY'],
-            lastResetReason: reasonCode || 'RECOVERY_CANARY_UNHEALTHY',
-          } : {}),
-        }),
+            lastResetReason: resetReason,
+            evidenceSummary: {
+              ...state.evidenceSummary,
+              measurementState: 'RECOVERY',
+              evaluationStatus: 'BREACH',
+              evaluatedAt: interruptedAt,
+              reasonCodes: [...new Set([
+                ...state.evidenceSummary.reasonCodes,
+                resetReason,
+              ])].slice(0, 50),
+            },
+          };
+        },
       });
       return;
     } catch (error) {
@@ -243,7 +480,7 @@ export async function issueRuntimeRecoveryCanaryPermit(
 
   const policy = getRuntimeRecoveryCanaryPolicy();
   let decision!: RuntimeRecoveryCanaryPermitDecision;
-  await runTransaction<RuntimeRecoveryCanaryPermit>(COLLECTION, permits => {
+  await runPermitTransaction(nowMs, permits => {
     const expired = expirePermits(permits, nowMs);
     const operationPermits = permits
       .filter(permit => permit.operationId === input.operationId && isActivePermit(permit, nowMs))
@@ -297,7 +534,7 @@ export async function issueRuntimeRecoveryCanaryPermit(
 
   if (!decision.allowed || !decision.permit) return decision;
   try {
-    await transitionRecoveryStateForPermit(decision.permit.id, 'HALF_OPEN', undefined, nowMs);
+    await transitionRecoveryStateForPermit(decision.permit.id, 'HALF_OPEN', [], nowMs);
     return decision;
   } catch {
     await finalizeRuntimeRecoveryCanaryPermit({
@@ -325,7 +562,7 @@ export async function consumeRuntimeRecoveryCanaryPermit(
   const safetyReason = await evaluateLiveSafety({ ...input, nowMs });
   if (safetyReason) return { allowed: false, reasonCode: safetyReason };
   let decision!: RuntimeRecoveryCanaryPermitDecision;
-  await runTransaction<RuntimeRecoveryCanaryPermit>(COLLECTION, permits => {
+  await runPermitTransaction(nowMs, permits => {
     const expired = expirePermits(permits, nowMs);
     const permit = permits.find(item => item.id === input.permitId);
     if (!permit) {
@@ -416,6 +653,99 @@ export async function listRuntimeRecoveryCanaryPermits(): Promise<RuntimeRecover
   return (await readCollection<RuntimeRecoveryCanaryPermit>(COLLECTION)).map(clonePermit);
 }
 
+export async function getRuntimeRecoveryCanaryHealthView(
+  nowMs = Date.now(),
+): Promise<RuntimeRecoveryCanaryHealthView> {
+  try {
+    const read = await readBoundedCollectionSnapshot<RuntimeRecoveryCanaryHealthSummary>(
+      HEALTH_SUMMARY_COLLECTION,
+      { maximumItems: 1, maximumBytes: HEALTH_SUMMARY_MAXIMUM_BYTES },
+    );
+    const summary = read.items[0];
+    const structurallyValid = summary?.schemaVersion === 1
+      && summary.id === HEALTH_SUMMARY_ID
+      && summary.source === 'runtime-recovery-canary-health-v1'
+      && Array.isArray(summary.activePermits)
+      && Array.isArray(summary.pendingMutations)
+      && Number.isInteger(summary.activeCount)
+      && Number.isInteger(summary.durableHistoryCount)
+      && Number.isFinite(Date.parse(summary.updatedAt));
+    if (structurallyValid) {
+      const releaseMatches = summary.releaseIdentity === getReleaseIdentity().releaseId;
+      const noPendingMutation = summary.pendingMutations.length === 0;
+      const activeCountBounded = summary.activeCount <= HARD_MAXIMUM_RECOVERY_CANARY_PERMITS;
+      const currentStateComplete = summary.currentStateComplete === true
+        && releaseMatches
+        && noPendingMutation
+        && activeCountBounded;
+      return {
+        activeCount: summary.activeCount,
+        activePermits: summary.activePermits.map(clonePermit),
+        latestPermit: summary.latestPermit ? clonePermit(summary.latestPermit) : null,
+        currentStateComplete,
+        historyComplete: summary.historyComplete === true,
+        truncated: summary.truncated === true,
+        durableHistoryCount: summary.durableHistoryCount,
+        source: 'runtime-recovery-canary-health-v1',
+        reasonCodes: [
+          ...(!releaseMatches ? ['RECOVERY_CANARY_HEALTH_RELEASE_MISMATCH'] : []),
+          ...(!noPendingMutation ? ['RECOVERY_CANARY_HEALTH_MUTATION_INCOMPLETE'] : []),
+          ...(!activeCountBounded ? ['RECOVERY_CANARY_ACTIVE_CAPACITY_EXCEEDED'] : []),
+          ...(summary.historyComplete !== true ? ['RECOVERY_CANARY_HISTORY_BOUNDED'] : []),
+          ...(!currentStateComplete ? ['RECOVERY_CANARY_CURRENT_STATE_INCOMPLETE'] : []),
+        ],
+        observedRange: summary.observedRange,
+        updatedAt: summary.updatedAt,
+      };
+    }
+  } catch {
+    // Fall through to a strictly bounded legacy/bootstrap read below.
+  }
+
+  try {
+    const legacy = await readBoundedCollectionSnapshot<RuntimeRecoveryCanaryPermit>(
+      COLLECTION,
+      { maximumItems: 1, maximumBytes: HEALTH_SUMMARY_MAXIMUM_BYTES },
+    );
+    const permits = legacy.items;
+    const activePermits = permits.filter(permit => isActivePermit(permit, nowMs));
+    return {
+      activeCount: activePermits.length,
+      activePermits: activePermits.map(clonePermit),
+      latestPermit: latestPermitFrom(permits),
+      currentStateComplete: false,
+      historyComplete: false,
+      truncated: true,
+      durableHistoryCount: null,
+      source: 'runtime-recovery-canary-health-v1',
+      reasonCodes: [
+        'RECOVERY_CANARY_HEALTH_BOOTSTRAP_BOUNDED',
+        'RECOVERY_CANARY_CURRENT_STATE_INCOMPLETE',
+        'RECOVERY_CANARY_HISTORY_BOUNDED',
+      ],
+      observedRange: permitObservedRange(permits),
+      updatedAt: null,
+    };
+  } catch {
+    return {
+      activeCount: 0,
+      activePermits: [],
+      latestPermit: null,
+      currentStateComplete: false,
+      historyComplete: false,
+      truncated: true,
+      durableHistoryCount: null,
+      source: 'runtime-recovery-canary-health-v1',
+      reasonCodes: [
+        'RECOVERY_CANARY_CURRENT_STATE_INCOMPLETE',
+        'RECOVERY_CANARY_HISTORY_BOUNDED',
+      ],
+      observedRange: { earliestIssuedAt: null, latestIssuedAt: null },
+      updatedAt: null,
+    };
+  }
+}
+
 export async function finalizeRuntimeRecoveryCanaryPermit(input: {
   permitId: string;
   productId: string;
@@ -428,7 +758,7 @@ export async function finalizeRuntimeRecoveryCanaryPermit(input: {
 }): Promise<RuntimeRecoveryCanaryPermit | null> {
   const nowMs = input.nowMs ?? Date.now();
   let output: RuntimeRecoveryCanaryPermit | null = null;
-  await runTransaction<RuntimeRecoveryCanaryPermit>(COLLECTION, permits => {
+  await runPermitTransaction(nowMs, permits => {
     const permit = permits.find(item => item.id === input.permitId && item.productId === input.productId);
     if (!permit) return undefined;
     if (input.publicationEffectKey
@@ -450,16 +780,25 @@ export async function finalizeRuntimeRecoveryCanaryPermit(input: {
   if (!finalizedPermit) return null;
 
   const failed = finalizedPermit.status === 'FAILED'
-    || (finalizedPermit.status === 'REVOKED' && input.preserveRuntimeBlock);
+    || finalizedPermit.status === 'REVOKED';
   if (failed) {
-    await updateAutomationControl({
-      publishBlockedByRuntime: true,
-      publishRuntimeReasons: [input.reasonCode],
-      reason: input.reasonCode,
+    const failureReason = finalizedPermit.outcomeReasonCode || input.reasonCode;
+    const blocked = await applyRuntimePublishBlock({
+      reasonCodes: [failureReason],
+      evaluationId: `recovery-canary-${finalizedPermit.id}`.slice(0, 200),
+      evaluatedAt: finalizedPermit.completedAt,
+      degradeMode: false,
     }, 'runtime-recovery-canary');
-    await transitionRecoveryStateForPermit(undefined, 'OPEN_BLOCKED', input.reasonCode, nowMs);
+    await flushRuntimeControlApplicationAudits();
+    await transitionRecoveryStateForPermit(
+      finalizedPermit.id,
+      'OPEN_BLOCKED',
+      blocked.control.publishRuntimeReasons || [failureReason],
+      nowMs,
+      failureReason,
+    );
   } else {
-    await transitionRecoveryStateForPermit(undefined, 'RECOVERY_OBSERVING', undefined, nowMs);
+    await transitionRecoveryStateForPermit(undefined, 'RECOVERY_OBSERVING', [], nowMs);
   }
   return finalizedPermit;
 }

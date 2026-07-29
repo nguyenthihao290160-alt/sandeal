@@ -428,7 +428,14 @@ async function main() {
 
   await test('alerts deduplicate across evaluations and reopen when a resolved fault recurs', async () => {
     await reset('products', 'product-alerts', 'automation-jobs', 'automation-control', 'automation-ai-usage', 'automation-circuits', 'automation-settings', 'token-vault');
-    await adapter.writeCollection('products', [makeProduct({ id: 'alert-product', linkHealthStatus: 'broken', duplicateConfidence: 0.95, qualityScore: 30, qualityBand: 'poor' })]);
+    const brokenProduct = makeProduct({
+      id: 'alert-product',
+      linkHealthStatus: 'broken',
+      duplicateConfidence: 0.95,
+      qualityScore: 30,
+      qualityBand: 'poor',
+    });
+    await adapter.writeCollection('products', [brokenProduct]);
     const first = await alerts.evaluateAlerts('alerts-first', TEST_NOW);
     const initial = await alerts.listAlerts({ limit: 500 });
     const second = await alerts.evaluateAlerts('alerts-second', TEST_NOW + 1_000);
@@ -438,10 +445,229 @@ async function main() {
     assert.equal(new Set(repeated.map(item => item.deduplicationKey)).size, repeated.length);
     assert.equal(repeated.length, initial.length);
     const broken = repeated.find(item => item.type === 'broken_link');
-    await alerts.updateAlertStatus(broken.id, 'resolved');
-    const recurrence = await alerts.evaluateAlerts('alerts-recurrence', TEST_NOW + 2_000);
+    await assert.rejects(
+      alerts.updateAlertStatus(broken.id, 'resolved'),
+      /RECHECK_EVIDENCE_REQUIRED/,
+    );
+    const clearedAt = new Date(TEST_NOW + 2_000).toISOString();
+    await adapter.writeCollection('products', [{
+      ...brokenProduct,
+      linkHealthStatus: 'ok',
+      linkLastCheckedAt: clearedAt,
+      duplicateConfidence: 0,
+      qualityScore: 90,
+      qualityBand: 'good',
+      updatedAt: clearedAt,
+    }]);
+    await alerts.evaluateAlerts('alerts-clear-observation-1', TEST_NOW + 2_000);
+    assert.notEqual(
+      (await alerts.listAlerts({ limit: 500 })).find(item => item.id === broken.id).status,
+      'resolved',
+    );
+    await alerts.evaluateAlerts('alerts-clear-observation-1', TEST_NOW + 2_500);
+    assert.notEqual(
+      (await alerts.listAlerts({ limit: 500 })).find(item => item.id === broken.id).status,
+      'resolved',
+    );
+    await adapter.writeCollection('products', [{
+      ...brokenProduct,
+      updatedAt: new Date(TEST_NOW + 2_600).toISOString(),
+    }]);
+    await alerts.evaluateAlerts('alerts-clear-failed-recheck', TEST_NOW + 2_600);
+    assert.equal(
+      (await alerts.listAlerts({ limit: 500 })).find(item => item.id === broken.id).clearObservationCount,
+      0,
+    );
+    const confirmedClearedAt = new Date(TEST_NOW + 3_000).toISOString();
+    await adapter.writeCollection('products', [{
+      ...brokenProduct,
+      linkHealthStatus: 'ok',
+      linkLastCheckedAt: confirmedClearedAt,
+      duplicateConfidence: 0,
+      qualityScore: 90,
+      qualityBand: 'good',
+      updatedAt: confirmedClearedAt,
+    }]);
+    await alerts.evaluateAlerts('alerts-clear-observation-after-failure-1', TEST_NOW + 3_000);
+    assert.notEqual(
+      (await alerts.listAlerts({ limit: 500 })).find(item => item.id === broken.id).status,
+      'resolved',
+    );
+    await alerts.evaluateAlerts('alerts-clear-observation-after-failure-2', TEST_NOW + 4_000);
+    assert.equal(
+      (await alerts.listAlerts({ limit: 500 })).find(item => item.id === broken.id).status,
+      'resolved',
+    );
+    await adapter.writeCollection('products', [brokenProduct]);
+    const recurrence = await alerts.evaluateAlerts('alerts-recurrence', TEST_NOW + 5_000);
     assert.equal(recurrence.reopened >= 1, true);
     assert.equal((await alerts.listAlerts({ limit: 500 })).find(item => item.id === broken.id).status, 'new');
+  });
+
+  await test('missing source or product evidence preserves alerts as unknown', async () => {
+    await reset('products', 'price-history', 'product-alerts', 'automation-jobs', 'automation-control', 'automation-ai-usage', 'automation-circuits', 'automation-settings', 'token-vault');
+    const missingEvidenceProduct = makeProduct({
+      id: 'missing-evidence-product',
+      source: 'accesstrade',
+      linkHealthStatus: 'broken',
+      lastSeenAt: '2026-05-01T00:00:00.000Z',
+    });
+    await adapter.writeCollection('products', [missingEvidenceProduct]);
+    await alerts.evaluateAlerts('missing-evidence-create', TEST_NOW);
+    const created = await alerts.listAlerts({ limit: 500 });
+    const productAlert = created.find(item => item.type === 'broken_link' && item.entityId === missingEvidenceProduct.id);
+    const sourceAlert = created.find(item => item.type === 'source_stale' && item.entityId === 'accesstrade');
+    assert.ok(productAlert);
+    assert.ok(sourceAlert);
+
+    await adapter.writeCollection('products', [{
+      ...missingEvidenceProduct,
+      linkHealthStatus: undefined,
+      linkLastCheckedAt: undefined,
+      updatedAt: new Date(TEST_NOW + 1_000).toISOString(),
+    }]);
+    await alerts.evaluateAlerts('missing-product-field-unknown-1', TEST_NOW + 1_000);
+    await alerts.evaluateAlerts('missing-product-field-unknown-2', TEST_NOW + 2_000);
+    const missingField = (await alerts.listAlerts({ limit: 500 }))
+      .find(item => item.id === productAlert.id);
+    assert.ok(missingField);
+    assert.notEqual(missingField.status, 'resolved');
+    assert.equal(missingField.resolutionEvidenceState, 'UNKNOWN');
+
+    await adapter.writeCollection('products', []);
+    const firstUnknown = await alerts.evaluateAlerts('missing-evidence-unknown-1', TEST_NOW + 3_000);
+    const secondUnknown = await alerts.evaluateAlerts('missing-evidence-unknown-2', TEST_NOW + 4_000);
+    const preserved = await alerts.listAlerts({ limit: 500 });
+    for (const item of [productAlert, sourceAlert]) {
+      const current = preserved.find(candidate => candidate.id === item.id);
+      assert.ok(current);
+      assert.notEqual(current.status, 'resolved');
+      assert.equal(current.resolutionEvidenceState, 'UNKNOWN');
+      assert.equal(current.clearObservationCount, 0);
+    }
+    assert.equal(firstUnknown.resolutionDeferred >= 2, true);
+    assert.equal(secondUnknown.resolutionDeferred >= 2, true);
+  });
+
+  await test('stale price-variation history stays unknown until a fresh lower-variation observation arrives', async () => {
+    await reset('products', 'price-history', 'product-alerts', 'automation-jobs', 'automation-control', 'automation-ai-usage', 'automation-circuits', 'automation-settings', 'token-vault');
+    const product = makeProduct({ id: 'stale-price-variation-evidence' });
+    const priceSnapshot = (id, salePrice, capturedAt) => ({
+      id,
+      productId: product.id,
+      source: product.source,
+      price: salePrice,
+      salePrice,
+      currency: 'VND',
+      availability: 'available',
+      capturedAt,
+      operationId: `price-variation-${id}`,
+      sourceHash: `price-variation-hash-${id}`,
+    });
+    const initialHistory = [
+      priceSnapshot('initial-low', 100_000, new Date(TEST_NOW - 2 * 60 * 60_000).toISOString()),
+      priceSnapshot('initial-high', 200_000, new Date(TEST_NOW - 60 * 60_000).toISOString()),
+    ];
+    await adapter.writeCollection('products', [product]);
+    await adapter.writeCollection('price-history', initialHistory);
+    await alerts.evaluateAlerts('stale-price-variation-create', TEST_NOW);
+    const target = (await alerts.listAlerts({ limit: 500 }))
+      .find(item => item.type === 'strong_price_variation' && item.entityId === product.id);
+    assert.ok(target);
+
+    const staleNow = TEST_NOW + 8 * 86_400_000;
+    await alerts.evaluateAlerts('stale-price-variation-unknown-1', staleNow);
+    await alerts.evaluateAlerts('stale-price-variation-unknown-2', staleNow + 1_000);
+    let current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+    assert.notEqual(current.status, 'resolved');
+    assert.equal(current.resolutionEvidenceState, 'UNKNOWN');
+    assert.equal(current.clearObservationCount, 0);
+
+    const correctedAt = new Date(staleNow + 2_000).toISOString();
+    await adapter.writeCollection('products', [{
+      ...product,
+      price: 210_000,
+      salePrice: 210_000,
+      lastSeenAt: correctedAt,
+      priceLastChangedAt: correctedAt,
+      updatedAt: correctedAt,
+    }]);
+    await adapter.writeCollection('price-history', [
+      ...initialHistory,
+      priceSnapshot('fresh-correction', 210_000, correctedAt),
+    ]);
+    await alerts.evaluateAlerts('stale-price-variation-corrected-1', staleNow + 2_000);
+    current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+    assert.notEqual(current.status, 'resolved');
+    assert.equal(current.clearObservationCount, 1);
+    await alerts.evaluateAlerts('stale-price-variation-corrected-2', staleNow + 3_000);
+    current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+    assert.equal(current.status, 'resolved');
+    assert.equal(current.lastAutoResolutionEvidence.reasonCode, 'PRICE_VARIATION_NO_LONGER_ACTIVE');
+  });
+
+  await test('alert clear streak requires recent ordered observations from one release', async () => {
+    await reset('products', 'price-history', 'product-alerts', 'automation-jobs', 'automation-control', 'automation-ai-usage', 'automation-circuits', 'automation-settings', 'token-vault');
+    const identityKeys = [
+      'SANDEAL_BUILD_MANIFEST_COMMIT',
+      'SANDEAL_BUILD_COMMIT',
+      'SANDEAL_RELEASE_ID',
+      'GIT_COMMIT_SHA',
+      'NEXT_PUBLIC_SANDEAL_RELEASE_ID',
+    ];
+    const previousIdentity = Object.fromEntries(identityKeys.map(key => [key, process.env[key]]));
+    const setRelease = value => {
+      for (const key of identityKeys) process.env[key] = value;
+    };
+    try {
+      const productWithFault = makeProduct({
+        id: 'release-streak-product',
+        linkHealthStatus: 'broken',
+      });
+      setRelease('alert-release-a');
+      await adapter.writeCollection('products', [productWithFault]);
+      await alerts.evaluateAlerts('release-streak-create', TEST_NOW);
+      const stored = await alerts.listAlerts({ limit: 500 });
+      const target = stored.find(item => item.type === 'broken_link' && item.entityId === productWithFault.id);
+      assert.ok(target);
+
+      const checkedAt = new Date(TEST_NOW + 1_000).toISOString();
+      await adapter.writeCollection('products', [{
+        ...productWithFault,
+        linkHealthStatus: 'ok',
+        linkLastCheckedAt: checkedAt,
+        updatedAt: checkedAt,
+      }]);
+      await alerts.evaluateAlerts('release-streak-a-1', TEST_NOW + 1_000);
+      setRelease('alert-release-b');
+      await alerts.evaluateAlerts('release-streak-b-1', TEST_NOW + 2_000);
+      let current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+      assert.notEqual(current.status, 'resolved');
+      assert.equal(current.clearObservationCount, 1);
+      assert.equal(current.lastClearObservationReleaseId, 'alert-release-b');
+
+      await alerts.evaluateAlerts('release-streak-b-out-of-order', TEST_NOW + 1_500);
+      current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+      assert.notEqual(current.status, 'resolved');
+      assert.equal(current.clearObservationCount, 1);
+
+      await alerts.evaluateAlerts('release-streak-b-after-gap', TEST_NOW + 13 * 60_000);
+      current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+      assert.notEqual(current.status, 'resolved');
+      assert.equal(current.clearObservationCount, 1);
+
+      await alerts.evaluateAlerts('release-streak-b-confirmed', TEST_NOW + 13 * 60_000 + 1_000);
+      current = (await alerts.listAlerts({ limit: 500 })).find(item => item.id === target.id);
+      assert.equal(current.status, 'resolved');
+      assert.equal(current.lastAutoResolutionEvidence.releaseId, 'alert-release-b');
+      assert.equal(current.lastAutoResolutionEvidence.requiredObservationCount, 2);
+    } finally {
+      for (const key of identityKeys) {
+        const value = previousIdentity[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   await test('today recommendations are data-derived, bounded and not duplicated', async () => {

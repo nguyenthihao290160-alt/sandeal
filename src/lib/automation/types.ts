@@ -261,12 +261,35 @@ export interface AutomationJobListItem {
 
 /** Internal lease fields needed to reconcile the compact read model. */
 export interface AutomationJobListProjection extends AutomationJobListItem {
+  projectionSchemaVersion?: number;
+  claimedAt?: string;
+  runnableAt?: string;
+  runnableReason?: AutomationJobAttempt['runnableReason'];
+  executionCritical?: boolean;
   claimedBy?: string;
   claimToken?: string;
   workerInstanceId?: string;
   workerFencingToken?: number;
   leaseExpiresAt?: string;
   heartbeatAt?: string;
+  resourceProductIds?: string[];
+  resourceCandidateId?: string;
+  resourceDraftId?: string;
+}
+
+/**
+ * Internal status projection used by bounded operational reads.
+ *
+ * Durable payloads, execution outputs, and complete results remain exclusively
+ * in automation-jobs. The projection carries only a compact operational result
+ * summary plus identifiers needed for deterministic product/candidate
+ * correlation.
+ */
+export interface AutomationJobStatusProjection extends AutomationJob {
+  projectionSchemaVersion?: number;
+  resourceProductIds?: string[];
+  resourceCandidateId?: string;
+  resourceDraftId?: string;
 }
 
 export interface AutomationControlState {
@@ -303,6 +326,25 @@ export interface AutomationControlState {
   guardianHeartbeatAt?: string;
   degradedAt?: string;
   degradedReason?: string;
+  /**
+   * Bounded durable idempotency records for runtime-control mutations. These
+   * records make an interrupted SLO/controller invocation resumable without
+   * applying another degradation step or losing the audit intent.
+   */
+  runtimeControlApplications?: Array<{
+    schemaVersion: 1;
+    evaluationId: string;
+    operationType: 'RUNTIME_BLOCK_APPLIED' | 'RUNTIME_REASONS_CLEARED';
+    actor: string;
+    reasons: string[];
+    previousRuntimeReasons: string[];
+    nextRuntimeReasons: string[];
+    previousEffectiveMode: Exclude<AutonomousMode, 'EMERGENCY_STOP'>;
+    nextEffectiveMode: Exclude<AutonomousMode, 'EMERGENCY_STOP'>;
+    appliedAt: string;
+    auditedAt?: string;
+  }>;
+  runtimeControlJournalInvalidCount?: number;
   timezone: 'Asia/Ho_Chi_Minh';
   updatedAt: string;
 }

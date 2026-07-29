@@ -255,7 +255,9 @@ async function main() {
     const firstResult = await monitor.executePostPublishMonitor(claimed, 'self-heal-worker-broken-2');
     const replayResult = await monitor.executePostPublishMonitor(claimed, 'self-heal-worker-broken-2');
     assert.equal(firstResult.childJobId, replayResult.childJobId);
-    await store.completeAutomationJob(claimed.id, 'self-heal-worker-broken-2', firstResult);
+    await store.completeAutomationJob(claimed.id, 'self-heal-worker-broken-2', firstResult, {
+      claimToken: claimed.claimToken,
+    });
     current = await products.getProductById(seeded.id);
     assert.equal(current.lifecycleState, 'HIDDEN');
     assert.equal(current.status, 'needs_review');
@@ -304,7 +306,9 @@ async function main() {
     const publishJobs = (await store.getAllAutomationJobs()).filter(job => job.type === 'AUTO_SAFE_PUBLISH' && job.payload.productId === seeded.id);
     assert.equal(publishJobs.length, 1);
     assert.equal(publishJobs[0].approvalStatus, 'NOT_REQUIRED');
-    await store.completeAutomationJob(claimed.id, 'self-heal-worker-recovery-3', firstResult);
+    await store.completeAutomationJob(claimed.id, 'self-heal-worker-recovery-3', firstResult, {
+      claimToken: claimed.claimToken,
+    });
 
     const publishRun = await worker.processAutomationBatch('self-heal-worker-recovery-publish', 1);
     assert.equal(publishRun.succeeded, 1, JSON.stringify(await store.getAutomationJob(publishJobs[0].id)));

@@ -33,6 +33,9 @@ export interface CanaryHealthEvidence {
   dataStatus: AutomationSloMeasurement['dataStatus'];
   sampleSize: number;
   evaluatedAt: string;
+  evidenceComplete: boolean;
+  releaseIdentity: string;
+  requiredReleaseIdentity: string;
 }
 
 export interface CanarySafetyDecision {
@@ -200,6 +203,9 @@ export async function advanceCanaryWaveAfterHealthyEvaluation(evidence?: CanaryH
     const evidenceIsUsable = evidence?.status === 'PASS'
       && evidence.dataStatus === 'MEASURED'
       && evidence.sampleSize >= 5
+      && evidence.evidenceComplete === true
+      && evidence.releaseIdentity.length > 0
+      && evidence.releaseIdentity === evidence.requiredReleaseIdentity
       && Number.isFinite(Date.parse(evidence.evaluatedAt));
     if (evidenceIsUsable && !state.paused && state.lastHealthyEvaluationId !== evidence.evaluationId) {
       if (state.controlledLaunch) {

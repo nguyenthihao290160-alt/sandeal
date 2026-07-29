@@ -109,8 +109,10 @@ async function main() {
 
   await test('zero-data onboarding and dashboard are server-derived', async () => {
     await reset();
+    await store.rebuildAutomationJobReadModelsFromDurable([], Date.now());
     const state = await onboarding.buildOperationsOnboarding();
     assert.equal(state.hasOperationalData, false);
+    assert.equal(state.jobEvidence.status, 'COMPLETE');
     assert.equal(state.compact, false);
     assert.equal(state.steps.length, 10);
     assert.ok(state.recommendations.length <= 5);
@@ -118,6 +120,7 @@ async function main() {
     assert.equal(state.steps.find(item => item.id === 'quality').status, 'BLOCKED');
     const view = await dashboard.buildAutomationDashboard('7d');
     assert.equal(view.zeroData, true);
+    assert.equal(view.jobReadModel.evidenceClassification, 'COMPLETE');
     assert.equal(view.kpis.completionRate, null);
     assert.equal(Number.isNaN(view.kpis.completionRate), false);
     assert.ok(view.onboarding.recommendations.length <= 5);

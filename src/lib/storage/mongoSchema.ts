@@ -16,6 +16,9 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'automation-circuits',
   'automation-control',
   'automation-job-attempts',
+  // Compact automation read models use the generic revision/order storage
+  // contract. Adding their indexes to this v1 manifest would silently require
+  // a production schema migration, so that belongs in a future schema version.
   'automation-jobs',
   'automation-manual-tasks',
   'automation-outbound-events',
@@ -54,6 +57,7 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'publication-audit',
   'recommended-actions',
   'runtime-health',
+  'runtime-recovery-canary-health-v1',
   'runtime-recovery-canary-permits',
   'runtime-recovery-state',
   'runtime-role-conflicts',

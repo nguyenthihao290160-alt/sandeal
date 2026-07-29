@@ -20,7 +20,6 @@ import {
   createAutomationJob,
   failAutomationJob,
   getAutomationControl,
-  getAllAutomationJobs,
   getAutomationJob,
   heartbeatAutomationJob,
   logAutomationJobEvent,
@@ -31,6 +30,7 @@ import {
   waitAutomationJobForChildren,
   waitAutomationJobForManual,
 } from './store';
+import { getAutomationJobHealthView } from './jobHealthSummary';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
@@ -56,6 +56,7 @@ export interface WorkerBatchOptions {
   maximumInFlight?: number;
   criticalReservedCapacity?: number;
   enforceExecutionCompatibility?: boolean;
+  claimLane?: 'ANY' | 'RUNTIME_GUARDIAN' | 'NON_GUARDIAN';
 }
 
 export interface ContinuousWorkerPoolResult extends WorkerRunResult {
@@ -157,6 +158,11 @@ function errorCategory(code: string): AutomationErrorCategory {
   if (/CREDENTIAL|SOURCE/.test(code)) return 'INVALID_SOURCE_DATA';
   if (/VALIDATION|SCHEMA|SAFETY|POLICY|APPROVAL|KILL/.test(code)) return 'VALIDATION_FAILED';
   return 'INTERNAL_CODE_ERROR';
+}
+
+function claimMutationGuard(job: AutomationJob, ownership?: RuntimeRoleOwnership) {
+  if (!job.claimToken) throw new Error('WORKER_FENCING_REJECTED');
+  return { claimToken: job.claimToken, ownership };
 }
 
 async function dryRunPreview(job: AutomationJob): Promise<Record<string, unknown>> {
@@ -285,7 +291,11 @@ async function executeLocalIntelligenceJob(job: AutomationJob): Promise<Record<s
   };
 }
 
-async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
+async function executeEvidenceAnalysis(
+  job: AutomationJob,
+  workerId: string,
+  ownership?: RuntimeRoleOwnership,
+): Promise<Record<string, unknown>> {
   if (job.dryRun) {
     return {
       ...(await dryRunPreview(job)),
@@ -348,7 +358,12 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
       parentJobId: job.id,
       priority: Math.max(1, job.priority - 1),
     });
-    await updateAutomationJobExecution(job.id, workerId, { executionMode: 'MANUAL_INPUT', outcomeStatus: 'PARTIALLY_COMPLETED', checkpoint, disclosure: completedDisclosure });
+    await updateAutomationJobExecution(
+      job.id,
+      workerId,
+      { executionMode: 'MANUAL_INPUT', outcomeStatus: 'PARTIALLY_COMPLETED', checkpoint, disclosure: completedDisclosure },
+      claimMutationGuard(job, ownership),
+    );
     await completeManualTask(task.id, job.id, workerId);
     return {
       executionStatus: 'PARTIALLY_COMPLETED',
@@ -432,12 +447,23 @@ async function executeEvidenceAnalysis(job: AutomationJob, workerId: string): Pr
     completedSteps: checkpoint.completedSteps,
     pendingSteps: checkpoint.pendingSteps,
   });
-  const waiting = await waitAutomationJobForManual(job.id, workerId, task.id, checkpoint, waitingDisclosure);
+  const waiting = await waitAutomationJobForManual(
+    job.id,
+    workerId,
+    task.id,
+    checkpoint,
+    waitingDisclosure,
+    claimMutationGuard(job, ownership),
+  );
   if (!waiting) throw new Error('MANUAL_WAIT_TRANSITION_FAILED');
   return { waitingForManualInput: true, taskId: task.id, executionStatus: 'WAITING_FOR_MANUAL_INPUT' };
 }
 
-async function executeJob(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
+async function executeJob(
+  job: AutomationJob,
+  workerId: string,
+  ownership?: RuntimeRoleOwnership,
+): Promise<Record<string, unknown>> {
   switch (job.type) {
     case 'PROCESS_CANDIDATE': {
       if (job.dryRun) return dryRunPreview(job);
@@ -508,7 +534,7 @@ async function executeJob(job: AutomationJob, workerId: string): Promise<Record<
     case 'AI_ANALYSIS': {
       if (job.dryRun) return dryRunPreview(job);
       await assertKillSwitchInactive();
-      return executeEvidenceAnalysis(job, workerId);
+      return executeEvidenceAnalysis(job, workerId, ownership);
     }
     default:
       return assertUnhandledJobType(job.type);
@@ -546,7 +572,9 @@ export async function processAutomationBatch(
     if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) throw new Error('WORKER_FENCING_REJECTED');
     const freshControl = await getAutomationControl();
     if (freshControl.killSwitch && job.type !== 'RUNTIME_GUARDIAN') {
-      await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.', {}, ownership);
+      await failAutomationJob(job.id, workerId, 'KILL_SWITCH_ACTIVE', 'Dừng khẩn cấp đang được bật.', {
+        ...claimMutationGuard(job, ownership),
+      });
       if (job.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(job));
       result.skipped += 1;
       return;
@@ -568,9 +596,9 @@ export async function processAutomationBatch(
       await updateAutomationJobExecution(job.id, workerId, {
         executionPlan: startedPlan,
         progress: { processed: 0, total: startedPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: new Date().toISOString() },
-      });
+      }, claimMutationGuard(job, ownership));
       businessExecutionStarted = job.type === 'PROCESS_CANDIDATE';
-      const output = await executeJob(job, workerId);
+      const output = await executeJob(job, workerId, ownership);
       if (workerLeaseLost || (ownership && !await isRuntimeRoleOwner('WORKER', ownership))) throw new Error('WORKER_FENCING_REJECTED');
       const latest = await getAutomationJob(job.id);
       if (latest?.status === 'CANCELLED') { result.skipped += 1; return; }
@@ -639,13 +667,23 @@ export async function processAutomationBatch(
           pendingSteps,
           completedAt,
         }),
-      });
+      }, claimMutationGuard(job, ownership));
       if (outcomeStatus === 'PARTIALLY_COMPLETED' && pendingSteps.length) {
-        const waiting = await waitAutomationJobForChildren(job.id, workerId, output);
+        const waiting = await waitAutomationJobForChildren(
+          job.id,
+          workerId,
+          output,
+          claimMutationGuard(job, ownership),
+        );
         if (waiting) result.waitingChildren += 1; else result.skipped += 1;
         return;
       }
-      const completed = await completeAutomationJob(job.id, workerId, output, ownership);
+      const completed = await completeAutomationJob(
+        job.id,
+        workerId,
+        output,
+        claimMutationGuard(job, ownership),
+      );
       if (completed) result.succeeded += 1; else result.skipped += 1;
     } catch (error) {
       const latest = await getAutomationJob(job.id);
@@ -667,7 +705,8 @@ export async function processAutomationBatch(
           && typeof (error as { result?: unknown }).result === 'object'
           ? (error as { result: Record<string, unknown> }).result
           : undefined,
-      }, ownership);
+        ...claimMutationGuard(job, ownership),
+      });
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);
@@ -676,8 +715,8 @@ export async function processAutomationBatch(
         else await releaseProductProcessingCapacity(productProcessingReservationKey(job));
       }
       if (!workerFencingRejected) {
-        const remainingJob = (await getAllAutomationJobs()).find(item =>
-          item.status === 'RUNNING' && item.claimedBy === workerId && item.id !== job.id);
+        const remainingJob = (await getAutomationJobHealthView()).runningJobs.find(item =>
+          item.claimedBy === workerId && item.id !== job.id);
         await updateAutomationControl({
           workerHeartbeatAt: new Date().toISOString(),
           workerId,
@@ -720,6 +759,7 @@ export async function runContinuousWorkerPool(options: {
   shouldStop?: () => boolean;
   drainTimeoutMs?: number;
   stopPollMs?: number;
+  lanePollMs?: number;
   runBatch?: (
     workerId: string,
     ownership: RuntimeRoleOwnership | undefined,
@@ -733,6 +773,7 @@ export async function runContinuousWorkerPool(options: {
     : 0;
   const drainTimeoutMs = boundedPoolValue(options.drainTimeoutMs, 12_000, 1_000, 60_000);
   const stopPollMs = boundedPoolValue(options.stopPollMs, 100, 10, 1_000);
+  const lanePollMs = boundedPoolValue(options.lanePollMs, 2_000, 100, 10_000);
   const aggregate: ContinuousWorkerPoolResult = {
     workerId: options.workerId,
     claimed: 0,
@@ -752,52 +793,81 @@ export async function runContinuousWorkerPool(options: {
   };
   const runBatch = options.runBatch || ((workerId, ownership, batchOptions) =>
     processAutomationBatch(workerId, 1, ownership, batchOptions));
-  const active = new Map<number, Promise<{
-    slotId: number;
-    result?: WorkerRunResult;
-    error?: unknown;
-  }>>();
+  type WorkerPoolLane = 'ANY' | 'RUNTIME_GUARDIAN' | 'NON_GUARDIAN';
+  type ActiveWorkerSlot = {
+    lane: WorkerPoolLane;
+    promise: Promise<{
+      slotId: number;
+      lane: WorkerPoolLane;
+      result?: WorkerRunResult;
+      error?: unknown;
+    }>;
+  };
+  const lanes: Array<{ lane: WorkerPoolLane; capacity: number }> = criticalReservedCapacity > 0
+    ? [
+        { lane: 'RUNTIME_GUARDIAN', capacity: criticalReservedCapacity },
+        { lane: 'NON_GUARDIAN', capacity: maxConcurrency - criticalReservedCapacity },
+      ]
+    : [{ lane: 'ANY', capacity: maxConcurrency }];
+  const active = new Map<number, ActiveWorkerSlot>();
+  const laneObservedEmpty = new Map<WorkerPoolLane, boolean>(lanes.map(item => [item.lane, false]));
+  const laneNextProbeAt = new Map<WorkerPoolLane, number>(lanes.map(item => [item.lane, 0]));
   let nextSlotId = 1;
   let startedAttempts = 0;
   let initialAttemptBoundary: number | undefined;
-  let claimBlockedUntilCompletion = false;
   let stopObservedAt: number | undefined;
 
-  const startClaim = () => {
+  const activeInLane = (lane: WorkerPoolLane) =>
+    [...active.values()].filter(slot => slot.lane === lane).length;
+
+  const startClaim = (lane: WorkerPoolLane) => {
     const slotId = nextSlotId;
     nextSlotId += 1;
     startedAttempts += 1;
     aggregate.claimAttempts += 1;
+    laneObservedEmpty.set(lane, false);
     const promise = runBatch(options.workerId, options.ownership, {
       maximumInFlight: maxConcurrency,
       criticalReservedCapacity,
       enforceExecutionCompatibility: true,
-    }).then(result => ({ slotId, result }), error => ({ slotId, error }));
-    active.set(slotId, promise);
+      claimLane: lane,
+    }).then(
+      result => ({ slotId, lane, result }),
+      error => ({ slotId, lane, error }),
+    );
+    active.set(slotId, { lane, promise });
     aggregate.peakInFlight = Math.max(aggregate.peakInFlight, active.size);
   };
 
   while (true) {
+    const nowMs = Date.now();
     const stopRequested = options.shouldStop?.() === true;
     if (stopRequested) {
       aggregate.stopRequested = true;
-      stopObservedAt ||= Date.now();
+      stopObservedAt ||= nowMs;
     }
-    if (!stopRequested && !claimBlockedUntilCompletion) {
-      const unobservedClaimCapacity = active.size;
-      const remainingClaims = maximumClaims - aggregate.claimed - unobservedClaimCapacity;
-      const availableSlots = maxConcurrency - active.size;
-      const launchCount = Math.max(0, Math.min(availableSlots, remainingClaims));
-      for (let index = 0; index < launchCount; index += 1) startClaim();
+    if (!stopRequested) {
+      let remainingClaimAttempts = maximumClaims - aggregate.claimed - active.size;
+      for (const lane of lanes) {
+        if (remainingClaimAttempts <= 0) break;
+        const laneIsEmpty = laneObservedEmpty.get(lane.lane) === true;
+        const canProbe = !laneIsEmpty
+          || (active.size > 0 && nowMs >= (laneNextProbeAt.get(lane.lane) || 0));
+        if (!canProbe) continue;
+        const availableLaneSlots = Math.max(0, lane.capacity - activeInLane(lane.lane));
+        const launchCount = Math.min(availableLaneSlots, remainingClaimAttempts);
+        for (let index = 0; index < launchCount; index += 1) {
+          startClaim(lane.lane);
+          remainingClaimAttempts -= 1;
+        }
+      }
       initialAttemptBoundary ??= startedAttempts;
     }
 
     if (!active.size) {
-      if (aggregate.stopRequested || aggregate.claimed >= maximumClaims || claimBlockedUntilCompletion) break;
-      if (startedAttempts > 0) {
-        claimBlockedUntilCompletion = true;
-        continue;
-      }
+      const everyLaneEmpty = lanes.every(item => laneObservedEmpty.get(item.lane) === true);
+      if (aggregate.stopRequested || aggregate.claimed >= maximumClaims || everyLaneEmpty) break;
+      continue;
     }
 
     if (aggregate.stopRequested && stopObservedAt && Date.now() - stopObservedAt >= drainTimeoutMs) {
@@ -807,7 +877,10 @@ export async function runContinuousWorkerPool(options: {
     const wake = new Promise<{ wake: true }>(resolve => {
       setTimeout(() => resolve({ wake: true }), stopPollMs);
     });
-    const completed = await Promise.race([...active.values(), wake]);
+    const completed = await Promise.race([
+      ...[...active.values()].map(slot => slot.promise),
+      wake,
+    ]);
     if ('wake' in completed) continue;
     active.delete(completed.slotId);
     if (completed.error) throw completed.error;
@@ -815,11 +888,10 @@ export async function runContinuousWorkerPool(options: {
     mergeWorkerRunResult(aggregate, result);
     if (result.claimed > 0) {
       if (completed.slotId > (initialAttemptBoundary || 0)) aggregate.replacementClaims += result.claimed;
-      claimBlockedUntilCompletion = false;
-    } else if (active.size > 0) {
-      claimBlockedUntilCompletion = true;
+      laneObservedEmpty.set(completed.lane, false);
     } else {
-      break;
+      laneObservedEmpty.set(completed.lane, true);
+      laneNextProbeAt.set(completed.lane, Date.now() + lanePollMs);
     }
   }
   return aggregate;

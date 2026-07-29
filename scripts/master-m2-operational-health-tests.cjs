@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const testRoot = path.join(process.cwd(), '.test-tmp', `master-m2-operational-health-${process.pid}-${Date.now()}`);
+const allowedTempRoot = path.resolve(process.cwd(), '.test-tmp');
+if (path.dirname(path.resolve(testRoot)) !== allowedTempRoot) throw new Error('UNSAFE_TEST_ROOT');
 fs.mkdirSync(testRoot, { recursive: true });
 process.env.SANDEAL_DATA_DIR = testRoot;
 process.env.NODE_ENV = 'test';
@@ -154,10 +156,36 @@ async function main() {
       consumedAt: new Date(now - 10_000).toISOString(),
       releaseIdentity: releaseSha,
     }]);
-    await adapter.writeCollection('automation-jobs', [
-      { id: 'guardian-running', type: 'RUNTIME_GUARDIAN', status: 'RUNNING', executionCritical: true },
-      { id: 'candidate-running', type: 'PROCESS_CANDIDATE', status: 'RUNNING', executionCritical: false },
-    ]);
+    const runningJobs = [
+      {
+        id: 'guardian-running',
+        type: 'RUNTIME_GUARDIAN',
+        status: 'RUNNING',
+        requestedBy: 'scheduler',
+        priority: 100,
+        attemptCount: 1,
+        createdAt: current,
+        updatedAt: current,
+        startedAt: current,
+        executionCritical: true,
+        projectionSchemaVersion: 2,
+      },
+      {
+        id: 'candidate-running',
+        type: 'PROCESS_CANDIDATE',
+        status: 'RUNNING',
+        requestedBy: 'scheduler',
+        priority: 50,
+        attemptCount: 1,
+        createdAt: current,
+        updatedAt: current,
+        startedAt: current,
+        executionCritical: false,
+        projectionSchemaVersion: 2,
+      },
+    ];
+    await adapter.writeCollection('automation-jobs', runningJobs);
+    await adapter.writeCollection('automation-job-list-projections-v2', runningJobs);
     await adapter.writeCollection('automation-slo-snapshots', [{
       id: 'automation-slo:fixture',
       dataStatus: 'RECOVERY',
@@ -212,10 +240,15 @@ async function main() {
 
   await test('stale runtime evidence becomes historical while stale and release mismatches remain current', async () => {
     await seedBase();
-    await store.updateAutomationControl({
-      publishBlockedByRuntime: false,
-      publishRuntimeReasons: [],
-    }, 'master-m2-operational-health-test');
+    const blockedControl = await store.getAutomationControl();
+    const cleared = await store.clearRuntimePublishReasons({
+      reasonCodes: blockedControl.publishRuntimeReasons,
+      expectedChangedAt: blockedControl.changedAt,
+      expectedRuntimeReasons: blockedControl.publishRuntimeReasons,
+      reason: 'MASTER_M2_EXPLICIT_RECOVERY_FIXTURE',
+      evaluationId: 'master-m2-explicit-recovery-fixture',
+    }, 'error-budget-controller');
+    assert.equal(cleared.status, 'CLEARED');
     const staleAt = new Date(now - 4 * 60_000).toISOString();
     const snapshots = await adapter.readCollection('runtime-health');
     snapshots[0].checkedAt = staleAt;
@@ -244,7 +277,9 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-main().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => fs.rmSync(testRoot, { recursive: true, force: true }));

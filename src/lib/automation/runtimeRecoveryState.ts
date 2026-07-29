@@ -5,7 +5,7 @@ import type { FeatureRolloutMode } from './featureRollout';
 const COLLECTION = 'runtime-recovery-state';
 const RECORD_ID = 'runtime-recovery';
 
-export const RUNTIME_RECOVERY_SCHEMA_VERSION = 1;
+export const RUNTIME_RECOVERY_SCHEMA_VERSION = 2;
 export const DEFAULT_RECOVERY_REQUIRED_HEALTHY_COUNT = 3;
 export const DEFAULT_RECOVERY_MAXIMUM_EVIDENCE_AGE_MS = 2 * 60_000;
 
@@ -37,6 +37,32 @@ export interface RuntimeRecoveryEvidenceSummary {
   publicProducts: number;
 }
 
+export type RuntimeRecoveryReasonMeasurement = 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA' | 'NOT_APPLICABLE';
+
+export interface RuntimeRecoveryReasonProgress {
+  reasonCode: string;
+  metricKey: string;
+  measurement: RuntimeRecoveryReasonMeasurement;
+  consecutiveHealthyCount: number;
+  requiredHealthyCount: number;
+  lastEvaluationId?: string;
+  lastHealthyEvaluation?: string;
+  qualifiedWindowStartedAt?: string;
+  lastQualifiedObservationAt?: string;
+  lastReleaseIdentity?: string;
+  lastEvidenceReferences?: string[];
+  qualificationReasons: string[];
+  interruptedAt?: string;
+  lastTransitionAt: string;
+}
+
+export interface RuntimeRecoveredReason {
+  reasonCode: string;
+  metricKey: string;
+  recoveredAt: string;
+  evaluationId: string;
+}
+
 export interface RuntimeRecoveryState {
   schemaVersion: typeof RUNTIME_RECOVERY_SCHEMA_VERSION;
   id: typeof RECORD_ID;
@@ -52,6 +78,8 @@ export interface RuntimeRecoveryState {
   lastHealthyEvaluationId?: string;
   lastResetReason?: string;
   currentCanaryPermitReference?: string;
+  reasonProgress: RuntimeRecoveryReasonProgress[];
+  recentlyRecoveredReasons: RuntimeRecoveredReason[];
   evidenceSummary: RuntimeRecoveryEvidenceSummary;
   releaseIdentity: string;
 }
@@ -191,6 +219,17 @@ function newRecoveryState(input: {
     currentApplicableReasons: input.publishBlockedByRuntime ? reasons : [],
     consecutiveHealthyCount: 0,
     requiredHealthyCount: policy.requiredHealthyCount,
+    reasonProgress: reasons.map(reasonCode => ({
+      reasonCode,
+      metricKey: reasonCode,
+      measurement: 'BREACH',
+      consecutiveHealthyCount: 0,
+      requiredHealthyCount: policy.requiredHealthyCount,
+      lastEvidenceReferences: [],
+      qualificationReasons: ['RUNTIME_BLOCK_ALREADY_ACTIVE'],
+      lastTransitionAt: now,
+    })),
+    recentlyRecoveredReasons: [],
     lastResetReason: input.publishBlockedByRuntime ? 'RUNTIME_BLOCK_ALREADY_ACTIVE' : undefined,
     evidenceSummary: emptyEvidence(policy.maximumEvidenceAgeMs),
     releaseIdentity: getReleaseIdentity().releaseId,
@@ -211,6 +250,74 @@ export function normalizeRuntimeRecoveryState(
     ...currentApplicableReasons,
     'RUNTIME_RECOVERY_STATE_INVALID',
   ])];
+  const reasonProgress: RuntimeRecoveryReasonProgress[] = Array.isArray(value.reasonProgress)
+    ? value.reasonProgress
+      .filter(item => item && typeof item === 'object')
+      .flatMap(item => {
+        const candidate = item as Partial<RuntimeRecoveryReasonProgress>;
+        const reasonCode = safeReasons([candidate.reasonCode])[0];
+        const measurement = ['PASS', 'BREACH', 'INSUFFICIENT_DATA', 'NOT_APPLICABLE'].includes(String(candidate.measurement))
+          ? candidate.measurement as RuntimeRecoveryReasonMeasurement
+          : 'INSUFFICIENT_DATA';
+        return reasonCode ? [{
+          reasonCode,
+          metricKey: String(candidate.metricKey || reasonCode).slice(0, 120),
+          measurement,
+          consecutiveHealthyCount: boundedInteger(
+            candidate.consecutiveHealthyCount,
+            0,
+            0,
+            policy.requiredHealthyCount,
+          ),
+          requiredHealthyCount: boundedInteger(
+            candidate.requiredHealthyCount,
+            policy.requiredHealthyCount,
+            3,
+            20,
+          ),
+          ...(safeOptionalReference(candidate.lastEvaluationId)
+            ? { lastEvaluationId: safeOptionalReference(candidate.lastEvaluationId) }
+            : {}),
+          ...(candidate.lastHealthyEvaluation
+            ? { lastHealthyEvaluation: safeTimestamp(candidate.lastHealthyEvaluation, new Date(0).toISOString()) }
+            : {}),
+          ...(candidate.qualifiedWindowStartedAt
+            ? { qualifiedWindowStartedAt: safeTimestamp(candidate.qualifiedWindowStartedAt, new Date(0).toISOString()) }
+            : {}),
+          ...(candidate.lastQualifiedObservationAt
+            ? { lastQualifiedObservationAt: safeTimestamp(candidate.lastQualifiedObservationAt, new Date(0).toISOString()) }
+            : {}),
+          ...(safeOptionalReference(candidate.lastReleaseIdentity)
+            ? { lastReleaseIdentity: safeOptionalReference(candidate.lastReleaseIdentity) }
+            : {}),
+          lastEvidenceReferences: Array.isArray(candidate.lastEvidenceReferences)
+            ? candidate.lastEvidenceReferences
+              .flatMap(reference => safeOptionalReference(reference) || [])
+              .slice(0, 20)
+            : [],
+          qualificationReasons: safeReasons(candidate.qualificationReasons),
+          ...(candidate.interruptedAt
+            ? { interruptedAt: safeTimestamp(candidate.interruptedAt, now) }
+            : {}),
+          lastTransitionAt: safeTimestamp(candidate.lastTransitionAt, now),
+        } satisfies RuntimeRecoveryReasonProgress] : [];
+      })
+      .slice(0, 50)
+    : [];
+  const recentlyRecoveredReasons: RuntimeRecoveredReason[] = Array.isArray(value.recentlyRecoveredReasons)
+    ? value.recentlyRecoveredReasons.flatMap(item => {
+        const candidate = item as Partial<RuntimeRecoveredReason>;
+        const reasonCode = safeReasons([candidate.reasonCode])[0];
+        const evaluationId = safeOptionalReference(candidate.evaluationId);
+        if (!reasonCode || !evaluationId) return [];
+        return [{
+          reasonCode,
+          metricKey: String(candidate.metricKey || reasonCode).slice(0, 120),
+          recoveredAt: safeTimestamp(candidate.recoveredAt, now),
+          evaluationId,
+        }];
+      }).slice(-50)
+    : [];
   return {
     schemaVersion: RUNTIME_RECOVERY_SCHEMA_VERSION,
     id: RECORD_ID,
@@ -230,9 +337,247 @@ export function normalizeRuntimeRecoveryState(
       ? safeReasons(value.lastResetReason ? [value.lastResetReason] : [])[0]
       : 'RUNTIME_RECOVERY_STATE_INVALID',
     currentCanaryPermitReference: safeOptionalReference(value.currentCanaryPermitReference),
+    reasonProgress,
+    recentlyRecoveredReasons,
     evidenceSummary: normalizeEvidence(value.evidenceSummary, policy.maximumEvidenceAgeMs),
     releaseIdentity: String(value.releaseIdentity || getReleaseIdentity().releaseId).slice(0, 120),
   };
+}
+
+export interface RuntimeReasonObservation {
+  reasonCode: string;
+  metricKey: string;
+  measurement: RuntimeRecoveryReasonMeasurement;
+  qualifyingStatus: 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA';
+  observedAt?: string;
+  releaseIdentity?: string;
+  qualificationReasons: string[];
+  evidenceReferences?: string[];
+}
+
+export interface RuntimeReasonRecoveryTransition {
+  state: RuntimeRecoveryState;
+  clearedReasons: string[];
+  advancedReasons: string[];
+  breachedReasons: string[];
+  insufficientReasons: string[];
+}
+
+export async function advanceRuntimeReasonRecoveryState(input: {
+  evaluationId: string;
+  observations: RuntimeReasonObservation[];
+  activeReasons: string[];
+  evidenceSummary: RuntimeRecoveryEvidenceSummary;
+  featureMode: FeatureRolloutMode;
+  requiredReleaseIdentity: string;
+  nowMs: number;
+}): Promise<RuntimeReasonRecoveryTransition> {
+  const activeReasons = safeReasons(input.activeReasons);
+  const observations = new Map(input.observations.map(observation => [observation.reasonCode, observation]));
+  const now = new Date(input.nowMs).toISOString();
+  const requiredReleaseIdentity = safeOptionalReference(input.requiredReleaseIdentity);
+  if (!requiredReleaseIdentity) throw new Error('RUNTIME_RECOVERY_RELEASE_IDENTITY_REQUIRED');
+  const evidenceWindowMs = getRuntimeRecoveryPolicy().maximumEvidenceAgeMs;
+  let current = await ensureRuntimeRecoveryState({
+    publishBlockedByRuntime: activeReasons.length > 0,
+    reasons: activeReasons,
+    nowMs: input.nowMs,
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const previousProgress = new Map(current.reasonProgress.map(progress => [progress.reasonCode, progress]));
+    const clearedReasons: string[] = [];
+    const advancedReasons: string[] = [];
+    const breachedReasons: string[] = [];
+    const insufficientReasons: string[] = [];
+    const reasonProgress: RuntimeRecoveryReasonProgress[] = [];
+
+    if (activeReasons.length === 0) {
+      const next: RuntimeRecoveryState = {
+        ...current,
+        state: 'CLOSED_HEALTHY',
+        currentApplicableReasons: [],
+        reasonProgress: [],
+        consecutiveHealthyCount: 0,
+        lastResetReason: current.state === 'CLOSED_HEALTHY'
+          ? current.lastResetReason
+          : 'RUNTIME_BLOCK_NOT_ACTIVE',
+        evidenceSummary: input.evidenceSummary,
+      };
+      try {
+        const state = await updateRuntimeRecoveryState({
+          expectedStateVersion: current.stateVersion,
+          nowMs: input.nowMs,
+          mutate: () => next,
+        });
+        return {
+          state,
+          clearedReasons: [],
+          advancedReasons: [],
+          breachedReasons: [],
+          insufficientReasons: [],
+        };
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'RUNTIME_RECOVERY_STATE_VERSION_CONFLICT' || attempt === 2) throw error;
+        const refreshed = await getRuntimeRecoveryState();
+        if (!refreshed) throw new Error('RUNTIME_RECOVERY_STATE_REQUIRED');
+        current = refreshed;
+        continue;
+      }
+    }
+
+    for (const reasonCode of activeReasons) {
+      const observation = observations.get(reasonCode);
+      const previous = previousProgress.get(reasonCode);
+      const measurement = observation?.measurement || 'INSUFFICIENT_DATA';
+      const distinctEvaluation = previous?.lastEvaluationId !== input.evaluationId;
+      if (!distinctEvaluation && previous) {
+        reasonProgress.push(previous);
+        continue;
+      }
+
+      const observedAtMs = Date.parse(observation?.observedAt || '');
+      const previousObservedAtMs = Date.parse(previous?.lastQualifiedObservationAt || '');
+      const previousWindowStartedAtMs = Date.parse(previous?.qualifiedWindowStartedAt || '');
+      const evidenceReferences = (observation?.evidenceReferences || [])
+        .flatMap(reference => safeOptionalReference(reference) || [])
+        .slice(0, 20);
+      const evidenceFresh = Number.isFinite(observedAtMs)
+        && observedAtMs <= input.nowMs + 60_000
+        && input.nowMs - observedAtMs <= evidenceWindowMs;
+      const evidenceOrdered = !Number.isFinite(previousObservedAtMs) || observedAtMs > previousObservedAtMs;
+      const releaseCompatible = observation?.releaseIdentity === requiredReleaseIdentity;
+      const previousProgressCompatible = (previous?.consecutiveHealthyCount || 0) === 0 || (
+        previous?.lastReleaseIdentity === requiredReleaseIdentity
+        && Number.isFinite(previousObservedAtMs)
+        && input.nowMs - previousObservedAtMs <= evidenceWindowMs
+        && Number.isFinite(previousWindowStartedAtMs)
+        && input.nowMs - previousWindowStartedAtMs <= evidenceWindowMs
+      );
+      const evidenceWindowStartedAtMs = previousProgressCompatible && (previous?.consecutiveHealthyCount || 0) > 0
+        ? previousWindowStartedAtMs
+        : observedAtMs;
+      const evidenceInsideWindow = Number.isFinite(evidenceWindowStartedAtMs)
+        && Number.isFinite(observedAtMs)
+        && observedAtMs - evidenceWindowStartedAtMs <= evidenceWindowMs;
+      const evidenceReferenced = evidenceReferences.length > 0;
+      const qualifyingPass = measurement === 'PASS'
+        && observation?.qualifyingStatus === 'PASS'
+        && evidenceFresh
+        && evidenceOrdered
+        && releaseCompatible
+        && previousProgressCompatible
+        && evidenceInsideWindow
+        && evidenceReferenced;
+      const explicitBreach = measurement === 'BREACH' || observation?.qualifyingStatus === 'BREACH';
+      const qualificationReasons = safeReasons([
+        ...(observation?.qualificationReasons || []),
+        ...(!evidenceFresh ? ['RUNTIME_RECOVERY_EVIDENCE_STALE_OR_INVALID'] : []),
+        ...(!evidenceOrdered ? ['RUNTIME_RECOVERY_EVIDENCE_OUT_OF_ORDER'] : []),
+        ...(!releaseCompatible ? ['RUNTIME_RECOVERY_RELEASE_MISMATCH'] : []),
+        ...(!previousProgressCompatible ? ['RUNTIME_RECOVERY_STREAK_EXPIRED_OR_RELEASE_CHANGED'] : []),
+        ...(!evidenceInsideWindow ? ['RUNTIME_RECOVERY_EVIDENCE_OUTSIDE_WINDOW'] : []),
+        ...(!evidenceReferenced ? ['RUNTIME_RECOVERY_EVIDENCE_REFERENCE_REQUIRED'] : []),
+        ...(measurement === 'NOT_APPLICABLE' ? ['RUNTIME_RECOVERY_EVIDENCE_NOT_APPLICABLE'] : []),
+        ...(measurement === 'INSUFFICIENT_DATA' ? ['RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT'] : []),
+      ]);
+      const healthyCount = qualifyingPass
+        ? Math.min(
+            current.requiredHealthyCount,
+            (previousProgressCompatible ? previous?.consecutiveHealthyCount || 0 : 0) + 1,
+          )
+        : 0;
+
+      if (explicitBreach) breachedReasons.push(reasonCode);
+      else if (qualifyingPass) advancedReasons.push(reasonCode);
+      else insufficientReasons.push(reasonCode);
+
+      if (
+        qualifyingPass
+        && healthyCount >= current.requiredHealthyCount
+        && input.featureMode === 'ACTIVE'
+      ) {
+        clearedReasons.push(reasonCode);
+        continue;
+      }
+
+      reasonProgress.push({
+        reasonCode,
+        metricKey: observation?.metricKey || previous?.metricKey || reasonCode,
+        measurement,
+        consecutiveHealthyCount: healthyCount,
+        requiredHealthyCount: current.requiredHealthyCount,
+        lastEvaluationId: input.evaluationId,
+        lastHealthyEvaluation: qualifyingPass
+          ? now
+          : previous?.lastHealthyEvaluation,
+        qualifiedWindowStartedAt: qualifyingPass
+          ? new Date(evidenceWindowStartedAtMs).toISOString()
+          : undefined,
+        lastQualifiedObservationAt: qualifyingPass
+          ? new Date(observedAtMs).toISOString()
+          : previous?.lastQualifiedObservationAt,
+        lastReleaseIdentity: qualifyingPass
+          ? requiredReleaseIdentity
+          : previous?.lastReleaseIdentity,
+        lastEvidenceReferences: qualifyingPass
+          ? evidenceReferences
+          : previous?.lastEvidenceReferences || [],
+        qualificationReasons,
+        interruptedAt: qualifyingPass ? undefined : now,
+        lastTransitionAt: measurement !== previous?.measurement || healthyCount !== previous?.consecutiveHealthyCount
+          ? now
+          : previous?.lastTransitionAt || now,
+      });
+    }
+
+    const remainingReasons = activeReasons.filter(reason => !clearedReasons.includes(reason));
+    const recoveredRecords: RuntimeRecoveredReason[] = clearedReasons.map(reasonCode => ({
+      reasonCode,
+      metricKey: observations.get(reasonCode)?.metricKey || reasonCode,
+      recoveredAt: now,
+      evaluationId: input.evaluationId,
+    }));
+    const aggregateHealthyCount = reasonProgress.length
+      ? Math.min(...reasonProgress.map(progress => progress.consecutiveHealthyCount))
+      : 0;
+    const next: RuntimeRecoveryState = {
+      ...current,
+      state: remainingReasons.length === 0
+        ? 'RECOVERED_PENDING_CONFIRMATION'
+        : advancedReasons.length > 0
+          ? 'RECOVERY_OBSERVING'
+          : 'OPEN_BLOCKED',
+      originatingBreachReasons: [...new Set([...current.originatingBreachReasons, ...activeReasons])],
+      currentApplicableReasons: remainingReasons,
+      reasonProgress,
+      recentlyRecoveredReasons: [
+        ...current.recentlyRecoveredReasons,
+        ...recoveredRecords,
+      ].slice(-50),
+      consecutiveHealthyCount: aggregateHealthyCount,
+      lastHealthyEvaluation: advancedReasons.length ? now : current.lastHealthyEvaluation,
+      lastHealthyEvaluationId: advancedReasons.length ? input.evaluationId : current.lastHealthyEvaluationId,
+      lastResetReason: breachedReasons[0]
+        || (insufficientReasons.length ? 'RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT' : undefined),
+      evidenceSummary: input.evidenceSummary,
+    };
+
+    try {
+      const state = await updateRuntimeRecoveryState({
+        expectedStateVersion: current.stateVersion,
+        nowMs: input.nowMs,
+        mutate: () => next,
+      });
+      return { state, clearedReasons, advancedReasons, breachedReasons, insufficientReasons };
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'RUNTIME_RECOVERY_STATE_VERSION_CONFLICT' || attempt === 2) throw error;
+      const refreshed = await getRuntimeRecoveryState();
+      if (!refreshed) throw new Error('RUNTIME_RECOVERY_STATE_REQUIRED');
+      current = refreshed;
+    }
+  }
+  throw new Error('RUNTIME_RECOVERY_REASON_UPDATE_FAILED');
 }
 
 export async function getRuntimeRecoveryState(): Promise<RuntimeRecoveryState | null> {
@@ -322,9 +667,7 @@ export function deriveRuntimeRecoveryTransition(
   current: RuntimeRecoveryState,
   input: RuntimeRecoveryTransitionInput,
 ): RuntimeRecoveryTransition {
-  const now = new Date(input.nowMs).toISOString();
   const applicableReasons = safeReasons(input.applicableReasons);
-  const eligibilityReasons = safeReasons(input.recoveryEligibilityReasons);
   const evidenceSummary = normalizeEvidence(input.evidenceSummary, current.evidenceSummary.maximumEvidenceAgeMs);
 
   if (!input.publishBlockedByRuntime) {
@@ -342,6 +685,12 @@ export function deriveRuntimeRecoveryTransition(
     };
   }
 
+  /*
+   * Compatibility-only transition for snapshots written before per-reason
+   * evidence existed. It may preserve or strengthen a runtime block, but it
+   * must never advance or clear one. `advanceRuntimeReasonRecoveryState` is
+   * the sole authoritative recovery path.
+   */
   if (input.evaluationStatus === 'BREACH') {
     return {
       state: {
@@ -360,60 +709,29 @@ export function deriveRuntimeRecoveryTransition(
     };
   }
 
-  if (input.evaluationStatus === 'INSUFFICIENT_DATA') {
-    return {
-      state: {
-        ...current,
-        state: 'RECOVERY_OBSERVING',
-        currentApplicableReasons: applicableReasons,
-        consecutiveHealthyCount: 0,
-        lastResetReason: 'RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT',
-        evidenceSummary,
-      },
-      shouldClearRuntimeBlock: false,
-      reasonCode: 'RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT',
-    };
-  }
-
-  const rolloutBlocksActivation = input.featureMode === 'OFF';
-  const blockers = rolloutBlocksActivation
-    ? [...new Set([...eligibilityReasons, 'RUNTIME_RECOVERY_V2_OFF'])]
-    : eligibilityReasons;
-  if (blockers.length) {
-    return {
-      state: {
-        ...current,
-        state: 'RECOVERY_OBSERVING',
-        currentApplicableReasons: blockers,
-        consecutiveHealthyCount: 0,
-        lastResetReason: blockers[0],
-        evidenceSummary,
-      },
-      shouldClearRuntimeBlock: false,
-      reasonCode: 'RUNTIME_RECOVERY_SAFETY_GATE_BLOCKED',
-    };
-  }
-
-  const distinctEvaluation = current.lastHealthyEvaluationId !== input.evaluationId;
-  const consecutiveHealthyCount = distinctEvaluation
-    ? Math.min(current.requiredHealthyCount, current.consecutiveHealthyCount + 1)
-    : current.consecutiveHealthyCount;
-  const confirmationReady = consecutiveHealthyCount >= current.requiredHealthyCount;
   return {
     state: {
       ...current,
-      state: confirmationReady ? 'RECOVERED_PENDING_CONFIRMATION' : 'RECOVERY_OBSERVING',
-      currentApplicableReasons: [],
-      consecutiveHealthyCount,
-      lastHealthyEvaluation: distinctEvaluation ? now : current.lastHealthyEvaluation,
-      lastHealthyEvaluationId: distinctEvaluation ? input.evaluationId : current.lastHealthyEvaluationId,
-      lastResetReason: distinctEvaluation ? undefined : current.lastResetReason,
+      state: 'RECOVERY_OBSERVING',
+      currentApplicableReasons: applicableReasons.length
+        ? applicableReasons
+        : current.currentApplicableReasons,
+      consecutiveHealthyCount: 0,
+      reasonProgress: current.reasonProgress.map(progress => ({
+        ...progress,
+        consecutiveHealthyCount: 0,
+        measurement: 'INSUFFICIENT_DATA',
+        qualifiedWindowStartedAt: undefined,
+        qualificationReasons: ['RUNTIME_RECOVERY_EXPLICIT_REASON_EVIDENCE_REQUIRED'],
+        interruptedAt: new Date(input.nowMs).toISOString(),
+      })),
+      lastResetReason: 'RUNTIME_RECOVERY_EXPLICIT_REASON_EVIDENCE_REQUIRED',
       evidenceSummary,
     },
-    shouldClearRuntimeBlock: confirmationReady && input.featureMode === 'ACTIVE',
-    reasonCode: confirmationReady
-      ? 'RUNTIME_RECOVERY_CONFIRMATION_READY'
-      : 'RUNTIME_RECOVERY_HEALTHY_PROGRESS',
+    shouldClearRuntimeBlock: false,
+    reasonCode: input.evaluationStatus === 'INSUFFICIENT_DATA'
+      ? 'RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT'
+      : 'RUNTIME_RECOVERY_SAFETY_GATE_BLOCKED',
   };
 }
 
@@ -454,13 +772,23 @@ export async function confirmRuntimeRecoveryClosed(input: {
   return updateRuntimeRecoveryState({
     expectedStateVersion: input.expectedStateVersion,
     nowMs: input.nowMs,
-    mutate: current => ({
-      ...current,
-      state: 'CLOSED_HEALTHY',
-      currentApplicableReasons: [],
-      consecutiveHealthyCount: 0,
-      lastResetReason: 'RUNTIME_RECOVERY_CONFIRMED',
-      evidenceSummary: input.evidenceSummary,
-    }),
+    mutate: current => {
+      if (
+        current.state !== 'RECOVERED_PENDING_CONFIRMATION'
+        || current.currentApplicableReasons.length > 0
+        || current.reasonProgress.length > 0
+        || current.recentlyRecoveredReasons.length === 0
+      ) {
+        throw new Error('RUNTIME_RECOVERY_CONFIRMATION_NOT_AUTHORIZED');
+      }
+      return {
+        ...current,
+        state: 'CLOSED_HEALTHY',
+        currentApplicableReasons: [],
+        consecutiveHealthyCount: 0,
+        lastResetReason: 'RUNTIME_RECOVERY_CONFIRMED',
+        evidenceSummary: input.evidenceSummary,
+      };
+    },
   });
 }

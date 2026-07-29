@@ -6,6 +6,8 @@ import { getStorageAdapter } from './storageFactory';
 import type {
   StorageBulkMutation,
   StorageBulkResult,
+  StorageBoundedCollectionOptions,
+  StorageBoundedCollectionResult,
   StorageCapabilities,
   StoragePage,
   StoragePageOptions,
@@ -42,36 +44,25 @@ export function readCollection<T>(collection: string): Promise<T[]> {
   return getStorageAdapter().readCollection<T>(collection);
 }
 
+export async function readBoundedCollection<T>(
+  collection: string,
+  options: StorageBoundedCollectionOptions,
+): Promise<T[]> {
+  return getStorageAdapter().readBoundedCollection<T>(collection, options);
+}
+
+export async function readBoundedCollectionSnapshot<T>(
+  collection: string,
+  options: StorageBoundedCollectionOptions,
+): Promise<StorageBoundedCollectionResult<T>> {
+  return getStorageAdapter().readBoundedCollectionSnapshot<T>(collection, options);
+}
+
 export async function readCollectionPage<T>(
   collection: string,
   options: StoragePageOptions
 ): Promise<StoragePage<T>> {
-  const adapter = getStorageAdapter();
-  if (adapter.readCollectionPage) return adapter.readCollectionPage<T>(collection, options);
-  let items = await adapter.readCollection<T>(collection);
-  for (const [field, expected] of Object.entries(options.filters || {})) {
-    items = items.filter((item) => (
-      item !== null
-      && typeof item === 'object'
-      && String((item as Record<string, unknown>)[field] ?? '') === expected
-    ));
-  }
-  if (options.sort) {
-    const { field, direction } = options.sort;
-    const multiplier = direction === 'desc' ? -1 : 1;
-    items.sort((left, right) => {
-      const leftValue = left !== null && typeof left === 'object'
-        ? String((left as Record<string, unknown>)[field] ?? '')
-        : '';
-      const rightValue = right !== null && typeof right === 'object'
-        ? String((right as Record<string, unknown>)[field] ?? '')
-        : '';
-      return leftValue.localeCompare(rightValue) * multiplier;
-    });
-  }
-  const totalItems = items.length;
-  const start = (options.page - 1) * options.pageSize;
-  return { items: items.slice(start, start + options.pageSize), totalItems, queryCount: 1 };
+  return getStorageAdapter().readCollectionPage<T>(collection, options);
 }
 
 export function writeCollection<T>(collection: string, data: T[]): Promise<void> {

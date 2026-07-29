@@ -17,10 +17,17 @@ import {
 import type { MongoStorageConfig } from './storageConfig';
 import { applyStorageBulkMutations } from './bulkMutation';
 import { isStorageError, storageError, storageErrorCode } from './storageErrors';
+import {
+  STORAGE_MAX_BOUNDED_BYTES,
+  STORAGE_MAX_BOUNDED_ITEMS,
+  STORAGE_MAX_PAGE_SIZE,
+} from './types';
 import type {
   StorageAdapter,
   StorageBulkMutation,
   StorageBulkResult,
+  StorageBoundedCollectionOptions,
+  StorageBoundedCollectionResult,
   StoragePageOptions,
   StorageTransaction,
 } from './types';
@@ -29,10 +36,58 @@ const TRANSACTION_ATTEMPTS = 2;
 const COMMIT_ATTEMPTS = 2;
 const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]*$/;
 
+function boundedCollectionError(code: string, collection: string): Error {
+  const error = new Error(`${code}:${collection}`) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
+
+function validateBoundedCollectionOptions(
+  collection: string,
+  options: StorageBoundedCollectionOptions,
+): { maximumItems: number; maximumBytes: number } {
+  if (
+    !Number.isFinite(options.maximumItems)
+    || !Number.isInteger(options.maximumItems)
+    || options.maximumItems <= 0
+    || options.maximumItems > STORAGE_MAX_BOUNDED_ITEMS
+    || !Number.isFinite(options.maximumBytes)
+    || !Number.isInteger(options.maximumBytes)
+    || options.maximumBytes <= 0
+    || options.maximumBytes > STORAGE_MAX_BOUNDED_BYTES
+  ) {
+    throw boundedCollectionError('BOUNDED_COLLECTION_OPTIONS_INVALID', collection);
+  }
+  return {
+    maximumItems: options.maximumItems,
+    maximumBytes: options.maximumBytes,
+  };
+}
+
+function validatePageOptions(options: StoragePageOptions): void {
+  const filterEntries = Object.entries(options.filters || {});
+  const sortField = options.sort?.field;
+  if (
+    !Number.isInteger(options.page)
+    || options.page < 1
+    || !Number.isInteger(options.pageSize)
+    || options.pageSize < 1
+    || options.pageSize > STORAGE_MAX_PAGE_SIZE
+    || options.page > Math.floor(Number.MAX_SAFE_INTEGER / options.pageSize)
+    || filterEntries.some(([field]) => !SAFE_PAGE_FIELD.test(field))
+    || filterEntries.some(([, value]) => typeof value !== 'string')
+    || (sortField && !SAFE_PAGE_FIELD.test(sortField))
+  ) {
+    throw storageError('INVALID_STORAGE_QUERY');
+  }
+}
+
 interface MongoRevisionDocument extends Document {
   _id: string;
   kind: 'collection';
   revision: number;
+  itemCount?: number;
+  serializedBytes?: number;
   updatedAt: string;
 }
 
@@ -102,6 +157,8 @@ async function writeRevision(
   const nextRevision = expectedRevision + 1;
   const metadata = db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION);
   const updatedAt = new Date().toISOString();
+  const itemCount = normalized.length;
+  const serializedBytes = Buffer.byteLength(JSON.stringify(normalized), 'utf8');
 
   if (expectedRevision === 0) {
     try {
@@ -109,6 +166,8 @@ async function writeRevision(
         _id: collection,
         kind: 'collection',
         revision: nextRevision,
+        itemCount,
+        serializedBytes,
         updatedAt,
       }, { session });
     } catch (error) {
@@ -118,7 +177,7 @@ async function writeRevision(
   } else {
     const result = await metadata.updateOne(
       { _id: collection, kind: 'collection', revision: expectedRevision },
-      { $set: { revision: nextRevision, updatedAt } },
+      { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
       { session }
     );
     if (result.matchedCount !== 1) throw storageError('MONGO_TRANSACTION_CONFLICT');
@@ -222,14 +281,8 @@ export class MongoStorageAdapter implements StorageAdapter {
 
   async readCollectionPage<T>(collection: string, options: StoragePageOptions) {
     const safeCollection = validateCollectionName(collection);
+    validatePageOptions(options);
     const filterEntries = Object.entries(options.filters || {});
-    const sortField = options.sort?.field;
-    if (
-      filterEntries.some(([field]) => !SAFE_PAGE_FIELD.test(field))
-      || (sortField && !SAFE_PAGE_FIELD.test(sortField))
-    ) {
-      throw storageError('INVALID_STORAGE_QUERY');
-    }
     const db = await this.database();
     const session = await this.session();
     try {
@@ -239,7 +292,7 @@ export class MongoStorageAdapter implements StorageAdapter {
         .findOne({ _id: safeCollection, kind: 'collection' }, { session });
       if (!metadata) {
         await commitWithBoundedRetry(session);
-        return { items: [] as T[], totalItems: 0, queryCount: 1 };
+        return { items: [] as T[], totalItems: 0, queryCount: 2 };
       }
       const match: Record<string, unknown> = { revision: metadata.revision };
       for (const [field, expected] of filterEntries) match[`item.${field}`] = expected;
@@ -264,9 +317,9 @@ export class MongoStorageAdapter implements StorageAdapter {
       return {
         items: deserializeMongoItems<T>(facet?.rows || []),
         totalItems: facet?.count[0]?.total || 0,
-        // One metadata lookup plus one aggregation command. The aggregation
-        // returns both the page and total through $facet.
-        queryCount: 2,
+        // One schema lookup, one revision lookup, and one aggregation command.
+        // The aggregation returns both the page and total through $facet.
+        queryCount: 3,
       };
     } catch (error) {
       await abortIfActive(session);
@@ -337,6 +390,128 @@ export class MongoStorageAdapter implements StorageAdapter {
         return;
       }
       throw storageError('MONGO_TRANSACTION_FAILED', error);
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async readBoundedCollection<T>(
+    collection: string,
+    options: StorageBoundedCollectionOptions,
+  ): Promise<T[]> {
+    return (await this.readBoundedCollectionSnapshot<T>(collection, options)).items;
+  }
+
+  async readBoundedCollectionSnapshot<T>(
+    collection: string,
+    options: StorageBoundedCollectionOptions,
+  ): Promise<StorageBoundedCollectionResult<T>> {
+    const safeCollection = validateCollectionName(collection);
+    const { maximumItems, maximumBytes } = validateBoundedCollectionOptions(safeCollection, options);
+    const db = await this.database();
+    const session = await this.session();
+    try {
+      session.startTransaction();
+      await assertMongoSchema(db, session);
+      const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
+        .findOne({ _id: safeCollection, kind: 'collection' }, { session });
+      if (!metadata) {
+        await commitWithBoundedRetry(session);
+        return {
+          items: [],
+          metadata: {
+            driver: 'mongo',
+            collectionPresent: false,
+            itemCount: 0,
+            observedBytes: 0,
+            maximumItems,
+            maximumBytes,
+            truncated: false,
+            queryCount: 2,
+          },
+        };
+      }
+      if (
+        !Number.isInteger(metadata.itemCount)
+        || Number(metadata.itemCount) < 0
+        || !Number.isInteger(metadata.serializedBytes)
+        || Number(metadata.serializedBytes) < 2
+      ) {
+        throw boundedCollectionError('BOUNDED_COLLECTION_METADATA_INCOMPLETE', safeCollection);
+      }
+      if (Number(metadata.itemCount) > maximumItems) {
+        throw boundedCollectionError('BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED', safeCollection);
+      }
+      if (Number(metadata.serializedBytes) > maximumBytes) {
+        throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', safeCollection);
+      }
+      const cursor = db.collection<MongoStoredItem>(safeCollection)
+        .find({ revision: metadata.revision }, { session })
+        .sort({ order: 1 })
+        .limit(maximumItems + 1);
+      const items: T[] = [];
+      // Account for the JSON array delimiters up front, then admit one
+      // normalized item at a time. This keeps client memory proportional to
+      // the configured byte bound and closes the server cursor immediately
+      // when either bound is crossed.
+      let observedBytes = 2;
+      try {
+        if (observedBytes > maximumBytes) {
+          throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', safeCollection);
+        }
+        while (await cursor.hasNext()) {
+          const document = await cursor.next();
+          if (!document) break;
+          if (items.length >= maximumItems) {
+            throw boundedCollectionError('BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED', safeCollection);
+          }
+          const normalizedItem = normalizeCollectionPayload([document.item])[0] as T;
+          const encodedItem = JSON.stringify(normalizedItem);
+          if (encodedItem === undefined) throw storageError('INVALID_STORAGE_PAYLOAD');
+          const itemBytes = Buffer.byteLength(encodedItem, 'utf8');
+          const nextObservedBytes = observedBytes + itemBytes + (items.length > 0 ? 1 : 0);
+          if (nextObservedBytes > maximumBytes) {
+            throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', safeCollection);
+          }
+          items.push(normalizedItem);
+          observedBytes = nextObservedBytes;
+        }
+      } finally {
+        await cursor.close().catch(() => undefined);
+      }
+      if (
+        items.length !== metadata.itemCount
+        || observedBytes !== metadata.serializedBytes
+      ) {
+        throw boundedCollectionError('BOUNDED_COLLECTION_METADATA_MISMATCH', safeCollection);
+      }
+      await commitWithBoundedRetry(session);
+      return {
+        items,
+        metadata: {
+          driver: 'mongo',
+          collectionPresent: true,
+          itemCount: items.length,
+          observedBytes,
+          maximumItems,
+          maximumBytes,
+          truncated: false,
+          queryCount: 3,
+        },
+      };
+    } catch (error) {
+      await abortIfActive(session);
+      if (
+        isStorageError(error)
+        || (
+          error instanceof Error
+          && typeof (error as Error & { code?: unknown }).code === 'string'
+          && String((error as Error & { code?: string }).code).startsWith('BOUNDED_COLLECTION_')
+        )
+      ) {
+        throw error;
+      }
+      throw storageError('MONGO_OPERATION_FAILED', error);
     } finally {
       await session.endSession();
     }

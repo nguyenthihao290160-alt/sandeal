@@ -1,7 +1,14 @@
-import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import {
+  generateId,
+  readBoundedCollectionSnapshot,
+  readCollection,
+  runTransaction,
+} from '@/lib/storage/adapter';
 import { getAllProducts } from '@/lib/storage/products';
 import { getPrimaryCredential } from '@/lib/storage/tokenVault';
-import { getAiUsage, getAllAutomationJobs, getAutomationControl, getCircuit } from '@/lib/automation/store';
+import { getAiUsage, getAutomationControl, getCircuit } from '@/lib/automation/store';
+import { readBoundedAutomationJobStatuses } from '@/lib/automation/jobHealthSummary';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import type { Product } from '@/lib/types';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
@@ -9,6 +16,91 @@ import type { PriceSnapshot, ProductAlert, RecommendedAction } from './types';
 
 const ALERTS = 'product-alerts';
 const ACTIONS = 'recommended-actions';
+const JOB_EVIDENCE_ALERT_TYPES = new Set<ProductAlert['type']>([
+  'queue_backlog',
+  'worker_stale',
+  'task_failure_spike',
+]);
+const PRODUCT_EVIDENCE_ALERT_TYPES = new Set<ProductAlert['type']>([
+  'duplicate_product',
+  'low_quality',
+  'broken_link',
+  'broken_affiliate_link',
+  'broken_image',
+  'stale_content',
+  'strong_price_variation',
+  'public_recheck',
+]);
+const PRODUCT_GROUP_EVIDENCE_ALERT_TYPES = new Set<ProductAlert['type']>([
+  'price_history_building',
+  'stale_price',
+]);
+const VERIFIED_HEALTH_STATUSES = new Set(['ok', 'redirect_ok']);
+const FAILURE_ALERT_WINDOW_MS = 24 * 60 * 60_000;
+const AUTO_RESOLUTION_OBSERVATIONS_REQUIRED = 2;
+const AUTO_RESOLUTION_MAX_OBSERVATION_GAP_MS = 10 * 60_000;
+const MAX_EVIDENCE_FUTURE_SKEW_MS = 60_000;
+const ALERT_READ_MAXIMUM_BYTES = 32 * 1024 * 1024;
+
+type StoredProductAlert = ProductAlert & {
+  resolutionEvidenceState?: 'ACTIVE' | 'UNKNOWN' | 'PASS_PENDING' | 'PASS_CONFIRMED';
+  clearObservationCount?: number;
+  lastClearObservationAt?: string;
+  lastClearObservationOperationId?: string;
+  lastClearObservationReleaseId?: string;
+  lastClearEvidenceReasonCode?: string;
+  lastClearEvidenceScope?: string;
+  lastAutoResolutionEvidence?: {
+    kind: 'AUTOMATED_RECHECK';
+    reasonCode: string;
+    scope: string;
+    observationCount: number;
+    requiredObservationCount: number;
+    checkedAt: string;
+    operationId: string;
+    releaseId: string;
+  };
+};
+
+interface PositiveAlertResolutionEvidence {
+  reasonCode: string;
+  scope: string;
+}
+
+interface AlertResolutionContext {
+  now: number;
+  jobRead: Awaited<ReturnType<typeof readBoundedAutomationJobStatuses>>;
+  backlog: number;
+  workerExpected: boolean;
+  workerHeartbeatAt: number | null;
+  schedulerExpected: boolean;
+  schedulerHeartbeatAt: number | null;
+  recentFailed: number;
+  accessTradeValid: boolean;
+  killSwitch: boolean;
+  aiWithinLimit: boolean;
+  circuitStates: Map<string, string>;
+  latestSourceObservation: Map<Product['source'], number>;
+  evaluatedProducts: Map<string, Product>;
+  priceHistoryByProduct: Map<string, PriceSnapshot[]>;
+  releaseId: string | null;
+}
+
+export interface AlertEvaluationResult {
+  active: number;
+  created: number;
+  reopened: number;
+  resolved: number;
+  resolutionDeferred: number;
+  jobEvidence: {
+    status: 'COMPLETE' | 'INCOMPLETE' | 'UNAVAILABLE';
+    reasonCodes: string[];
+    currentStateComplete: boolean;
+    historyComplete: boolean;
+    truncated: boolean;
+    retentionBoundary: { field: 'updatedAt'; oldestRetainedAt: string } | null;
+  };
+}
 
 type AlertDraft = Omit<ProductAlert, 'id' | 'groupKey' | 'createdAt' | 'updatedAt' | 'firstSeenAt' | 'lastSeenAt' | 'occurrenceCount' | 'autoResolve' | 'recommendedAction' | 'status' | 'acknowledgedAt' | 'resolvedAt' | 'ignoredReason' | 'cooldownUntil' | 'suppressionUntil'>;
 
@@ -23,6 +115,251 @@ function timestamp(value?: string): number | null {
 function cooldownActive(value: string | undefined, now: number): boolean {
   const parsed = timestamp(value);
   return parsed !== null && parsed > now;
+}
+
+function currentEvidenceTime(
+  value: number | null,
+  now: number,
+  maximumAgeMs: number,
+  notBefore: number | null = null,
+): boolean {
+  return value !== null
+    && value <= now + MAX_EVIDENCE_FUTURE_SKEW_MS
+    && now - value <= maximumAgeMs
+    && (notBefore === null || value >= notBefore);
+}
+
+function hasPositiveJobResolutionEvidence(
+  type: ProductAlert['type'],
+  read: Awaited<ReturnType<typeof readBoundedAutomationJobStatuses>>,
+  now: number,
+): boolean {
+  if (!JOB_EVIDENCE_ALERT_TYPES.has(type)) return true;
+  if (type === 'queue_backlog' || type === 'worker_stale') {
+    return read.currentStateComplete;
+  }
+  if (read.historyComplete) return true;
+  const retainedFrom = Date.parse(read.retentionBoundary?.oldestRetainedAt || '');
+  return read.currentStateComplete
+    && Number.isFinite(retainedFrom)
+    && retainedFrom <= now - FAILURE_ALERT_WINDOW_MS;
+}
+
+function positiveAlertResolutionEvidence(
+  item: ProductAlert,
+  context: AlertResolutionContext,
+): PositiveAlertResolutionEvidence | null {
+  if (item.type === 'credential_missing') {
+    return context.accessTradeValid
+      ? { reasonCode: 'CREDENTIAL_VALID', scope: 'credential:accesstrade' }
+      : null;
+  }
+  if (item.type === 'queue_backlog') {
+    return hasPositiveJobResolutionEvidence(item.type, context.jobRead, context.now)
+      && context.backlog < 25
+      ? { reasonCode: 'QUEUE_BELOW_ALERT_THRESHOLD', scope: 'automation:current_jobs' }
+      : null;
+  }
+  if (item.type === 'worker_stale') {
+    const workerHealthy = !context.workerExpected
+      || currentEvidenceTime(context.workerHeartbeatAt, context.now, 90_000);
+    return hasPositiveJobResolutionEvidence(item.type, context.jobRead, context.now) && workerHealthy
+      ? { reasonCode: 'WORKER_HEARTBEAT_CURRENT_OR_NOT_REQUIRED', scope: 'automation:worker' }
+      : null;
+  }
+  if (item.type === 'scheduler_stale') {
+    const schedulerHealthy = !context.schedulerExpected
+      || currentEvidenceTime(
+        context.schedulerHeartbeatAt,
+        context.now,
+        2 * 60 * 60_000,
+      );
+    return schedulerHealthy
+      ? { reasonCode: 'SCHEDULER_HEARTBEAT_CURRENT_OR_NOT_REQUIRED', scope: 'automation:scheduler' }
+      : null;
+  }
+  if (item.type === 'kill_switch') {
+    return context.killSwitch
+      ? null
+      : { reasonCode: 'KILL_SWITCH_DISABLED', scope: 'automation:control' };
+  }
+  if (item.type === 'task_failure_spike') {
+    return hasPositiveJobResolutionEvidence(item.type, context.jobRead, context.now)
+      && context.recentFailed < 3
+      ? { reasonCode: 'FAILURE_RATE_BELOW_ALERT_THRESHOLD', scope: 'automation:last_24_hours' }
+      : null;
+  }
+  if (item.type === 'ai_limit') {
+    return context.aiWithinLimit
+      ? { reasonCode: 'AI_USAGE_BELOW_ALERT_THRESHOLD', scope: 'ai:current_budget_day' }
+      : null;
+  }
+  if (item.type === 'circuit_open') {
+    const provider = String(item.entityId || '').trim();
+    const state = provider ? context.circuitStates.get(provider) : undefined;
+    return state && state !== 'OPEN'
+      ? { reasonCode: 'CIRCUIT_NOT_OPEN', scope: `circuit:${provider}` }
+      : null;
+  }
+  if (item.type === 'source_stale') {
+    const source = String(item.entityId || '') as Product['source'];
+    const observedAt = context.latestSourceObservation.get(source);
+    const alertLastSeenAt = timestamp(item.lastSeenAt);
+    return currentEvidenceTime(
+      observedAt ?? null,
+      context.now,
+      CONFIG.freshness.productDays * 86_400_000,
+      alertLastSeenAt,
+    )
+      ? { reasonCode: 'SOURCE_OBSERVATION_CURRENT', scope: `source:${source}` }
+      : null;
+  }
+  if (PRODUCT_EVIDENCE_ALERT_TYPES.has(item.type)) {
+    const productId = String(item.entityId || '').trim();
+    const product = productId ? context.evaluatedProducts.get(productId) : undefined;
+    if (!product) return null;
+    const alertLastSeenAt = timestamp(item.lastSeenAt);
+    const productUpdatedAt = timestamp(product.updatedAt);
+    const updatedAfterAlert = currentEvidenceTime(
+      productUpdatedAt,
+      context.now,
+      CONFIG.freshness.productDays * 86_400_000,
+      alertLastSeenAt,
+    );
+    if (item.type === 'duplicate_product') {
+      return updatedAfterAlert
+        && Number.isFinite(product.duplicateConfidence)
+        && Number(product.duplicateConfidence) < CONFIG.thresholds.duplicateMedium
+        ? { reasonCode: 'DUPLICATE_CONFIDENCE_BELOW_THRESHOLD', scope: `product:${productId}` }
+        : null;
+    }
+    if (item.type === 'low_quality') {
+      return updatedAfterAlert
+        && Number.isFinite(product.qualityScore)
+        && Number(product.qualityScore) >= CONFIG.thresholds.qualityNeedsData
+        && product.qualityBand !== 'blocked'
+        ? { reasonCode: 'PRODUCT_QUALITY_ABOVE_ALERT_THRESHOLD', scope: `product:${productId}` }
+        : null;
+    }
+    if (item.type === 'broken_link' || item.type === 'broken_affiliate_link' || item.type === 'broken_image') {
+      const status = item.type === 'broken_link'
+        ? product.linkHealthStatus
+        : item.type === 'broken_affiliate_link'
+          ? product.affiliateHealthStatus
+          : product.imageHealthStatus;
+      const checkedAt = timestamp(item.type === 'broken_link'
+        ? product.linkLastCheckedAt
+        : item.type === 'broken_affiliate_link'
+          ? product.affiliateLastCheckedAt
+          : product.imageLastCheckedAt);
+      return VERIFIED_HEALTH_STATUSES.has(String(status || ''))
+        && currentEvidenceTime(
+          checkedAt,
+          context.now,
+          CONFIG.freshness.linkDays * 86_400_000,
+          alertLastSeenAt,
+        )
+        ? { reasonCode: 'PRODUCT_HEALTH_RECHECK_PASSED', scope: `product:${productId}` }
+        : null;
+    }
+    if (item.type === 'stale_content') {
+      if (product.contentWorkflowStatus !== 'published') {
+        return updatedAfterAlert
+          ? { reasonCode: 'CONTENT_NO_LONGER_PUBLISHED', scope: `product:${productId}` }
+          : null;
+      }
+      const checkedAt = timestamp(product.lastEditorialCheckAt);
+      return currentEvidenceTime(
+        checkedAt,
+        context.now,
+        CONFIG.freshness.editorialDays * 86_400_000,
+        alertLastSeenAt,
+      )
+        ? { reasonCode: 'EDITORIAL_RECHECK_CURRENT', scope: `product:${productId}` }
+        : null;
+    }
+    if (item.type === 'strong_price_variation') {
+      const movement = latestPriceMovement(context.priceHistoryByProduct.get(productId) || []);
+      if (!movement) return null;
+      const capturedAt = timestamp(movement.capturedAt);
+      return capturedAt !== null
+        && movement.percent < CONFIG.thresholds.strongPriceMovementPercent
+        && currentEvidenceTime(
+          capturedAt,
+          context.now,
+          CONFIG.freshness.priceDays * 86_400_000,
+          alertLastSeenAt,
+        )
+        ? { reasonCode: 'PRICE_VARIATION_NO_LONGER_ACTIVE', scope: `product:${productId}` }
+        : null;
+    }
+    if (item.type === 'public_recheck') {
+      if (product.status !== 'published') {
+        return updatedAfterAlert
+          ? { reasonCode: 'PRODUCT_NO_LONGER_PUBLIC', scope: `product:${productId}` }
+          : null;
+      }
+      const priceObservedTimes = [
+        timestamp(product.priceLastChangedAt),
+        ...(context.priceHistoryByProduct.get(productId) || []).map(snapshot => timestamp(snapshot.capturedAt)),
+      ].filter((value): value is number => value !== null);
+      const priceObservedAt = priceObservedTimes.length ? Math.max(...priceObservedTimes) : undefined;
+      return publicRecheckReasons(product, context.now, priceObservedAt).length === 0
+        ? { reasonCode: 'PUBLIC_PRODUCT_RECHECK_CURRENT', scope: `product:${productId}` }
+        : null;
+    }
+    return null;
+  }
+  if (PRODUCT_GROUP_EVIDENCE_ALERT_TYPES.has(item.type)) {
+    const relatedIds = [...new Set((item.relatedEntityIds || []).map(String).filter(Boolean))];
+    const alertLastSeenAt = timestamp(item.lastSeenAt);
+    if (!relatedIds.length || alertLastSeenAt === null) return null;
+    const allHavePositivePriceEvidence = relatedIds.every(id => {
+      const product = context.evaluatedProducts.get(id);
+      if (!product) return false;
+      const snapshots = (context.priceHistoryByProduct.get(id) || [])
+        .filter(snapshot => effectiveSnapshotPrice(snapshot) !== null && timestamp(snapshot.capturedAt) !== null);
+      if (item.type === 'price_history_building') {
+        const latest = Math.max(...snapshots.map(snapshot => timestamp(snapshot.capturedAt)!), -1);
+        return snapshots.length >= 2 && currentEvidenceTime(
+          latest,
+          context.now,
+          CONFIG.freshness.priceDays * 86_400_000,
+          alertLastSeenAt,
+        );
+      }
+      const evidenceTimes = [
+        timestamp(product.priceLastChangedAt),
+        ...snapshots.map(snapshot => timestamp(snapshot.capturedAt)),
+      ].filter((value): value is number => value !== null);
+      const latest = evidenceTimes.length ? Math.max(...evidenceTimes) : null;
+      return currentEvidenceTime(
+        latest,
+        context.now,
+        CONFIG.freshness.priceDays * 86_400_000,
+        alertLastSeenAt,
+      );
+    });
+    return allHavePositivePriceEvidence
+      ? {
+          reasonCode: item.type === 'price_history_building'
+            ? 'PRICE_HISTORY_MINIMUM_REACHED'
+            : 'PRICE_EVIDENCE_CURRENT',
+          scope: `product_group:${relatedIds.slice(0, 20).join(',')}`,
+        }
+      : null;
+  }
+  return null;
+}
+
+function resetClearObservations(item: StoredProductAlert, state: 'ACTIVE' | 'UNKNOWN'): void {
+  item.resolutionEvidenceState = state;
+  item.clearObservationCount = 0;
+  item.lastClearObservationAt = undefined;
+  item.lastClearObservationOperationId = undefined;
+  item.lastClearObservationReleaseId = undefined;
+  item.lastClearEvidenceReasonCode = undefined;
+  item.lastClearEvidenceScope = undefined;
 }
 
 function effectiveSnapshotPrice(snapshot: PriceSnapshot): number | null {
@@ -47,23 +384,27 @@ function publicRecheckReasons(product: Product, now: number, priceObservedAt?: n
   if (product.status !== 'published') return [];
   const reasons: string[] = [];
   const linkCheckedAt = timestamp(product.linkLastCheckedAt);
-  if (linkCheckedAt === null || now - linkCheckedAt > CONFIG.freshness.linkDays * 86_400_000) reasons.push('link');
+  if (!currentEvidenceTime(linkCheckedAt, now, CONFIG.freshness.linkDays * 86_400_000)) reasons.push('link');
   if (product.imageUrl) {
     const imageCheckedAt = timestamp(product.imageLastCheckedAt);
-    if (imageCheckedAt === null || now - imageCheckedAt > CONFIG.freshness.linkDays * 86_400_000) reasons.push('image');
+    if (!currentEvidenceTime(imageCheckedAt, now, CONFIG.freshness.linkDays * 86_400_000)) reasons.push('image');
   }
   const editorialCheckedAt = timestamp(product.lastEditorialCheckAt);
-  if (editorialCheckedAt === null || now - editorialCheckedAt > CONFIG.freshness.editorialDays * 86_400_000) reasons.push('editorial');
+  if (!currentEvidenceTime(editorialCheckedAt, now, CONFIG.freshness.editorialDays * 86_400_000)) reasons.push('editorial');
   const priceCheckedAt = priceObservedAt ?? timestamp(product.lastSeenAt || product.priceLastChangedAt || product.updatedAt);
-  if (priceCheckedAt === null || now - priceCheckedAt > CONFIG.freshness.priceDays * 86_400_000) reasons.push('price');
+  if (!currentEvidenceTime(priceCheckedAt, now, CONFIG.freshness.priceDays * 86_400_000)) reasons.push('price');
   return reasons;
 }
 
-export async function evaluateAlerts(operationId: string, now = Date.now()): Promise<{ active: number; created: number; reopened: number; resolved: number }> {
-  const [products, priceHistory, jobs, control, settings, accessTrade, aiUsage, geminiCircuit, automationCircuit] = await Promise.all([
-    getAllProducts(), readCollection<PriceSnapshot>('price-history'), getAllAutomationJobs(), getAutomationControl(), getAutomationSettings(),
+export async function evaluateAlerts(operationId: string, now = Date.now()): Promise<AlertEvaluationResult> {
+  const [products, priceHistory, jobRead, control, settings, accessTrade, aiUsage, geminiCircuit, automationCircuit] = await Promise.all([
+    getAllProducts(), readCollection<PriceSnapshot>('price-history'),
+    readBoundedAutomationJobStatuses(),
+    getAutomationControl(), getAutomationSettings(),
     getPrimaryCredential('accesstrade'), getAiUsage(now), getCircuit('gemini'), getCircuit('autopilot'),
   ]);
+  const jobs = jobRead.items;
+  const jobEvidenceStatus = jobRead.evidenceClassification;
   const drafts: AlertDraft[] = [];
   const nowIso = new Date(now).toISOString();
   if (!accessTrade || accessTrade.status !== 'valid') drafts.push(alert({
@@ -141,7 +482,8 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
 
   const buildingPriceHistory: Product[] = [];
   const stalePriceProducts: Product[] = [];
-  for (const product of products.slice(0, 2_000)) {
+  const evaluatedProducts = products.slice(0, 2_000);
+  for (const product of evaluatedProducts) {
     const productPriceHistory = priceHistoryByProduct.get(product.id) || [];
     const observedPriceTimes = [timestamp(product.lastSeenAt), timestamp(product.priceLastChangedAt),
       ...productPriceHistory.map(item => timestamp(item.capturedAt))].filter((value): value is number => value !== null);
@@ -216,9 +558,36 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
     relatedEntityIds: stalePriceProducts.map(product => product.id).slice(0, 500),
   }));
 
-  let created = 0; let reopened = 0; let resolved = 0;
+  let created = 0; let reopened = 0; let resolved = 0; let resolutionDeferred = 0;
   const activeKeys = new Set(drafts.map(item => item.deduplicationKey));
-  await runTransaction<ProductAlert>(ALERTS, items => {
+  const releaseIdentity = getReleaseIdentity();
+  const resolutionReleaseId = releaseIdentity.releaseMismatch
+    || releaseIdentity.releaseId === 'unavailable'
+    ? null
+    : releaseIdentity.releaseId;
+  const resolutionContext: AlertResolutionContext = {
+    now,
+    jobRead,
+    backlog,
+    workerExpected,
+    workerHeartbeatAt,
+    schedulerExpected,
+    schedulerHeartbeatAt,
+    recentFailed,
+    accessTradeValid: Boolean(accessTrade && accessTrade.status === 'valid'),
+    killSwitch: control.killSwitch,
+    aiWithinLimit: aiUsage.requests < aiUsage.requestLimit * 0.8
+      && aiUsage.tokens < aiUsage.tokenLimit * 0.8,
+    circuitStates: new Map([
+      [geminiCircuit.provider, geminiCircuit.state],
+      [automationCircuit.provider, automationCircuit.state],
+    ]),
+    latestSourceObservation,
+    evaluatedProducts: new Map(evaluatedProducts.map(product => [product.id, product])),
+    priceHistoryByProduct,
+    releaseId: resolutionReleaseId,
+  };
+  await runTransaction<StoredProductAlert>(ALERTS, items => {
     for (const draft of drafts) {
       const existing = items.find(item => item.deduplicationKey === draft.deduplicationKey);
       if (!existing) {
@@ -226,6 +595,7 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
           ...draft, id: generateId(), groupKey: draft.deduplicationKey, recommendedAction: draft.suggestedAction,
           status: 'new', createdAt: nowIso, updatedAt: nowIso, firstSeenAt: nowIso, lastSeenAt: nowIso,
           occurrenceCount: Math.max(1, draft.relatedEntityIds?.length || 1), autoResolve: true,
+          resolutionEvidenceState: 'ACTIVE', clearObservationCount: 0,
         }); created += 1;
       } else if (existing.status === 'resolved' || (existing.status === 'ignored' && !cooldownActive(existing.cooldownUntil, now))) {
         Object.assign(existing, draft, {
@@ -234,6 +604,7 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
           firstSeenAt: existing.firstSeenAt || existing.createdAt, lastSeenAt: nowIso,
           occurrenceCount: Math.max(1, draft.relatedEntityIds?.length || 1), autoResolve: true,
         });
+        resetClearObservations(existing, 'ACTIVE');
         reopened += 1;
       } else if (!['resolved', 'ignored'].includes(existing.status)) {
         Object.assign(existing, draft, {
@@ -241,19 +612,188 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
           firstSeenAt: existing.firstSeenAt || existing.createdAt, lastSeenAt: nowIso,
           occurrenceCount: Math.max(1, draft.relatedEntityIds?.length || 1), autoResolve: true,
         });
+        resetClearObservations(existing, 'ACTIVE');
+      } else {
+        resetClearObservations(existing, 'ACTIVE');
       }
     }
     for (const existing of items) {
       if (!activeKeys.has(existing.deduplicationKey) && !['resolved', 'ignored'].includes(existing.status)) {
+        const evidence = positiveAlertResolutionEvidence(existing, resolutionContext);
+        if (!evidence) {
+          resetClearObservations(existing, 'UNKNOWN');
+          resolutionDeferred += 1;
+          continue;
+        }
+        if (!resolutionContext.releaseId) {
+          resetClearObservations(existing, 'UNKNOWN');
+          resolutionDeferred += 1;
+          continue;
+        }
+        const evidenceScope = evidence.scope.slice(0, 500);
+        const previousObservedAt = Date.parse(existing.lastClearObservationAt || '');
+        const previousCount = Math.max(0, existing.clearObservationCount || 0);
+        const previousObservationCompatible = previousCount > 0
+          && Number.isFinite(previousObservedAt)
+          && now > previousObservedAt
+          && now - previousObservedAt <= AUTO_RESOLUTION_MAX_OBSERVATION_GAP_MS
+          && existing.lastClearObservationReleaseId === resolutionContext.releaseId
+          && existing.lastClearEvidenceReasonCode === evidence.reasonCode
+          && existing.lastClearEvidenceScope === evidenceScope;
+        if (previousCount > 0 && !previousObservationCompatible) {
+          resetClearObservations(existing, 'UNKNOWN');
+        }
+        const newObservation = existing.lastClearObservationOperationId !== operationId;
+        if (newObservation) {
+          existing.clearObservationCount = Math.min(
+            AUTO_RESOLUTION_OBSERVATIONS_REQUIRED,
+            Math.max(0, existing.clearObservationCount || 0) + 1,
+          );
+          existing.lastClearObservationAt = nowIso;
+          existing.lastClearObservationOperationId = operationId;
+          existing.lastClearObservationReleaseId = resolutionContext.releaseId;
+          existing.lastClearEvidenceReasonCode = evidence.reasonCode;
+          existing.lastClearEvidenceScope = evidenceScope;
+        }
+        if ((existing.clearObservationCount || 0) < AUTO_RESOLUTION_OBSERVATIONS_REQUIRED) {
+          existing.resolutionEvidenceState = 'PASS_PENDING';
+          existing.updatedAt = nowIso;
+          resolutionDeferred += 1;
+          continue;
+        }
         existing.status = 'resolved'; existing.resolvedAt = nowIso; existing.updatedAt = nowIso;
-        existing.cooldownUntil = undefined; resolved += 1;
+        existing.cooldownUntil = undefined;
+        existing.resolutionEvidenceState = 'PASS_CONFIRMED';
+        existing.lastAutoResolutionEvidence = {
+          kind: 'AUTOMATED_RECHECK',
+          reasonCode: evidence.reasonCode,
+          scope: evidenceScope,
+          observationCount: existing.clearObservationCount || AUTO_RESOLUTION_OBSERVATIONS_REQUIRED,
+          requiredObservationCount: AUTO_RESOLUTION_OBSERVATIONS_REQUIRED,
+          checkedAt: nowIso,
+          operationId: operationId.slice(0, 200),
+          releaseId: resolutionContext.releaseId,
+        };
+        resolved += 1;
       }
     }
     const retentionCutoff = now - CONFIG.retention.resolvedAlertDays * 86_400_000;
     return items.filter(item => !item.resolvedAt || Date.parse(item.resolvedAt) >= retentionCutoff).slice(-CONFIG.limits.alerts);
   });
   const active = (await listAlerts({ limit: CONFIG.limits.alerts })).filter(item => !['resolved', 'ignored'].includes(item.status)).length;
-  return { active, created, reopened, resolved };
+  return {
+    active,
+    created,
+    reopened,
+    resolved,
+    resolutionDeferred,
+    jobEvidence: {
+      status: jobEvidenceStatus,
+      reasonCodes: jobRead.reasonCodes.length
+        ? jobRead.reasonCodes
+        : jobEvidenceStatus === 'COMPLETE'
+          ? []
+          : [jobEvidenceStatus === 'UNAVAILABLE'
+            ? 'JOB_READ_MODEL_UNAVAILABLE'
+            : 'JOB_READ_MODEL_INCOMPLETE'],
+      currentStateComplete: jobRead.currentStateComplete,
+      historyComplete: jobRead.historyComplete,
+      truncated: jobRead.truncated,
+      retentionBoundary: jobRead.retentionBoundary,
+    },
+  };
+}
+
+export async function readAlertDashboardView(options: {
+  status?: ProductAlert['status'];
+  limit?: number;
+} = {}) {
+  const limit = Math.max(1, Math.min(options.limit || 100, 500));
+  const snapshot = await readBoundedCollectionSnapshot<ProductAlert>(ALERTS, {
+    maximumItems: CONFIG.limits.alerts,
+    maximumBytes: ALERT_READ_MAXIMUM_BYTES,
+  });
+  if (!snapshot.metadata.collectionPresent) {
+    throw new Error('ALERT_COLLECTION_UNAVAILABLE');
+  }
+
+  const validStatuses = new Set<ProductAlert['status']>([
+    'new',
+    'acknowledged',
+    'in_progress',
+    'resolved',
+    'ignored',
+  ]);
+  const validItems = snapshot.items.filter(item =>
+    item
+    && typeof item.id === 'string'
+    && typeof item.deduplicationKey === 'string'
+    && typeof item.updatedAt === 'string'
+    && validStatuses.has(item.status));
+  if (validItems.length !== snapshot.items.length) {
+    throw new Error('ALERT_COLLECTION_INVALID_RECORD');
+  }
+
+  const unique = new Map<string, ProductAlert>();
+  for (const item of [...validItems].sort((left, right) =>
+    Date.parse(right.updatedAt) - Date.parse(left.updatedAt))) {
+    if (!unique.has(item.deduplicationKey)) unique.set(item.deduplicationKey, item);
+  }
+  const retained = [...unique.values()];
+  const active = retained
+    .filter(item => !['resolved', 'ignored'].includes(item.status))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const historical = retained
+    .filter(item => ['resolved', 'ignored'].includes(item.status))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const selected = options.status
+    ? retained
+        .filter(item => item.status === options.status)
+        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    : [...active, ...historical];
+  const items = selected.slice(0, limit);
+  const returnedHistoricalCount = items.filter(item =>
+    ['resolved', 'ignored'].includes(item.status)).length;
+
+  return {
+    items,
+    summary: {
+      total: null,
+      retainedTotal: retained.length,
+      matchingRetainedCount: selected.length,
+      returnedCount: items.length,
+      limit,
+      bounded: true,
+      hasMore: selected.length > items.length,
+      truncated: selected.length > items.length,
+      source: 'bounded_alert_collection',
+      unresolved: active.length,
+      critical: active.filter(item => item.severity === 'critical').length,
+      important: active.filter(item => item.severity === 'important').length,
+      resolved: null,
+      resolvedRetained: historical.filter(item => item.status === 'resolved').length,
+    },
+    evidence: {
+      status: 'COMPLETE' as const,
+      source: 'bounded_alert_collection',
+      collectionPresent: true,
+      currentStateComplete: true,
+      historyComplete: false,
+      reasonCodes: ['ALERT_HISTORY_RETENTION_BOUNDED'],
+      retainedRecordCount: retained.length,
+      duplicateRecordsSuppressed: validItems.length - retained.length,
+    },
+    history: {
+      total: null,
+      retainedCount: historical.length,
+      returnedCount: returnedHistoricalCount,
+      limit,
+      bounded: true,
+      hasMore: historical.length > returnedHistoricalCount,
+      source: 'bounded_retained_alert_history',
+      retentionDays: CONFIG.retention.resolvedAlertDays,
+    },
+  };
 }
 
 export async function listAlerts(options: { status?: ProductAlert['status']; limit?: number } = {}): Promise<ProductAlert[]> {
@@ -269,20 +809,21 @@ export async function listAlerts(options: { status?: ProductAlert['status']; lim
 
 export async function updateAlertStatuses(ids: string[], status: ProductAlert['status'], reason?: string, nowMs = Date.now()): Promise<ProductAlert[]> {
   if (status === 'ignored' && String(reason || '').trim().length < 5) throw new Error('REASON_REQUIRED');
+  if (status === 'resolved') throw new Error('RECHECK_EVIDENCE_REQUIRED');
   const targets = new Set(ids.map(id => String(id).trim()).filter(Boolean).slice(0, 100));
   if (!targets.size) return [];
   const updated: ProductAlert[] = [];
-  await runTransaction<ProductAlert>(ALERTS, items => {
+  await runTransaction<StoredProductAlert>(ALERTS, items => {
     const now = new Date(nowMs).toISOString();
     for (const item of items) {
       if (!targets.has(item.id)) continue;
       item.status = status; item.updatedAt = now; item.lastSeenAt ||= item.updatedAt; item.firstSeenAt ||= item.createdAt;
       item.groupKey ||= item.deduplicationKey; item.recommendedAction ||= item.suggestedAction; item.autoResolve ??= true;
       item.occurrenceCount ||= 1;
+      resetClearObservations(item, 'UNKNOWN');
       if (status === 'new') { item.acknowledgedAt = undefined; item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
       if (status === 'acknowledged') { item.acknowledgedAt = now; item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
       if (status === 'in_progress') { item.resolvedAt = undefined; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
-      if (status === 'resolved') { item.resolvedAt = now; item.ignoredReason = undefined; item.cooldownUntil = undefined; }
       if (status === 'ignored') {
         item.resolvedAt = undefined; item.ignoredReason = reason!.trim().slice(0, 500);
         item.cooldownUntil = new Date(nowMs + CONFIG.cooldown.alertHours * 60 * 60_000).toISOString();

@@ -129,22 +129,27 @@ async function main() {
     const duplicate = await automation.createAutomationJob({ type: 'HEALTH_CHECK', payload: {}, idempotencyKey: 'prompt11-retry', requestedBy: 'prompt11-test', riskLevel: 'LOW' });
     assert.equal(duplicate.created, false); assert.equal(duplicate.job.id, first.job.id);
     const claimed = (await automation.claimAutomationJobs('prompt11-worker', 1))[0];
-    const retry = await automation.failAutomationJob(claimed.id, 'prompt11-worker', 'PROVIDER_TIMEOUT', new Error('provider timed out; authorization=hidden'));
+    const retry = await automation.failAutomationJob(claimed.id, 'prompt11-worker', 'PROVIDER_TIMEOUT', new Error('provider timed out; authorization=hidden'), {
+      claimToken: claimed.claimToken,
+    });
     assert.equal(retry.status, 'RETRY_SCHEDULED'); assert.equal(retry.lastErrorCategory, 'PROVIDER_TIMEOUT'); assert.equal(retry.retryable, true); assert.equal(retry.deadLetterReason, undefined);
     const terminalJob = await automation.createAutomationJob({ type: 'HEALTH_CHECK', payload: {}, idempotencyKey: 'prompt11-dead-letter', requestedBy: 'prompt11-test', riskLevel: 'LOW' });
     const claimedTerminal = (await automation.claimAutomationJobs('prompt11-worker', 1))[0];
     assert.equal(claimedTerminal.id, terminalJob.job.id);
-    const dead = await automation.failAutomationJob(claimedTerminal.id, 'prompt11-worker', 'VALIDATION_FAILED', new Error('invalid source data'));
+    const dead = await automation.failAutomationJob(claimedTerminal.id, 'prompt11-worker', 'VALIDATION_FAILED', new Error('invalid source data'), {
+      claimToken: claimedTerminal.claimToken,
+    });
     assert.equal(dead.status, 'FAILED'); assert.equal(dead.retryable, false); assert.match(dead.deadLetterReason, /^VALIDATION_FAILED:/);
   });
 
   await test('scheduler dashboard fails closed when nextRunAt is overdue despite a fresh heartbeat', async () => {
-    await reset('automation-jobs', 'automation-control', 'automation-audit', 'automation-role-leases', 'automation-role-conflicts', 'runtime-health', 'products', 'product-sources', 'candidate-queue', 'outbound-events', 'token-vault');
+    await reset('automation-jobs', 'automation-control', 'automation-audit', 'runtime-role-leases', 'runtime-role-conflicts', 'runtime-health', 'products', 'product-sources', 'candidate-queue', 'outbound-events', 'token-vault');
     await automationSettings.updateAutomationSettings({ enabled: true, launchEnabled: false, safePublish: true });
     const now = Date.now();
     await automation.updateAutomationControl({ schedulerPaused: false, schedulerHeartbeatAt: new Date(now).toISOString(), schedulerNextRunAt: new Date(now - 5 * 60_000).toISOString() }, 'prompt11-test');
     const result = await dashboard.buildAutomationDashboard('today');
-    assert.equal(result.scheduler.status, 'stale'); assert.equal(result.scheduler.blockReason, 'NEXT_RUN_OVERDUE');
+    assert.equal(result.scheduler.status, 'stale'); assert.equal(result.scheduler.blockReason, 'HEARTBEAT_OR_LEASE_STALE');
+    assert.equal(result.scheduler.scheduleWarning, 'NEXT_RUN_OVERDUE');
   });
 
   await test('normal new-price state is grouped as info and stale products are grouped once', async () => {

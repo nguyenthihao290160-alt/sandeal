@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
-import { clientRequestMessage, requestClientJson } from '@/lib/dashboard/clientRequest';
+import { requestClientJson } from '@/lib/dashboard/clientRequest';
+import {
+  appHealthRequestFailureMessage,
+  appHealthRefreshFailed,
+  appHealthRefreshStarted,
+  appHealthRefreshSucceeded,
+  initialAppHealthRefreshState,
+} from '@/lib/dashboard/appHealthRefreshState';
 import styles from '../operations.module.css';
 
 type Capability = {
@@ -21,6 +28,14 @@ type Capability = {
 };
 
 type Health = {
+  generatedAt: string;
+  partial: boolean;
+  components: Record<string, {
+    status: 'available' | 'degraded' | 'unavailable' | 'insufficient_data';
+    checkedAt: string;
+    stale: boolean;
+    reasonCode: string;
+  }>;
   release: {
     releaseId: string;
     embeddedBuildId: string;
@@ -43,6 +58,7 @@ type Health = {
     publishBlockedByPolicy?: boolean;
   };
   runtime?: {
+    dataStatus?: 'CURRENT' | 'STALE';
     publishSafe: boolean;
     reasons: string[];
     historicalReasons?: string[];
@@ -125,7 +141,13 @@ type Health = {
       valid: boolean;
       reasonCode?: string;
     }>;
-  };
+  } | null;
+  jobReadModel?: {
+    stale: boolean;
+    availability: 'AVAILABLE' | 'DEGRADED' | 'UNAVAILABLE';
+    evidenceClassification?: 'COMPLETE' | 'INCOMPLETE' | 'UNAVAILABLE';
+    reasonCodes: string[];
+  } | null;
 };
 
 const STATE: Record<string, string> = {
@@ -160,6 +182,23 @@ const AI_LABELS: Record<Capability['aiStatus'], string> = {
   UNAVAILABLE: 'Chưa sẵn sàng',
 };
 
+const COMPONENT_LABELS: Record<string, string> = {
+  core: 'Dữ liệu vận hành cốt lõi',
+  historySummary: 'Bản tổng hợp hàng đợi',
+  providerGemini: 'Nhà cung cấp AI',
+  providerAccessTrade: 'Nguồn AccessTrade',
+  runtime: 'Bản chụp Runtime Guardian',
+  operational: 'Sức khỏe vận hành',
+  slo: 'Bằng chứng SLO',
+};
+
+const COMPONENT_STATUS_LABELS: Record<Health['components'][string]['status'], string> = {
+  available: 'Đã xác minh',
+  degraded: 'Bằng chứng chưa đầy đủ',
+  unavailable: 'Không thể xác minh',
+  insufficient_data: 'Chưa đủ dữ liệu',
+};
+
 function stateClass(value: string) {
   if (['active', 'ready', 'CLOSED', 'CLOSED_HEALTHY', 'READY', 'OPERATIONAL', 'PASS', 'MATCH', 'ACTIVE', 'OFF'].includes(value)) return `${styles.badge} ${styles.success}`;
   if (['paused', 'degraded', 'configured', 'configured_not_ready', 'not_configured', 'unverified', 'HALF_OPEN', 'RECOVERY_OBSERVING', 'RECOVERED_PENDING_CONFIRMATION', 'PAUSED', 'BLOCKED', 'LIMITED', 'UNVERIFIED', 'SHADOW', 'OBSERVE', 'CANARY'].includes(value)) {
@@ -179,29 +218,50 @@ function duration(value: number | null) {
 }
 
 export default function SystemHealthPage() {
-  const [health, setHealth] = useState<Health | null>(null);
+  const [refreshState, setRefreshState] = useState(() => initialAppHealthRefreshState<Health>());
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const requestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
+  const health = refreshState.snapshot;
+  const error = refreshState.message;
   const load = useCallback(async () => {
     requestRef.current?.abort(new DOMException('Superseded health request', 'AbortError'));
     const controller = new AbortController();
     requestRef.current = controller;
     const sequence = ++requestSequenceRef.current;
     setLoading(true);
-    setError('');
+    setRefreshState(current => appHealthRefreshStarted(current));
     try {
       const body = await requestClientJson<{ ok: boolean; message?: string; data?: Health }>('/api/automation/health', {
         cache: 'no-store',
         signal: controller.signal,
+        timeoutMs: 20_000,
+        maximumResponseBytes: 512 * 1024,
       });
       if (!body.ok || !body.data) throw new Error(body.message || 'Không thể xác minh trạng thái hệ thống.');
       if (controller.signal.aborted || sequence !== requestSequenceRef.current) return;
-      setHealth(body.data);
+      const staleProjection = body.data.jobReadModel?.stale === true
+        || body.data.components.historySummary?.stale === true;
+      const incompleteProjection = body.data.jobReadModel?.evidenceClassification === 'INCOMPLETE'
+        || body.data.jobReadModel?.evidenceClassification === 'UNAVAILABLE';
+      const partialMessage = body.data.partial
+        ? staleProjection
+          ? 'Bản tổng hợp hàng đợi đã cũ; các thành phần đã xác minh vẫn được hiển thị.'
+          : incompleteProjection
+            ? 'Bằng chứng hàng đợi chưa đầy đủ; số không không được hiểu là không có tác vụ.'
+            : 'Một số thành phần đang suy giảm hoặc chưa có đủ dữ liệu; đây không phải trạng thái khỏe đầy đủ.'
+        : '';
+      setRefreshState(current => appHealthRefreshSucceeded(current, body.data!, {
+        receivedAt: new Date().toISOString(),
+        stale: staleProjection,
+        message: partialMessage,
+      }));
     } catch (cause) {
       if (!controller.signal.aborted && sequence === requestSequenceRef.current) {
-        setError(clientRequestMessage(cause, 'Không thể xác minh trạng thái hệ thống.'));
+        setRefreshState(current => appHealthRefreshFailed(
+          current,
+          appHealthRequestFailureMessage(cause),
+        ));
       }
     } finally {
       if (requestRef.current === controller) requestRef.current = null;
@@ -224,6 +284,8 @@ export default function SystemHealthPage() {
   const operational = health?.operational;
   const recovery = operational?.recovery;
   const slo = operational?.slo;
+  const componentIssues = Object.entries(health?.components || {})
+    .filter(([, component]) => component.status !== 'available');
 
   return (
     <main className={styles.page} aria-busy={loading}>
@@ -237,16 +299,38 @@ export default function SystemHealthPage() {
         </button>
       </header>
 
-      {loading && !health && <div className={styles.notice}>Đang kiểm tra tình trạng hệ thống...</div>}
+      {loading && !health && <div className={styles.notice} role="status" aria-live="polite">Đang kiểm tra tình trạng hệ thống...</div>}
+      {loading && health && <div className={styles.notice} role="status" aria-live="polite">Đang làm mới; bản chụp hiện tại vẫn được hiển thị.</div>}
       {error && (
-        <div className={`${styles.notice} ${styles.errorBox}`} role="alert">
-          <strong>Không thể xác minh tình trạng hệ thống.</strong> {error} Dữ liệu không bị thay đổi.{' '}
+        <div
+          className={`${styles.notice} ${health && refreshState.stale ? styles.warning : styles.errorBox}`}
+          role={health ? 'status' : 'alert'}
+          aria-live="polite"
+        >
+          <strong>{refreshState.stale
+            ? 'Đang hiển thị bản chụp cũ.'
+            : health?.partial
+              ? 'Sức khỏe một phần.'
+              : 'Không thể xác minh tình trạng hệ thống.'}</strong> {error}{' '}
           <button className={styles.button} onClick={() => void load()}>Thử lại</button>
         </div>
       )}
 
       {health && (
         <>
+          {componentIssues.length > 0 && (
+            <section className={`${styles.notice} ${styles.warning}`} aria-label="Bằng chứng sức khỏe chưa đầy đủ">
+              <strong>Một số bằng chứng chưa đầy đủ.</strong>
+              <ul>
+                {componentIssues.map(([name, component]) => (
+                  <li key={name} data-reason-code={component.reasonCode}>
+                    {COMPONENT_LABELS[name] || name}: {COMPONENT_STATUS_LABELS[component.status]}
+                    {' '}(<code>{component.reasonCode}</code>)
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           <section className={styles.statusRow} aria-label="Tổng quan capability">
             <article className={styles.metric}>
               <div className={styles.metricTop}><span className={styles.metricIcon}><DashboardIcon name="health" size={20} /></span><span>Khả năng phục vụ</span></div>

@@ -85,3 +85,10 @@ export function isFeatureActive(
 ): boolean {
   return getFeatureRolloutState(feature, environment).mode === 'ACTIVE';
 }
+
+export function isContinuousWorkerPoolEnabled(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const state = getFeatureRolloutState('WORKER_CONTINUOUS_POOL_V2', environment);
+  return state.valid && state.mode === 'ACTIVE';
+}

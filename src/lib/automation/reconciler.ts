@@ -3,7 +3,15 @@ import { clearOrphanedCandidateBridge, listCandidateQueue, recoverStaleProcessin
 import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct } from '@/lib/storage/products';
 import { bridgeCandidatesToDurableJobs } from './candidateBridge';
 import { completeJournalEffect, listInconsistentJournals } from './operationJournal';
-import { approveAutomationJob, cancelAutomationJob, completeAutomationParentJob, createAutomationJob, getAllAutomationJobs, getAutomationControl } from './store';
+import {
+  approveAutomationJob,
+  cancelAutomationJob,
+  completeAutomationParentJob,
+  createAutomationJob,
+  getAllAutomationJobs,
+  getAutomationControl,
+  rebuildAutomationJobReadModelsFromDurable,
+} from './store';
 import type { AutomationJob } from './types';
 import { reconcilePendingLifecycleTransitions } from '@/lib/autonomous/lifecycleStore';
 import { recordSuccessfulShadowCycle } from './canaryController';
@@ -24,6 +32,7 @@ export interface ReconcilerResult {
   duplicateJobsCancelled: number;
   staleApprovalsExpired: number;
   lifecycleTransitionsReconciled: number;
+  jobProjectionsRebuilt: number;
   skipped: number;
 }
 
@@ -45,7 +54,10 @@ function descendantsOf(parentId: string, jobs: AutomationJob[]): AutomationJob[]
 }
 
 export async function runAutonomousReconciler(nowMs = Date.now()): Promise<ReconcilerResult> {
-  const result: ReconcilerResult = { inspected: 0, repaired: 0, bridgeJobs: 0, publishJobs: 0, monitorJobs: 0, staleCandidates: 0, journalsReconciled: 0, orphans: 0, parentJobsCompleted: 0, shadowCyclesRecorded: 0, duplicateJobsCancelled: 0, staleApprovalsExpired: 0, lifecycleTransitionsReconciled: 0, skipped: 0 };
+  // Deliberate maintenance-only full-history scan. This durable worker job
+  // repairs lineage and never runs inside an interactive health/dashboard
+  // request; current-state consumers use compact projections.
+  const result: ReconcilerResult = { inspected: 0, repaired: 0, bridgeJobs: 0, publishJobs: 0, monitorJobs: 0, staleCandidates: 0, journalsReconciled: 0, orphans: 0, parentJobsCompleted: 0, shadowCyclesRecorded: 0, duplicateJobsCancelled: 0, staleApprovalsExpired: 0, lifecycleTransitionsReconciled: 0, jobProjectionsRebuilt: 0, skipped: 0 };
   const control = await getAutomationControl();
   result.staleCandidates = await recoverStaleProcessing(nowMs);
   result.repaired += result.staleCandidates;
@@ -185,5 +197,10 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
     result.journalsReconciled += 1;
     result.repaired += 1;
   }
+  const projectionManifest = await rebuildAutomationJobReadModelsFromDurable(
+    await getAllAutomationJobs(),
+    nowMs,
+  );
+  result.jobProjectionsRebuilt = projectionManifest.retainedJobCount;
   return result;
 }

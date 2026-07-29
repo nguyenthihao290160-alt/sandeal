@@ -6,10 +6,17 @@ import path from 'path';
 
 import { applyStorageBulkMutations } from './bulkMutation';
 import { storageErrorCode } from './storageErrors';
+import {
+  STORAGE_MAX_BOUNDED_BYTES,
+  STORAGE_MAX_BOUNDED_ITEMS,
+  STORAGE_MAX_PAGE_SIZE,
+} from './types';
 import type {
   StorageAdapter,
   StorageBulkMutation,
   StorageBulkResult,
+  StorageBoundedCollectionOptions,
+  StorageBoundedCollectionResult,
   StoragePageOptions,
   StorageTransaction,
 } from './types';
@@ -217,10 +224,132 @@ async function readCollection<T>(collection: string): Promise<T[]> {
   return readCollectionUnlocked<T>(collection);
 }
 
+function boundedCollectionError(code: string, collection: string): Error {
+  const error = new Error(`${code}:${collection}`) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
+
+function validateBoundedCollectionOptions(
+  collection: string,
+  options: StorageBoundedCollectionOptions,
+): { maximumItems: number; maximumBytes: number } {
+  if (
+    !Number.isFinite(options.maximumItems)
+    || !Number.isInteger(options.maximumItems)
+    || options.maximumItems <= 0
+    || options.maximumItems > STORAGE_MAX_BOUNDED_ITEMS
+    || !Number.isFinite(options.maximumBytes)
+    || !Number.isInteger(options.maximumBytes)
+    || options.maximumBytes <= 0
+    || options.maximumBytes > STORAGE_MAX_BOUNDED_BYTES
+  ) {
+    throw boundedCollectionError('BOUNDED_COLLECTION_OPTIONS_INVALID', collection);
+  }
+  return {
+    maximumItems: options.maximumItems,
+    maximumBytes: options.maximumBytes,
+  };
+}
+
+/**
+ * Compact projections use this path so an unexpectedly large or corrupt read
+ * model cannot turn an interactive request into a full-history parse. Unlike
+ * durable collection recovery, normal read-model reads never consult backups.
+ */
+async function readBoundedCollectionSnapshot<T>(
+  collection: string,
+  options: StorageBoundedCollectionOptions,
+): Promise<StorageBoundedCollectionResult<T>> {
+  const { maximumItems, maximumBytes } = validateBoundedCollectionOptions(collection, options);
+  await ensureDataDir();
+  const filePath = getFilePath(collection);
+  const stat = await fs.stat(filePath).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!stat) {
+    return {
+      items: [],
+      metadata: {
+        driver: 'file',
+        collectionPresent: false,
+        itemCount: 0,
+        observedBytes: 0,
+        maximumItems,
+        maximumBytes,
+        truncated: false,
+        queryCount: 1,
+      },
+    };
+  }
+  if (stat.size > maximumBytes) {
+    throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', collection);
+  }
+  const raw = await fs.readFile(filePath, 'utf8');
+  if (Buffer.byteLength(raw, 'utf8') > maximumBytes) {
+    throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', collection);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw boundedCollectionError('BOUNDED_COLLECTION_INVALID_JSON', collection);
+  }
+  if (!Array.isArray(parsed)) {
+    throw boundedCollectionError('BOUNDED_COLLECTION_INVALID_ROOT', collection);
+  }
+  if (parsed.length > maximumItems) {
+    throw boundedCollectionError('BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED', collection);
+  }
+  return {
+    items: parsed as T[],
+    metadata: {
+      driver: 'file',
+      collectionPresent: true,
+      itemCount: parsed.length,
+      observedBytes: Buffer.byteLength(raw, 'utf8'),
+      maximumItems,
+      maximumBytes,
+      truncated: false,
+      queryCount: 1,
+    },
+  };
+}
+
+async function readBoundedCollection<T>(
+  collection: string,
+  options: StorageBoundedCollectionOptions,
+): Promise<T[]> {
+  return (await readBoundedCollectionSnapshot<T>(collection, options)).items;
+}
+
+const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]*$/;
+
+function validatePageOptions(options: StoragePageOptions): void {
+  const filterFields = Object.keys(options.filters || {});
+  const filterValues = Object.values(options.filters || {});
+  if (
+    !Number.isInteger(options.page)
+    || options.page < 1
+    || !Number.isInteger(options.pageSize)
+    || options.pageSize < 1
+    || options.pageSize > STORAGE_MAX_PAGE_SIZE
+    || options.page > Math.floor(Number.MAX_SAFE_INTEGER / options.pageSize)
+    || filterFields.some(field => !SAFE_PAGE_FIELD.test(field))
+    || filterValues.some(value => typeof value !== 'string')
+    || (options.sort?.field && !SAFE_PAGE_FIELD.test(options.sort.field))
+  ) {
+    throw boundedCollectionError('INVALID_STORAGE_QUERY', 'page');
+  }
+}
+
 async function readCollectionPage<T>(collection: string, options: StoragePageOptions) {
-  let items = await readCollectionUnlocked<T>(collection);
+  validatePageOptions(options);
+  let items = (await readCollectionUnlocked<T>(collection))
+    .map((item, order) => ({ item, order }));
   for (const [field, expected] of Object.entries(options.filters || {})) {
-    items = items.filter((item) => (
+    items = items.filter(({ item }) => (
       item !== null
       && typeof item === 'object'
       && String((item as Record<string, unknown>)[field] ?? '') === expected
@@ -230,19 +359,20 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
     const { field, direction } = options.sort;
     const multiplier = direction === 'desc' ? -1 : 1;
     items.sort((left, right) => {
-      const leftValue = left !== null && typeof left === 'object'
-        ? String((left as Record<string, unknown>)[field] ?? '')
+      const leftValue = left.item !== null && typeof left.item === 'object'
+        ? String((left.item as Record<string, unknown>)[field] ?? '')
         : '';
-      const rightValue = right !== null && typeof right === 'object'
-        ? String((right as Record<string, unknown>)[field] ?? '')
+      const rightValue = right.item !== null && typeof right.item === 'object'
+        ? String((right.item as Record<string, unknown>)[field] ?? '')
         : '';
-      return leftValue.localeCompare(rightValue) * multiplier;
+      const compared = leftValue.localeCompare(rightValue) * multiplier;
+      return compared || left.order - right.order;
     });
   }
   const totalItems = items.length;
   const start = (options.page - 1) * options.pageSize;
   return {
-    items: items.slice(start, start + options.pageSize),
+    items: items.slice(start, start + options.pageSize).map(({ item }) => item),
     totalItems,
     queryCount: 1,
   };
@@ -278,6 +408,19 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+async function renameAtomicWithRetry(source: string, target: string): Promise<void> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await fs.rename(source, target);
+      return;
+    } catch (error) {
+      const code = String((error as NodeJS.ErrnoException).code || '');
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(code) || attempt === 5) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(160, 10 * (2 ** attempt))));
+    }
+  }
+}
+
 /** Write and fsync a compact snapshot, then atomically replace the collection. */
 async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promise<void> {
   if (!Array.isArray(data)) throw new Error(`Invalid collection payload: ${collection}`);
@@ -297,7 +440,7 @@ async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promis
       throw new Error('atomic_write_validation_failed');
     }
     await refreshBackup(filePath);
-    await fs.rename(tmpPath, filePath);
+    await renameAtomicWithRetry(tmpPath, filePath);
     await syncDirectory(path.dirname(filePath));
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -429,6 +572,8 @@ export const fileStorageAdapter: StorageAdapter = {
   getDataDir,
   ensureDataDir,
   readCollection,
+  readBoundedCollection,
+  readBoundedCollectionSnapshot,
   readCollectionPage,
   writeCollection,
   backupCollection,

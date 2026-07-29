@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const testRoot = path.join(process.cwd(), '.test-tmp', `master-m2-slo-runnable-${process.pid}-${Date.now()}`);
+const allowedTempRoot = path.resolve(process.cwd(), '.test-tmp');
+if (path.dirname(path.resolve(testRoot)) !== allowedTempRoot) throw new Error('UNSAFE_TEST_ROOT');
 fs.mkdirSync(testRoot, { recursive: true });
 process.env.SANDEAL_DATA_DIR = testRoot;
 process.env.NODE_ENV = 'test';
@@ -224,6 +226,7 @@ async function main() {
         completedAt: iso(now - 1_000),
       },
     ]);
+    await adapter.writeCollection('automation-job-projections', await adapter.readCollection('automation-jobs'));
     await adapter.writeCollection('automation-job-attempts', [
       attempt('immediate', {
         createdAt: iso(now - 15_000),
@@ -287,6 +290,7 @@ async function main() {
       claimedAt: iso(now - 3_000),
       completedAt: iso(now - 1_000),
     }]);
+    await adapter.writeCollection('automation-job-projections', await adapter.readCollection('automation-jobs'));
     await adapter.writeCollection('automation-job-attempts', [{
       ...attempt('older-attempt', {
         createdAt: iso(now - 600_000),
@@ -313,7 +317,9 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-main().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => fs.rmSync(testRoot, { recursive: true, force: true }));

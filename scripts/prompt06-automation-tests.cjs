@@ -77,9 +77,9 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
   });
 
   await test('lỗi tạm thời retry có giới hạn, lỗi xác thực không retry', async () => {
-    await reset(); const timeout = await create({ idempotencyKey: 'timeout-job-001' }); await store.claimAutomationJobs('worker-a', 1); await store.failAutomationJob(timeout.job.id, 'worker-a', 'TIMEOUT', 'timeout');
+    await reset(); const timeout = await create({ idempotencyKey: 'timeout-job-001' }); const [timeoutClaim] = await store.claimAutomationJobs('worker-a', 1); await store.failAutomationJob(timeout.job.id, 'worker-a', 'TIMEOUT', 'timeout', { claimToken: timeoutClaim.claimToken });
     equal((await store.getAutomationJob(timeout.job.id)).status, 'RETRY_SCHEDULED');
-    const authJob = await create({ idempotencyKey: 'auth-job-000001' }); await store.claimAutomationJobs('worker-a', 1); await store.failAutomationJob(authJob.job.id, 'worker-a', 'AUTH_REQUIRED', 'not authorized');
+    const authJob = await create({ idempotencyKey: 'auth-job-000001' }); const [authClaim] = await store.claimAutomationJobs('worker-a', 1); await store.failAutomationJob(authJob.job.id, 'worker-a', 'AUTH_REQUIRED', 'not authorized', { claimToken: authClaim.claimToken });
     equal((await store.getAutomationJob(authJob.job.id)).status, 'FAILED');
     assert(store.isRetryableAutomationError('RATE_LIMITED')); assert(!store.isRetryableAutomationError('VALIDATION_ERROR'));
   });
@@ -125,7 +125,7 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
 
   await test('hủy và chạy lại chỉ cho phép transition hợp lệ', async () => {
     await reset(); const pending = await create({ idempotencyKey: 'cancel-job-00001' }); equal((await store.cancelAutomationJob(pending.job.id, 'admin', 'Không còn cần thiết')).status, 'CANCELLED'); equal(await store.retryAutomationJob(pending.job.id, 'admin'), null);
-    const failed = await create({ idempotencyKey: 'retry-job-000001' }); await store.claimAutomationJobs('worker-a', 1); await store.failAutomationJob(failed.job.id, 'worker-a', 'VALIDATION_ERROR', 'invalid'); equal((await store.retryAutomationJob(failed.job.id, 'admin')).status, 'PENDING');
+    const failed = await create({ idempotencyKey: 'retry-job-000001' }); const [failedClaim] = await store.claimAutomationJobs('worker-a', 1); await store.failAutomationJob(failed.job.id, 'worker-a', 'VALIDATION_ERROR', 'invalid', { claimToken: failedClaim.claimToken }); equal((await store.retryAutomationJob(failed.job.id, 'admin')).status, 'PENDING');
   });
 
   await test('nhật ký loại bỏ secret đệ quy', async () => {

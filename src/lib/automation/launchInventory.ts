@@ -6,10 +6,10 @@ import { getKeywordYieldReport } from '@/lib/bots/productPipeline';
 import { getLatestRuntimeHealth } from './runtimeGuardian';
 import {
   appendAutomationAudit,
-  getAllAutomationJobs,
   getAutomationControl,
   getAutomationQueueStats,
 } from './store';
+import { readBoundedAutomationJobStatuses } from './jobHealthSummary';
 import {
   getAutomationSettings,
   sanitizeAutomationSettings,
@@ -20,6 +20,11 @@ import { getQueueStats, listCandidateQueue } from '@/lib/storage/candidateQueue'
 import { getAllProducts } from '@/lib/storage/products';
 import type { AutomationJob } from './types';
 import type { Product } from '@/lib/types';
+import {
+  classifyAutomationJobEvidence,
+  completeAutomationJobEvidence,
+  type AutomationJobEvidence,
+} from './truth';
 
 export const BOOTSTRAP_LAUNCH_PROFILE = Object.freeze({
   intervalHours: 3,
@@ -319,6 +324,8 @@ function sourceBlocker(status: SourceProviderStatus, reason: string): string | n
 
 function operatorRecommendation(code: string): string {
   const recommendations: Record<string, string> = {
+    JOB_READ_MODEL_UNAVAILABLE: 'Khôi phục bản đọc hàng đợi trước khi kết luận pipeline chưa chạy.',
+    JOB_READ_MODEL_INCOMPLETE: 'Chờ hoặc xây dựng lại bản đọc hàng đợi trước khi kết luận pipeline chưa chạy.',
     SOURCE_NOT_CONFIGURED: 'Cấu hình hoặc xác minh AccessTrade; nếu chưa sẵn sàng, dùng Import Center với datafeed được phép.',
     SOURCE_CONFIGURED_NOT_PROBED: 'Chạy probe nguồn có kiểm soát trước khi bật ingestion.',
     SOURCE_NO_RESULTS: 'Xem keyword kém hiệu quả và dùng datafeed được owner phê duyệt nếu nguồn tiếp tục trả 0.',
@@ -336,11 +343,40 @@ function operatorRecommendation(code: string): string {
   return recommendations[code] || 'Mở dashboard để xử lý blocker đầu tiên; không bulk publish hoặc bỏ qua Safe Publish.';
 }
 
-export async function buildZeroProductDiagnostic() {
-  const [jobs, products, candidateCounts, candidates, jobCounts, settings, control, runtime, launchReady] = await Promise.all([
-    getAllAutomationJobs(), getAllProducts(), getQueueStats(), listCandidateQueue(), getAutomationQueueStats(),
+interface SharedAutomationJobs {
+  jobs?: AutomationJob[];
+  jobEvidence?: AutomationJobEvidence;
+}
+
+async function resolveSharedAutomationJobs(shared: SharedAutomationJobs) {
+  if (shared.jobs !== undefined) {
+    return {
+      jobs: shared.jobs,
+      jobEvidence: shared.jobEvidence || completeAutomationJobEvidence(),
+    };
+  }
+  const read = await readBoundedAutomationJobStatuses();
+  return {
+    jobs: read.items,
+    jobEvidence: classifyAutomationJobEvidence(read),
+  };
+}
+
+export function automationJobCandidateId(
+  job: Pick<AutomationJob, 'payload'> & { resourceCandidateId?: string },
+): string | null {
+  const value = job.resourceCandidateId || job.payload?.candidateId;
+  const normalized = String(value || '').trim();
+  return normalized || null;
+}
+
+export async function buildZeroProductDiagnostic(shared: SharedAutomationJobs = {}) {
+  const [jobInput, products, candidateCounts, candidates, jobCounts, settings, control, runtime, launchReady] = await Promise.all([
+    resolveSharedAutomationJobs(shared),
+    getAllProducts(), getQueueStats(), listCandidateQueue(), getAutomationQueueStats(),
     getAutomationSettings(), getAutomationControl(), getLatestRuntimeHealth(), buildLaunchReadyReport(),
   ]);
+  const { jobs, jobEvidence } = jobInput;
   const sourceJob = latestJob(jobs, ['AUTO_PILOT', 'PRODUCT_SCAN']);
   const sourceResult = object(sourceJob?.result);
   const sourceAdapter = createDefaultSourceAdapterRegistry().get('accesstrade');
@@ -362,6 +398,11 @@ export async function buildZeroProductDiagnostic() {
   const workerStale = !workerMissing && (!Number.isFinite(workerHeartbeat) || Date.now() - workerHeartbeat > 90_000);
   const blockers: string[] = [];
 
+  if (publicProductCount === 0 && !sourceJob && jobEvidence.status !== 'COMPLETE') {
+    blockers.push(jobEvidence.status === 'UNAVAILABLE'
+      ? 'JOB_READ_MODEL_UNAVAILABLE'
+      : 'JOB_READ_MODEL_INCOMPLETE');
+  }
   if (publicProductCount === 0 && launchReady.totalReady > 0) {
     blockers.push(control.killSwitch ? 'KILL_SWITCH' : control.publishPaused ? 'PUBLISH_PAUSED' : !settings.launchEnabled ? 'LAUNCH_DISABLED'
       : control.effectiveMode === 'OBSERVE' ? 'MODE_OBSERVE' : control.effectiveMode === 'SHADOW' ? 'MODE_SHADOW' : 'PRODUCTS_READY_FOR_LAUNCH');
@@ -411,6 +452,7 @@ export async function buildZeroProductDiagnostic() {
       normalized: Number(sourceMetrics.normalized || 0), reason: sourceReason,
     } : null,
     lastWorkerSuccess: latestWorkerSuccess?.completedAt || latestWorkerSuccess?.updatedAt || null,
+    jobEvidence,
     lastSchedulerSuccess: control.schedulerLastRunAt || null,
     nextAutomaticAction: primaryBlocker === 'PRODUCTS_READY_FOR_LAUNCH' ? 'PREVIEW_WAVE_1'
       : primaryBlocker === 'NO_ELIGIBLE_PRODUCTS' ? 'REVIEW_LAUNCH_BLOCKERS'
@@ -420,14 +462,22 @@ export async function buildZeroProductDiagnostic() {
   };
 }
 
-export async function buildCandidateProcessingMetrics(launchReadyCount?: number) {
-  const [jobs, candidates, products] = await Promise.all([getAllAutomationJobs(), listCandidateQueue(), getAllProducts()]);
+export async function buildCandidateProcessingMetrics(
+  launchReadyCount?: number,
+  shared: SharedAutomationJobs = {},
+) {
+  const [jobInput, candidates, products] = await Promise.all([
+    resolveSharedAutomationJobs(shared),
+    listCandidateQueue(),
+    getAllProducts(),
+  ]);
+  const { jobs, jobEvidence } = jobInput;
   const processJobs = jobs.filter(job => job.type === 'PROCESS_CANDIDATE');
   const terminal = processJobs.filter(job => ['SUCCEEDED', 'FAILED', 'BLOCKED'].includes(job.status));
   const durations = terminal.map(job => Date.parse(job.completedAt || job.updatedAt) - Date.parse(job.startedAt || job.createdAt)).filter(value => Number.isFinite(value) && value >= 0);
   const candidateById = new Map(candidates.map(candidate => [candidate.id, candidate]));
   const waits = processJobs.map(job => {
-    const candidate = candidateById.get(String(job.payload.candidateId || ''));
+    const candidate = candidateById.get(automationJobCandidateId(job) || '');
     return candidate && job.startedAt ? Date.parse(job.startedAt) - Date.parse(candidate.createdAt) : Number.NaN;
   }).filter(value => Number.isFinite(value) && value >= 0);
   const span = terminal.length > 1
@@ -438,21 +488,37 @@ export async function buildCandidateProcessingMetrics(launchReadyCount?: number)
   const reasons = new Map<string, number>();
   for (const candidate of candidates) for (const reason of String(candidate.delayReason || '').split(',').filter(Boolean)) reasons.set(reason, (reasons.get(reason) || 0) + 1);
   return {
-    processingRatePerMinute: span > 0 ? Number((terminal.length / (span / 60_000)).toFixed(2)) : null,
-    averageCandidateDurationMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : null,
-    queueWaitP50: percentile(waits, 0.5),
-    queueWaitP95: percentile(waits, 0.95),
-    networkFailureRate: percentage(terminal.filter(job => job.status === 'FAILED' && /timeout|network|dns|rate/i.test(`${job.lastErrorCode || ''}:${job.lastErrorMessage || ''}`)).length, terminal.length),
+    dataStatus: jobEvidence.status,
+    reasonCodes: jobEvidence.reasonCodes,
+    processingRatePerMinute: jobEvidence.status === 'COMPLETE' && span > 0
+      ? Number((terminal.length / (span / 60_000)).toFixed(2))
+      : null,
+    averageCandidateDurationMs: jobEvidence.status === 'COMPLETE' && durations.length
+      ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length)
+      : null,
+    queueWaitP50: jobEvidence.status === 'COMPLETE' ? percentile(waits, 0.5) : null,
+    queueWaitP95: jobEvidence.status === 'COMPLETE' ? percentile(waits, 0.95) : null,
+    networkFailureRate: jobEvidence.status === 'COMPLETE'
+      ? percentage(terminal.filter(job => job.status === 'FAILED' && /timeout|network|dns|rate/i.test(`${job.lastErrorCode || ''}:${job.lastErrorMessage || ''}`)).length, terminal.length)
+      : null,
     validToReadyRate: percentage(ready, candidates.filter(candidate => ['completed', 'needs_review', 'discarded'].includes(candidate.status)).length),
     readyToPublishedRate: percentage(published, ready + published),
     topBlockReasons: Object.fromEntries([...reasons].sort((a, b) => b[1] - a[1]).slice(0, 10)),
-    sampleSize: terminal.length,
+    sampleSize: jobEvidence.status === 'COMPLETE' ? terminal.length : null,
   };
 }
 
-export async function buildLaunchInventoryOverview() {
+export async function buildLaunchInventoryOverview(shared: SharedAutomationJobs = {}) {
+  const resolved = await resolveSharedAutomationJobs(shared);
+  const completeShared = { jobs: resolved.jobs, jobEvidence: resolved.jobEvidence };
   const [diagnostic, launchReady, bootstrap, keywords] = await Promise.all([
-    buildZeroProductDiagnostic(), buildLaunchReadyReport(), previewBootstrapLaunchProfile(), getKeywordYieldReport(5),
+    buildZeroProductDiagnostic(completeShared), buildLaunchReadyReport(), previewBootstrapLaunchProfile(), getKeywordYieldReport(5),
   ]);
-  return { diagnostic, launchReady, bootstrap, keywords, processing: await buildCandidateProcessingMetrics(launchReady.totalReady) };
+  return {
+    diagnostic,
+    launchReady,
+    bootstrap,
+    keywords,
+    processing: await buildCandidateProcessingMetrics(launchReady.totalReady, completeShared),
+  };
 }

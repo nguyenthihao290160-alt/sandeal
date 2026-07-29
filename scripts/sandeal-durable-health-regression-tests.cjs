@@ -153,13 +153,164 @@ function jobEnvelope(job) {
     assert.equal(takeover.event, 'TAKEN_OVER');
     assert.ok(takeover.ownership.fencingToken > first.ownership.fencingToken);
     await assert.rejects(
-      store.completeAutomationJob(created.job.id, 'worker-old:1', { stale: true }, first.ownership),
+      store.completeAutomationJob(created.job.id, 'worker-old:1', { stale: true }, {
+        claimToken: claimed[0].claimToken,
+        ownership: first.ownership,
+      }),
       /WORKER_FENCING_REJECTED/,
     );
     assert.equal((await store.getAutomationJob(created.job.id)).status, 'RUNNING');
     const productsSource = fs.readFileSync(path.join(process.cwd(), 'src/lib/storage/products.ts'), 'utf8');
     assert.match(productsSource, /isRuntimeRoleOwner\('WORKER'/);
     assert.match(productsSource, /throw new Error\('WORKER_FENCING_REJECTED'\)/);
+  });
+
+  await test('same-worker stale claim tokens cannot mutate a reclaimed job', async () => {
+    await reset();
+    const created = await Promise.all([
+      store.createAutomationJob(jobInput('claim-token-update-001', {
+        dryRun: true,
+        payload: { productIds: ['claim-token-update'], healthTarget: 'all' },
+      })),
+      store.createAutomationJob(jobInput('claim-token-manual-001', {
+        dryRun: true,
+        payload: { productIds: ['claim-token-manual'], healthTarget: 'all' },
+      })),
+      store.createAutomationJob(jobInput('claim-token-children-001', {
+        dryRun: true,
+        payload: { productIds: ['claim-token-children'], healthTarget: 'all' },
+      })),
+      store.createAutomationJob(jobInput('claim-token-complete-001', {
+        dryRun: true,
+        payload: { productIds: ['claim-token-complete'], healthTarget: 'all' },
+      })),
+      store.createAutomationJob(jobInput('claim-token-fail-001', {
+        dryRun: true,
+        payload: { productIds: ['claim-token-fail'], healthTarget: 'all' },
+      })),
+    ]);
+    const claimed = await store.claimAutomationJobs('same-worker', 5);
+    assert.equal(claimed.length, created.length);
+    const byId = new Map(claimed.map(job => [job.id, job]));
+    const checkpoint = {
+      version: 1,
+      completedSteps: [],
+      pendingSteps: ['pending-step'],
+      outputs: {},
+      executionModes: ['LOCAL_RULES'],
+      inputHash: 'input-hash',
+      updatedAt: new Date().toISOString(),
+    };
+    const disclosure = {
+      status: 'WAITING_FOR_MANUAL_INPUT',
+      requestedMode: 'AUTO',
+      executionMode: 'MANUAL_INPUT',
+      provider: 'manual',
+      warnings: [],
+      limitations: [],
+      aiRequests: 0,
+      externalRequests: 0,
+      completedSteps: [],
+      pendingSteps: ['pending-step'],
+    };
+    const rotateClaim = async (createdJob, suffix) => {
+      const original = byId.get(createdJob.job.id);
+      assert.ok(original?.claimToken);
+      const replacement = `replacement-claim-token-${suffix}`;
+      await adapter.runTransaction('automation-jobs', jobs => {
+        const durable = jobs.find(job => job.id === original.id);
+        durable.claimToken = replacement;
+        return jobs;
+      });
+      return {
+        id: original.id,
+        stale: { claimToken: original.claimToken },
+        current: { claimToken: replacement },
+      };
+    };
+
+    const updateClaim = await rotateClaim(created[0], 'update');
+    assert.equal(await store.updateAutomationJobExecution(
+      updateClaim.id,
+      'same-worker',
+      { executionMode: 'LOCAL_RULES' },
+      updateClaim.stale,
+    ), null);
+    assert.ok(await store.updateAutomationJobExecution(
+      updateClaim.id,
+      'same-worker',
+      { executionMode: 'LOCAL_RULES' },
+      updateClaim.current,
+    ));
+
+    const manualClaim = await rotateClaim(created[1], 'manual');
+    assert.equal(await store.waitAutomationJobForManual(
+      manualClaim.id,
+      'same-worker',
+      'manual-task',
+      checkpoint,
+      disclosure,
+      manualClaim.stale,
+    ), null);
+    assert.equal((await store.waitAutomationJobForManual(
+      manualClaim.id,
+      'same-worker',
+      'manual-task',
+      checkpoint,
+      disclosure,
+      manualClaim.current,
+    )).status, 'WAITING_FOR_MANUAL_INPUT');
+
+    const childrenOriginal = byId.get(created[2].job.id);
+    await store.updateAutomationJobExecution(
+      childrenOriginal.id,
+      'same-worker',
+      { checkpoint },
+      { claimToken: childrenOriginal.claimToken },
+    );
+    const childrenClaim = await rotateClaim(created[2], 'children');
+    assert.equal(await store.waitAutomationJobForChildren(
+      childrenClaim.id,
+      'same-worker',
+      { childSummary: {} },
+      childrenClaim.stale,
+    ), null);
+    assert.equal((await store.waitAutomationJobForChildren(
+      childrenClaim.id,
+      'same-worker',
+      { childSummary: {} },
+      childrenClaim.current,
+    )).status, 'WAITING_CHILDREN');
+
+    const completeClaim = await rotateClaim(created[3], 'complete');
+    assert.equal(await store.completeAutomationJob(
+      completeClaim.id,
+      'same-worker',
+      { stale: true },
+      completeClaim.stale,
+    ), null);
+    assert.equal((await store.completeAutomationJob(
+      completeClaim.id,
+      'same-worker',
+      { completed: true },
+      completeClaim.current,
+    )).status, 'SUCCEEDED');
+
+    const failClaim = await rotateClaim(created[4], 'fail');
+    assert.equal(await store.failAutomationJob(
+      failClaim.id,
+      'same-worker',
+      'VALIDATION_FAILED',
+      new Error('stale attempt'),
+      { ...failClaim.stale },
+    ), null);
+    assert.equal((await store.failAutomationJob(
+      failClaim.id,
+      'same-worker',
+      'VALIDATION_FAILED',
+      new Error('current attempt'),
+      { ...failClaim.current },
+    )).status, 'FAILED');
   });
 
   await test('FileStorage giữ đủ update khi nhiều transaction chạy đồng thời', async () => {
@@ -208,7 +359,9 @@ function jobEnvelope(job) {
     const created = await store.createAutomationJob(jobInput('terminal-projection-race-001', { dryRun: true }));
     const [claimed] = await store.claimAutomationJobs('projection-worker', 1);
     assert.equal(claimed.id, created.job.id);
-    await store.completeAutomationJob(claimed.id, 'projection-worker', { completed: true });
+    await store.completeAutomationJob(claimed.id, 'projection-worker', { completed: true }, {
+      claimToken: claimed.claimToken,
+    });
     const staleHeartbeat = await store.heartbeatAutomationJob(claimed.id, 'projection-worker', 60_000, claimed.claimToken);
     assert.equal(staleHeartbeat, false);
     assert.equal((await store.getAutomationJobProjection(claimed.id)).status, 'SUCCEEDED');

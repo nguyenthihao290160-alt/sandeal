@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readCollection, runTransaction } from '@/lib/storage/adapter';
+import { readBoundedCollectionSnapshot, readCollection, runTransaction } from '@/lib/storage/adapter';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import type { Product } from '@/lib/types';
 import {
   advanceCanaryWaveAfterHealthyEvaluation,
@@ -9,26 +10,32 @@ import {
 } from './canaryController';
 import type { RuntimeHealthSnapshot } from './runtimeGuardian';
 import { getFeatureRolloutState, type FeatureRolloutMode } from './featureRollout';
+import { readBoundedAutomationJobStatuses } from './jobHealthSummary';
 import {
-  advanceRuntimeRecoveryState,
+  advanceRuntimeReasonRecoveryState,
   confirmRuntimeRecoveryClosed,
   getRuntimeRecoveryPolicy,
   type RuntimeRecoveryEvidenceSummary,
   type RuntimeRecoveryMeasurementState,
   type RuntimeRecoveryState,
 } from './runtimeRecoveryState';
-import { getAutomationControl, updateAutomationControl } from './store';
+import {
+  applyRuntimePublishBlock,
+  appendAutomationAuditOnce,
+  clearRuntimePublishReasons,
+  flushRuntimeControlApplicationAudits,
+  getAutomationControl,
+} from './store';
 import type { AutomationControlState, AutomationJob, AutomationJobAttempt } from './types';
 
 const SNAPSHOT_COLLECTION = 'automation-slo-snapshots';
-const JOB_COLLECTION = 'automation-jobs';
 const JOB_ATTEMPT_COLLECTION = 'automation-job-attempts';
 const RUNTIME_COLLECTION = 'runtime-health';
 const PUBLICATION_AUDIT_COLLECTION = 'publication-audit';
 const OUTBOUND_COLLECTION = 'automation-outbound-events';
 const PRODUCT_COLLECTION = 'products';
 
-export const SLO_ERROR_BUDGET_RULE_VERSION = 'automation-slo-error-budget-v1';
+export const SLO_ERROR_BUDGET_RULE_VERSION = 'automation-slo-error-budget-v3';
 export const DEFAULT_SLO_WINDOW_MS = 24 * 60 * 60_000;
 export const DEFAULT_SLO_MINIMUM_SAMPLES = 5;
 export const DEFAULT_RUNTIME_FRESHNESS_MS = 2 * 60_000;
@@ -54,6 +61,7 @@ export interface SloMetric {
   value: number | boolean | null;
   sampleSize: number;
   status: MetricStatus;
+  evaluationStatus: 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA' | 'NOT_APPLICABLE';
   measurementState: RuntimeRecoveryMeasurementState;
   stateReason: string;
   target: string;
@@ -78,8 +86,53 @@ export interface AutomationSloMeasurement {
     pendingMonitorTargets: number;
     runtimeSnapshots: number;
     publicationAttempts: number;
+    publishBlockedDecisions: number;
     outboundEvents: number;
     publicProducts: number;
+    zeroTouchEligible: number;
+    zeroTouchSucceeded: number;
+    zeroTouchBlocked: number;
+    zeroTouchFailed: number;
+    zeroTouchPartial: number;
+    pickupCreatedAtAttempts: number;
+    pickupScheduledAttempts: number;
+    pickupRetryAttempts: number;
+    pickupCarriedIntoWindow: number;
+  };
+  jobProjection: {
+    availability: 'AVAILABLE' | 'DEGRADED' | 'UNAVAILABLE';
+    evidenceClassification: 'COMPLETE' | 'INCOMPLETE' | 'UNAVAILABLE';
+    source: 'job-status-projection-v1';
+    collectionPresent: boolean;
+    currentStateComplete: boolean;
+    historyComplete: boolean;
+    windowComplete: boolean;
+    windowStartedAt: string;
+    truncated: boolean;
+    coverageComplete: boolean;
+    reasonCodes: string[];
+    observedRange: {
+      earliestCreatedAt: string | null;
+      latestCreatedAt: string | null;
+      earliestUpdatedAt: string | null;
+      latestUpdatedAt: string | null;
+    };
+    retentionBoundary: { field: 'updatedAt'; oldestRetainedAt: string } | null;
+  };
+  sourceAvailability: {
+    jobAttempts: boolean;
+    runtimeSnapshots: boolean;
+    publicationAudits: boolean;
+    outboundEvents: boolean;
+    products: boolean;
+  };
+  sourceCompleteness: {
+    jobAttemptsWindow: boolean;
+    runtimeWindow: boolean;
+    publicationAuditWindow: boolean;
+    outboundEventWindow: boolean;
+    currentProducts: boolean;
+    reasonCodes: string[];
   };
   workerHeartbeatFresh: boolean | null;
   schedulerHeartbeatFresh: boolean | null;
@@ -105,8 +158,26 @@ export interface AutomationSloMeasurement {
   runtimeReasons: string[];
   publicRouteHealthy: boolean | null;
   metrics: SloMetric[];
+  metricEvidence: SloMetricEvidence[];
+  releaseIdentity: string;
   evidenceHash: string;
   measuredAt: string;
+}
+
+export interface SloMetricEvidence {
+  metricKey: SloMetric['key'];
+  source:
+    | 'runtime-health-current'
+    | 'current-job-state'
+    | 'job-attempt-history'
+    | 'bounded-job-history'
+    | 'publication-history'
+    | 'current-products';
+  observedAt: string | null;
+  complete: boolean;
+  releaseIdentity: string;
+  reasonCodes: string[];
+  references: string[];
 }
 
 export interface ErrorBudgetEvaluation {
@@ -119,6 +190,8 @@ export interface ErrorBudgetEvaluation {
   sampleSize: number;
   reasons: string[];
   severeReasons: string[];
+  blockingMetrics: Array<{ metricKey: SloMetric['key']; reasonCode: string; sampleSize: number }>;
+  unavailableMetrics: Array<{ metricKey: SloMetric['key']; reasonCode: string; sampleSize: number }>;
   evaluatedAt: string;
 }
 
@@ -189,6 +262,14 @@ function percentile(values: number[], percentileValue: number): number | null {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.max(0, Math.ceil(sorted.length * percentileValue) - 1)];
+}
+
+function latestIsoTimestamp(values: unknown[]): string | null {
+  const latest = values
+    .map(validTimestamp)
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => right - left)[0];
+  return latest === undefined ? null : new Date(latest).toISOString();
 }
 
 function p50(values: number[]): number | null {
@@ -279,6 +360,7 @@ function booleanMetric(key: SloMetric['key'], value: boolean | null, target: str
     value,
     sampleSize: value === null ? 0 : 1,
     status: value === null ? 'NO_DATA' : value ? 'PASS' : 'BREACH',
+    evaluationStatus: value === null ? 'INSUFFICIENT_DATA' : value ? 'PASS' : 'BREACH',
     measurementState: value === null ? 'INSUFFICIENT_DATA' : 'MEASURED',
     stateReason: value === null ? 'METRIC_EVIDENCE_MISSING' : 'METRIC_MEASURED',
     target,
@@ -291,6 +373,9 @@ function upperBoundMetric(key: SloMetric['key'], value: number | null, sampleSiz
     value,
     sampleSize,
     status: value === null || sampleSize < minimumSamples ? 'NO_DATA' : value <= maximum ? 'PASS' : 'BREACH',
+    evaluationStatus: value === null || sampleSize < minimumSamples
+      ? 'INSUFFICIENT_DATA'
+      : value <= maximum ? 'PASS' : 'BREACH',
     measurementState: value === null || sampleSize < minimumSamples ? 'INSUFFICIENT_DATA' : 'MEASURED',
     stateReason: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
     target,
@@ -303,6 +388,9 @@ function lowerBoundMetric(key: SloMetric['key'], value: number | null, sampleSiz
     value,
     sampleSize,
     status: value === null || sampleSize < minimumSamples ? 'NO_DATA' : value >= minimum ? 'PASS' : 'BREACH',
+    evaluationStatus: value === null || sampleSize < minimumSamples
+      ? 'INSUFFICIENT_DATA'
+      : value >= minimum ? 'PASS' : 'BREACH',
     measurementState: value === null || sampleSize < minimumSamples ? 'INSUFFICIENT_DATA' : 'MEASURED',
     stateReason: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
     target,
@@ -313,7 +401,18 @@ function notApplicableMetric(metric: SloMetric, stateReason: string): SloMetric 
   return {
     ...metric,
     status: 'NOT_APPLICABLE',
+    evaluationStatus: 'NOT_APPLICABLE',
     measurementState: 'NOT_APPLICABLE',
+    stateReason,
+  };
+}
+
+function unavailableMetric(metric: SloMetric, stateReason: string): SloMetric {
+  return {
+    ...metric,
+    status: 'NO_DATA',
+    evaluationStatus: 'INSUFFICIENT_DATA',
+    measurementState: 'INSUFFICIENT_DATA',
     stateReason,
   };
 }
@@ -347,10 +446,92 @@ function jobObservationTime(job: AutomationJob): string {
   return job.completedAt || job.updatedAt || job.createdAt;
 }
 
-function isZeroTouchJob(job: AutomationJob): boolean {
-  if (!['AUTO_PILOT', 'PROCESS_CANDIDATE', 'AUTO_SAFE_PUBLISH', 'POST_PUBLISH_MONITOR', 'RECONCILE_AUTOMATION'].includes(job.type)) return false;
-  if (job.approvalStatus !== 'NOT_REQUIRED' || job.manualTaskId || job.executionMode === 'MANUAL_INPUT') return false;
-  return !/(?:owner|dashboard|manual|client|user)/i.test(job.requestedBy);
+function isZeroTouchEligibleJob(job: AutomationJob): boolean {
+  if (!['AUTO_PILOT', 'PROCESS_CANDIDATE', 'AUTO_SAFE_PUBLISH', 'POST_PUBLISH_MONITOR'].includes(job.type)) return false;
+  if (
+    job.approvalStatus !== 'NOT_REQUIRED'
+    || job.manualTaskId
+    || job.executionMode === 'MANUAL_INPUT'
+    || job.requestedExecutionMode === 'MANUAL_ONLY'
+    || job.dryRun
+  ) return false;
+  const triggerIdentity = [
+    job.requestedBy,
+    job.sourceMetadata?.producer,
+    job.sourceMetadata?.trigger,
+  ].filter(Boolean).join(':');
+  return !/(?:owner|dashboard|manual|client|user)/i.test(triggerIdentity);
+}
+
+function autoPilotChildOutcome(
+  job: AutomationJob,
+): 'SUCCEEDED' | 'BLOCKED' | 'FAILED' | 'PARTIAL' | null {
+  const childSummary = job.result?.childSummary;
+  if (!childSummary || typeof childSummary !== 'object') return null;
+  const summary = childSummary as {
+    total?: unknown;
+    byStatus?: Record<string, unknown>;
+  };
+  if (!summary.byStatus || typeof summary.byStatus !== 'object') return 'PARTIAL';
+  const count = (status: string) => Math.max(0, Number(summary.byStatus?.[status]) || 0);
+  if (count('FAILED') > 0 || count('CANCELLED') > 0) return 'FAILED';
+  if (count('BLOCKED') > 0 || count('WAITING_FOR_MANUAL_INPUT') > 0) return 'BLOCKED';
+  const total = Math.max(0, Number(summary.total) || 0);
+  const succeeded = count('SUCCEEDED');
+  return total > 0 && succeeded === total ? 'SUCCEEDED' : 'PARTIAL';
+}
+
+function isSuccessfulZeroTouchOutcome(job: AutomationJob): boolean {
+  if (
+    job.status !== 'SUCCEEDED'
+    || job.outcomeStatus === 'PARTIALLY_COMPLETED'
+    || (job.checkpoint?.pendingSteps.length || 0) > 0
+    || (job.disclosure?.pendingSteps.length || 0) > 0
+  ) return false;
+  if (job.type === 'AUTO_SAFE_PUBLISH') {
+    return job.result?.published === true
+      && job.result?.evidenceVerified === true
+      && typeof job.result?.productId === 'string';
+  }
+  if (job.type === 'POST_PUBLISH_MONITOR') {
+    return job.result?.outcome === 'HEALTHY';
+  }
+  if (job.type === 'PROCESS_CANDIDATE') {
+    return job.result?.candidateStatus === 'completed'
+      && typeof job.result?.productId === 'string';
+  }
+  if (job.type === 'AUTO_PILOT') {
+    const executionStatus = String(job.result?.executionStatus || '');
+    const summary = job.result?.summary;
+    const childOutcome = autoPilotChildOutcome(job);
+    return ['COMPLETED_WITH_LOCAL_RULES', 'COMPLETED_WITH_LOCAL_TEMPLATE', 'COMPLETED_WITH_API'].includes(executionStatus)
+      && summary !== null
+      && typeof summary === 'object'
+      && Number((summary as { failed?: unknown }).failed) === 0
+      && (childOutcome === null || childOutcome === 'SUCCEEDED');
+  }
+  return false;
+}
+
+type ZeroTouchOutcomeClass = 'SUCCEEDED' | 'BLOCKED' | 'FAILED' | 'PARTIAL';
+
+function classifyZeroTouchOutcome(job: AutomationJob): ZeroTouchOutcomeClass {
+  const childOutcome = job.type === 'AUTO_PILOT' ? autoPilotChildOutcome(job) : null;
+  if (childOutcome === 'FAILED') return 'FAILED';
+  if (job.status === 'BLOCKED' || childOutcome === 'BLOCKED') return 'BLOCKED';
+  if (
+    job.outcomeStatus === 'PARTIALLY_COMPLETED'
+    || (job.checkpoint?.pendingSteps.length || 0) > 0
+    || (job.disclosure?.pendingSteps.length || 0) > 0
+    || childOutcome === 'PARTIAL'
+  ) return 'PARTIAL';
+  if (
+    (job.type === 'AUTO_SAFE_PUBLISH' && job.result?.published === false)
+    || (job.type === 'PROCESS_CANDIDATE'
+      && ['needs_review', 'discarded'].includes(String(job.result?.candidateStatus || '')))
+  ) return 'BLOCKED';
+  if (isSuccessfulZeroTouchOutcome(job)) return 'SUCCEEDED';
+  return 'FAILED';
 }
 
 function countDuplicateKeys(keys: string[]): number {
@@ -359,9 +540,61 @@ function countDuplicateKeys(keys: string[]): number {
   return [...counts.values()].reduce((total, count) => total + Math.max(0, count - 1), 0);
 }
 
-async function readPersistedTelemetry<T>(collection: string): Promise<T[]> {
-  try { return await readCollection<T>(collection); }
-  catch { return []; }
+interface PersistedTelemetryRead<T> {
+  items: T[];
+  available: boolean;
+  collectionPresent: boolean;
+  atCapacity: boolean;
+  maximumItems: number;
+  reasonCodes: string[];
+}
+
+async function readPersistedTelemetry<T>(
+  collection: string,
+  maximumItems: number,
+  maximumBytes: number,
+): Promise<PersistedTelemetryRead<T>> {
+  try {
+    const snapshot = await readBoundedCollectionSnapshot<T>(collection, {
+      maximumItems,
+      maximumBytes,
+    });
+    const collectionPresent = snapshot.metadata.collectionPresent;
+    return {
+      items: snapshot.items,
+      available: collectionPresent,
+      collectionPresent,
+      atCapacity: snapshot.items.length >= maximumItems,
+      maximumItems,
+      reasonCodes: collectionPresent ? [] : ['TELEMETRY_COLLECTION_MISSING'],
+    };
+  } catch (error) {
+    const code = error instanceof Error && /LIMIT_EXCEEDED/.test(error.message)
+      ? 'TELEMETRY_RETENTION_BOUND_EXCEEDED'
+      : 'TELEMETRY_COLLECTION_UNAVAILABLE';
+    return {
+      items: [],
+      available: false,
+      collectionPresent: false,
+      atCapacity: false,
+      maximumItems,
+      reasonCodes: [code],
+    };
+  }
+}
+
+function retainedWindowComplete<T>(
+  read: PersistedTelemetryRead<T>,
+  windowStartedAt: number,
+  observedAt: (item: T) => unknown,
+): boolean {
+  if (!read.available) return false;
+  if (!read.atCapacity) return true;
+  const earliest = read.items
+    .map(item => validTimestamp(observedAt(item)))
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right)[0];
+  return earliest !== undefined && earliest <= windowStartedAt;
 }
 
 export async function measureAutomationSlo(options: MeasureAutomationSloOptions = {}): Promise<AutomationSloMeasurement> {
@@ -370,14 +603,40 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const minimumSamples = Math.max(1, options.minimumSamples ?? DEFAULT_SLO_MINIMUM_SAMPLES);
   const runtimeFreshnessMs = Math.max(30_000, options.runtimeFreshnessMs ?? DEFAULT_RUNTIME_FRESHNESS_MS);
   const startedAt = now - windowMs;
-  const [allJobs, allAttempts, runtimeSnapshots, allAudits, allEvents, allProducts] = await Promise.all([
-    readPersistedTelemetry<AutomationJob>(JOB_COLLECTION),
-    readPersistedTelemetry<AutomationJobAttempt>(JOB_ATTEMPT_COLLECTION),
-    readPersistedTelemetry<RuntimeHealthSnapshot>(RUNTIME_COLLECTION),
-    readPersistedTelemetry<PublicationAuditRecord>(PUBLICATION_AUDIT_COLLECTION),
-    readPersistedTelemetry<OutboundPublicationEvent>(OUTBOUND_COLLECTION),
-    readPersistedTelemetry<Product>(PRODUCT_COLLECTION),
+  const [jobProjection, attemptsRead, runtimeRead, auditsRead, eventsRead, productsRead] = await Promise.all([
+    readBoundedAutomationJobStatuses(),
+    readPersistedTelemetry<AutomationJobAttempt>(JOB_ATTEMPT_COLLECTION, 10_000, 16 * 1024 * 1024),
+    readPersistedTelemetry<RuntimeHealthSnapshot>(RUNTIME_COLLECTION, 500, 8 * 1024 * 1024),
+    readPersistedTelemetry<PublicationAuditRecord>(PUBLICATION_AUDIT_COLLECTION, 1_000, 8 * 1024 * 1024),
+    readPersistedTelemetry<OutboundPublicationEvent>(OUTBOUND_COLLECTION, 5_000, 16 * 1024 * 1024),
+    readPersistedTelemetry<Product>(PRODUCT_COLLECTION, 5_000, 32 * 1024 * 1024),
   ]);
+  const allAttempts = attemptsRead.items;
+  const runtimeSnapshots = runtimeRead.items;
+  const allAudits = auditsRead.items;
+  const allEvents = eventsRead.items;
+  const allProducts = productsRead.items;
+  const allJobs = jobProjection.items;
+  const attemptWindowComplete = retainedWindowComplete(
+    attemptsRead,
+    startedAt,
+    attempt => attempt.claimedAt,
+  );
+  const runtimeWindowComplete = retainedWindowComplete(
+    runtimeRead,
+    startedAt,
+    snapshot => snapshot.checkedAt,
+  );
+  const publicationAuditWindowComplete = retainedWindowComplete(
+    auditsRead,
+    startedAt,
+    audit => audit.timestamp,
+  );
+  const outboundEventWindowComplete = retainedWindowComplete(
+    eventsRead,
+    startedAt,
+    event => event.createdAt,
+  );
 
   const jobs = allJobs.filter(job => inWindow(jobObservationTime(job), startedAt, now) && (validTimestamp(job.scheduledAt) || 0) <= now + 60_000);
   const terminals = jobs.filter(terminalJob);
@@ -401,12 +660,17 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const retryPickupLatencies = pickupObservations
     .filter(observation => observation.retryAttempt)
     .map(observation => observation.latencyMs);
-  const pendingQueueAges = allJobs.flatMap(job => {
-    if (!['PENDING', 'RETRY_SCHEDULED'].includes(job.status) || job.attemptCount > 0) return [];
+  const runnableQueueEntries = allJobs.flatMap(job => {
+    if (!['PENDING', 'RETRY_SCHEDULED'].includes(job.status)) return [];
     const runnable = deriveRunnableAt(job);
     if (!runnable || runnable.runnableAt > now) return [];
-    return [now - runnable.runnableAt];
+    return [{
+      ageMs: now - runnable.runnableAt,
+      neverClaimed: job.attemptCount === 0,
+    }];
   });
+  const pendingQueueAges = runnableQueueEntries.map(entry => entry.ageMs);
+  const neverClaimedPending = runnableQueueEntries.filter(entry => entry.neverClaimed).length;
   const pickupLatencyFeature = getFeatureRolloutState('SLO_RUNNABLE_AT_V2');
   const pickupLatencyMode: AutomationSloMeasurement['pickupLatencyMode'] =
     pickupLatencyFeature.mode === 'ACTIVE' ? 'RUNNABLE_AT' : 'LEGACY_CREATED_AT';
@@ -415,14 +679,24 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     : legacyPickupLatencies;
   const failed = terminals.filter(job => ['FAILED', 'BLOCKED'].includes(job.status));
   const monitorOutcomes = terminals.filter(job => job.type === 'POST_PUBLISH_MONITOR' && ['HEALTHY', 'TEMPORARY_FAILURE', 'CONFIRMED_BROKEN'].includes(String(job.result?.outcome)));
-  const pendingMonitorTargets = jobs.filter(job => job.type === 'POST_PUBLISH_MONITOR' && !terminalJob(job));
+  // Active work is current state, not windowed history. An old still-pending
+  // monitor must remain visible to recovery even if it was created before the
+  // SLO observation window.
+  const pendingMonitorTargets = allJobs.filter(job =>
+    job.type === 'POST_PUBLISH_MONITOR' && !terminalJob(job));
   const healthyMonitorOutcomes = monitorOutcomes.filter(job => job.result?.outcome === 'HEALTHY');
-  const zeroTouchJobs = terminals.filter(isZeroTouchJob);
-  const zeroTouchCompleted = zeroTouchJobs.filter(job => job.status === 'SUCCEEDED');
+  const zeroTouchJobs = terminals.filter(isZeroTouchEligibleJob);
+  const zeroTouchOutcomes = new Map(zeroTouchJobs.map(job => [job.id, classifyZeroTouchOutcome(job)]));
+  const zeroTouchCompleted = zeroTouchJobs.filter(job => zeroTouchOutcomes.get(job.id) === 'SUCCEEDED');
+  const zeroTouchPartial = zeroTouchJobs.filter(job => zeroTouchOutcomes.get(job.id) === 'PARTIAL');
+  const zeroTouchBlocked = zeroTouchJobs.filter(job => zeroTouchOutcomes.get(job.id) === 'BLOCKED');
+  const zeroTouchFailed = zeroTouchJobs.filter(job => zeroTouchOutcomes.get(job.id) === 'FAILED');
   const storageLockTimeoutCount = terminals.filter(job => /(?:STORAGE_LOCK_TIMEOUT|storage lock timeout)/i.test(`${job.lastErrorCode || ''} ${job.lastErrorMessage || ''}`)).length;
 
   const audits = allAudits.filter(item => inWindow(item.timestamp, startedAt, now));
-  const publicationAttempts = audits.filter(item => ['published', 'rolled_back', 'publish_blocked'].includes(String(item.action)));
+  const publicationDecisions = audits.filter(item => ['published', 'rolled_back', 'publish_blocked'].includes(String(item.action)));
+  const publicationAttempts = publicationDecisions.filter(item => ['published', 'rolled_back'].includes(String(item.action)));
+  const publishBlockedDecisions = publicationDecisions.filter(item => item.action === 'publish_blocked');
   const rollbacks = publicationAttempts.filter(item => item.action === 'rolled_back');
   const publishedAudits = publicationAttempts.filter(item => item.action === 'published');
   const events = allEvents.filter(item => item.eventType === 'PRODUCT_PUBLISHED' && inWindow(item.createdAt, startedAt, now));
@@ -437,13 +711,23 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     && (inWindow(product.publishedAt, startedAt, now) || recentlyPublishedIds.has(product.id)));
   const unsafeProducts = publicProducts.filter(hasUnsafePublicState);
 
-  const runtimeWindow = runtimeSnapshots.filter(snapshot => inWindow(snapshot.checkedAt, startedAt, now));
+  const runtimeWindow = runtimeSnapshots.filter(snapshot => {
+    const checkedAt = validTimestamp(snapshot.checkedAt);
+    return checkedAt !== null && checkedAt >= startedAt && checkedAt <= now;
+  });
   const latestRuntime = runtimeWindow
     .sort((a, b) => (validTimestamp(b.checkedAt) || 0) - (validTimestamp(a.checkedAt) || 0))[0];
-  const runtimeAge = latestRuntime ? now - (validTimestamp(latestRuntime.checkedAt) || 0) : Number.POSITIVE_INFINITY;
+  const latestRuntimeCheckedAt = validTimestamp(latestRuntime?.checkedAt);
+  const runtimeAge = latestRuntimeCheckedAt === null ? Number.POSITIVE_INFINITY : now - latestRuntimeCheckedAt;
   const runtimeObserved = Boolean(latestRuntime);
-  const workerHeartbeatAge = latestRuntime?.worker.heartbeatAt ? now - (validTimestamp(latestRuntime.worker.heartbeatAt) || 0) : Number.POSITIVE_INFINITY;
-  const schedulerHeartbeatAge = latestRuntime?.scheduler.heartbeatAt ? now - (validTimestamp(latestRuntime.scheduler.heartbeatAt) || 0) : Number.POSITIVE_INFINITY;
+  const workerHeartbeatAt = validTimestamp(latestRuntime?.worker.heartbeatAt);
+  const schedulerHeartbeatAt = validTimestamp(latestRuntime?.scheduler.heartbeatAt);
+  const workerHeartbeatAge = workerHeartbeatAt === null || workerHeartbeatAt > now
+    ? Number.POSITIVE_INFINITY
+    : now - workerHeartbeatAt;
+  const schedulerHeartbeatAge = schedulerHeartbeatAt === null || schedulerHeartbeatAt > now
+    ? Number.POSITIVE_INFINITY
+    : now - schedulerHeartbeatAt;
   const workerHeartbeatFresh = !latestRuntime ? null
     : runtimeAge <= runtimeFreshnessMs && workerHeartbeatAge <= runtimeFreshnessMs && latestRuntime.worker.status === 'active';
   const schedulerHeartbeatFresh = !latestRuntime ? null
@@ -465,44 +749,118 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const healthPassRate = ratio(healthyMonitorOutcomes.length, monitorOutcomes.length);
   const rollbackRate = ratio(rollbacks.length, publicationAttempts.length);
   const zeroTouchRate = ratio(zeroTouchCompleted.length, zeroTouchJobs.length);
+  const pickupCreatedAtAttempts = pickupObservations.filter(item => item.runnableReason === 'CREATED_AT').length;
+  const pickupScheduledAttempts = pickupObservations.filter(item => item.runnableReason === 'SCHEDULED_AT').length;
+  const pickupRetryAttempts = pickupObservations.filter(item => item.runnableReason === 'RETRY_ELIGIBLE_AT').length;
+  const pickupCarriedIntoWindow = pickupObservations.filter(item =>
+    item.runnableAt < startedAt && item.claimedAt >= startedAt).length;
   const noLegitimateMonitorTarget = publicProducts.length === 0
     && monitorOutcomes.length === 0
     && pendingMonitorTargets.length === 0;
   const noPublicationActivity = publicationAttempts.length === 0
     && events.length === 0
     && publicProducts.length === 0;
+  const currentJobStateAvailable = jobProjection.availability !== 'UNAVAILABLE'
+    && jobProjection.currentStateComplete;
+  const retentionBoundaryAt = validTimestamp(jobProjection.retentionBoundary?.oldestRetainedAt);
+  const jobHistoryWindowComplete = currentJobStateAvailable && (
+    jobProjection.historyComplete
+    || (jobProjection.truncated
+      && retentionBoundaryAt !== null
+      && retentionBoundaryAt <= startedAt)
+  );
+  const jobHistoryAvailable = jobHistoryWindowComplete;
+  const pickupEvidenceAvailable = attemptWindowComplete
+    && (pickupObservations.length > 0 || jobHistoryAvailable);
+  const verifiedIdleQueue = currentJobStateAvailable
+    && pendingQueueAges.length === 0
+    && pickupObservations.length === 0;
   const metrics: SloMetric[] = [
     booleanMetric('worker_heartbeat_fresh', workerHeartbeatFresh, 'true within 120 seconds'),
     booleanMetric('scheduler_heartbeat_fresh', schedulerHeartbeatFresh, 'true within 120 seconds'),
-    upperBoundMetric('job_pickup_latency_p95_ms', pickupLatencyP95Ms, pickupLatencies.length, 30_000, '<= 30000 ms'),
-    lowerBoundMetric('terminal_outcome_rate', terminalOutcomeRate, jobs.length, 0.95, '>= 0.95', minimumSamples),
-    upperBoundMetric('terminal_error_rate', errorRate, terminals.length, 0.05, '<= 0.05', minimumSamples),
-    noLegitimateMonitorTarget
+    verifiedIdleQueue
+      ? notApplicableMetric(
+          upperBoundMetric('job_pickup_latency_p95_ms', null, 0, 30_000, '<= 30000 ms'),
+          'VERIFIED_IDLE_QUEUE_NO_PICKUP_SAMPLE',
+        )
+      : pickupEvidenceAvailable
+      ? upperBoundMetric('job_pickup_latency_p95_ms', pickupLatencyP95Ms, pickupLatencies.length, 30_000, '<= 30000 ms')
+      : unavailableMetric(
+          upperBoundMetric('job_pickup_latency_p95_ms', null, 0, 30_000, '<= 30000 ms'),
+          attemptsRead.available ? 'PICKUP_HISTORY_INCOMPLETE' : 'JOB_ATTEMPT_TELEMETRY_UNAVAILABLE',
+        ),
+    jobHistoryAvailable
+      ? lowerBoundMetric('terminal_outcome_rate', terminalOutcomeRate, jobs.length, 0.95, '>= 0.95', minimumSamples)
+      : unavailableMetric(
+          lowerBoundMetric('terminal_outcome_rate', null, 0, 0.95, '>= 0.95', minimumSamples),
+          'JOB_STATUS_PROJECTION_INCOMPLETE',
+        ),
+    jobHistoryAvailable
+      ? upperBoundMetric('terminal_error_rate', errorRate, terminals.length, 0.05, '<= 0.05', minimumSamples)
+      : unavailableMetric(
+          upperBoundMetric('terminal_error_rate', null, 0, 0.05, '<= 0.05', minimumSamples),
+          'JOB_STATUS_PROJECTION_INCOMPLETE',
+        ),
+    !jobHistoryAvailable || !productsRead.available || productsRead.atCapacity
+      ? unavailableMetric(
+          lowerBoundMetric('post_publish_health_pass_rate', null, 0, 0.9, '>= 0.90'),
+          !jobHistoryAvailable
+            ? 'JOB_STATUS_PROJECTION_INCOMPLETE'
+            : productsRead.atCapacity
+              ? 'PRODUCT_CURRENT_STATE_BOUNDED'
+              : 'PRODUCT_TELEMETRY_UNAVAILABLE',
+        )
+      : noLegitimateMonitorTarget
       ? notApplicableMetric(
           lowerBoundMetric('post_publish_health_pass_rate', null, 0, 0.9, '>= 0.90'),
           'NO_PUBLIC_PRODUCT_OR_LEGITIMATE_MONITOR_TARGET',
         )
       : lowerBoundMetric('post_publish_health_pass_rate', healthPassRate, monitorOutcomes.length, 0.9, '>= 0.90'),
-    noPublicationActivity
+    !publicationAuditWindowComplete || !outboundEventWindowComplete
+      ? unavailableMetric(
+          upperBoundMetric('duplicate_publish_count', null, 0, 0, '= 0'),
+          'PUBLICATION_TELEMETRY_UNAVAILABLE',
+        )
+      : noPublicationActivity
       ? notApplicableMetric(
           upperBoundMetric('duplicate_publish_count', null, 0, 0, '= 0'),
           'NO_PUBLICATION_ACTIVITY_IN_WINDOW',
         )
       : upperBoundMetric('duplicate_publish_count', duplicatePublishCount, events.length + publishedAudits.length, 0, '= 0'),
-    publicProducts.length === 0
+    !productsRead.available || productsRead.atCapacity
+      ? unavailableMetric(
+          upperBoundMetric('unsafe_publish_count', null, 0, 0, '= 0'),
+          productsRead.atCapacity ? 'PRODUCT_CURRENT_STATE_BOUNDED' : 'PRODUCT_TELEMETRY_UNAVAILABLE',
+        )
+      : publicProducts.length === 0
       ? notApplicableMetric(
           upperBoundMetric('unsafe_publish_count', null, 0, 0, '= 0'),
           'NO_PUBLIC_PRODUCTS_IN_WINDOW',
         )
       : upperBoundMetric('unsafe_publish_count', unsafeProducts.length, publicProducts.length, 0, '= 0'),
-    upperBoundMetric('storage_lock_timeout_count', storageLockTimeoutCount, terminals.length, 0, '= 0'),
-    publicationAttempts.length === 0
+    jobHistoryAvailable
+      ? upperBoundMetric('storage_lock_timeout_count', storageLockTimeoutCount, terminals.length, 0, '= 0')
+      : unavailableMetric(
+          upperBoundMetric('storage_lock_timeout_count', null, 0, 0, '= 0'),
+          'JOB_STATUS_PROJECTION_INCOMPLETE',
+        ),
+    !publicationAuditWindowComplete
+      ? unavailableMetric(
+          upperBoundMetric('rollback_rate', null, 0, 0.02, '<= 0.02'),
+          'PUBLICATION_AUDIT_UNAVAILABLE',
+        )
+      : publicationAttempts.length === 0
       ? notApplicableMetric(
           upperBoundMetric('rollback_rate', null, 0, 0.02, '<= 0.02'),
           'NO_PUBLICATION_ATTEMPTS_IN_WINDOW',
         )
       : upperBoundMetric('rollback_rate', rollbackRate, publicationAttempts.length, 0.02, '<= 0.02'),
-    lowerBoundMetric('zero_touch_completion_rate', zeroTouchRate, zeroTouchJobs.length, 0.9, '>= 0.90', minimumSamples),
+    jobHistoryAvailable
+      ? lowerBoundMetric('zero_touch_completion_rate', zeroTouchRate, zeroTouchJobs.length, 0.9, '>= 0.90', minimumSamples)
+      : unavailableMetric(
+          lowerBoundMetric('zero_touch_completion_rate', null, 0, 0.9, '>= 0.90', minimumSamples),
+          'JOB_STATUS_PROJECTION_INCOMPLETE',
+        ),
     booleanMetric('runtime_publish_safe', runtimePublishSafe, 'true'),
     booleanMetric('public_route_healthy', publicRouteHealthy, 'true'),
   ];
@@ -516,19 +874,168 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     ? noLegitimateMonitorTarget ? 'RECOVERY' : 'MEASURED'
     : runtimeObserved || terminals.length > 0 ? 'INSUFFICIENT_DATA' : 'BOOTSTRAP';
   const measuredAt = new Date(now).toISOString();
+  const releaseIdentity = getReleaseIdentity().releaseId;
+  const productionReleaseEvidenceRequired = process.env.NODE_ENV === 'production';
+  const runtimeReleaseReasons = [
+    ...(!latestRuntime?.web.releaseId ? ['RUNTIME_WEB_RELEASE_ID_MISSING'] : []),
+    ...(latestRuntime?.web.releaseId && latestRuntime.web.releaseId !== releaseIdentity
+      ? ['RUNTIME_WEB_RELEASE_MISMATCH']
+      : []),
+    ...(!latestRuntime?.worker.releaseId ? ['RUNTIME_WORKER_RELEASE_ID_MISSING'] : []),
+    ...(latestRuntime?.worker.releaseId && latestRuntime.worker.releaseId !== releaseIdentity
+      ? ['RUNTIME_WORKER_RELEASE_MISMATCH']
+      : []),
+    ...(!latestRuntime?.scheduler.releaseId ? ['RUNTIME_SCHEDULER_RELEASE_ID_MISSING'] : []),
+    ...(latestRuntime?.scheduler.releaseId && latestRuntime.scheduler.releaseId !== releaseIdentity
+      ? ['RUNTIME_SCHEDULER_RELEASE_MISMATCH']
+      : []),
+    ...(productionReleaseEvidenceRequired && latestRuntime?.web.releaseMatchesBuild !== true
+      ? ['RUNTIME_BUILD_RELEASE_UNVERIFIED']
+      : []),
+  ];
+  const runtimeEvidenceComplete = runtimeRead.available
+    && runtimeObserved
+    && runtimeReleaseReasons.length === 0;
+  const runtimeReferences = latestRuntime?.id ? [latestRuntime.id] : [];
+  const jobObservedAt = latestIsoTimestamp(terminals.map(jobObservationTime));
+  const pickupObservedAt = latestIsoTimestamp(pickupObservations.map(item => item.claimedAt));
+  const publicationObservedAt = latestIsoTimestamp([
+    ...audits.map(item => item.timestamp),
+    ...events.map(item => item.createdAt),
+  ]) || measuredAt;
+  const productObservedAt = latestIsoTimestamp(allProducts.map(product => product.updatedAt)) || measuredAt;
+  const jobReferences = terminals.slice(-10).map(job => job.id);
+  const pickupReferences = pickupObservations.slice(-10).map(item =>
+    `${item.runnableReason}:${item.claimedAt}`);
+  const publicationReferences = [
+    ...audits.slice(-5).flatMap(item => item.runId || []),
+    ...events.slice(-5).flatMap(item => item.effectKey || []),
+  ];
+  const productReferences = allProducts.slice(-10).map(product => product.id);
+  const metricEvidence: SloMetricEvidence[] = metrics.map(metric => {
+    if (['worker_heartbeat_fresh', 'scheduler_heartbeat_fresh', 'runtime_publish_safe', 'public_route_healthy'].includes(metric.key)) {
+      const observedAt = metric.key === 'worker_heartbeat_fresh'
+        ? latestRuntime?.worker.heartbeatAt || null
+        : metric.key === 'scheduler_heartbeat_fresh'
+          ? latestRuntime?.scheduler.heartbeatAt || null
+          : latestRuntime?.checkedAt || null;
+      return {
+        metricKey: metric.key,
+        source: 'runtime-health-current',
+        observedAt,
+        complete: runtimeEvidenceComplete && validTimestamp(observedAt) !== null,
+        releaseIdentity: latestRuntime?.web.releaseId || '',
+        reasonCodes: [
+          ...runtimeReleaseReasons,
+          ...(!runtimeRead.available ? ['RUNTIME_HEALTH_COLLECTION_UNAVAILABLE'] : []),
+          ...(!runtimeObserved ? ['RUNTIME_HEALTH_CURRENT_OBSERVATION_MISSING'] : []),
+        ],
+        references: runtimeReferences,
+      };
+    }
+    if (metric.key === 'job_pickup_latency_p95_ms') {
+      return {
+        metricKey: metric.key,
+        source: verifiedIdleQueue ? 'current-job-state' : 'job-attempt-history',
+        observedAt: verifiedIdleQueue ? latestRuntime?.checkedAt || null : pickupObservedAt,
+        complete: verifiedIdleQueue || (pickupEvidenceAvailable && pickupObservations.length > 0),
+        releaseIdentity: verifiedIdleQueue ? releaseIdentity : '',
+        reasonCodes: [
+          ...(!attemptsRead.available ? ['JOB_ATTEMPT_TELEMETRY_UNAVAILABLE'] : []),
+          ...(!verifiedIdleQueue && pickupObservations.length === 0 ? ['PICKUP_OBSERVATION_MISSING'] : []),
+          ...(!jobHistoryAvailable ? ['PICKUP_HISTORY_BOUNDED_SAMPLE'] : []),
+          ...(verifiedIdleQueue ? ['VERIFIED_IDLE_QUEUE_NO_PICKUP_SAMPLE'] : []),
+          ...(!verifiedIdleQueue ? ['HISTORICAL_EVIDENCE_RELEASE_UNATTRIBUTED'] : []),
+        ],
+        references: pickupReferences,
+      };
+    }
+    if ([
+      'terminal_outcome_rate',
+      'terminal_error_rate',
+      'storage_lock_timeout_count',
+      'zero_touch_completion_rate',
+      'post_publish_health_pass_rate',
+    ].includes(metric.key)) {
+      return {
+        metricKey: metric.key,
+        source: 'bounded-job-history',
+        observedAt: jobObservedAt,
+        complete: jobHistoryAvailable && jobObservedAt !== null,
+        releaseIdentity: '',
+        reasonCodes: [...jobProjection.reasonCodes, 'HISTORICAL_EVIDENCE_RELEASE_UNATTRIBUTED'],
+        references: jobReferences,
+      };
+    }
+    if (['duplicate_publish_count', 'rollback_rate'].includes(metric.key)) {
+      return {
+        metricKey: metric.key,
+        source: 'publication-history',
+        observedAt: publicationObservedAt,
+        complete: publicationAuditWindowComplete && outboundEventWindowComplete,
+        releaseIdentity: '',
+        reasonCodes: [
+          ...(!auditsRead.available ? ['PUBLICATION_AUDIT_UNAVAILABLE'] : []),
+          ...(!eventsRead.available ? ['PUBLICATION_EVENT_TELEMETRY_UNAVAILABLE'] : []),
+          ...(!publicationAuditWindowComplete ? ['PUBLICATION_AUDIT_WINDOW_INCOMPLETE'] : []),
+          ...(!outboundEventWindowComplete ? ['OUTBOUND_EVENT_WINDOW_INCOMPLETE'] : []),
+          'HISTORICAL_EVIDENCE_RELEASE_UNATTRIBUTED',
+        ],
+        references: publicationReferences,
+      };
+    }
+    return {
+      metricKey: metric.key,
+      source: 'current-products',
+      observedAt: productObservedAt,
+      complete: productsRead.available && !productsRead.atCapacity,
+      // This is a direct bounded read of current state performed by this
+      // release, not a historical event being re-attributed to a release.
+      releaseIdentity,
+      reasonCodes: [
+        ...(!productsRead.available ? ['PRODUCT_TELEMETRY_UNAVAILABLE'] : []),
+        ...(productsRead.atCapacity ? ['PRODUCT_CURRENT_STATE_BOUNDED'] : []),
+      ],
+      references: productReferences,
+    };
+  });
   const evidence = {
     sourceCounts: [
       jobs.length,
       terminals.length,
       pickupObservations.length,
       retryPickupLatencies.length,
-      pendingQueueAges.length,
+      neverClaimedPending,
       monitorOutcomes.length,
       runtimeWindow.length,
       publicationAttempts.length,
+      publishBlockedDecisions.length,
       events.length,
       publicProducts.length,
+      zeroTouchJobs.length,
+      zeroTouchCompleted.length,
+      zeroTouchBlocked.length,
+      zeroTouchFailed.length,
+      zeroTouchPartial.length,
+      pickupCreatedAtAttempts,
+      pickupScheduledAttempts,
+      pickupRetryAttempts,
+      pickupCarriedIntoWindow,
     ],
+    sourceAvailability: {
+      jobAttempts: attemptsRead.available,
+      runtimeSnapshots: runtimeRead.available,
+      publicationAudits: auditsRead.available,
+      outboundEvents: eventsRead.available,
+      products: productsRead.available,
+    },
+    sourceCompleteness: {
+      jobAttemptsWindow: attemptWindowComplete,
+      runtimeWindow: runtimeWindowComplete,
+      publicationAuditWindow: publicationAuditWindowComplete,
+      outboundEventWindow: outboundEventWindowComplete,
+      currentProducts: productsRead.available && !productsRead.atCapacity,
+    },
     pickupLatency: {
       mode: pickupLatencyMode,
       featureMode: pickupLatencyFeature.mode,
@@ -544,16 +1051,19 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       metric.value,
       metric.sampleSize,
       metric.status,
+      metric.evaluationStatus,
       metric.measurementState,
       metric.stateReason,
     ]),
     unsafeProductIds: unsafeProducts.map(product => product.id).sort(),
+    metricEvidence,
+    releaseIdentity,
     windowStartedAt: new Date(startedAt).toISOString(),
     windowEndedAt: measuredAt,
   };
   const evidenceHash = createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     id: `automation-slo:${Math.floor(now / 60_000)}`,
     ruleVersion: SLO_ERROR_BUDGET_RULE_VERSION,
     dataStatus,
@@ -566,13 +1076,64 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       terminalJobs: terminals.length,
       pickupAttempts: pickupObservations.length,
       retryPickupAttempts: retryPickupLatencies.length,
-      neverClaimedPending: pendingQueueAges.length,
+      neverClaimedPending,
       monitorOutcomes: monitorOutcomes.length,
       pendingMonitorTargets: pendingMonitorTargets.length,
       runtimeSnapshots: runtimeWindow.length,
       publicationAttempts: publicationAttempts.length,
+      publishBlockedDecisions: publishBlockedDecisions.length,
       outboundEvents: events.length,
       publicProducts: publicProducts.length,
+      zeroTouchEligible: zeroTouchJobs.length,
+      zeroTouchSucceeded: zeroTouchCompleted.length,
+      zeroTouchBlocked: zeroTouchBlocked.length,
+      zeroTouchFailed: zeroTouchFailed.length,
+      zeroTouchPartial: zeroTouchPartial.length,
+      pickupCreatedAtAttempts,
+      pickupScheduledAttempts,
+      pickupRetryAttempts,
+      pickupCarriedIntoWindow,
+    },
+    jobProjection: {
+      availability: jobProjection.availability,
+      evidenceClassification: jobProjection.evidenceClassification,
+      source: jobProjection.source,
+      collectionPresent: jobProjection.collectionPresent,
+      currentStateComplete: jobProjection.currentStateComplete,
+      historyComplete: jobProjection.historyComplete,
+      windowComplete: jobHistoryWindowComplete,
+      windowStartedAt: new Date(startedAt).toISOString(),
+      truncated: jobProjection.truncated,
+      coverageComplete: jobProjection.coverageComplete,
+      reasonCodes: jobProjection.reasonCodes,
+      observedRange: jobProjection.observedRange,
+      retentionBoundary: jobProjection.retentionBoundary,
+    },
+    sourceAvailability: {
+      jobAttempts: attemptsRead.available,
+      runtimeSnapshots: runtimeRead.available,
+      publicationAudits: auditsRead.available,
+      outboundEvents: eventsRead.available,
+      products: productsRead.available,
+    },
+    sourceCompleteness: {
+      jobAttemptsWindow: attemptWindowComplete,
+      runtimeWindow: runtimeWindowComplete,
+      publicationAuditWindow: publicationAuditWindowComplete,
+      outboundEventWindow: outboundEventWindowComplete,
+      currentProducts: productsRead.available && !productsRead.atCapacity,
+      reasonCodes: [...new Set([
+        ...attemptsRead.reasonCodes,
+        ...runtimeRead.reasonCodes,
+        ...auditsRead.reasonCodes,
+        ...eventsRead.reasonCodes,
+        ...productsRead.reasonCodes,
+        ...(!attemptWindowComplete ? ['JOB_ATTEMPT_WINDOW_INCOMPLETE'] : []),
+        ...(!runtimeWindowComplete ? ['RUNTIME_WINDOW_INCOMPLETE'] : []),
+        ...(!publicationAuditWindowComplete ? ['PUBLICATION_AUDIT_WINDOW_INCOMPLETE'] : []),
+        ...(!outboundEventWindowComplete ? ['OUTBOUND_EVENT_WINDOW_INCOMPLETE'] : []),
+        ...(productsRead.atCapacity ? ['PRODUCT_CURRENT_STATE_BOUNDED'] : []),
+      ])],
     },
     workerHeartbeatFresh,
     schedulerHeartbeatFresh,
@@ -598,28 +1159,32 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     runtimeReasons,
     publicRouteHealthy,
     metrics,
+    metricEvidence,
+    releaseIdentity,
     evidenceHash,
     measuredAt,
   };
 }
 
+export const SLO_REASON_FOR_METRIC: Record<SloMetric['key'], string> = {
+  worker_heartbeat_fresh: 'WORKER_HEARTBEAT_STALE',
+  scheduler_heartbeat_fresh: 'SCHEDULER_HEARTBEAT_STALE',
+  job_pickup_latency_p95_ms: 'JOB_PICKUP_LATENCY_SLO_FAILED',
+  terminal_outcome_rate: 'TERMINAL_OUTCOME_SLO_FAILED',
+  terminal_error_rate: 'ERROR_BUDGET_EXCEEDED',
+  post_publish_health_pass_rate: 'HEALTH_SLO_FAILED',
+  duplicate_publish_count: 'DUPLICATE_PUBLISH',
+  unsafe_publish_count: 'UNSAFE_PUBLISH',
+  storage_lock_timeout_count: 'STORAGE_LOCK_TIMEOUT',
+  rollback_rate: 'ROLLBACK_BUDGET_EXCEEDED',
+  zero_touch_completion_rate: 'ZERO_TOUCH_SLO_FAILED',
+  runtime_publish_safe: 'RUNTIME_GUARDIAN_UNSAFE',
+  public_route_healthy: 'PUBLIC_ROUTE_UNHEALTHY',
+};
+
 export function evaluateAutomationErrorBudget(measurement: AutomationSloMeasurement): ErrorBudgetEvaluation {
   const reasons: string[] = [];
-  const reasonForMetric: Partial<Record<SloMetric['key'], string>> = {
-    worker_heartbeat_fresh: 'WORKER_HEARTBEAT_STALE',
-    scheduler_heartbeat_fresh: 'SCHEDULER_HEARTBEAT_STALE',
-    job_pickup_latency_p95_ms: 'JOB_PICKUP_LATENCY_SLO_FAILED',
-    terminal_outcome_rate: 'TERMINAL_OUTCOME_SLO_FAILED',
-    terminal_error_rate: 'ERROR_BUDGET_EXCEEDED',
-    post_publish_health_pass_rate: 'HEALTH_SLO_FAILED',
-    duplicate_publish_count: 'DUPLICATE_PUBLISH',
-    unsafe_publish_count: 'UNSAFE_PUBLISH',
-    storage_lock_timeout_count: 'STORAGE_LOCK_TIMEOUT',
-    rollback_rate: 'ROLLBACK_BUDGET_EXCEEDED',
-    zero_touch_completion_rate: 'ZERO_TOUCH_SLO_FAILED',
-    runtime_publish_safe: 'RUNTIME_GUARDIAN_UNSAFE',
-    public_route_healthy: 'PUBLIC_ROUTE_UNHEALTHY',
-  };
+  const reasonForMetric = SLO_REASON_FOR_METRIC;
   for (const metric of measurement.metrics) {
     if (metric.status === 'BREACH') reasons.push(reasonForMetric[metric.key] || metric.key.toUpperCase());
   }
@@ -635,13 +1200,57 @@ export function evaluateAutomationErrorBudget(measurement: AutomationSloMeasurem
     'PUBLIC_ROUTE_UNHEALTHY',
   ]);
   const severeReasons = uniqueReasons.filter(reason => severeSet.has(reason));
+  const blockingMetrics = measurement.metrics
+    .filter(metric => metric.evaluationStatus === 'BREACH')
+    .map(metric => ({
+      metricKey: metric.key,
+      reasonCode: reasonForMetric[metric.key] || metric.key.toUpperCase(),
+      sampleSize: metric.sampleSize,
+    }));
+  const unavailableMetrics = measurement.metrics
+    .filter(metric => metric.evaluationStatus === 'INSUFFICIENT_DATA')
+    .map(metric => ({
+      metricKey: metric.key,
+      reasonCode: metric.stateReason,
+      sampleSize: metric.sampleSize,
+    }));
   const status: EvaluationStatus = uniqueReasons.length
     ? 'BREACH'
     : ['MEASURED', 'RECOVERY'].includes(measurement.dataStatus) ? 'PASS' : 'INSUFFICIENT_DATA';
   const evaluatedAt = measurement.measuredAt;
-  const idHash = createHash('sha256').update(JSON.stringify({ measurementId: measurement.id, status, reasons: uniqueReasons })).digest('hex').slice(0, 12);
+  const blockingMetricKeys = new Set(blockingMetrics.map(item => item.metricKey));
+  const identityMetricKeys = status === 'BREACH'
+    ? blockingMetricKeys
+    : new Set(measurement.metrics.map(metric => metric.key));
+  const evaluationEvidenceIdentity = {
+    measurementMinute: measurement.id,
+    status,
+    reasons: uniqueReasons,
+    metrics: measurement.metrics
+      .filter(metric => identityMetricKeys.has(metric.key))
+      .map(metric => [
+      metric.key,
+      metric.value,
+      metric.sampleSize,
+      metric.evaluationStatus,
+      metric.stateReason,
+    ]),
+    evidence: measurement.metricEvidence
+      .filter(item => identityMetricKeys.has(item.metricKey))
+      .map(item => [
+      item.metricKey,
+      item.observedAt,
+      item.complete,
+      item.releaseIdentity,
+      item.references,
+    ]),
+  };
+  const idHash = createHash('sha256')
+    .update(JSON.stringify(evaluationEvidenceIdentity))
+    .digest('hex')
+    .slice(0, 16);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: `error-budget:${Math.floor(Date.parse(evaluatedAt) / 60_000)}:${idHash}`,
     ruleVersion: SLO_ERROR_BUDGET_RULE_VERSION,
     measurementId: measurement.id,
@@ -650,6 +1259,8 @@ export function evaluateAutomationErrorBudget(measurement: AutomationSloMeasurem
     sampleSize: measurement.sampleSize,
     reasons: uniqueReasons,
     severeReasons,
+    blockingMetrics,
+    unavailableMetrics,
     evaluatedAt,
   };
 }
@@ -659,7 +1270,13 @@ async function persistMeasurement(measurement: AutomationSloMeasurement, evaluat
     const existing = items.find(item => item.id === measurement.id);
     return [
       ...items.filter(item => item.id !== measurement.id).slice(-499),
-      { ...measurement, evaluation, application: existing?.application },
+      {
+        ...measurement,
+        evaluation,
+        application: existing?.application?.evaluationId === evaluation.id
+          ? existing.application
+          : undefined,
+      },
     ];
   });
 }
@@ -668,7 +1285,11 @@ async function claimControlApplication(measurementId: string, evaluation: ErrorB
   let claimed = false;
   await runTransaction<StoredSloSnapshot>(SNAPSHOT_COLLECTION, items => {
     const record = items.find(item => item.id === measurementId);
-    if (!record || record.application) return undefined;
+    if (!record) return undefined;
+    if (record.application?.evaluationId === evaluation.id) {
+      claimed = record.application.status === 'CLAIMED';
+      return undefined;
+    }
     record.application = {
       status: 'CLAIMED',
       evaluationId: evaluation.id,
@@ -682,6 +1303,7 @@ async function claimControlApplication(measurementId: string, evaluation: ErrorB
 
 async function completeControlApplication(
   measurementId: string,
+  evaluationId: string,
   previousEffectiveMode: AutomationControlState['effectiveMode'],
   nextEffectiveMode: AutomationControlState['effectiveMode'],
   publishPaused: boolean,
@@ -689,7 +1311,7 @@ async function completeControlApplication(
 ): Promise<void> {
   await runTransaction<StoredSloSnapshot>(SNAPSHOT_COLLECTION, items => {
     const record = items.find(item => item.id === measurementId);
-    if (!record?.application) return undefined;
+    if (!record?.application || record.application.evaluationId !== evaluationId) return undefined;
     record.application = {
       ...record.application,
       status: 'APPLIED',
@@ -700,12 +1322,6 @@ async function completeControlApplication(
     };
     return items;
   });
-}
-
-function degradedMode(mode: AutomationControlState['effectiveMode']): AutomationControlState['effectiveMode'] {
-  if (mode === 'AUTONOMOUS') return 'CANARY';
-  if (mode === 'CANARY') return 'SHADOW';
-  return mode;
 }
 
 function recoveryEvidenceSummary(
@@ -734,27 +1350,198 @@ function recoveryEvidenceSummary(
   };
 }
 
-function recoveryEligibilityReasons(
-  control: AutomationControlState,
-  measurement: AutomationSloMeasurement,
-  evaluation: ErrorBudgetEvaluation,
-  now: number,
-): string[] {
-  const reasons: string[] = [];
-  if (control.publishPausedByOperator) reasons.push('OPERATOR_PUBLISH_PAUSE_ACTIVE');
-  if (control.killSwitch || control.mode === 'EMERGENCY_STOP') reasons.push('EMERGENCY_STOP_ACTIVE');
-  if (control.publishBlockedByPolicy) reasons.push('PROVIDER_OR_POLICY_BLOCK_ACTIVE');
-  if (measurement.workerHeartbeatFresh !== true) reasons.push('WORKER_LEASE_NOT_FRESH');
-  if (measurement.schedulerHeartbeatFresh !== true) reasons.push('SCHEDULER_LEASE_NOT_FRESH');
-  if (measurement.publicRouteHealthy !== true) reasons.push('PUBLIC_HEALTH_NOT_READY');
-  if (measurement.runtimePublishSafe !== true) reasons.push('RUNTIME_GUARDIAN_NOT_SAFE');
-  if (!['MEASURED', 'RECOVERY'].includes(measurement.dataStatus)) reasons.push('RECOVERY_EVIDENCE_INSUFFICIENT');
-  if (evaluation.severeReasons.length) reasons.push(...evaluation.severeReasons);
-  const evaluatedAt = Date.parse(evaluation.evaluatedAt);
-  if (!Number.isFinite(evaluatedAt) || now - evaluatedAt > getRuntimeRecoveryPolicy().maximumEvidenceAgeMs) {
-    reasons.push('RECOVERY_EVIDENCE_STALE');
-  }
-  return [...new Set(reasons)];
+const QUIESCENT_PUBLICATION_RECOVERY_REASONS = new Set([
+  'HEALTH_SLO_FAILED',
+  'DUPLICATE_PUBLISH',
+  'UNSAFE_PUBLISH',
+  'ROLLBACK_BUDGET_EXCEEDED',
+]);
+
+const CURRENT_RUNTIME_RECOVERABLE_REASON_CODES = new Set([
+  'WORKER_STALE',
+  'WORKER_MISSING',
+  'WORKER_CRASHED',
+  'WORKER_UNVERIFIED',
+  'SCHEDULER_STALE',
+  'SCHEDULER_MISSING',
+  'SCHEDULER_CRASHED',
+  'SCHEDULER_UNVERIFIED',
+  'WEB_UNHEALTHY',
+  'WEB_BUILD_MISSING',
+  'WEB_BUILD_MISMATCH',
+  'RELEASE_MISMATCH',
+  'WORKER_RELEASE_ID_MISSING',
+  'SCHEDULER_RELEASE_ID_MISSING',
+  'WORKER_RELEASE_MISMATCH',
+  'SCHEDULER_RELEASE_MISMATCH',
+  'STORAGE_DEGRADED',
+  'STORAGE_BLOCKED',
+  'JOB_HEALTH_SUMMARY_UNAVAILABLE',
+  'JOB_HEALTH_SUMMARY_STALE',
+  'JOB_HEALTH_SUMMARY_COVERAGE_BOUNDED',
+  'JOB_HEALTH_CURRENT_STATE_INCOMPLETE',
+  'STALE_JOB',
+  'QUEUE_STUCK',
+  'DUPLICATE_PROCESS_ROLE',
+  'REPEATED_PROCESS_RESTART',
+  'PROVIDER_DEGRADED',
+]);
+
+function deriveRuntimeReasonObservations(input: {
+  measurement: AutomationSloMeasurement;
+  evaluation: ErrorBudgetEvaluation;
+  control: AutomationControlState;
+  activeReasons: string[];
+}): Array<{
+  reasonCode: string;
+  metricKey: string;
+  measurement: 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA' | 'NOT_APPLICABLE';
+  qualifyingStatus: 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA';
+  observedAt?: string;
+  releaseIdentity?: string;
+  qualificationReasons: string[];
+  evidenceReferences: string[];
+}> {
+  const { measurement, evaluation, control } = input;
+  const runtimeMetricKeys: SloMetric['key'][] = [
+    'worker_heartbeat_fresh',
+    'scheduler_heartbeat_fresh',
+    'runtime_publish_safe',
+    'public_route_healthy',
+  ];
+  const runtimeMetrics = runtimeMetricKeys.map(key => measurement.metrics.find(metric => metric.key === key));
+  const runtimeEvidence = runtimeMetricKeys.map(key =>
+    measurement.metricEvidence.find(evidence => evidence.metricKey === key));
+  const mandatoryRuntimeHealthy = runtimeMetrics.every(metric => metric?.evaluationStatus === 'PASS')
+    && runtimeEvidence.every(evidence => evidence?.complete === true)
+    && control.publishPausedByOperator !== true
+    && control.killSwitch !== true
+    && control.workerPaused !== true
+    && control.schedulerPaused !== true
+    && control.mode !== 'EMERGENCY_STOP';
+  const coreObservedAt = latestIsoTimestamp(runtimeEvidence.map(evidence => evidence?.observedAt));
+  const coreReferences = runtimeEvidence.flatMap(evidence => evidence?.references || []);
+  const globalMeasuredPass = evaluation.status === 'PASS'
+    && ['MEASURED', 'RECOVERY'].includes(measurement.dataStatus);
+
+  return input.activeReasons.map(reasonCode => {
+    const metric = measurement.metrics.find(item => SLO_REASON_FOR_METRIC[item.key] === reasonCode);
+    const evidence = metric
+      ? measurement.metricEvidence.find(item => item.metricKey === metric.key)
+      : undefined;
+    const evidenceReleaseCompatible = evidence?.releaseIdentity === measurement.releaseIdentity;
+    const metricPass = metric?.evaluationStatus === 'PASS'
+      && evidence?.complete === true
+      && evidenceReleaseCompatible;
+    const quiescentSourceComplete = reasonCode === 'HEALTH_SLO_FAILED'
+      ? measurement.sourceCompleteness.currentProducts && measurement.jobProjection.currentStateComplete
+      : reasonCode === 'DUPLICATE_PUBLISH'
+        ? measurement.sourceCompleteness.publicationAuditWindow
+          && measurement.sourceCompleteness.outboundEventWindow
+          && measurement.sourceCompleteness.currentProducts
+        : reasonCode === 'UNSAFE_PUBLISH'
+          ? measurement.sourceCompleteness.currentProducts
+          : reasonCode === 'ROLLBACK_BUDGET_EXCEEDED'
+            ? measurement.sourceCompleteness.publicationAuditWindow
+              && measurement.sourceCompleteness.currentProducts
+            : false;
+    const quiescentPublicationRecovery = Boolean(
+      metric
+      && QUIESCENT_PUBLICATION_RECOVERY_REASONS.has(reasonCode)
+      && metric.evaluationStatus === 'NOT_APPLICABLE'
+      && quiescentSourceComplete
+      && measurement.sourceCounts.publicProducts === 0
+      && measurement.sourceCounts.pendingMonitorTargets === 0,
+    );
+    const currentQueueRecovery = reasonCode === 'JOB_PICKUP_LATENCY_SLO_FAILED'
+      && measurement.jobProjection.currentStateComplete
+      && measurement.pendingQueueCount === 0
+      && (measurement.pendingQueueAgeMs === null || measurement.pendingQueueAgeMs <= 30_000);
+    const currentRuntimeReasonRecovery = !metric
+      && CURRENT_RUNTIME_RECOVERABLE_REASON_CODES.has(reasonCode)
+      && !measurement.runtimeReasons.includes(reasonCode)
+      && measurement.runtimePublishSafe === true;
+    const reasonEvidencePass = metricPass
+      || quiescentPublicationRecovery
+      || currentQueueRecovery
+      || currentRuntimeReasonRecovery;
+    const dedicatedCurrentRecoveryProof = quiescentPublicationRecovery
+      || currentQueueRecovery
+      || currentRuntimeReasonRecovery;
+    // A complete, release-matched current-state proof may recover a blocked
+    // idle system without pretending that unrelated zero-sample historical
+    // metrics passed. Missing/partial evidence still remains insufficient and
+    // an actual concurrent breach never advances recovery.
+    const evaluationAllowsRecovery = globalMeasuredPass
+      || (
+        evaluation.status === 'INSUFFICIENT_DATA'
+        && dedicatedCurrentRecoveryProof
+      );
+    const qualificationReasons = [
+      ...(!evaluationAllowsRecovery ? ['RUNTIME_RECOVERY_EVALUATION_NOT_QUALIFIED'] : []),
+      ...(!mandatoryRuntimeHealthy ? ['RUNTIME_RECOVERY_MANDATORY_RUNTIME_EVIDENCE_INCOMPLETE'] : []),
+      ...(!reasonEvidencePass ? ['RUNTIME_RECOVERY_REASON_EVIDENCE_NOT_PASS'] : []),
+      ...(metric?.evaluationStatus === 'PASS' && evidence?.complete === true && !evidenceReleaseCompatible
+        ? ['RUNTIME_RECOVERY_EVIDENCE_RELEASE_UNATTRIBUTED_OR_MISMATCHED']
+        : []),
+      ...(control.publishPausedByOperator ? ['OPERATOR_PAUSE_ACTIVE'] : []),
+      ...(control.killSwitch || control.mode === 'EMERGENCY_STOP' ? ['EMERGENCY_STOP_ACTIVE'] : []),
+      ...(control.workerPaused ? ['WORKER_PAUSE_ACTIVE'] : []),
+      ...(control.schedulerPaused ? ['SCHEDULER_PAUSE_ACTIVE'] : []),
+      ...(currentQueueRecovery ? ['CURRENT_QUEUE_PICKUP_RECOVERY_EVIDENCE'] : []),
+      ...(quiescentPublicationRecovery ? ['QUIESCENT_PUBLICATION_RECOVERY_EVIDENCE'] : []),
+      ...(currentRuntimeReasonRecovery ? ['CURRENT_RUNTIME_REASON_ABSENT'] : []),
+      ...(dedicatedCurrentRecoveryProof ? ['DEDICATED_CURRENT_RECOVERY_PROOF'] : []),
+      ...(evidence?.reasonCodes || []),
+    ];
+    const qualifyingPass = evaluationAllowsRecovery
+      && mandatoryRuntimeHealthy
+      && reasonEvidencePass;
+    const explicitBreach = metric?.evaluationStatus === 'BREACH'
+      || measurement.runtimeReasons.includes(reasonCode);
+    return {
+      reasonCode,
+      metricKey: metric?.key || reasonCode,
+      measurement: explicitBreach
+        ? 'BREACH'
+        : qualifyingPass
+          ? 'PASS'
+          : metric?.evaluationStatus || 'INSUFFICIENT_DATA',
+      qualifyingStatus: explicitBreach
+        ? 'BREACH'
+        : qualifyingPass ? 'PASS' : 'INSUFFICIENT_DATA',
+      observedAt: coreObservedAt || undefined,
+      releaseIdentity: measurement.releaseIdentity,
+      qualificationReasons,
+      evidenceReferences: [...new Set([
+        measurement.id,
+        measurement.evidenceHash,
+        ...coreReferences,
+        ...(evidenceReleaseCompatible ? evidence?.references || [] : []),
+      ])].slice(0, 20),
+    };
+  });
+}
+
+async function appendRecoveryTransitionAudit(input: {
+  evaluationId: string;
+  operationType: 'RUNTIME_BLOCK_APPLIED' | 'RUNTIME_HEALTHY_STREAK_ADVANCED' | 'RUNTIME_REASON_CLEARED' | 'RUNTIME_CLEAR_REJECTED_INSUFFICIENT_DATA';
+  reasonCode: string;
+  actor: string;
+  result: Record<string, unknown>;
+}): Promise<void> {
+  await appendAutomationAuditOnce({
+    correlationId: input.evaluationId,
+    operationId: `${input.evaluationId}:${input.operationType}:${input.reasonCode}`,
+    operationType: input.operationType,
+    actor: input.actor,
+    target: input.reasonCode,
+    risk: 'HIGH',
+    result: input.result,
+    reasons: [input.reasonCode],
+    dryRun: false,
+    attempts: 1,
+  });
 }
 
 export async function applyAutomationErrorBudget(options: MeasureAutomationSloOptions & { actor?: string } = {}): Promise<AppliedErrorBudget> {
@@ -768,68 +1555,216 @@ export async function applyAutomationErrorBudget(options: MeasureAutomationSloOp
   let canary = await getCanaryState();
   let publishPausedByBudget = false;
   let applied = false;
+  const actor = options.actor || 'error-budget-controller';
+  // Repair a durable audit intent left by an interrupted previous invocation
+  // before applying or clearing any additional runtime-control state.
+  await flushRuntimeControlApplicationAudits();
 
   if (evaluation.status === 'BREACH') {
     const claimed = await claimControlApplication(measurement.id, evaluation);
     if (claimed) {
-      previous = await getAutomationControl();
-      const nextMode = degradedMode(previous.effectiveMode);
       publishPausedByBudget = true;
-      control = await updateAutomationControl({
-        effectiveMode: nextMode,
-        publishBlockedByRuntime: true,
-        publishRuntimeReasons: evaluation.reasons,
-        degradedAt: evaluation.evaluatedAt,
-        degradedReason: evaluation.reasons.join(','),
-        reason: evaluation.reasons.join(','),
-      }, options.actor || 'error-budget-controller');
+      const blockResult = await applyRuntimePublishBlock({
+        reasonCodes: evaluation.reasons,
+        evaluationId: evaluation.id,
+        evaluatedAt: evaluation.evaluatedAt,
+        degradeMode: true,
+      }, actor);
+      previous = {
+        ...blockResult.control,
+        effectiveMode: blockResult.previousEffectiveMode,
+      };
+      control = blockResult.control;
       canary = await applyCanarySafetyDecision({
         pause: true,
         reasons: evaluation.reasons,
         evaluatedAt: evaluation.evaluatedAt,
         evaluationId: evaluation.id,
       });
-      applied = nextMode !== previous.effectiveMode || !previous.publishBlockedByRuntime;
-      await completeControlApplication(measurement.id, previous.effectiveMode, control.effectiveMode, control.publishPaused, evaluation.evaluatedAt);
+      applied = blockResult.status === 'APPLIED';
+      for (const reasonCode of blockResult.addedReasons) {
+        await appendRecoveryTransitionAudit({
+          evaluationId: evaluation.id,
+          operationType: 'RUNTIME_BLOCK_APPLIED',
+          reasonCode,
+          actor,
+          result: { publicationOccurred: false, runtimeBlockActive: true },
+        });
+      }
+      await flushRuntimeControlApplicationAudits();
+      await completeControlApplication(
+        measurement.id,
+        evaluation.id,
+        blockResult.previousEffectiveMode,
+        blockResult.nextEffectiveMode,
+        control.publishPaused,
+        evaluation.evaluatedAt,
+      );
     } else {
       control = await getAutomationControl();
       canary = await getCanaryState();
     }
   } else if (evaluation.status === 'PASS') {
+    const canaryEvidenceComplete = measurement.metrics
+      .filter(metric => metric.evaluationStatus !== 'NOT_APPLICABLE')
+      .every(metric => {
+        const evidence = measurement.metricEvidence.find(item => item.metricKey === metric.key);
+        return evidence?.complete === true
+          && evidence.releaseIdentity === measurement.releaseIdentity;
+      });
     canary = await advanceCanaryWaveAfterHealthyEvaluation({
       evaluationId: evaluation.id,
       status: evaluation.status,
       dataStatus: evaluation.dataStatus,
       sampleSize: evaluation.sampleSize,
       evaluatedAt: evaluation.evaluatedAt,
+      evidenceComplete: canaryEvidenceComplete,
+      releaseIdentity: measurement.releaseIdentity,
+      requiredReleaseIdentity: getReleaseIdentity().releaseId,
     });
   }
 
   control = await getAutomationControl();
-  const recoveryTransition = await advanceRuntimeRecoveryState({
+  const activeRuntimeReasons = [...new Set([
+    ...(control.publishBlockedByRuntime ? control.publishRuntimeReasons || [] : []),
+    ...evaluation.reasons,
+    ...(control.publishBlockedByRuntime && !(control.publishRuntimeReasons || []).length
+      ? ['RUNTIME_BLOCK_REASON_UNATTRIBUTED']
+      : []),
+  ])];
+  const observations = deriveRuntimeReasonObservations({
+    measurement,
+    evaluation,
+    control,
+    activeReasons: activeRuntimeReasons,
+  });
+  const recoveryTransition = await advanceRuntimeReasonRecoveryState({
     evaluationId: evaluation.id,
-    evaluationStatus: evaluation.status,
-    applicableReasons: evaluation.reasons,
-    recoveryEligibilityReasons: recoveryEligibilityReasons(control, measurement, evaluation, now),
+    observations,
+    activeReasons: activeRuntimeReasons,
     evidenceSummary: recoveryEvidenceSummary(measurement, evaluation),
-    publishBlockedByRuntime: control.publishBlockedByRuntime === true,
     featureMode: recoveryFeature.mode,
+    requiredReleaseIdentity: measurement.releaseIdentity,
     nowMs: now,
   });
   let recovery = recoveryTransition.state;
-  if (recoveryTransition.shouldClearRuntimeBlock) {
-    control = await updateAutomationControl({
-      publishBlockedByRuntime: false,
-      publishRuntimeReasons: [],
-      degradedReason: undefined,
-      reason: 'Runtime recovery reached the required consecutive healthy confirmation count.',
-    }, options.actor || 'error-budget-controller');
-    recovery = await confirmRuntimeRecoveryClosed({
-      expectedStateVersion: recovery.stateVersion,
-      nowMs: now,
-      evidenceSummary: recovery.evidenceSummary,
+  for (const reasonCode of recoveryTransition.advancedReasons) {
+    const progress = recovery.reasonProgress.find(item => item.reasonCode === reasonCode);
+    const observation = observations.find(item => item.reasonCode === reasonCode);
+    await appendRecoveryTransitionAudit({
+      evaluationId: evaluation.id,
+      operationType: 'RUNTIME_HEALTHY_STREAK_ADVANCED',
+      reasonCode,
+      actor,
+      result: {
+        consecutiveHealthyCount: progress?.consecutiveHealthyCount || recovery.requiredHealthyCount,
+        requiredHealthyCount: recovery.requiredHealthyCount,
+        observedAt: observation?.observedAt,
+        releaseIdentity: observation?.releaseIdentity,
+        evidenceReferences: observation?.evidenceReferences || [],
+        qualificationReasons: observation?.qualificationReasons || [],
+      },
     });
-    applied = true;
+  }
+  for (const reasonCode of recoveryTransition.insufficientReasons) {
+    const observation = observations.find(item => item.reasonCode === reasonCode);
+    await appendRecoveryTransitionAudit({
+      evaluationId: evaluation.id,
+      operationType: 'RUNTIME_CLEAR_REJECTED_INSUFFICIENT_DATA',
+      reasonCode,
+      actor,
+      result: {
+        runtimeBlockActive: true,
+        evidenceStatus: 'INSUFFICIENT_DATA',
+        observedAt: observation?.observedAt,
+        releaseIdentity: observation?.releaseIdentity,
+        evidenceReferences: observation?.evidenceReferences || [],
+        qualificationReasons: observation?.qualificationReasons || [],
+      },
+    });
+  }
+
+  if (recoveryTransition.clearedReasons.length > 0) {
+    const clearResult = await clearRuntimePublishReasons({
+      reasonCodes: recoveryTransition.clearedReasons,
+      expectedChangedAt: control.changedAt,
+      expectedRuntimeReasons: control.publishRuntimeReasons || [],
+      reason: recovery.currentApplicableReasons.length
+        ? 'RUNTIME_RECOVERY_REASONS_PARTIALLY_CLEARED'
+        : 'RUNTIME_RECOVERY_REQUIRED_EVIDENCE_CONFIRMED',
+      evaluationId: evaluation.id,
+    }, actor);
+    control = clearResult.control;
+    if (
+      clearResult.status !== 'CLEARED'
+      || clearResult.clearedReasons.length !== recoveryTransition.clearedReasons.length
+    ) {
+      const currentReasons = control.publishBlockedByRuntime
+        ? control.publishRuntimeReasons || ['RUNTIME_BLOCK_REASON_UNATTRIBUTED']
+        : [];
+      const conflictEvaluationId = `${evaluation.id}:control-conflict`;
+      const conflictTransition = await advanceRuntimeReasonRecoveryState({
+        evaluationId: conflictEvaluationId,
+        observations: currentReasons.map(reasonCode => ({
+          reasonCode,
+          metricKey: reasonCode,
+          measurement: 'INSUFFICIENT_DATA',
+          qualifyingStatus: 'INSUFFICIENT_DATA',
+          observedAt: measurement.measuredAt,
+          releaseIdentity: measurement.releaseIdentity,
+          qualificationReasons: ['RUNTIME_RECOVERY_CONTROL_STATE_CONFLICT'],
+          evidenceReferences: [measurement.id, measurement.evidenceHash],
+        })),
+        activeReasons: currentReasons,
+        evidenceSummary: recoveryEvidenceSummary(measurement, {
+          ...evaluation,
+          status: 'INSUFFICIENT_DATA',
+        }),
+        featureMode: recoveryFeature.mode,
+        requiredReleaseIdentity: measurement.releaseIdentity,
+        nowMs: now,
+      });
+      recovery = conflictTransition.state;
+      await appendRecoveryTransitionAudit({
+        evaluationId: evaluation.id,
+        operationType: 'RUNTIME_CLEAR_REJECTED_INSUFFICIENT_DATA',
+        reasonCode: 'RUNTIME_RECOVERY_CONTROL_STATE_CONFLICT',
+        actor,
+        result: {
+          publicationOccurred: false,
+          runtimeBlockActive: control.publishBlockedByRuntime === true,
+          controlClearStatus: clearResult.status,
+        },
+      });
+    } else {
+      const remainingReasons = control.publishRuntimeReasons || [];
+      for (const reasonCode of clearResult.clearedReasons) {
+        const observation = observations.find(item => item.reasonCode === reasonCode);
+        await appendRecoveryTransitionAudit({
+          evaluationId: evaluation.id,
+          operationType: 'RUNTIME_REASON_CLEARED',
+          reasonCode,
+          actor,
+          result: {
+            publicationOccurred: false,
+            remainingRuntimeReasons: remainingReasons,
+            policyBlockPreserved: control.publishBlockedByPolicy === true,
+            operatorPausePreserved: control.publishPausedByOperator === true,
+            observedAt: observation?.observedAt,
+            releaseIdentity: observation?.releaseIdentity,
+            evidenceReferences: observation?.evidenceReferences || [],
+          },
+        });
+      }
+      if (remainingReasons.length === 0) {
+        recovery = await confirmRuntimeRecoveryClosed({
+          expectedStateVersion: recovery.stateVersion,
+          nowMs: now,
+          evidenceSummary: recovery.evidenceSummary,
+        });
+      }
+      applied = true;
+    }
   }
   publishPausedByBudget = control.publishBlockedByRuntime === true;
 

@@ -61,11 +61,13 @@ async function main() {
   await store.completeAutomationJob(scan.job.id, 'gate8-worker', { summary: {
     sourceRequests: 2, found: 3, queued: 2, duplicate: 1, rejected: 1, created: 1, updated: 1,
     seoReady: 1, seoBlocked: 1, failed: 0,
-  } });
+  } }, { claimToken: claimedScan[0].claimToken });
   const guardian = await store.createAutomationJob({ type: 'RUNTIME_GUARDIAN', payload: {}, idempotencyKey: 'gate8-guardian', requestedBy: 'gate8-test', dryRun: true });
   const claimedGuardian = await store.claimAutomationJobs('gate8-worker', 1);
   assert.equal(claimedGuardian[0].id, guardian.job.id);
-  await store.failAutomationJob(guardian.job.id, 'gate8-worker', 'POLICY_BLOCKED', new Error('Provider chưa sẵn sàng; giữ SHADOW'));
+  await store.failAutomationJob(guardian.job.id, 'gate8-worker', 'POLICY_BLOCKED', new Error('Provider chưa sẵn sàng; giữ SHADOW'), {
+    claimToken: claimedGuardian[0].claimToken,
+  });
   await store.createAutomationJob({ type: 'AUTO_PILOT', payload: {}, idempotencyKey: 'gate8-autopilot', requestedBy: 'gate8-test', dryRun: true });
 
   const data = await dashboard.buildAutomationDashboard('today');
@@ -75,6 +77,8 @@ async function main() {
     assert.equal(data.runtime.scheduler.activeRole, true); assert.equal(data.runtime.scheduler.owner, 'scheduler-leader');
     assert.equal(data.runtime.scheduler.lastContenderState, 'rejected'); assert.equal(data.runtime.scheduler.rejectedOwner, 'scheduler-contender');
     assert.ok(data.runtime.scheduler.fencingToken >= 1); assert.ok(data.runtime.scheduler.leaseAgeMs >= 0);
+    assert.equal(data.scheduler.status, 'stale');
+    assert.ok(data.runtime.reasons.includes('SCHEDULER_OWNER_CONFLICT'));
   });
 
   await test('provider configured state is not presented as ready and degraded state stays visible', () => {
@@ -96,6 +100,7 @@ async function main() {
       sourceRequests: 2, sourceFound: 3, candidateQueued: 2, duplicateRejected: 1, validationRejected: 1,
       productCreated: 1, productUpdated: 1, publishEligible: 1, publishBlocked: 1,
       quarantined: 1, failed: 1, durationMs: data.pipeline.durationMs,
+      dataStatus: 'INCOMPLETE',
     });
     assert.ok(data.pipeline.durationMs >= 0);
   });

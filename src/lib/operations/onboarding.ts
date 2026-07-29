@@ -1,4 +1,10 @@
-import { getAllAutomationJobs, getAutomationControl } from '@/lib/automation/store';
+import { getAutomationControl } from '@/lib/automation/store';
+import { readBoundedAutomationJobStatuses } from '@/lib/automation/jobHealthSummary';
+import {
+  classifyAutomationJobEvidence,
+  completeAutomationJobEvidence,
+  type AutomationJobEvidence,
+} from '@/lib/automation/truth';
 import type { AutomationJob, AutomationJobType } from '@/lib/automation/types';
 import { listAlerts } from '@/lib/product-intelligence/alerts';
 import { listContentDrafts } from '@/lib/product-intelligence/contentStudio';
@@ -38,11 +44,24 @@ function step(input: Omit<OnboardingStep, 'updatedAt'>, updatedAt: string): Onbo
   return { ...input, updatedAt };
 }
 
-export async function buildOperationsOnboarding() {
-  const [jobs, products, sources, pendingSources, drafts, alerts, outboundEvents, settings, control, accessTrade] = await Promise.all([
-    getAllAutomationJobs(), getAllProducts(), listProductSources(), listPendingManualSources(100), listContentDrafts(),
+export async function buildOperationsOnboarding(
+  shared: { jobs?: AutomationJob[]; jobEvidence?: AutomationJobEvidence } = {},
+) {
+  const jobInputPromise = shared.jobs
+    ? Promise.resolve({
+        jobs: shared.jobs,
+        evidence: shared.jobEvidence || completeAutomationJobEvidence(),
+      })
+    : readBoundedAutomationJobStatuses().then(read => ({
+        jobs: read.items,
+        evidence: classifyAutomationJobEvidence(read),
+      }));
+  const [jobInput, products, sources, pendingSources, drafts, alerts, outboundEvents, settings, control, accessTrade] = await Promise.all([
+    jobInputPromise,
+    getAllProducts(), listProductSources(), listPendingManualSources(100), listContentDrafts(),
     listAlerts({ limit: 500 }), listOutboundEvents(), getAutomationSettings(), getAutomationControl(), getPrimaryCredential('accesstrade'),
   ]);
+  const { jobs, evidence: jobEvidence } = jobInput;
   const now = new Date().toISOString();
   const enabledSources = sources.filter(source => source.enabled);
   const activeImport = activeJob(jobs, ['IMPORT_PRODUCTS']);
@@ -71,6 +90,15 @@ export async function buildOperationsOnboarding() {
     step({ id: 'growth', title: 'Theo dõi click và cảnh báo', status: !published ? 'BLOCKED' : outboundEvents.length > 0 || latestSucceeded(jobs, ['EVALUATE_ALERTS', 'AGGREGATE_GROWTH_METRICS']) ? 'COMPLETED' : activeGrowth ? 'IN_PROGRESS' : 'NOT_STARTED', reason: !published ? 'Cần sản phẩm public trước khi đo funnel.' : outboundEvents.length > 0 ? `Đã ghi nhận ${outboundEvents.length} event outbound an toàn.` : activeGrowth ? `Analytics/alert job ${activeGrowth.status}.` : 'Chưa có event hoặc lần đánh giá cảnh báo.', cta: 'Mở cảnh báo', route: '/dashboard/alerts', completionCriteria: 'Có event không PII và lần đánh giá alert/metrics; không tạo doanh thu hoặc conversion giả.' }, activeGrowth?.updatedAt || outboundEvents[0]?.timestamp || alerts[0]?.updatedAt || now),
   ];
 
+  if (jobEvidence.status !== 'COMPLETE') {
+    const jobDependentSteps = new Set(['import', 'quality', 'dedupe', 'content', 'editorial', 'safe-publish', 'growth']);
+    for (const item of steps) {
+      if (!jobDependentSteps.has(item.id) || item.status !== 'NOT_STARTED') continue;
+      item.status = 'BLOCKED';
+      item.reason = 'Chưa thể xác minh lịch sử tác vụ; trạng thái thiếu không được hiểu là chưa bắt đầu.';
+    }
+  }
+
   const recommendations = steps.filter(item => item.status !== 'COMPLETED').slice(0, 5).map(item => ({ id: item.id, title: item.title, reason: item.reason, route: item.route, cta: item.cta, status: item.status }));
   const completed = steps.filter(item => item.status === 'COMPLETED').length;
   return {
@@ -89,6 +117,7 @@ export async function buildOperationsOnboarding() {
       outboundEvents: outboundEvents.length,
       openAlerts: alerts.filter(alert => !['resolved', 'ignored'].includes(alert.status)).length,
     },
+    jobEvidence,
     steps,
     recommendations,
     updatedAt: now,

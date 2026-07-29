@@ -5,7 +5,7 @@ const os = require('node:os');
 const { processAutomationBatch, runContinuousWorkerPool } = require('../src/lib/automation/worker.ts');
 const { getAutomationSettings } = require('../src/lib/storage/automationSettings.ts');
 const { acquireRuntimeRole, heartbeatRuntimeRole, releaseRuntimeRole } = require('../src/lib/automation/runtimeRoles.ts');
-const { getFeatureRolloutState } = require('../src/lib/automation/featureRollout.ts');
+const { isContinuousWorkerPoolEnabled } = require('../src/lib/automation/featureRollout.ts');
 
 const hostname = os.hostname();
 const workerId = `worker:${hostname}`;
@@ -91,7 +91,7 @@ async function waitForWorkerRole() {
       try {
         const settings = await getAutomationSettings();
         const concurrency = Math.max(1, Math.min(4, Number(settings.maxConcurrency) || 1));
-        const continuousPoolActive = getFeatureRolloutState('WORKER_CONTINUOUS_POOL_V2').mode === 'ACTIVE';
+        const continuousPoolActive = isContinuousWorkerPoolEnabled();
         result = continuousPoolActive
           ? await runContinuousWorkerPool({
               workerId: instanceId,

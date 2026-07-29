@@ -44,7 +44,8 @@ async function main() {
 
   await test('the compatibility facade keeps every existing named export', () => {
     for (const name of [
-      'getDataDir', 'ensureDataDir', 'readCollection', 'writeCollection', 'runTransaction',
+      'getDataDir', 'ensureDataDir', 'readCollection', 'readBoundedCollection',
+      'readBoundedCollectionSnapshot', 'readCollectionPage', 'writeCollection', 'runTransaction',
       'getStorageCapabilities', 'bulkMutateCollection',
       'findById', 'insertOne', 'updateOne', 'deleteOne', 'generateId',
     ]) {
@@ -140,6 +141,87 @@ async function main() {
       return [{ ...items[0], value: current + 1 }];
     })));
     assert.equal((await facade.readCollection('counter-fixture'))[0].value, 6);
+  });
+
+  await test('bounded projection reads enforce byte and item limits without consulting backups', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    await facade.writeCollection('bounded-fixture', [{ id: 'one' }, { id: 'two' }]);
+    assert.deepEqual(await facade.readBoundedCollection('bounded-fixture', {
+      maximumItems: 2,
+      maximumBytes: 1024,
+    }), [{ id: 'one' }, { id: 'two' }]);
+    await assert.rejects(
+      () => facade.readBoundedCollection('bounded-fixture', { maximumItems: 1, maximumBytes: 1024 }),
+      /BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED/,
+    );
+    await facade.writeCollection('bounded-backup-fixture', [{ id: 'version-one' }]);
+    await facade.writeCollection('bounded-backup-fixture', [{ id: 'version-two' }]);
+    fs.writeFileSync(path.join(tempDir, 'bounded-backup-fixture.json'), '{broken-main', 'utf8');
+    await assert.rejects(
+      () => facade.readBoundedCollection('bounded-backup-fixture', { maximumItems: 5, maximumBytes: 1024 }),
+      /BOUNDED_COLLECTION_INVALID_JSON/,
+    );
+    for (const options of [
+      { maximumItems: Number.NaN, maximumBytes: 1024 },
+      { maximumItems: 1.5, maximumBytes: 1024 },
+      { maximumItems: 0, maximumBytes: 1024 },
+      { maximumItems: 1, maximumBytes: Number.POSITIVE_INFINITY },
+      { maximumItems: 1, maximumBytes: 0 },
+      { maximumItems: 10_001, maximumBytes: 1024 },
+      { maximumItems: 1, maximumBytes: 32 * 1024 * 1024 + 1 },
+    ]) {
+      await assert.rejects(
+        () => facade.readBoundedCollection('bounded-fixture', options),
+        error => error instanceof Error && error.code === 'BOUNDED_COLLECTION_OPTIONS_INVALID',
+      );
+    }
+  });
+
+  await test('bounded snapshots distinguish a missing collection from an authoritative empty collection', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    const missing = await facade.readBoundedCollectionSnapshot('missing-bounded-fixture', {
+      maximumItems: 5,
+      maximumBytes: 1024,
+    });
+    assert.equal(missing.metadata.collectionPresent, false);
+    assert.equal(missing.metadata.itemCount, 0);
+    assert.deepEqual(missing.items, []);
+
+    await facade.writeCollection('present-empty-bounded-fixture', []);
+    const present = await facade.readBoundedCollectionSnapshot('present-empty-bounded-fixture', {
+      maximumItems: 5,
+      maximumBytes: 1024,
+    });
+    assert.equal(present.metadata.collectionPresent, true);
+    assert.equal(present.metadata.itemCount, 0);
+    assert.equal(present.metadata.truncated, false);
+    assert.deepEqual(present.items, []);
+  });
+
+  await test('file pagination validates bounds and has deterministic filtered tie ordering', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    await facade.writeCollection('page-fixture', [
+      { id: 'first', status: 'PENDING', createdAt: '2026-01-02T00:00:00.000Z' },
+      { id: 'second', status: 'PENDING', createdAt: '2026-01-02T00:00:00.000Z' },
+      { id: 'third', status: 'FAILED', createdAt: '2026-01-03T00:00:00.000Z' },
+      { id: 'fourth', status: 'PENDING', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+    const page = await facade.readCollectionPage('page-fixture', {
+      page: 1,
+      pageSize: 2,
+      filters: { status: 'PENDING' },
+      sort: { field: 'createdAt', direction: 'desc' },
+    });
+    assert.deepEqual(page.items.map(item => item.id), ['first', 'second']);
+    assert.equal(page.totalItems, 3);
+    await assert.rejects(
+      () => facade.readCollectionPage('page-fixture', { page: 0, pageSize: 2 }),
+      error => error instanceof Error && error.code === 'INVALID_STORAGE_QUERY',
+    );
+    await assert.rejects(
+      () => facade.readCollectionPage('page-fixture', { page: 1, pageSize: 10_001 }),
+      error => error instanceof Error && error.code === 'INVALID_STORAGE_QUERY',
+    );
   });
 
   await test('file capabilities and bounded bulk mutation report per-item partial failures atomically', async () => {

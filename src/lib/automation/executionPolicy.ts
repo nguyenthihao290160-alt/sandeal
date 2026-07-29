@@ -24,8 +24,6 @@ export interface AutomationExecutionDescriptor extends AutomationExecutionPolicy
 const CRITICAL_JOB_TYPES = new Set<AutomationJobType>([
   'RUNTIME_GUARDIAN',
   'POST_PUBLISH_MONITOR',
-  'RECHECK_PRODUCT_HEALTH',
-  'EVALUATE_ALERTS',
 ]);
 
 const PRODUCT_JOB_TYPES = new Set<AutomationJobType>([
@@ -157,6 +155,10 @@ export function isCriticalAutomationJob(type: AutomationJobType): boolean {
   return CRITICAL_JOB_TYPES.has(type);
 }
 
+export function isRuntimeGuardianJob(type: AutomationJobType): boolean {
+  return type === 'RUNTIME_GUARDIAN';
+}
+
 export function selectCompatibleWorkerJobs(
   candidates: AutomationJob[],
   activeJobs: AutomationJob[],
@@ -164,27 +166,41 @@ export function selectCompatibleWorkerJobs(
   nowMs: number,
   fairSelector: (items: AutomationJob[], limit: number, nowMs: number) => AutomationJob[],
   criticalReservedCapacity = 1,
+  laneCapacity?: {
+    runtimeGuardian: number;
+    nonGuardian: number;
+  },
 ): AutomationJob[] {
   const maximum = Math.max(0, Math.min(10, Math.floor(limit)));
   if (!maximum) return [];
   const selected: AutomationJob[] = [];
   const compatible = (candidate: AutomationJob) =>
     [...activeJobs, ...selected].every(active => !automationJobsConflict(candidate, active));
-  const criticalLimit = Math.min(
+  const runtimeGuardianLimit = Math.min(
     maximum,
-    Math.max(0, Math.min(maximum - 1, Math.floor(criticalReservedCapacity))),
+    laneCapacity
+      ? Math.max(0, Math.floor(laneCapacity.runtimeGuardian))
+      : Math.max(0, Math.floor(criticalReservedCapacity)),
   );
-  if (criticalLimit > 0) {
-    const critical = fairSelector(
-      candidates.filter(candidate => isCriticalAutomationJob(candidate.type)),
-      criticalLimit,
+  if (runtimeGuardianLimit > 0) {
+    const guardians = fairSelector(
+      candidates.filter(candidate => isRuntimeGuardianJob(candidate.type)),
+      runtimeGuardianLimit,
       nowMs,
     );
-    for (const candidate of critical) {
+    for (const candidate of guardians) {
       if (compatible(candidate)) selected.push(candidate);
     }
   }
   const selectedIds = new Set(selected.map(job => job.id));
+  let selectedGuardians = selected.filter(job => isRuntimeGuardianJob(job.type)).length;
+  let selectedNonGuardians = selected.length - selectedGuardians;
+  const guardianCapacity = laneCapacity
+    ? Math.max(0, Math.floor(laneCapacity.runtimeGuardian))
+    : maximum;
+  const nonGuardianCapacity = laneCapacity
+    ? Math.max(0, Math.floor(laneCapacity.nonGuardian))
+    : maximum;
   const remainder = fairSelector(
     candidates.filter(candidate => !selectedIds.has(candidate.id)),
     candidates.length,
@@ -192,7 +208,12 @@ export function selectCompatibleWorkerJobs(
   );
   for (const candidate of remainder) {
     if (selected.length >= maximum) break;
-    if (compatible(candidate)) selected.push(candidate);
+    const guardian = isRuntimeGuardianJob(candidate.type);
+    if (guardian ? selectedGuardians >= guardianCapacity : selectedNonGuardians >= nonGuardianCapacity) continue;
+    if (!compatible(candidate)) continue;
+    selected.push(candidate);
+    if (guardian) selectedGuardians += 1;
+    else selectedNonGuardians += 1;
   }
   return selected;
 }

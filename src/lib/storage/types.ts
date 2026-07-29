@@ -19,9 +19,35 @@ export interface StoragePage<T> {
   totalItems: number;
   /**
    * Number of storage round trips used for this page. File storage reads the
-   * capped read model once; Mongo reads the active revision and one facet.
+   * compact collection once; Mongo verifies schema, reads the active revision,
+   * and executes one bounded query.
    */
   queryCount: number;
+}
+
+export const STORAGE_MAX_PAGE_SIZE = 10_000;
+export const STORAGE_MAX_BOUNDED_ITEMS = 10_000;
+export const STORAGE_MAX_BOUNDED_BYTES = 32 * 1024 * 1024;
+
+export interface StorageBoundedCollectionOptions {
+  maximumItems: number;
+  maximumBytes: number;
+}
+
+export interface StorageBoundedCollectionMetadata {
+  driver: StorageDriver;
+  collectionPresent: boolean;
+  itemCount: number;
+  observedBytes: number;
+  maximumItems: number;
+  maximumBytes: number;
+  truncated: false;
+  queryCount: number;
+}
+
+export interface StorageBoundedCollectionResult<T> {
+  items: T[];
+  metadata: StorageBoundedCollectionMetadata;
 }
 
 export interface StorageHealth {
@@ -86,7 +112,19 @@ export interface StorageAdapter {
   getDataDir(): string;
   ensureDataDir(): Promise<void>;
   readCollection<T>(collection: string): Promise<T[]>;
-  readCollectionPage?<T>(collection: string, options: StoragePageOptions): Promise<StoragePage<T>>;
+  /**
+   * Read a deliberately compact read model. Implementations must reject the
+   * read before parsing when the configured byte bound can be checked.
+   */
+  readBoundedCollection<T>(
+    collection: string,
+    options: StorageBoundedCollectionOptions,
+  ): Promise<T[]>;
+  readBoundedCollectionSnapshot<T>(
+    collection: string,
+    options: StorageBoundedCollectionOptions,
+  ): Promise<StorageBoundedCollectionResult<T>>;
+  readCollectionPage<T>(collection: string, options: StoragePageOptions): Promise<StoragePage<T>>;
   writeCollection<T>(collection: string, data: T[]): Promise<void>;
   backupCollection?(collection: string, label: string): Promise<string>;
   runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void>;

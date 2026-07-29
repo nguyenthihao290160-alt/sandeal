@@ -2,12 +2,19 @@ import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { listFeatureRolloutStates, type FeatureRolloutMode } from './featureRollout';
 import { isCriticalAutomationJob } from './executionPolicy';
-import { getRuntimeRecoveryCanaryPolicy, listRuntimeRecoveryCanaryPermits } from './runtimeRecoveryCanary';
+import { getAutomationJobHealthView, type AutomationJobHealthView } from './jobHealthSummary';
+import {
+  getRuntimeRecoveryCanaryHealthView,
+  getRuntimeRecoveryCanaryPolicy,
+  type RuntimeRecoveryCanaryHealthView,
+  type RuntimeRecoveryCanaryPermit,
+} from './runtimeRecoveryCanary';
 import { getRuntimeRecoveryState, type RuntimeRecoveryState } from './runtimeRecoveryState';
 import { getLatestRuntimeHealth } from './runtimeGuardian';
 import { listRuntimeRoleLeases } from './runtimeRoles';
 import { getLatestSloMeasurement, type AutomationSloMeasurement } from './sloErrorBudget';
-import { getAllAutomationJobs, getAutomationControl } from './store';
+import { getAutomationControl } from './store';
+import type { AutomationControlState } from './types';
 
 const CURRENT_RUNTIME_MAX_AGE_MS = 3 * 60_000;
 
@@ -27,6 +34,14 @@ export interface AutomationOperationalHealth {
       expiresAt: string;
       outcomeReasonCode: string | null;
     } | null;
+    evidence: {
+      source: 'runtime-recovery-canary-health-v1';
+      currentStateComplete: boolean;
+      historyComplete: boolean;
+      truncated: boolean;
+      durableHistoryCount: number | null;
+      reasonCodes: string[];
+    };
   };
   slo: {
     dataStatus: AutomationSloMeasurement['dataStatus'];
@@ -70,6 +85,18 @@ export interface AutomationOperationalHealth {
   featureRollouts: ReturnType<typeof listFeatureRolloutStates>;
 }
 
+export interface AutomationOperationalHealthInputs {
+  summary?: AutomationJobHealthView;
+  settings?: Awaited<ReturnType<typeof getAutomationSettings>>;
+  control?: AutomationControlState;
+  runtime?: Awaited<ReturnType<typeof getLatestRuntimeHealth>>;
+  recovery?: Awaited<ReturnType<typeof getRuntimeRecoveryState>>;
+  permits?: RuntimeRecoveryCanaryPermit[];
+  canaryHealth?: RuntimeRecoveryCanaryHealthView;
+  leases?: Awaited<ReturnType<typeof listRuntimeRoleLeases>>;
+  latestSlo?: Awaited<ReturnType<typeof getLatestSloMeasurement>>;
+}
+
 function uniqueReasons(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => Boolean(value)))].sort();
 }
@@ -78,25 +105,61 @@ function latestByIssuedAt<T extends { issuedAt: string }>(items: T[]): T | undef
   return [...items].sort((left, right) => Date.parse(right.issuedAt) - Date.parse(left.issuedAt))[0];
 }
 
-export async function buildAutomationOperationalHealth(now = Date.now()): Promise<AutomationOperationalHealth> {
+function injectedCanaryHealth(
+  permits: RuntimeRecoveryCanaryPermit[],
+  now: number,
+): RuntimeRecoveryCanaryHealthView {
+  const activePermits = permits.filter(permit =>
+    permit.status === 'CONSUMED'
+    || (permit.status === 'ISSUED' && Date.parse(permit.expiresAt) > now));
+  const latest = latestByIssuedAt(permits);
+  const issuedAt = permits
+    .map(permit => Date.parse(permit.issuedAt))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  return {
+    activeCount: activePermits.length,
+    activePermits,
+    latestPermit: latest || null,
+    currentStateComplete: true,
+    historyComplete: true,
+    truncated: false,
+    durableHistoryCount: permits.length,
+    source: 'runtime-recovery-canary-health-v1',
+    reasonCodes: ['RECOVERY_CANARY_HEALTH_INJECTED_FIXTURE'],
+    observedRange: {
+      earliestIssuedAt: issuedAt.length ? new Date(issuedAt[0]).toISOString() : null,
+      latestIssuedAt: issuedAt.length ? new Date(issuedAt[issuedAt.length - 1]).toISOString() : null,
+    },
+    updatedAt: null,
+  };
+}
+
+export async function buildAutomationOperationalHealth(
+  now = Date.now(),
+  inputs: AutomationOperationalHealthInputs = {},
+): Promise<AutomationOperationalHealth> {
   const [
-    jobs,
+    summary,
     settings,
     control,
     runtime,
     recovery,
-    permits,
+    canaryHealth,
     leases,
     latestSlo,
   ] = await Promise.all([
-    getAllAutomationJobs(),
-    getAutomationSettings(),
-    getAutomationControl(),
-    getLatestRuntimeHealth(),
-    getRuntimeRecoveryState(),
-    listRuntimeRecoveryCanaryPermits(),
-    listRuntimeRoleLeases(),
-    getLatestSloMeasurement(),
+    inputs.summary ?? getAutomationJobHealthView(now),
+    inputs.settings ?? getAutomationSettings(),
+    inputs.control ?? getAutomationControl(),
+    inputs.runtime === undefined ? getLatestRuntimeHealth() : inputs.runtime,
+    inputs.recovery === undefined ? getRuntimeRecoveryState() : inputs.recovery,
+    inputs.canaryHealth
+      ?? (inputs.permits
+        ? injectedCanaryHealth(inputs.permits, now)
+        : getRuntimeRecoveryCanaryHealthView(now)),
+    inputs.leases ?? listRuntimeRoleLeases(),
+    inputs.latestSlo === undefined ? getLatestSloMeasurement() : inputs.latestSlo,
   ]);
   const release = getReleaseIdentity();
   const features = listFeatureRolloutStates();
@@ -121,6 +184,7 @@ export async function buildAutomationOperationalHealth(now = Date.now()): Promis
   const matchStatus = releaseMismatchReasons.length
     ? 'MISMATCH'
     : identitiesPresent ? 'MATCH' : 'UNVERIFIED';
+  const canaryMode = features.find(item => item.feature === 'RECOVERY_CANARY')?.mode || 'OFF';
   const currentActiveReasons = uniqueReasons([
     ...(runtimeFresh
       ? runtime?.reasons || []
@@ -129,6 +193,9 @@ export async function buildAutomationOperationalHealth(now = Date.now()): Promis
     ...(control.publishBlockedByPolicy ? control.publishPolicyReasons || [] : []),
     ...(recovery && recovery.state !== 'CLOSED_HEALTHY' ? recovery.currentApplicableReasons : []),
     ...releaseMismatchReasons,
+    ...(canaryMode === 'ACTIVE' && !canaryHealth.currentStateComplete
+      ? canaryHealth.reasonCodes
+      : []),
     ...features
       .filter(feature => !feature.valid)
       .map(feature => `FEATURE_ROLLOUT_INVALID_VALUE:${feature.feature}`),
@@ -138,14 +205,12 @@ export async function buildAutomationOperationalHealth(now = Date.now()): Promis
     ...(!runtimeFresh ? runtime?.reasons || [] : []),
     ...(recovery?.originatingBreachReasons || []),
   ]).filter(reason => !currentActiveReasons.includes(reason));
-  const runningJobs = jobs.filter(job => job.status === 'RUNNING');
+  const runningJobs = summary.runningJobs;
   const activeCriticalSlots = runningJobs.filter(job =>
     job.executionCritical === true || isCriticalAutomationJob(job.type)).length;
   const maximumSlots = settings.maxConcurrency;
   const activeSlots = runningJobs.length;
-  const latestPermit = latestByIssuedAt(permits);
-  const activePermits = permits.filter(permit => ['ISSUED', 'CONSUMED'].includes(permit.status));
-  const canaryMode = features.find(item => item.feature === 'RECOVERY_CANARY')?.mode || 'OFF';
+  const latestPermit = canaryHealth.latestPermit;
   const workerPoolMode = features.find(item => item.feature === 'WORKER_CONTINUOUS_POOL_V2')?.mode || 'OFF';
 
   return {
@@ -155,7 +220,7 @@ export async function buildAutomationOperationalHealth(now = Date.now()): Promis
     recovery,
     canary: {
       featureMode: canaryMode,
-      activeCount: activePermits.length,
+      activeCount: canaryHealth.activeCount,
       maximumActive: getRuntimeRecoveryCanaryPolicy().maximumActivePermits,
       latest: latestPermit ? {
         permitId: latestPermit.id,
@@ -164,6 +229,14 @@ export async function buildAutomationOperationalHealth(now = Date.now()): Promis
         expiresAt: latestPermit.expiresAt,
         outcomeReasonCode: latestPermit.outcomeReasonCode || null,
       } : null,
+      evidence: {
+        source: canaryHealth.source,
+        currentStateComplete: canaryHealth.currentStateComplete,
+        historyComplete: canaryHealth.historyComplete,
+        truncated: canaryHealth.truncated,
+        durableHistoryCount: canaryHealth.durableHistoryCount,
+        reasonCodes: canaryHealth.reasonCodes,
+      },
     },
     slo: latestSlo ? {
       dataStatus: latestSlo.dataStatus,

@@ -340,7 +340,10 @@ async function main() {
     }), /SIMULATED_LIFECYCLE_CRASH_AFTER_PRODUCT_WRITE/);
     assert.equal((await products.getProductById(product.id)).lifecycleState, 'PUBLISHING');
     assert.equal((await adapter.readCollection('product-lifecycle-events')).find(event => event.productId === product.id).status, 'PENDING');
-    await store.failAutomationJob(claimed.id, 'auto-publish-worker-pending-1', 'TEMPORARY_ERROR', new Error('simulated worker crash'), { nextRetryAt: new Date(0).toISOString() });
+    await store.failAutomationJob(claimed.id, 'auto-publish-worker-pending-1', 'TEMPORARY_ERROR', new Error('simulated worker crash'), {
+      nextRetryAt: new Date(0).toISOString(),
+      claimToken: claimed.claimToken,
+    });
     await adapter.runTransaction('automation-jobs', jobs => { const job = jobs.find(item => item.id === claimed.id); job.nextRetryAt = new Date(0).toISOString(); return jobs; });
     const recovery = await worker.processAutomationBatch('auto-publish-worker-pending-2', 1);
     assert.equal(recovery.succeeded, 1, JSON.stringify(await store.getAutomationJob(claimed.id)));

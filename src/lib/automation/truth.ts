@@ -1,5 +1,9 @@
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
-import { getAiUsage, getAllAutomationJobs, getAutomationControl, publicAutomationJob } from './store';
+import { getAiUsage, getAutomationControl, publicAutomationJob } from './store';
+import {
+  readBoundedAutomationJobStatuses,
+  type BoundedAutomationJobStatusRead,
+} from './jobHealthSummary';
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases, type RuntimeRoleConflict, type RuntimeRoleLease } from './runtimeRoles';
 import type { AiUsageRecord, AutomationControlState, AutomationJob } from './types';
 import { AUTOMATION_TIMEZONE, vietnamDayKey } from './timezone';
@@ -23,8 +27,56 @@ export interface AutomationTruthInput {
   leases: RuntimeRoleLease[];
   conflicts: RuntimeRoleConflict[];
   jobs: AutomationJob[];
+  jobEvidence?: AutomationJobEvidence;
   usage: AiUsageRecord;
   businessUsage?: DailyBusinessUsage;
+}
+
+export interface AutomationJobEvidence {
+  status: 'COMPLETE' | 'INCOMPLETE' | 'UNAVAILABLE';
+  reasonCodes: string[];
+  currentStateComplete: boolean;
+  historyComplete: boolean;
+  truncated: boolean;
+  retentionBoundary: { field: 'updatedAt'; oldestRetainedAt: string } | null;
+}
+
+export function completeAutomationJobEvidence(): AutomationJobEvidence {
+  return {
+    status: 'COMPLETE',
+    reasonCodes: [],
+    currentStateComplete: true,
+    historyComplete: true,
+    truncated: false,
+    retentionBoundary: null,
+  };
+}
+
+export function classifyAutomationJobEvidence(
+  read: Pick<
+    BoundedAutomationJobStatusRead,
+    | 'evidenceClassification'
+    | 'reasonCodes'
+    | 'currentStateComplete'
+    | 'historyComplete'
+    | 'truncated'
+    | 'retentionBoundary'
+  >,
+): AutomationJobEvidence {
+  return {
+    status: read.evidenceClassification,
+    reasonCodes: read.reasonCodes.length
+      ? [...new Set(read.reasonCodes)]
+      : read.evidenceClassification === 'COMPLETE'
+        ? []
+        : [read.evidenceClassification === 'UNAVAILABLE'
+          ? 'JOB_READ_MODEL_UNAVAILABLE'
+          : 'JOB_READ_MODEL_INCOMPLETE'],
+    currentStateComplete: read.currentStateComplete,
+    historyComplete: read.historyComplete,
+    truncated: read.truncated,
+    retentionBoundary: read.retentionBoundary,
+  };
 }
 
 const HEARTBEAT_FRESH_MS = 90_000;
@@ -47,6 +99,7 @@ function inconsistency(code: string, severity: TruthSeverity, message: string, e
 
 export function buildAutomationTruth(input: AutomationTruthInput) {
   const { now, settings, control, jobs, usage } = input;
+  const jobEvidence = input.jobEvidence || completeAutomationJobEvidence();
   const schedulerLeases = input.leases.filter(item => item.role === 'SCHEDULER' && item.status === 'ACTIVE');
   const workerLeases = input.leases.filter(item => item.role === 'WORKER' && item.status === 'ACTIVE');
   const schedulerLease = [...schedulerLeases].sort((a, b) => b.fencingToken - a.fencingToken)[0];
@@ -94,6 +147,15 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
   const oldestPendingAt = newest(jobs.filter(job => job.status === 'PENDING').map(job => job.createdAt).sort().slice(0, 1));
   const inconsistencies: AutomationInconsistency[] = [];
 
+  if (jobEvidence.status !== 'COMPLETE') inconsistencies.push(inconsistency(
+    jobEvidence.status === 'UNAVAILABLE' ? 'JOB_READ_MODEL_UNAVAILABLE' : 'JOB_READ_MODEL_INCOMPLETE',
+    jobEvidence.status === 'UNAVAILABLE' ? 'CRITICAL' : 'WARNING',
+    jobEvidence.status === 'UNAVAILABLE'
+      ? 'Không thể xác minh trạng thái hàng đợi từ bản đọc giới hạn.'
+      : 'Bằng chứng hàng đợi chưa đầy đủ; số không không được hiểu là không có tác vụ.',
+    { reasonCodes: jobEvidence.reasonCodes.slice(0, 10) },
+    now,
+  ));
   if (settings.enabled && !control.schedulerPaused && !schedulerActive) inconsistencies.push(inconsistency(
     'SCHEDULE_ENABLED_RUNTIME_INACTIVE', 'CRITICAL', 'Lịch được bật nhưng runtime scheduler chưa chứng minh ACTIVE.',
     { leaseFresh: schedulerLeaseFresh, heartbeatFresh: schedulerHeartbeatFresh, fencingValid }, now));
@@ -169,8 +231,20 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
       activeWorkers,
       staleWorkers: staleWorkers.length,
     },
-    queue: { pending, running, retrying, failed, deadLetter, completedRecent, oldestPendingAt },
+    queue: {
+      dataStatus: jobEvidence.currentStateComplete ? 'COMPLETE' : jobEvidence.status,
+      reasonCodes: jobEvidence.reasonCodes,
+      pending,
+      running,
+      retrying,
+      failed,
+      deadLetter,
+      completedRecent,
+      oldestPendingAt,
+    },
     runs: {
+      dataStatus: jobEvidence.historyComplete ? 'COMPLETE' : jobEvidence.status,
+      reasonCodes: jobEvidence.reasonCodes,
       latestStartedAt, latestCompletedAt, latestSuccessfulAt, latestFailedAt,
       recent: sorted.slice(0, 20).map(job => publicAutomationJob(job)),
       latestSafeRun: latestSafeJob ? {
@@ -190,18 +264,44 @@ export function buildAutomationTruth(input: AutomationTruthInput) {
       } : null,
     },
     dailyUsage: {
+      dataStatus: jobEvidence.historyComplete ? 'COMPLETE' : jobEvidence.status,
+      reasonCodes: jobEvidence.reasonCodes,
       day: vietnamDayKey(now), processed: processedToday, limit: settings.maxItemsPerDay,
       remaining: Math.max(0, settings.maxItemsPerDay - processedToday),
     },
+    jobEvidence,
     inconsistencies,
   };
 }
 
-export async function getAutomationTruth(now = Date.now()) {
-  const [settings, control, leases, conflicts, jobs, usage, businessUsage] = await Promise.all([
-    getAutomationSettings(), getAutomationControl(), listRuntimeRoleLeases(),
-    listRecentRuntimeRoleConflicts(now - 24 * 60 * 60_000), getAllAutomationJobs(), getAiUsage(now),
-    getDailyBusinessUsage(now),
+export async function getAutomationTruth(now = Date.now(), shared: Partial<AutomationTruthInput> = {}) {
+  const jobInputPromise = shared.jobs
+    ? Promise.resolve({
+        jobs: shared.jobs,
+        evidence: shared.jobEvidence || completeAutomationJobEvidence(),
+      })
+    : readBoundedAutomationJobStatuses().then(read => ({
+        jobs: read.items,
+        evidence: classifyAutomationJobEvidence(read),
+      }));
+  const [settings, control, leases, conflicts, jobInput, usage, businessUsage] = await Promise.all([
+    shared.settings || getAutomationSettings(),
+    shared.control || getAutomationControl(),
+    shared.leases || listRuntimeRoleLeases(),
+    shared.conflicts || listRecentRuntimeRoleConflicts(now - 24 * 60 * 60_000),
+    jobInputPromise,
+    shared.usage || getAiUsage(now),
+    shared.businessUsage || getDailyBusinessUsage(now),
   ]);
-  return buildAutomationTruth({ now, settings, control, leases, conflicts, jobs, usage, businessUsage });
+  return buildAutomationTruth({
+    now,
+    settings,
+    control,
+    leases,
+    conflicts,
+    jobs: jobInput.jobs,
+    jobEvidence: jobInput.evidence,
+    usage,
+    businessUsage,
+  });
 }

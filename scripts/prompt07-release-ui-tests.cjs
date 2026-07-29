@@ -98,10 +98,15 @@ test('Tự động hóa yêu cầu confirmation, lý do và ghi audit backend', 
 
 test('Sức khỏe không báo Gemini bình thường khi chưa cấu hình', () => {
   const route = read('src/app/api/automation/health/route.ts');
+  const service = read('src/lib/automation/healthService.ts');
   const page = read('src/app/dashboard/app-health/page.tsx');
-  assert(route.includes('getGeminiProviderReadiness'));
-  assert(route.includes('gemini: geminiStatus'));
-  assert(!route.includes('adapterAvailable: false'));
+  assert(route.includes("'APP_HEALTH_UNAVAILABLE'"));
+  assert(route.includes('Không thể xác minh sức khỏe hệ thống lúc này.'));
+  assert(!route.includes(String.fromCodePoint(0x4d, 0xe1, 0xbb)));
+  assert(!route.includes(String.fromCodePoint(0xc4, 0x90)));
+  assert(service.includes('getGeminiProviderReadiness'));
+  assert(service.includes('gemini: geminiStatus'));
+  assert(!service.includes('adapterAvailable: false'));
   assert(page.includes("configured_not_ready: 'Đã cấu hình, chưa sẵn sàng'"));
 });
 

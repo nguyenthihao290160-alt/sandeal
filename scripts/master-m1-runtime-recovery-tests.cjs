@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const testRoot = path.join(process.cwd(), '.test-tmp', `master-m1-runtime-recovery-${process.pid}-${Date.now()}`);
+const allowedTempRoot = path.resolve(process.cwd(), '.test-tmp');
+if (path.dirname(path.resolve(testRoot)) !== allowedTempRoot) throw new Error('UNSAFE_TEST_ROOT');
 fs.mkdirSync(testRoot, { recursive: true });
 process.env.SANDEAL_DATA_DIR = testRoot;
 process.env.NODE_ENV = 'test';
@@ -41,6 +43,7 @@ async function main() {
   }) {
     await Promise.all([
       adapter.writeCollection('runtime-recovery-canary-permits', []),
+      adapter.writeCollection('runtime-recovery-canary-health-v1', []),
       adapter.writeCollection('runtime-recovery-state', []),
       adapter.writeCollection('runtime-role-leases', []),
       adapter.writeCollection('automation-control', []),
@@ -101,13 +104,74 @@ async function main() {
     return acquired.ownership;
   }
 
-  await test('feature rollout defaults are conservative and server controlled', async () => {
+  await test('safety-sensitive implementations preserve their guarded rollout defaults', async () => {
     const states = rollout.listFeatureRolloutStates({});
     assert.equal(states.find(item => item.feature === 'RUNTIME_RECOVERY_V2').mode, 'SHADOW');
     assert.equal(states.find(item => item.feature === 'RECOVERY_CANARY').mode, 'OFF');
     assert.equal(states.find(item => item.feature === 'WORKER_CONTINUOUS_POOL_V2').mode, 'OFF');
+    assert.equal(states.find(item => item.feature === 'SLO_RUNNABLE_AT_V2').mode, 'SHADOW');
     assert.equal(states.find(item => item.feature === 'MONGO_BULK_WRITE').mode, 'OFF');
     assert.equal(states.every(item => item.valid), true);
+  });
+
+  await test('malformed runtime-control journal is fail-closed and cannot be cleared as healthy', async () => {
+    await adapter.writeCollection('automation-control', [{
+      ...store.DEFAULT_CONTROL,
+      updatedAt: new Date().toISOString(),
+      runtimeControlApplications: [null, { evaluationId: 'missing-required-fields' }],
+    }]);
+    const control = await store.getAutomationControl();
+    assert.equal(control.publishBlockedByRuntime, true);
+    assert.equal(control.runtimeControlJournalInvalidCount, 2);
+    assert.ok(control.publishRuntimeReasons.includes('RUNTIME_CONTROL_JOURNAL_INVALID'));
+    const clear = await store.clearRuntimePublishReasons({
+      reasonCodes: ['RUNTIME_CONTROL_JOURNAL_INVALID'],
+      expectedChangedAt: control.changedAt,
+      expectedRuntimeReasons: control.publishRuntimeReasons,
+      reason: 'INVALID_JOURNAL_MUST_NOT_CLEAR',
+      evaluationId: 'invalid-journal-clear-attempt',
+    });
+    assert.equal(clear.status, 'STATE_CONFLICT');
+    assert.equal(clear.control.publishBlockedByRuntime, true);
+    await adapter.writeCollection('automation-control', []);
+  });
+
+  await test('runtime blockers and unaudited control intents are not silently truncated', async () => {
+    await adapter.writeCollection('automation-control', []);
+    const reasons = Array.from({ length: 25 }, (_, index) => `RUNTIME_REASON_${index}`);
+    const applied = await store.applyRuntimePublishBlock({
+      reasonCodes: reasons,
+      evaluationId: 'many-runtime-reasons',
+      evaluatedAt: new Date().toISOString(),
+      degradeMode: false,
+    }, 'runtime-recovery-test');
+    assert.equal(reasons.every(reason => applied.control.publishRuntimeReasons.includes(reason)), true);
+
+    const now = new Date().toISOString();
+    const pending = Array.from({ length: 60 }, (_, index) => ({
+      schemaVersion: 1,
+      evaluationId: `pending-runtime-control-${index}`,
+      operationType: 'RUNTIME_BLOCK_APPLIED',
+      actor: 'runtime-recovery-test',
+      reasons: [`PENDING_REASON_${index}`],
+      previousRuntimeReasons: [],
+      nextRuntimeReasons: [`PENDING_REASON_${index}`],
+      previousEffectiveMode: 'SHADOW',
+      nextEffectiveMode: 'SHADOW',
+      appliedAt: now,
+    }));
+    await adapter.writeCollection('automation-control', [{
+      ...store.DEFAULT_CONTROL,
+      publishPaused: true,
+      publishBlockedByRuntime: true,
+      publishRuntimeReasons: ['PENDING_AUDIT_FIXTURE'],
+      runtimeControlApplications: pending,
+      updatedAt: now,
+    }]);
+    const retained = await store.getAutomationControl();
+    assert.equal(retained.runtimeControlApplications.length, 60);
+    assert.equal(retained.runtimeControlApplications.every(item => item.auditedAt === undefined), true);
+    await adapter.writeCollection('automation-control', []);
   });
 
   await test('invalid rollout configuration falls back without exposing the raw value', async () => {
@@ -205,68 +269,156 @@ async function main() {
     }), /RUNTIME_RECOVERY_STATE_VERSION_CONFLICT/);
   });
 
-  await test('recovery transition requires distinct healthy evaluations and ACTIVE mode to clear', async () => {
+  await test('only ordered release-compatible evidence advances the authoritative recovery streak', async () => {
+    await adapter.writeCollection('runtime-recovery-state', []);
     const nowMs = Date.parse('2026-07-26T00:05:00.000Z');
-    const initial = recovery.normalizeRuntimeRecoveryState({
-      id: 'runtime-recovery',
-      state: 'OPEN_BLOCKED',
-      stateVersion: 1,
-      enteredAt: new Date(nowMs).toISOString(),
-      updatedAt: new Date(nowMs).toISOString(),
-      originatingBreachReasons: ['QUEUE_CONGESTION'],
-      currentApplicableReasons: [],
-      consecutiveHealthyCount: 0,
-      requiredHealthyCount: 3,
+    const reasonCode = 'QUEUE_CONGESTION';
+    const evidenceSummary = {
+      measurementState: 'RECOVERY',
+      evaluationStatus: 'PASS',
+      evaluatedAt: new Date(nowMs).toISOString(),
+      maximumEvidenceAgeMs: 120_000,
+      reasonCodes: [],
+      terminalJobSamples: 20,
+      publicationAttempts: 0,
+      monitorOutcomes: 0,
+      publicProducts: 0,
+    };
+    const observation = (observedAt, overrides = {}) => ({
+      reasonCode,
+      metricKey: 'job_pickup_latency_p95_ms',
+      measurement: 'PASS',
+      qualifyingStatus: 'PASS',
+      observedAt: new Date(observedAt).toISOString(),
+      releaseIdentity: 'a'.repeat(40),
+      qualificationReasons: [],
+      evidenceReferences: [`runtime-health:${observedAt}`],
+      ...overrides,
+    });
+    const advance = (evaluationId, observedAt, overrides = {}) =>
+      recovery.advanceRuntimeReasonRecoveryState({
+        evaluationId,
+        observations: [observation(observedAt, overrides)],
+        activeReasons: [reasonCode],
+        evidenceSummary: { ...evidenceSummary, evaluatedAt: new Date(observedAt).toISOString() },
+        featureMode: 'ACTIVE',
+        requiredReleaseIdentity: 'a'.repeat(40),
+        nowMs: observedAt,
+      });
+
+    const first = await advance('healthy-evaluation-1', nowMs);
+    const replay = await advance('healthy-evaluation-1', nowMs);
+    const missing = await advance('missing-evidence-2', nowMs + 30_000, {
+      measurement: 'INSUFFICIENT_DATA',
+      qualifyingStatus: 'INSUFFICIENT_DATA',
+      evidenceReferences: [],
+    });
+    const restarted = await advance('healthy-evaluation-3', nowMs + 60_000);
+    const mismatched = await advance('release-mismatch-4', nowMs + 90_000, {
+      releaseIdentity: 'b'.repeat(40),
+    });
+
+    assert.equal(first.state.reasonProgress[0].consecutiveHealthyCount, 1);
+    assert.equal(replay.state.reasonProgress[0].consecutiveHealthyCount, 1);
+    assert.equal(missing.state.reasonProgress[0].consecutiveHealthyCount, 0);
+    assert.equal(restarted.state.reasonProgress[0].consecutiveHealthyCount, 1);
+    assert.equal(mismatched.state.reasonProgress[0].consecutiveHealthyCount, 0);
+    assert.ok(mismatched.state.reasonProgress[0].qualificationReasons.includes('RUNTIME_RECOVERY_RELEASE_MISMATCH'));
+    assert.deepEqual(mismatched.clearedReasons, []);
+  });
+
+  await test('non-consecutive, stale, partial, and out-of-order evidence cannot clear a runtime reason', async () => {
+    await adapter.writeCollection('runtime-recovery-state', []);
+    const nowMs = Date.parse('2026-07-26T00:10:00.000Z');
+    const reasonCode = 'RUNTIME_GUARDIAN_UNSAFE';
+    const evidenceSummary = {
+      measurementState: 'RECOVERY',
+      evaluationStatus: 'PASS',
+      evaluatedAt: new Date(nowMs).toISOString(),
+      maximumEvidenceAgeMs: 120_000,
+      reasonCodes: [],
+      terminalJobSamples: 0,
+      publicationAttempts: 0,
+      monitorOutcomes: 0,
+      publicProducts: 0,
+    };
+    const call = (id, currentNow, observedAt, overrides = {}) =>
+      recovery.advanceRuntimeReasonRecoveryState({
+        evaluationId: id,
+        observations: [{
+          reasonCode,
+          metricKey: 'runtime_publish_safe',
+          measurement: 'PASS',
+          qualifyingStatus: 'PASS',
+          observedAt: new Date(observedAt).toISOString(),
+          releaseIdentity: 'a'.repeat(40),
+          qualificationReasons: [],
+          evidenceReferences: [`runtime-health:${observedAt}`],
+          ...overrides,
+        }],
+        activeReasons: [reasonCode],
+        evidenceSummary: { ...evidenceSummary, evaluatedAt: new Date(currentNow).toISOString() },
+        featureMode: 'ACTIVE',
+        requiredReleaseIdentity: 'a'.repeat(40),
+        nowMs: currentNow,
+      });
+
+    assert.equal((await call('sequence-1', nowMs, nowMs)).state.reasonProgress[0].consecutiveHealthyCount, 1);
+    assert.equal((await call('sequence-partial', nowMs + 30_000, nowMs + 30_000, {
+      qualifyingStatus: 'INSUFFICIENT_DATA',
+      qualificationReasons: ['PARTIAL_SOURCE_EVIDENCE'],
+    })).state.reasonProgress[0].consecutiveHealthyCount, 0);
+    assert.equal((await call('sequence-2', nowMs + 60_000, nowMs + 60_000)).state.reasonProgress[0].consecutiveHealthyCount, 1);
+    assert.equal((await call('sequence-stale', nowMs + 4 * 60_000, nowMs + 60_000)).state.reasonProgress[0].consecutiveHealthyCount, 0);
+    assert.equal((await call('sequence-3', nowMs + 4 * 60_000 + 10_000, nowMs + 4 * 60_000 + 10_000)).state.reasonProgress[0].consecutiveHealthyCount, 1);
+    const outOfOrder = await call('sequence-out-of-order', nowMs + 4 * 60_000 + 20_000, nowMs + 4 * 60_000 + 5_000);
+    assert.equal(outOfOrder.state.reasonProgress[0].consecutiveHealthyCount, 0);
+    assert.ok(outOfOrder.state.reasonProgress[0].qualificationReasons.includes('RUNTIME_RECOVERY_EVIDENCE_OUT_OF_ORDER'));
+    assert.deepEqual(outOfOrder.clearedReasons, []);
+  });
+
+  await test('three consecutive explicit observations clear exactly one reason while SHADOW cannot clear', async () => {
+    await adapter.writeCollection('runtime-recovery-state', []);
+    const nowMs = Date.parse('2026-07-26T00:20:00.000Z');
+    const reasonCode = 'JOB_PICKUP_LATENCY_SLO_FAILED';
+    const run = (index, featureMode) => recovery.advanceRuntimeReasonRecoveryState({
+      evaluationId: `qualified-evaluation-${index}`,
+      observations: [{
+        reasonCode,
+        metricKey: 'job_pickup_latency_p95_ms',
+        measurement: 'PASS',
+        qualifyingStatus: 'PASS',
+        observedAt: new Date(nowMs + index * 30_000).toISOString(),
+        releaseIdentity: 'a'.repeat(40),
+        qualificationReasons: [],
+        evidenceReferences: [`runtime-health:${nowMs + index * 30_000}`, `queue-summary:${index}`],
+      }],
+      activeReasons: [reasonCode],
       evidenceSummary: {
         measurementState: 'RECOVERY',
-        evaluationStatus: 'PASS',
-        evaluatedAt: new Date(nowMs).toISOString(),
+        evaluationStatus: 'INSUFFICIENT_DATA',
+        evaluatedAt: new Date(nowMs + index * 30_000).toISOString(),
         maximumEvidenceAgeMs: 120_000,
-        reasonCodes: [],
-        terminalJobSamples: 20,
+        reasonCodes: ['UNRELATED_METRIC_INSUFFICIENT'],
+        terminalJobSamples: 0,
         publicationAttempts: 0,
         monitorOutcomes: 0,
         publicProducts: 0,
       },
-      releaseIdentity: 'a'.repeat(40),
-    }, nowMs);
-    const input = {
-      evaluationId: 'healthy-evaluation-1',
-      evaluationStatus: 'PASS',
-      applicableReasons: [],
-      recoveryEligibilityReasons: [],
-      evidenceSummary: initial.evidenceSummary,
-      publishBlockedByRuntime: true,
-      featureMode: 'ACTIVE',
-      nowMs,
-    };
-    const first = recovery.deriveRuntimeRecoveryTransition(initial, input);
-    const duplicate = recovery.deriveRuntimeRecoveryTransition(first.state, input);
-    const second = recovery.deriveRuntimeRecoveryTransition(duplicate.state, {
-      ...input,
-      evaluationId: 'healthy-evaluation-2',
-      nowMs: nowMs + 1_000,
+      featureMode,
+      requiredReleaseIdentity: 'a'.repeat(40),
+      nowMs: nowMs + index * 30_000,
     });
-    const shadowThird = recovery.deriveRuntimeRecoveryTransition(second.state, {
-      ...input,
-      evaluationId: 'healthy-evaluation-3',
-      featureMode: 'SHADOW',
-      nowMs: nowMs + 2_000,
-    });
-    const activeThird = recovery.deriveRuntimeRecoveryTransition(second.state, {
-      ...input,
-      evaluationId: 'healthy-evaluation-3',
-      nowMs: nowMs + 2_000,
-    });
-    assert.equal(first.state.consecutiveHealthyCount, 1);
-    assert.equal(duplicate.state.consecutiveHealthyCount, 1);
-    assert.equal(second.state.consecutiveHealthyCount, 2);
-    assert.equal(shadowThird.state.state, 'RECOVERED_PENDING_CONFIRMATION');
-    assert.equal(shadowThird.shouldClearRuntimeBlock, false);
-    assert.equal(activeThird.shouldClearRuntimeBlock, true);
+    assert.equal((await run(0, 'ACTIVE')).state.reasonProgress[0].consecutiveHealthyCount, 1);
+    assert.equal((await run(1, 'ACTIVE')).state.reasonProgress[0].consecutiveHealthyCount, 2);
+    assert.deepEqual((await run(2, 'SHADOW')).clearedReasons, []);
+    const cleared = await run(3, 'ACTIVE');
+    assert.deepEqual(cleared.clearedReasons, [reasonCode]);
+    assert.equal(cleared.state.state, 'RECOVERED_PENDING_CONFIRMATION');
+    assert.equal(cleared.state.recentlyRecoveredReasons.at(-1).reasonCode, reasonCode);
   });
 
-  await test('operator pause, emergency stop, and severe reasons reset recovery progress', async () => {
+  await test('the legacy aggregate transition can preserve or strengthen a block but cannot clear it', async () => {
     const nowMs = Date.parse('2026-07-26T00:06:00.000Z');
     const current = recovery.normalizeRuntimeRecoveryState({
       id: 'runtime-recovery',
@@ -304,8 +456,47 @@ async function main() {
       });
       assert.equal(transition.state.consecutiveHealthyCount, 0);
       assert.equal(transition.shouldClearRuntimeBlock, false);
-      assert.ok(transition.state.currentApplicableReasons.includes(reasonCode));
+      if (reasonCode === 'RELEASE_MISMATCH') {
+        assert.ok(transition.state.currentApplicableReasons.includes(reasonCode));
+        assert.equal(transition.reasonCode, 'RUNTIME_BREACH_RECORDED');
+      } else {
+        assert.equal(transition.state.lastResetReason, 'RUNTIME_RECOVERY_EXPLICIT_REASON_EVIDENCE_REQUIRED');
+        assert.equal(transition.reasonCode, 'RUNTIME_RECOVERY_SAFETY_GATE_BLOCKED');
+      }
     }
+  });
+
+  await test('a one-record legacy canary read remains explicitly bounded and incomplete', async () => {
+    const nowMs = Date.now();
+    const issuedAt = new Date(nowMs - 1_000).toISOString();
+    await adapter.writeCollection('runtime-recovery-canary-health-v1', []);
+    await adapter.writeCollection('runtime-recovery-canary-permits', [{
+      schemaVersion: 1,
+      id: 'legacy-bounded-permit',
+      operationId: 'legacy-bounded-operation',
+      productId: 'legacy-bounded-product',
+      jobId: 'legacy-bounded-job',
+      readinessSnapshotHash: '1'.repeat(64),
+      ownerId: 'legacy-bounded-owner',
+      instanceId: 'legacy-bounded-instance',
+      fencingToken: 1,
+      claimTokenHash: '2'.repeat(64),
+      status: 'ISSUED',
+      issuedAt,
+      expiresAt: new Date(nowMs + 60_000).toISOString(),
+      releaseIdentity: 'a'.repeat(40),
+    }]);
+
+    const health = await recoveryCanary.getRuntimeRecoveryCanaryHealthView(nowMs);
+    assert.equal(health.activeCount, 1);
+    assert.equal(health.latestPermit.id, 'legacy-bounded-permit');
+    assert.equal(health.currentStateComplete, false);
+    assert.equal(health.historyComplete, false);
+    assert.equal(health.truncated, true);
+    assert.equal(health.durableHistoryCount, null);
+    assert.ok(health.reasonCodes.includes('RECOVERY_CANARY_HEALTH_BOOTSTRAP_BOUNDED'));
+    assert.ok(health.reasonCodes.includes('RECOVERY_CANARY_CURRENT_STATE_INCOMPLETE'));
+    assert.ok(health.reasonCodes.includes('RECOVERY_CANARY_HISTORY_BOUNDED'));
   });
 
   await test('recovery canary stays disabled by default even with otherwise eligible evidence', async () => {
@@ -367,6 +558,30 @@ async function main() {
     });
     assert.equal(decision.allowed, false);
     assert.equal(decision.reasonCode, 'RECOVERY_CANARY_RELEASE_MISMATCH');
+  });
+
+  await test('a persisted recovery-state release mismatch prevents a recovery canary permit', async () => {
+    const nowMs = Date.now();
+    const ownership = await prepareCanarySafety(nowMs);
+    process.env.RECOVERY_CANARY = 'ACTIVE';
+    const current = await recovery.getRuntimeRecoveryState();
+    await adapter.writeCollection('runtime-recovery-state', [{
+      ...current,
+      releaseIdentity: 'b'.repeat(40),
+    }]);
+    const decision = await recoveryCanary.issueRuntimeRecoveryCanaryPermit({
+      operationId: 'recovery-canary-state-release-mismatch-operation',
+      productId: 'recovery-canary-state-release-mismatch-product',
+      jobId: 'recovery-canary-state-release-mismatch-job',
+      claimToken: 'test-fixture-recovery-canary-state-release-mismatch-claim',
+      ownership,
+      readinessSnapshotHash: '3'.repeat(64),
+      productEligibleExceptRuntime: true,
+      nowMs,
+    });
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.reasonCode, 'RECOVERY_CANARY_RELEASE_MISMATCH');
+    assert.deepEqual(await recoveryCanary.listRuntimeRecoveryCanaryPermits(), []);
   });
 
   await test('one scoped permit is fenced, capacity bounded, and consumed exactly once', async () => {
@@ -503,7 +718,7 @@ async function main() {
     assert.equal(state.currentCanaryPermitReference, undefined);
   });
 
-  await test('unhealthy canary preserves the runtime block and resets recovery progress', async () => {
+  await test('unhealthy canary additively preserves adjacent runtime reasons and interrupts every recovery streak', async () => {
     const nowMs = Date.now();
     const ownership = await prepareCanarySafety(nowMs);
     process.env.RECOVERY_CANARY = 'ACTIVE';
@@ -523,6 +738,40 @@ async function main() {
       permitId: issued.permit.id,
       publicationEffectKey: 'recovery-canary-unhealthy-publication',
     });
+    await store.updateAutomationControl({
+      publishBlockedByRuntime: true,
+      publishRuntimeReasons: [
+        'HISTORICAL_RUNTIME_BREACH',
+        'CONCURRENT_RUNTIME_INCIDENT',
+      ],
+      reason: 'CONCURRENT_RUNTIME_INCIDENT',
+    }, 'runtime-guardian');
+    const beforeFailure = await recovery.getRuntimeRecoveryState();
+    await recovery.updateRuntimeRecoveryState({
+      expectedStateVersion: beforeFailure.stateVersion,
+      nowMs: nowMs + 500,
+      mutate: current => ({
+        ...current,
+        state: 'OPEN_BLOCKED',
+        currentApplicableReasons: ['CONCURRENT_RUNTIME_INCIDENT'],
+        consecutiveHealthyCount: 2,
+        reasonProgress: [{
+          reasonCode: 'CONCURRENT_RUNTIME_INCIDENT',
+          metricKey: 'runtime_publish_safe',
+          measurement: 'PASS',
+          consecutiveHealthyCount: 2,
+          requiredHealthyCount: 3,
+          lastEvaluationId: 'concurrent-runtime-evaluation',
+          lastHealthyEvaluation: new Date(nowMs + 500).toISOString(),
+          qualifiedWindowStartedAt: new Date(nowMs).toISOString(),
+          lastQualifiedObservationAt: new Date(nowMs + 500).toISOString(),
+          lastReleaseIdentity: 'a'.repeat(40),
+          lastEvidenceReferences: ['runtime-health-concurrent'],
+          qualificationReasons: [],
+          lastTransitionAt: new Date(nowMs + 500).toISOString(),
+        }],
+      }),
+    });
     await recoveryCanary.finalizeRuntimeRecoveryCanaryPermit({
       permitId: consumed.permit.id,
       productId: base.productId,
@@ -537,7 +786,78 @@ async function main() {
     assert.equal(control.publishBlockedByRuntime, true);
     assert.equal(state.state, 'OPEN_BLOCKED');
     assert.equal(state.consecutiveHealthyCount, 0);
-    assert.deepEqual(state.currentApplicableReasons, ['RECOVERY_CANARY_MONITOR_TEMPORARY_FAILURE']);
+    assert.deepEqual(
+      [...control.publishRuntimeReasons].sort(),
+      [
+        'CONCURRENT_RUNTIME_INCIDENT',
+        'HISTORICAL_RUNTIME_BREACH',
+        'RECOVERY_CANARY_MONITOR_TEMPORARY_FAILURE',
+      ],
+    );
+    assert.deepEqual(
+      [...state.currentApplicableReasons].sort(),
+      [
+        'CONCURRENT_RUNTIME_INCIDENT',
+        'HISTORICAL_RUNTIME_BREACH',
+        'RECOVERY_CANARY_MONITOR_TEMPORARY_FAILURE',
+      ],
+    );
+    assert.equal(state.evidenceSummary.evaluationStatus, 'BREACH');
+    assert.equal(state.lastResetReason, 'RECOVERY_CANARY_MONITOR_TEMPORARY_FAILURE');
+    assert.equal(state.reasonProgress.every(progress => progress.consecutiveHealthyCount === 0), true);
+    const adjacent = state.reasonProgress.find(progress => progress.reasonCode === 'CONCURRENT_RUNTIME_INCIDENT');
+    const canaryFailure = state.reasonProgress.find(
+      progress => progress.reasonCode === 'RECOVERY_CANARY_MONITOR_TEMPORARY_FAILURE',
+    );
+    assert.equal(adjacent.measurement, 'INSUFFICIENT_DATA');
+    assert.ok(adjacent.qualificationReasons.includes('RUNTIME_RECOVERY_CANARY_FAILURE_INTERRUPTED_STREAK'));
+    assert.equal(canaryFailure.measurement, 'BREACH');
+    assert.ok(canaryFailure.qualificationReasons.includes('RUNTIME_RECOVERY_CANARY_FAILURE_OBSERVED'));
+  });
+
+  await test('revoked canary remains fail-closed and cannot erase an adjacent runtime reason', async () => {
+    const nowMs = Date.now();
+    const ownership = await prepareCanarySafety(nowMs);
+    process.env.RECOVERY_CANARY = 'ACTIVE';
+    const base = {
+      operationId: 'recovery-canary-revoked-operation',
+      productId: 'recovery-canary-revoked-product',
+      jobId: 'recovery-canary-revoked-job',
+      claimToken: 'test-fixture-recovery-canary-revoked-claim',
+      ownership,
+      readinessSnapshotHash: '9'.repeat(64),
+      productEligibleExceptRuntime: true,
+      nowMs,
+    };
+    const issued = await recoveryCanary.issueRuntimeRecoveryCanaryPermit(base);
+    assert.equal(issued.allowed, true);
+    await store.updateAutomationControl({
+      publishBlockedByRuntime: true,
+      publishRuntimeReasons: ['ADJACENT_RUNTIME_REASON'],
+      reason: 'ADJACENT_RUNTIME_REASON',
+    }, 'runtime-guardian');
+    await recoveryCanary.finalizeRuntimeRecoveryCanaryPermit({
+      permitId: issued.permit.id,
+      productId: base.productId,
+      healthy: false,
+      reasonCode: 'RECOVERY_CANARY_REVOKED_BY_SAFETY_GATE',
+      nowMs: nowMs + 1_000,
+      preserveRuntimeBlock: false,
+      finalStatus: 'REVOKED',
+    });
+
+    const control = await store.getAutomationControl();
+    const state = await recovery.getRuntimeRecoveryState();
+    assert.equal(control.publishBlockedByRuntime, true);
+    assert.deepEqual(
+      [...control.publishRuntimeReasons].sort(),
+      ['ADJACENT_RUNTIME_REASON', 'RECOVERY_CANARY_REVOKED_BY_SAFETY_GATE'],
+    );
+    assert.deepEqual(
+      [...state.currentApplicableReasons].sort(),
+      ['ADJACENT_RUNTIME_REASON', 'RECOVERY_CANARY_REVOKED_BY_SAFETY_GATE'],
+    );
+    assert.equal(state.state, 'OPEN_BLOCKED');
   });
 
   console.log(`\nMaster M1 runtime recovery primitives: ${passed} passed, ${failed} failed`);
@@ -545,7 +865,9 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-main().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => fs.rmSync(testRoot, { recursive: true, force: true }));

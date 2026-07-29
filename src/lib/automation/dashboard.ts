@@ -9,17 +9,17 @@ import { getLatestRuntimeHealth } from './runtimeGuardian';
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases, type RuntimeRole, type RuntimeRoleLease } from './runtimeRoles';
 import {
   getAiUsage,
-  getAllAutomationJobs,
   getAutomationControl,
   getAutomationQueueStats,
   getCircuit,
   listAutomationAudit,
   publicAutomationJob,
 } from './store';
+import { readBoundedAutomationJobStatuses } from './jobHealthSummary';
 import type { AutomationJob } from './types';
 import { buildLaunchInventoryOverview } from './launchInventory';
 import { startOfVietnamDay, vietnamActivityLabel } from './timezone';
-import { getAutomationTruth } from './truth';
+import { classifyAutomationJobEvidence, getAutomationTruth } from './truth';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 export type DashboardRange = 'today' | '7d' | '30d';
@@ -150,15 +150,21 @@ export function schedulerRuntimeStatusFromTruth(input: {
 
 export async function buildAutomationDashboard(range: DashboardRange) {
   const now = Date.now();
-  const [jobs, products, sources, control, queue, usage, autopilotCircuit, geminiCircuit, audit, settings, runtimeHealth, roleLeases, roleConflicts, outboundEvents, inventory, truth] = await Promise.all([
-    getAllAutomationJobs(), getAllProducts(), listProductSources(), getAutomationControl(), getAutomationQueueStats(),
+  const jobRead = await readBoundedAutomationJobStatuses();
+  const jobs = jobRead.items;
+  const jobEvidence = classifyAutomationJobEvidence(jobRead);
+  const [products, sources, control, queue, usage, autopilotCircuit, geminiCircuit, audit, settings, runtimeHealth, roleLeases, roleConflicts, outboundEvents, inventory] = await Promise.all([
+    getAllProducts(), listProductSources(), getAutomationControl(), getAutomationQueueStats(),
     getAiUsage(), getCircuit('autopilot'), getCircuit('gemini'), listAutomationAudit(1, 20), getAutomationSettings(),
     getLatestRuntimeHealth(), listRuntimeRoleLeases(), listRecentRuntimeRoleConflicts(now - 24 * 60 * 60_000), listOutboundEvents(),
-    buildLaunchInventoryOverview(), getAutomationTruth(now),
+    buildLaunchInventoryOverview({ jobs, jobEvidence }),
+  ]);
+  const [truth, onboarding] = await Promise.all([
+    getAutomationTruth(now, { jobs, jobEvidence, settings, control, leases: roleLeases, conflicts: roleConflicts, usage }),
+    buildOperationsOnboarding({ jobs, jobEvidence }),
   ]);
   const start = rangeStart(range);
   const release = getReleaseIdentity();
-  const onboarding = await buildOperationsOnboarding();
   const current = jobs.filter(job => Date.parse(job.completedAt || job.updatedAt || job.createdAt) >= start);
   const guardianReasons = partitionGuardianReasons(runtimeHealth?.reasons || [], runtimeHealth?.checkedAt, now);
   const terminal = current.filter(job => ['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED'].includes(job.status));
@@ -204,6 +210,9 @@ export async function buildAutomationDashboard(range: DashboardRange) {
   ].filter(Boolean);
   const currentRuntimeReasons = [...new Set([
     ...truth.inconsistencies.filter(item => item.severity === 'CRITICAL').map(item => item.code),
+    ...(jobEvidence.currentStateComplete
+      ? []
+      : [jobEvidence.status === 'UNAVAILABLE' ? 'JOB_READ_MODEL_UNAVAILABLE' : 'JOB_READ_MODEL_INCOMPLETE']),
     ...guardianReasons.current,
     ...releaseRuntimeReasons,
   ])];
@@ -227,6 +236,13 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     heartbeatAt: truth.scheduler.heartbeatAt,
     snapshotStatus: runtimeHealth?.scheduler.status,
   });
+  const schedulerProcessStatus = control.schedulerPaused
+    ? 'paused'
+    : !settings.enabled
+      ? 'disabled'
+      : guardianReasons.fresh && runtimeHealth?.scheduler.status
+        ? runtimeHealth.scheduler.status
+        : schedulerRuntimeStatus;
   const schedulerBlockReason = schedulerRuntimeStatus === 'stale'
     ? 'HEARTBEAT_OR_LEASE_STALE'
     : schedulerRuntimeStatus === 'paused' ? 'SCHEDULER_PAUSED'
@@ -274,6 +290,12 @@ export async function buildAutomationDashboard(range: DashboardRange) {
 
   return {
     updatedAt: new Date().toISOString(), range,
+    jobReadModel: {
+      availability: jobRead.availability,
+      coverageComplete: jobRead.coverageComplete,
+      evidenceClassification: jobRead.evidenceClassification,
+      reasonCodes: jobRead.reasonCodes,
+    },
     release,
     truth,
     kpis: {
@@ -281,7 +303,9 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       running: queue.RUNNING,
       waiting: queue.PENDING + queue.RETRY_SCHEDULED + queue.WAITING_FOR_MANUAL_INPUT + queue.WAITING_CHILDREN,
       waitingApproval: queue.WAITING_APPROVAL,
-      completionRate: terminal.length ? Math.round((completed.length / terminal.length) * 100) : null,
+      completionRate: jobEvidence.status === 'COMPLETE' && terminal.length
+        ? Math.round((completed.length / terminal.length) * 100)
+        : null,
       systemErrors: errorSummary.failedJobsInRange,
     },
     activity: [...activityMap.values()],
@@ -299,7 +323,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
         releaseMatchesWeb: workerLease?.releaseId ? workerLease.releaseId === release.releaseId : null,
       },
       scheduler: {
-        ...roleDiagnostic('SCHEDULER', schedulerLease, schedulerRuntimeStatus, now),
+        ...roleDiagnostic('SCHEDULER', schedulerLease, schedulerProcessStatus, now),
         heartbeatAt: truth.scheduler.heartbeatAt,
         heartbeatAgeMs: truth.scheduler.heartbeatAgeMs,
         heartbeatSource: truth.scheduler.heartbeatSource,
@@ -385,7 +409,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       launchEnabled: settings.launchEnabled, reason: control.reason || null,
       safePublish: { state: publishBlockReasons.length ? 'blocked' : 'ready', reasons: publishBlockReasons },
     },
-    pipeline,
+    pipeline: { ...pipeline, dataStatus: jobEvidence.status },
     jobs: {
       productScan: jobDiagnostic(latestByType('PRODUCT_SCAN')),
       autoPilot: jobDiagnostic(latestByType('AUTO_PILOT')),
@@ -406,7 +430,7 @@ export async function buildAutomationDashboard(range: DashboardRange) {
       degradedProviders: providers.filter(provider => provider.degraded).map(provider => provider.id),
     },
     sources: { configured: sources.length, products: products.length },
-    zeroData: !onboarding.hasOperationalData,
+    zeroData: jobEvidence.status === 'COMPLETE' && !onboarding.hasOperationalData,
     onboarding,
     groups: {
       workItems: { waitingApproval: queue.WAITING_APPROVAL, waitingManual: queue.WAITING_FOR_MANUAL_INPUT, failed: errorSummary.failedJobsInRange, openAlerts: onboarding.facts.openAlerts },

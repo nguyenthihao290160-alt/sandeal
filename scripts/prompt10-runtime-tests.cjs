@@ -30,10 +30,16 @@ async function main() {
 
   async function reset() {
     for (const collection of [
-      'runtime-role-leases', 'runtime-role-conflicts', 'runtime-health', 'automation-jobs', 'automation-control', 'automation-audit',
-      'automation-slo-snapshots', 'automation-canary', 'publication-audit', 'automation-outbound-events', 'products',
+      'runtime-role-leases', 'runtime-role-conflicts', 'runtime-health', 'runtime-recovery-state',
+      'runtime-recovery-canary-health-v1', 'runtime-recovery-canary-permits',
+      'automation-jobs', 'automation-job-attempts', 'automation-job-heartbeats',
+      'automation-job-projections', 'automation-job-list-projections-v2',
+      'automation-job-health-summary-v1', 'automation-job-projection-manifest-v1',
+      'automation-control', 'automation-audit', 'automation-slo-snapshots', 'automation-canary',
+      'publication-audit', 'automation-outbound-events', 'products',
     ]) await adapter.writeCollection(collection, []);
     await store.updateAutomationControl({ mode: 'SHADOW', effectiveMode: 'SHADOW', publishPaused: false, ingestionPaused: false, workerPaused: false, schedulerPaused: false, killSwitch: false }, 'runtime-test');
+    await store.rebuildAutomationJobReadModelsFromDurable([], Date.now());
   }
 
   await test('PM2 keeps Prompt 10 runtime disabled by default and enables exactly one opt-in worker and scheduler', () => {
@@ -157,7 +163,7 @@ async function main() {
     assert.equal(control.publishPaused, true); assert.equal(control.ingestionPaused, false); assert.equal(control.effectiveMode, 'SHADOW');
   });
 
-  await test('Guardian apply delegates one persisted downgrade per SLO time bucket', async () => {
+  await test('Guardian apply delegates one persisted downgrade for an identical evidence replay', async () => {
     await reset();
     const now = Math.floor(Date.now() / 60_000) * 60_000 + 10_000;
     await store.updateAutomationControl({ mode: 'AUTONOMOUS', effectiveMode: 'AUTONOMOUS', publishPaused: false }, 'runtime-integration-test');
@@ -179,20 +185,20 @@ async function main() {
 
     await guardian.runRuntimeGuardian({
       apply: true,
-      now: now + 2_000,
+      now: now + 1_000,
       webAlive: true,
       publicRouteHealthy: true,
       schedulerEnabled: true,
       providers: { accessTrade: 'degraded' },
     });
     const afterSecond = await store.getAutomationControl();
-    assert.equal(afterSecond.effectiveMode, 'CANARY', 'same persisted SLO bucket must not downgrade twice');
+    assert.equal(afterSecond.effectiveMode, 'CANARY', 'identical persisted evidence must not downgrade twice');
     const snapshots = await adapter.readCollection('automation-slo-snapshots');
     assert.equal(snapshots.length, 1); assert.equal(snapshots[0].evaluation.status, 'BREACH');
     assert.ok(snapshots[0].evaluation.reasons.includes('RUNTIME_GUARDIAN_UNSAFE'));
     assert.equal(snapshots[0].application.status, 'APPLIED'); assert.equal(snapshots[0].application.nextEffectiveMode, 'CANARY');
     const guardianControlWrites = (await adapter.readCollection('automation-audit'))
-      .filter(event => event.operationType === 'CONTROL_CHANGED' && event.actor === 'runtime-guardian');
+      .filter(event => event.operationType === 'CONTROL_RUNTIME_BLOCK_APPLIED' && event.actor === 'runtime-guardian');
     assert.equal(guardianControlWrites.length, 1);
   });
 
