@@ -1,6 +1,15 @@
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
-import { listFeatureRolloutStates, type FeatureRolloutMode } from './featureRollout';
+import {
+  reconcileCurrentReasons,
+  type CurrentReasonReconciliation,
+} from './currentReasonReconciler';
+import {
+  getWorkerPoolRolloutState,
+  listFeatureRolloutStates,
+  type FeatureRolloutMode,
+  type WorkerPoolRolloutState,
+} from './featureRollout';
 import { isCriticalAutomationJob } from './executionPolicy';
 import { getAutomationJobHealthView, type AutomationJobHealthView } from './jobHealthSummary';
 import {
@@ -11,7 +20,11 @@ import {
 } from './runtimeRecoveryCanary';
 import { getRuntimeRecoveryState, type RuntimeRecoveryState } from './runtimeRecoveryState';
 import { getLatestRuntimeHealth } from './runtimeGuardian';
-import { listRuntimeRoleLeases } from './runtimeRoles';
+import {
+  listRecentRuntimeRoleConflicts,
+  listRuntimeRoleLeases,
+  type RuntimeRoleConflict,
+} from './runtimeRoles';
 import { getLatestSloMeasurement, type AutomationSloMeasurement } from './sloErrorBudget';
 import { getAutomationControl } from './store';
 import type { AutomationControlState } from './types';
@@ -21,7 +34,10 @@ const CURRENT_RUNTIME_MAX_AGE_MS = 3 * 60_000;
 export interface AutomationOperationalHealth {
   generatedAt: string;
   currentActiveReasons: string[];
+  currentPolicyReasons: string[];
+  projectionQualityWarnings: string[];
   historicalAuditReasons: string[];
+  reasonReconciliation: CurrentReasonReconciliation;
   recovery: RuntimeRecoveryState | null;
   canary: {
     featureMode: FeatureRolloutMode;
@@ -50,6 +66,17 @@ export interface AutomationOperationalHealth {
     windowEndedAt: string;
     pickupLatencyP50Ms: number | null;
     pickupLatencyP95Ms: number | null;
+    historicalPickupLatencyP50Ms: number | null;
+    historicalPickupLatencyP95Ms: number | null;
+    historicalPickupSampleCount: number;
+    currentPickupLatencyP50Ms: number | null;
+    currentPickupLatencyP95Ms: number | null;
+    currentPickupSampleCount: number;
+    excludedLegacyPickupCount: number;
+    insufficientPickupTimestampCount: number;
+    pickupMeasurementSemantics: AutomationSloMeasurement['pickupLatencyMeasurementSemantics'];
+    pickupRolloutBoundary: AutomationSloMeasurement['pickupLatencyRolloutBoundary'];
+    pickupReleaseBoundary: AutomationSloMeasurement['pickupLatencyReleaseBoundary'];
     pendingQueueAgeMs: number | null;
     pendingQueueCount: number;
     pickupLatencyMode: AutomationSloMeasurement['pickupLatencyMode'];
@@ -57,12 +84,21 @@ export interface AutomationOperationalHealth {
   } | null;
   workerPool: {
     featureMode: FeatureRolloutMode;
+    configuredMode: FeatureRolloutMode;
+    effectiveMode: FeatureRolloutMode;
+    effectiveModeSource: WorkerPoolRolloutState['effectiveModeSource'];
+    implementationActive: boolean;
     maximumSlots: number;
     activeSlots: number;
     availableSlots: number;
     criticalReservedCapacity: number;
     activeCriticalSlots: number;
     activeNormalSlots: number;
+    normalAvailableSlots: number;
+    rolloutCohort: string;
+    disabledReason: WorkerPoolRolloutState['disabledReason'];
+    activationControl: WorkerPoolRolloutState['activationControl'];
+    ordinaryFairness: 'BOUNDED_NORMAL_LANE_WITH_RESERVED_GUARDIAN_CAPACITY';
     capacityExceeded: boolean;
   };
   release: {
@@ -94,6 +130,7 @@ export interface AutomationOperationalHealthInputs {
   permits?: RuntimeRecoveryCanaryPermit[];
   canaryHealth?: RuntimeRecoveryCanaryHealthView;
   leases?: Awaited<ReturnType<typeof listRuntimeRoleLeases>>;
+  conflicts?: RuntimeRoleConflict[];
   latestSlo?: Awaited<ReturnType<typeof getLatestSloMeasurement>>;
 }
 
@@ -147,6 +184,7 @@ export async function buildAutomationOperationalHealth(
     recovery,
     canaryHealth,
     leases,
+    conflicts,
     latestSlo,
   ] = await Promise.all([
     inputs.summary ?? getAutomationJobHealthView(now),
@@ -159,6 +197,7 @@ export async function buildAutomationOperationalHealth(
         ? injectedCanaryHealth(inputs.permits, now)
         : getRuntimeRecoveryCanaryHealthView(now)),
     inputs.leases ?? listRuntimeRoleLeases(),
+    inputs.conflicts ?? listRecentRuntimeRoleConflicts(now - CURRENT_RUNTIME_MAX_AGE_MS),
     inputs.latestSlo === undefined ? getLatestSloMeasurement() : inputs.latestSlo,
   ]);
   const release = getReleaseIdentity();
@@ -185,12 +224,12 @@ export async function buildAutomationOperationalHealth(
     ? 'MISMATCH'
     : identitiesPresent ? 'MATCH' : 'UNVERIFIED';
   const canaryMode = features.find(item => item.feature === 'RECOVERY_CANARY')?.mode || 'OFF';
-  const currentActiveReasons = uniqueReasons([
+  const candidateCurrentReasons = uniqueReasons([
+    ...(!summary.currentStateComplete ? ['JOB_HEALTH_CURRENT_STATE_INCOMPLETE'] : []),
     ...(runtimeFresh
       ? runtime?.reasons || []
       : [runtime ? 'RUNTIME_HEALTH_SNAPSHOT_STALE' : 'RUNTIME_HEALTH_SNAPSHOT_MISSING']),
     ...(control.publishBlockedByRuntime ? control.publishRuntimeReasons || [] : []),
-    ...(control.publishBlockedByPolicy ? control.publishPolicyReasons || [] : []),
     ...(recovery && recovery.state !== 'CLOSED_HEALTHY' ? recovery.currentApplicableReasons : []),
     ...releaseMismatchReasons,
     ...(canaryMode === 'ACTIVE' && !canaryHealth.currentStateComplete
@@ -200,23 +239,46 @@ export async function buildAutomationOperationalHealth(
       .filter(feature => !feature.valid)
       .map(feature => `FEATURE_ROLLOUT_INVALID_VALUE:${feature.feature}`),
   ]);
-  const historicalAuditReasons = uniqueReasons([
+  const candidateHistoricalReasons = uniqueReasons([
     ...(runtime?.historicalReasons || []),
     ...(!runtimeFresh ? runtime?.reasons || [] : []),
     ...(recovery?.originatingBreachReasons || []),
-  ]).filter(reason => !currentActiveReasons.includes(reason));
+  ]);
+  const reasonReconciliation = reconcileCurrentReasons({
+    now,
+    releaseId: release.releaseId,
+    candidateCurrentReasons,
+    historicalReasons: candidateHistoricalReasons,
+    runtime,
+    leases,
+    conflicts,
+    workerRequired: true,
+    schedulerRequired: settings.enabled,
+  });
+  const currentActiveReasons = reasonReconciliation.currentActiveReasons;
+  const historicalAuditReasons = reasonReconciliation.historicalAuditReasons;
+  const currentPolicyReasons = uniqueReasons(
+    control.publishBlockedByPolicy ? control.publishPolicyReasons || [] : [],
+  );
+  const projectionQualityWarnings = uniqueReasons(summary.reasonCodes);
   const runningJobs = summary.runningJobs;
   const activeCriticalSlots = runningJobs.filter(job =>
     job.executionCritical === true || isCriticalAutomationJob(job.type)).length;
   const maximumSlots = settings.maxConcurrency;
   const activeSlots = runningJobs.length;
   const latestPermit = canaryHealth.latestPermit;
-  const workerPoolMode = features.find(item => item.feature === 'WORKER_CONTINUOUS_POOL_V2')?.mode || 'OFF';
+  const workerPoolRollout = getWorkerPoolRolloutState();
+  const criticalReservedCapacity = maximumSlots > 1 ? 1 : 0;
+  const normalCapacity = Math.max(0, maximumSlots - criticalReservedCapacity);
+  const activeNormalSlots = Math.max(0, activeSlots - activeCriticalSlots);
 
   return {
     generatedAt: new Date(now).toISOString(),
     currentActiveReasons,
+    currentPolicyReasons,
+    projectionQualityWarnings,
     historicalAuditReasons,
+    reasonReconciliation,
     recovery,
     canary: {
       featureMode: canaryMode,
@@ -245,19 +307,48 @@ export async function buildAutomationOperationalHealth(
       windowEndedAt: latestSlo.windowEndedAt,
       pickupLatencyP50Ms: latestSlo.pickupLatencyP50Ms ?? null,
       pickupLatencyP95Ms: latestSlo.pickupLatencyP95Ms,
+      historicalPickupLatencyP50Ms: latestSlo.pickupLatencyHistoricalP50Ms ?? null,
+      historicalPickupLatencyP95Ms: latestSlo.pickupLatencyHistoricalP95Ms ?? null,
+      historicalPickupSampleCount: latestSlo.pickupLatencyHistoricalSampleCount ?? 0,
+      currentPickupLatencyP50Ms: latestSlo.pickupLatencyCurrentP50Ms ?? null,
+      currentPickupLatencyP95Ms: latestSlo.pickupLatencyCurrentP95Ms ?? null,
+      currentPickupSampleCount: latestSlo.pickupLatencyCurrentSampleCount ?? 0,
+      excludedLegacyPickupCount: latestSlo.pickupLatencyExcludedLegacyCount ?? 0,
+      insufficientPickupTimestampCount: latestSlo.pickupLatencyInsufficientTimestampCount ?? 0,
+      pickupMeasurementSemantics: latestSlo.pickupLatencyMeasurementSemantics || {
+        historical: 'LEGACY_CREATED_AT',
+        current: 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE',
+      },
+      pickupRolloutBoundary: latestSlo.pickupLatencyRolloutBoundary || {
+        cohort: `SLO_RUNNABLE_AT_V2:${latestSlo.pickupLatencyFeatureMode || 'SHADOW'}`,
+        startedAt: null,
+      },
+      pickupReleaseBoundary: latestSlo.pickupLatencyReleaseBoundary || {
+        releaseId: release.releaseId,
+        startedAt: null,
+      },
       pendingQueueAgeMs: latestSlo.pendingQueueAgeMs ?? null,
       pendingQueueCount: latestSlo.pendingQueueCount ?? 0,
       pickupLatencyMode: latestSlo.pickupLatencyMode || 'LEGACY_CREATED_AT',
       pickupLatencyFeatureMode: latestSlo.pickupLatencyFeatureMode || 'SHADOW',
     } : null,
     workerPool: {
-      featureMode: workerPoolMode,
+      featureMode: workerPoolRollout.effectiveMode,
+      configuredMode: workerPoolRollout.configuredMode,
+      effectiveMode: workerPoolRollout.effectiveMode,
+      effectiveModeSource: workerPoolRollout.effectiveModeSource,
+      implementationActive: workerPoolRollout.implementationActive,
       maximumSlots,
       activeSlots,
       availableSlots: Math.max(0, maximumSlots - activeSlots),
-      criticalReservedCapacity: maximumSlots > 1 ? 1 : 0,
+      criticalReservedCapacity,
       activeCriticalSlots,
-      activeNormalSlots: Math.max(0, activeSlots - activeCriticalSlots),
+      activeNormalSlots,
+      normalAvailableSlots: Math.max(0, normalCapacity - activeNormalSlots),
+      rolloutCohort: workerPoolRollout.rolloutCohort,
+      disabledReason: workerPoolRollout.disabledReason,
+      activationControl: workerPoolRollout.activationControl,
+      ordinaryFairness: 'BOUNDED_NORMAL_LANE_WITH_RESERVED_GUARDIAN_CAPACITY',
       capacityExceeded: activeSlots > maximumSlots,
     },
     release: {

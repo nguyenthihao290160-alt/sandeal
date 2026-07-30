@@ -148,8 +148,18 @@ async function main() {
   await test(49, 'Link normalization an toàn', () => assert.equal(urlSafety.validateExternalUrl(' https://example.com/a#b ').normalizedUrl, 'https://example.com/a'));
   await test(50, 'javascript/data URL bị từ chối', () => { assert.equal(urlSafety.validateExternalUrl('javascript:alert(1)').safe, false); assert.equal(urlSafety.validateExternalUrl('data:text/plain,x').safe, false); });
   await test(51, 'Private IP và metadata endpoint bị chặn', () => { for (const host of ['127.0.0.1', '10.0.0.1', '169.254.169.254', 'metadata.google.internal', '[::1]']) assert.equal(urlSafety.validateExternalUrl(`http://${host}/`).safe, false); });
-  await test(52, 'Timeout bounded', () => { const text = source('src/lib/product-intelligence/urlSafety.ts'); assert.ok(text.includes('Math.min(options.timeoutMs || 8_000, 20_000)')); assert.ok(text.includes('AbortSignal.timeout(timeoutMs)')); });
-  await test(53, 'Image fallback không loop', () => assert.ok(source('src/components/safe-product-image.tsx').includes('if (index < sources.length)')));
+  await test(52, 'Timeout bounded', () => {
+    const text = source('src/lib/product-intelligence/urlSafety.ts');
+    assert.ok(text.includes('Math.min(options.timeoutMs || 8_000, 20_000)'));
+    assert.ok(text.includes('const deadline = Date.now() + timeoutMs'));
+    assert.ok(text.includes('const remainingMs = deadline - Date.now()'));
+    assert.ok(text.includes('AbortSignal.timeout(remainingMs)'));
+  });
+  await test(53, 'Image fallback không loop', () => {
+    const text = source('src/components/safe-product-image.tsx');
+    assert.ok(text.includes('index: index < sources.length ? index + 1 : index'));
+    assert.ok(text.includes('loading: index < sources.length'));
+  });
   await test(54, 'Fallback không ghi source image', () => assert.ok(!source('src/components/safe-product-image.tsx').match(/fetch\(|save|updateProduct/)));
   await test(55, 'Missing price không thay bằng 0', () => assert.ok(!source('src/lib/product-intelligence/productActions.ts').match(/price\s*:\s*0/)));
   await test(56, 'Price update cần evidence', () => assert.ok(source('docs/operations/PROMPT12_OPERATIONAL_TRUTH.md').includes('Price không được thay bằng 0')));

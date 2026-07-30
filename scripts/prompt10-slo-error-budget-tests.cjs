@@ -44,7 +44,12 @@ function job(now, index, overrides = {}) {
     dryRun: false,
     attemptCount: 1,
     maxAttempts: 3,
+    releaseId: 'a'.repeat(40),
+    rolloutCohort: 'SLO_RUNNABLE_AT_V2:SHADOW',
+    queuedAt: createdAt,
     scheduledAt: createdAt,
+    runnableAt: createdAt,
+    runnableReason: 'CREATED_AT',
     claimedAt,
     startedAt: claimedAt,
     completedAt,
@@ -482,7 +487,7 @@ async function main() {
     assert.equal(duplicate.evaluationStatus, 'NOT_APPLICABLE');
   });
 
-  await test('operator pause prevents runtime recovery progress and remains untouched', async () => {
+  await test('independent runtime recovery progress leaves an operator pause untouched', async () => {
     await reset('AUTONOMOUS'); const now = Date.now(); await seedZeroProductRecoveryEvidence(now);
     await store.updateAutomationControl({
       publishPausedByOperator: true,
@@ -496,12 +501,15 @@ async function main() {
     assert.equal(result.control.publishBlockedByRuntime, true);
     assert.equal(result.control.publishPausedByOperator, true);
     assert.equal(result.control.publishPaused, true);
-    assert.equal(result.recovery.consecutiveHealthyCount, 0);
-    assert.equal(result.recovery.lastResetReason, 'RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT');
+    assert.equal(result.recovery.consecutiveHealthyCount, 1);
+    assert.equal(result.recovery.reasonProgress[0].reasonCode, 'REPEATED_PROCESS_RESTART');
+    assert.ok(result.recovery.reasonProgress[0].qualificationReasons.includes(
+      'OPERATOR_PAUSE_PRESERVED_SEPARATELY',
+    ));
     assert.equal(result.applied, false); assert.equal(result.ingestionAvailable, true);
   });
 
-  await test('three current same-release quiescent proofs clear a runtime block despite unrelated insufficient zero-sample metrics', async () => {
+  await test('quiescent zero-sample publication evidence never clears a publication-health block', async () => {
     await reset('AUTONOMOUS');
     const firstNow = Math.floor(Date.now() / 60_000) * 60_000 + 5_000;
     await store.updateAutomationControl({
@@ -522,32 +530,23 @@ async function main() {
       assert.equal(zeroTouch.evaluationStatus, 'INSUFFICIENT_DATA');
       assert.equal(result.measurement.dataStatus, 'INSUFFICIENT_DATA');
       assert.equal(result.evaluation.status, 'INSUFFICIENT_DATA');
-      if (index < 2) {
-        const progress = result.recovery.reasonProgress.find(
-          item => item.reasonCode === 'HEALTH_SLO_FAILED',
-        );
-        assert.equal(result.control.publishBlockedByRuntime, true);
-        assert.equal(progress.consecutiveHealthyCount, index + 1, JSON.stringify({
-          evaluation: result.evaluation,
-          projection: result.measurement.jobProjection,
-          sourceCompleteness: result.measurement.sourceCompleteness,
-          metrics: result.measurement.metrics,
-          recovery: result.recovery,
-        }));
-        assert.equal(progress.lastReleaseIdentity, 'a'.repeat(40));
-        assert.ok(progress.lastEvidenceReferences.length > 0);
-      }
+      const progress = result.recovery.reasonProgress.find(
+        item => item.reasonCode === 'HEALTH_SLO_FAILED',
+      );
+      assert.equal(result.control.publishBlockedByRuntime, true);
+      assert.equal(progress.consecutiveHealthyCount, 0);
+      assert.equal(progress.measurement, 'NOT_APPLICABLE');
     }
 
-    assert.equal(result.control.publishBlockedByRuntime, false);
-    assert.deepEqual(result.control.publishRuntimeReasons, []);
-    assert.equal(result.recovery.state, 'CLOSED_HEALTHY');
+    assert.equal(result.control.publishBlockedByRuntime, true);
+    assert.deepEqual(result.control.publishRuntimeReasons, ['HEALTH_SLO_FAILED']);
+    assert.equal(result.recovery.state, 'OPEN_BLOCKED');
     assert.equal((await adapter.readCollection('publication-audit')).length, 0);
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
     assert.equal((await store.getAllAutomationJobs()).length, 0);
   });
 
-  await test('missing and release-incomplete current evidence interrupt recovery and cannot clear a runtime block', async () => {
+  await test('pickup recovery is independent of unrelated runtime fields but rejects release-incomplete samples', async () => {
     await reset('AUTONOMOUS');
     const firstNow = Math.floor(Date.now() / 60_000) * 60_000 + 5_000;
     await store.updateAutomationControl({
@@ -555,7 +554,7 @@ async function main() {
       publishRuntimeReasons: ['JOB_PICKUP_LATENCY_SLO_FAILED'],
     }, 'slo-test');
 
-    await seedQuiescentCurrentProof(firstNow);
+    await seedZeroProductRecoveryEvidence(firstNow);
     const first = await slo.applyAutomationErrorBudget({ now: firstNow, minimumSamples: 5 });
     assert.equal(first.control.publishBlockedByRuntime, true);
     assert.equal(first.recovery.consecutiveHealthyCount, 1, JSON.stringify({
@@ -567,27 +566,42 @@ async function main() {
     }));
 
     const incompleteNow = firstNow + 30_000;
-    await seedQuiescentCurrentProof(incompleteNow, {
+    await seedZeroProductRecoveryEvidence(incompleteNow);
+    await adapter.writeCollection('runtime-health', [runtimeSnapshot(incompleteNow, {
       worker: {
         status: 'active',
         holderId: 'worker-without-release-evidence',
         heartbeatAt: new Date(incompleteNow - 1_000).toISOString(),
       },
-    });
+    })]);
     const incomplete = await slo.applyAutomationErrorBudget({ now: incompleteNow, minimumSamples: 5 });
     assert.equal(incomplete.control.publishBlockedByRuntime, true);
-    assert.equal(incomplete.recovery.consecutiveHealthyCount, 0);
-    assert.ok(incomplete.recovery.reasonProgress[0].qualificationReasons.includes(
-      'RUNTIME_RECOVERY_MANDATORY_RUNTIME_EVIDENCE_INCOMPLETE',
-    ));
+    assert.equal(incomplete.recovery.consecutiveHealthyCount, 2);
 
-    const missingNow = firstNow + 60_000;
-    await adapter.writeCollection('runtime-health', []);
-    const missing = await slo.applyAutomationErrorBudget({ now: missingNow, minimumSamples: 5 });
-    assert.equal(missing.evaluation.status, 'INSUFFICIENT_DATA');
-    assert.equal(missing.control.publishBlockedByRuntime, true);
-    assert.equal(missing.recovery.consecutiveHealthyCount, 0);
-    assert.equal(missing.recovery.reasonProgress[0].consecutiveHealthyCount, 0);
+    const releaseIncompleteNow = firstNow + 60_000;
+    const releaseIncompleteJobs = (await adapter.readCollection('automation-jobs')).map(item => ({
+      ...item,
+      releaseId: undefined,
+      updatedAt: new Date(releaseIncompleteNow - 1_000).toISOString(),
+    }));
+    await adapter.writeCollection('automation-jobs', releaseIncompleteJobs);
+    await store.rebuildAutomationJobReadModelsFromDurable(
+      releaseIncompleteJobs,
+      releaseIncompleteNow,
+    );
+    await adapter.writeCollection('runtime-health', [runtimeSnapshot(releaseIncompleteNow)]);
+    const releaseIncomplete = await slo.applyAutomationErrorBudget({
+      now: releaseIncompleteNow,
+      minimumSamples: 5,
+    });
+    assert.equal(releaseIncomplete.control.publishBlockedByRuntime, true);
+    assert.equal(releaseIncomplete.recovery.consecutiveHealthyCount, 0);
+    assert.equal(releaseIncomplete.measurement.pickupLatencyCurrentSampleCount, 0);
+    assert.equal(releaseIncomplete.measurement.pickupLatencyExcludedLegacyCount, 5);
+    assert.equal(
+      releaseIncomplete.recovery.reasonProgress[0].consecutiveHealthyCount,
+      0,
+    );
   });
 
   await test('an overdue scheduled retry is active queue evidence and cannot authorize idle pickup recovery', async () => {
@@ -660,7 +674,17 @@ async function main() {
       assert.equal(monitorMetric.stateReason, 'NO_PUBLIC_PRODUCT_OR_LEGITIMATE_MONITOR_TARGET');
       if (index < 2) {
         assert.equal(result.control.publishBlockedByRuntime, true);
-        assert.equal(result.recovery.consecutiveHealthyCount, index + 1);
+        assert.equal(result.recovery.consecutiveHealthyCount, index + 1, JSON.stringify({
+          pickup: {
+            currentP95: result.measurement.pickupLatencyCurrentP95Ms,
+            currentSamples: result.measurement.pickupLatencyCurrentSampleCount,
+            releaseBoundary: result.measurement.pickupLatencyReleaseBoundary,
+            rolloutBoundary: result.measurement.pickupLatencyRolloutBoundary,
+          },
+          metric: result.measurement.metrics.find(metric => metric.key === 'job_pickup_latency_p95_ms'),
+          evidence: result.measurement.metricEvidence.find(metric => metric.metricKey === 'job_pickup_latency_p95_ms'),
+          recovery: result.recovery,
+        }));
       }
     }
     assert.equal(result.control.publishBlockedByRuntime, false);

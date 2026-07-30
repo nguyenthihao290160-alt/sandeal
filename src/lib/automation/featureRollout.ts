@@ -27,6 +27,22 @@ export interface FeatureRolloutState {
   reasonCode?: 'FEATURE_ROLLOUT_INVALID_VALUE';
 }
 
+export interface WorkerPoolRolloutState {
+  configuredMode: FeatureRolloutMode;
+  effectiveMode: FeatureRolloutMode;
+  effectiveModeSource: 'ENVIRONMENT_OVERRIDE' | 'SAFE_DEFAULT' | 'INVALID_CONFIGURATION_FALLBACK';
+  configured: boolean;
+  valid: boolean;
+  implementationActive: boolean;
+  rolloutCohort: string;
+  disabledReason:
+    | 'WORKER_POOL_ROLLOUT_OFF'
+    | 'WORKER_POOL_OBSERVATION_ONLY'
+    | 'WORKER_POOL_INVALID_CONFIGURATION'
+    | null;
+  activationControl: 'WORKER_CONTINUOUS_POOL_V2=ACTIVE';
+}
+
 const DEFAULT_MODES: Readonly<Record<SandealFeatureFlag, FeatureRolloutMode>> = {
   RUNTIME_RECOVERY_V2: 'SHADOW',
   RECOVERY_CANARY: 'OFF',
@@ -91,4 +107,31 @@ export function isContinuousWorkerPoolEnabled(
 ): boolean {
   const state = getFeatureRolloutState('WORKER_CONTINUOUS_POOL_V2', environment);
   return state.valid && state.mode === 'ACTIVE';
+}
+
+export function getWorkerPoolRolloutState(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): WorkerPoolRolloutState {
+  const state = getFeatureRolloutState('WORKER_CONTINUOUS_POOL_V2', environment);
+  const effectiveMode = state.valid ? state.mode : 'OFF';
+  const implementationActive = state.valid && state.mode === 'ACTIVE';
+  return {
+    configuredMode: state.mode,
+    effectiveMode,
+    effectiveModeSource: !state.valid
+      ? 'INVALID_CONFIGURATION_FALLBACK'
+      : state.configured ? 'ENVIRONMENT_OVERRIDE' : 'SAFE_DEFAULT',
+    configured: state.configured,
+    valid: state.valid,
+    implementationActive,
+    rolloutCohort: `WORKER_CONTINUOUS_POOL_V2:${effectiveMode}`,
+    disabledReason: !state.valid
+      ? 'WORKER_POOL_INVALID_CONFIGURATION'
+      : implementationActive
+        ? null
+        : state.mode === 'OFF'
+          ? 'WORKER_POOL_ROLLOUT_OFF'
+          : 'WORKER_POOL_OBSERVATION_ONLY',
+    activationControl: 'WORKER_CONTINUOUS_POOL_V2=ACTIVE',
+  };
 }

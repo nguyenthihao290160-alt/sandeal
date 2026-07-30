@@ -59,12 +59,23 @@ export interface SloMetric {
     | 'runtime_publish_safe'
     | 'public_route_healthy';
   value: number | boolean | null;
+  observedValue: number | boolean | null;
   sampleSize: number;
+  qualifyingSampleCount: number;
+  excludedSampleCount: number;
   status: MetricStatus;
   evaluationStatus: 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA' | 'NOT_APPLICABLE';
   measurementState: RuntimeRecoveryMeasurementState;
   stateReason: string;
+  reasonCode: string;
   target: string;
+  threshold: string;
+  windowStart: string;
+  windowEnd: string;
+  measurementSemantics: string;
+  evidenceSufficiency: 'SUFFICIENT' | 'INSUFFICIENT' | 'NOT_APPLICABLE';
+  rawNumerator: number | null;
+  rawDenominator: number | null;
 }
 
 export interface AutomationSloMeasurement {
@@ -98,6 +109,10 @@ export interface AutomationSloMeasurement {
     pickupScheduledAttempts: number;
     pickupRetryAttempts: number;
     pickupCarriedIntoWindow: number;
+    pickupHistoricalSamples: number;
+    pickupCurrentSamples: number;
+    pickupExcludedLegacySamples: number;
+    pickupInsufficientTimestampSamples: number;
   };
   jobProjection: {
     availability: 'AVAILABLE' | 'DEGRADED' | 'UNAVAILABLE';
@@ -140,6 +155,26 @@ export interface AutomationSloMeasurement {
   pickupLatencyP95Ms: number | null;
   pickupLatencyLegacyP95Ms: number | null;
   pickupLatencyRunnableAtP95Ms: number | null;
+  pickupLatencyHistoricalP50Ms: number | null;
+  pickupLatencyHistoricalP95Ms: number | null;
+  pickupLatencyHistoricalSampleCount: number;
+  pickupLatencyCurrentP50Ms: number | null;
+  pickupLatencyCurrentP95Ms: number | null;
+  pickupLatencyCurrentSampleCount: number;
+  pickupLatencyExcludedLegacyCount: number;
+  pickupLatencyInsufficientTimestampCount: number;
+  pickupLatencyMeasurementSemantics: {
+    historical: 'LEGACY_CREATED_AT';
+    current: 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE';
+  };
+  pickupLatencyRolloutBoundary: {
+    cohort: string;
+    startedAt: string | null;
+  };
+  pickupLatencyReleaseBoundary: {
+    releaseId: string;
+    startedAt: string | null;
+  };
   retryPickupLatencyP95Ms: number | null;
   pickupLatencyMode: 'LEGACY_CREATED_AT' | 'RUNNABLE_AT';
   pickupLatencyFeatureMode: FeatureRolloutMode;
@@ -272,6 +307,14 @@ function latestIsoTimestamp(values: unknown[]): string | null {
   return latest === undefined ? null : new Date(latest).toISOString();
 }
 
+function oldestTimestamp(values: unknown[]): string | null {
+  const earliest = values
+    .map(validTimestamp)
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right)[0];
+  return earliest === undefined ? null : new Date(earliest).toISOString();
+}
+
 function p50(values: number[]): number | null {
   return percentile(values, 0.5);
 }
@@ -354,46 +397,109 @@ export function derivePickupLatencyObservation(
   };
 }
 
+export function deriveExplicitPickupLatencyObservation(
+  source: RunnableAtSource & { claimedAt?: string },
+  windowStartedAt: number,
+  windowEndedAt: number,
+): PickupLatencyObservation | null {
+  const runnableAt = validTimestamp(source.runnableAt);
+  const claimedAt = validTimestamp(source.claimedAt);
+  if (
+    runnableAt === null
+    || !source.runnableReason
+    || claimedAt === null
+    || claimedAt < runnableAt
+  ) {
+    return null;
+  }
+  const runnableInsideWindow = runnableAt >= windowStartedAt && runnableAt <= windowEndedAt;
+  const claimInsideWindow = claimedAt >= windowStartedAt && claimedAt <= windowEndedAt;
+  if (!runnableInsideWindow && !claimInsideWindow) return null;
+  return {
+    runnableAt,
+    claimedAt,
+    latencyMs: claimedAt - runnableAt,
+    runnableReason: source.runnableReason,
+    retryAttempt: source.runnableReason === 'RETRY_ELIGIBLE_AT',
+  };
+}
+
 function booleanMetric(key: SloMetric['key'], value: boolean | null, target: string): SloMetric {
+  const sufficient = value !== null;
   return {
     key,
     value,
+    observedValue: value,
     sampleSize: value === null ? 0 : 1,
+    qualifyingSampleCount: value === null ? 0 : 1,
+    excludedSampleCount: 0,
     status: value === null ? 'NO_DATA' : value ? 'PASS' : 'BREACH',
     evaluationStatus: value === null ? 'INSUFFICIENT_DATA' : value ? 'PASS' : 'BREACH',
     measurementState: value === null ? 'INSUFFICIENT_DATA' : 'MEASURED',
     stateReason: value === null ? 'METRIC_EVIDENCE_MISSING' : 'METRIC_MEASURED',
+    reasonCode: value === null ? 'METRIC_EVIDENCE_MISSING' : 'METRIC_MEASURED',
     target,
+    threshold: target,
+    windowStart: '',
+    windowEnd: '',
+    measurementSemantics: 'CURRENT_AUTHORITATIVE_STATE',
+    evidenceSufficiency: sufficient ? 'SUFFICIENT' : 'INSUFFICIENT',
+    rawNumerator: value === null ? null : value ? 1 : 0,
+    rawDenominator: value === null ? null : 1,
   };
 }
 
 function upperBoundMetric(key: SloMetric['key'], value: number | null, sampleSize: number, maximum: number, target: string, minimumSamples = 1): SloMetric {
+  const sufficient = value !== null && sampleSize >= minimumSamples;
   return {
     key,
     value,
+    observedValue: value,
     sampleSize,
+    qualifyingSampleCount: sufficient ? sampleSize : 0,
+    excludedSampleCount: 0,
     status: value === null || sampleSize < minimumSamples ? 'NO_DATA' : value <= maximum ? 'PASS' : 'BREACH',
     evaluationStatus: value === null || sampleSize < minimumSamples
       ? 'INSUFFICIENT_DATA'
       : value <= maximum ? 'PASS' : 'BREACH',
     measurementState: value === null || sampleSize < minimumSamples ? 'INSUFFICIENT_DATA' : 'MEASURED',
     stateReason: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
+    reasonCode: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
     target,
+    threshold: target,
+    windowStart: '',
+    windowEnd: '',
+    measurementSemantics: 'BOUNDED_WINDOW',
+    evidenceSufficiency: sufficient ? 'SUFFICIENT' : 'INSUFFICIENT',
+    rawNumerator: null,
+    rawDenominator: sampleSize,
   };
 }
 
 function lowerBoundMetric(key: SloMetric['key'], value: number | null, sampleSize: number, minimum: number, target: string, minimumSamples = 1): SloMetric {
+  const sufficient = value !== null && sampleSize >= minimumSamples;
   return {
     key,
     value,
+    observedValue: value,
     sampleSize,
+    qualifyingSampleCount: sufficient ? sampleSize : 0,
+    excludedSampleCount: 0,
     status: value === null || sampleSize < minimumSamples ? 'NO_DATA' : value >= minimum ? 'PASS' : 'BREACH',
     evaluationStatus: value === null || sampleSize < minimumSamples
       ? 'INSUFFICIENT_DATA'
       : value >= minimum ? 'PASS' : 'BREACH',
     measurementState: value === null || sampleSize < minimumSamples ? 'INSUFFICIENT_DATA' : 'MEASURED',
     stateReason: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
+    reasonCode: value === null || sampleSize < minimumSamples ? 'METRIC_MINIMUM_SAMPLE_NOT_MET' : 'METRIC_MEASURED',
     target,
+    threshold: target,
+    windowStart: '',
+    windowEnd: '',
+    measurementSemantics: 'BOUNDED_WINDOW',
+    evidenceSufficiency: sufficient ? 'SUFFICIENT' : 'INSUFFICIENT',
+    rawNumerator: null,
+    rawDenominator: sampleSize,
   };
 }
 
@@ -404,6 +510,9 @@ function notApplicableMetric(metric: SloMetric, stateReason: string): SloMetric 
     evaluationStatus: 'NOT_APPLICABLE',
     measurementState: 'NOT_APPLICABLE',
     stateReason,
+    reasonCode: stateReason,
+    qualifyingSampleCount: 0,
+    evidenceSufficiency: 'NOT_APPLICABLE',
   };
 }
 
@@ -414,6 +523,9 @@ function unavailableMetric(metric: SloMetric, stateReason: string): SloMetric {
     evaluationStatus: 'INSUFFICIENT_DATA',
     measurementState: 'INSUFFICIENT_DATA',
     stateReason,
+    reasonCode: stateReason,
+    qualifyingSampleCount: 0,
+    evidenceSufficiency: 'INSUFFICIENT',
   };
 }
 
@@ -603,6 +715,7 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const minimumSamples = Math.max(1, options.minimumSamples ?? DEFAULT_SLO_MINIMUM_SAMPLES);
   const runtimeFreshnessMs = Math.max(30_000, options.runtimeFreshnessMs ?? DEFAULT_RUNTIME_FRESHNESS_MS);
   const startedAt = now - windowMs;
+  const releaseIdentity = getReleaseIdentity().releaseId;
   const [jobProjection, attemptsRead, runtimeRead, auditsRead, eventsRead, productsRead] = await Promise.all([
     readBoundedAutomationJobStatuses(),
     readPersistedTelemetry<AutomationJobAttempt>(JOB_ATTEMPT_COLLECTION, 10_000, 16 * 1024 * 1024),
@@ -656,6 +769,28 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     return observation ? [observation] : [];
   });
   const pickupObservations = [...attemptPickupObservations, ...legacyJobPickupObservations];
+  const explicitAttemptRecords = allAttempts.flatMap(attempt => {
+    const observation = deriveExplicitPickupLatencyObservation(attempt, startedAt, now);
+    return observation ? [{
+      observation,
+      releaseId: attempt.releaseId || '',
+      rolloutCohort: attempt.rolloutCohort || '',
+      observedId: attempt.id,
+      boundaryAt: attempt.createdAt,
+    }] : [];
+  });
+  const explicitJobRecords = allJobs.flatMap(job => {
+    if (persistedAttemptKeys.has(`${job.id}:${job.attemptCount}`)) return [];
+    const observation = deriveExplicitPickupLatencyObservation(job, startedAt, now);
+    return observation ? [{
+      observation,
+      releaseId: job.releaseId || '',
+      rolloutCohort: job.rolloutCohort || '',
+      observedId: `${job.id}:attempt:${job.attemptCount}`,
+      boundaryAt: job.createdAt,
+    }] : [];
+  });
+  const explicitPickupRecords = [...explicitAttemptRecords, ...explicitJobRecords];
   const runnableAtPickupLatencies = pickupObservations.map(observation => observation.latencyMs);
   const retryPickupLatencies = pickupObservations
     .filter(observation => observation.retryAttempt)
@@ -672,6 +807,39 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const pendingQueueAges = runnableQueueEntries.map(entry => entry.ageMs);
   const neverClaimedPending = runnableQueueEntries.filter(entry => entry.neverClaimed).length;
   const pickupLatencyFeature = getFeatureRolloutState('SLO_RUNNABLE_AT_V2');
+  const currentRolloutCohort = `SLO_RUNNABLE_AT_V2:${pickupLatencyFeature.mode}`;
+  const currentPickupRecords = explicitPickupRecords.filter(record =>
+    record.releaseId === releaseIdentity
+    && record.rolloutCohort === currentRolloutCohort);
+  const currentPickupLatencies = currentPickupRecords.map(record => record.observation.latencyMs);
+  const pickupExcludedLegacyCount = explicitPickupRecords.length - currentPickupRecords.length;
+  const pickupInsufficientTimestampCount = [
+    ...allAttempts.filter(attempt =>
+      inWindow(attempt.claimedAt, startedAt, now)
+      && deriveExplicitPickupLatencyObservation(attempt, startedAt, now) === null),
+    ...allJobs.filter(job =>
+      !persistedAttemptKeys.has(`${job.id}:${job.attemptCount}`)
+      && inWindow(job.claimedAt || job.startedAt, startedAt, now)
+      && deriveExplicitPickupLatencyObservation(job, startedAt, now) === null),
+  ].length;
+  const currentReleaseBoundaryAt = oldestTimestamp([
+    ...allAttempts
+      .filter(attempt => attempt.releaseId === releaseIdentity)
+      .map(attempt => attempt.createdAt),
+    ...allJobs
+      .filter(job => job.releaseId === releaseIdentity)
+      .map(job => job.createdAt),
+  ]);
+  const currentRolloutBoundaryAt = oldestTimestamp([
+    ...allAttempts
+      .filter(attempt => attempt.releaseId === releaseIdentity
+        && attempt.rolloutCohort === currentRolloutCohort)
+      .map(attempt => attempt.createdAt),
+    ...allJobs
+      .filter(job => job.releaseId === releaseIdentity
+        && job.rolloutCohort === currentRolloutCohort)
+      .map(job => job.createdAt),
+  ]);
   const pickupLatencyMode: AutomationSloMeasurement['pickupLatencyMode'] =
     pickupLatencyFeature.mode === 'ACTIVE' ? 'RUNNABLE_AT' : 'LEGACY_CREATED_AT';
   const pickupLatencies = pickupLatencyMode === 'RUNNABLE_AT'
@@ -740,6 +908,10 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
 
   const pickupLatencyP50Ms = p50(pickupLatencies);
   const pickupLatencyP95Ms = p95(pickupLatencies);
+  const pickupLatencyHistoricalP50Ms = p50(legacyPickupLatencies);
+  const pickupLatencyHistoricalP95Ms = p95(legacyPickupLatencies);
+  const pickupLatencyCurrentP50Ms = p50(currentPickupLatencies);
+  const pickupLatencyCurrentP95Ms = p95(currentPickupLatencies);
   const pickupLatencyLegacyP95Ms = p95(legacyPickupLatencies);
   const pickupLatencyRunnableAtP95Ms = p95(runnableAtPickupLatencies);
   const retryPickupLatencyP95Ms = p95(retryPickupLatencies);
@@ -771,7 +943,7 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   );
   const jobHistoryAvailable = jobHistoryWindowComplete;
   const pickupEvidenceAvailable = attemptWindowComplete
-    && (pickupObservations.length > 0 || jobHistoryAvailable);
+    && currentPickupRecords.length > 0;
   const verifiedIdleQueue = currentJobStateAvailable
     && pendingQueueAges.length === 0
     && pickupObservations.length === 0;
@@ -784,7 +956,13 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
           'VERIFIED_IDLE_QUEUE_NO_PICKUP_SAMPLE',
         )
       : pickupEvidenceAvailable
-      ? upperBoundMetric('job_pickup_latency_p95_ms', pickupLatencyP95Ms, pickupLatencies.length, 30_000, '<= 30000 ms')
+      ? upperBoundMetric(
+          'job_pickup_latency_p95_ms',
+          pickupLatencyCurrentP95Ms,
+          currentPickupLatencies.length,
+          30_000,
+          '<= 30000 ms',
+        )
       : unavailableMetric(
           upperBoundMetric('job_pickup_latency_p95_ms', null, 0, 30_000, '<= 30000 ms'),
           attemptsRead.available ? 'PICKUP_HISTORY_INCOMPLETE' : 'JOB_ATTEMPT_TELEMETRY_UNAVAILABLE',
@@ -864,6 +1042,38 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     booleanMetric('runtime_publish_safe', runtimePublishSafe, 'true'),
     booleanMetric('public_route_healthy', publicRouteHealthy, 'true'),
   ];
+  const metricWindowStart = new Date(startedAt).toISOString();
+  const metricWindowEnd = new Date(now).toISOString();
+  for (const metric of metrics) {
+    metric.windowStart = metricWindowStart;
+    metric.windowEnd = metricWindowEnd;
+    metric.reasonCode = metric.evaluationStatus === 'BREACH'
+      ? SLO_REASON_FOR_METRIC[metric.key]
+      : metric.evaluationStatus === 'PASS'
+        ? 'METRIC_PASS'
+        : metric.stateReason;
+    if (metric.key === 'job_pickup_latency_p95_ms') {
+      metric.qualifyingSampleCount = currentPickupRecords.length;
+      metric.excludedSampleCount = pickupExcludedLegacyCount + pickupInsufficientTimestampCount;
+      metric.measurementSemantics = 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE';
+      metric.rawDenominator = currentPickupRecords.length;
+    } else if (metric.key === 'zero_touch_completion_rate') {
+      metric.measurementSemantics = 'AUTONOMOUS_TERMINAL_OUTCOMES_ONLY';
+      metric.rawNumerator = zeroTouchCompleted.length;
+      metric.rawDenominator = zeroTouchJobs.length;
+      metric.qualifyingSampleCount = zeroTouchJobs.length;
+      metric.excludedSampleCount = Math.max(0, terminals.length - zeroTouchJobs.length);
+    } else if (['worker_heartbeat_fresh', 'scheduler_heartbeat_fresh'].includes(metric.key)) {
+      metric.measurementSemantics = 'CURRENT_ROLE_HEARTBEAT_FRESHNESS';
+    } else if ([
+      'post_publish_health_pass_rate',
+      'duplicate_publish_count',
+      'rollback_rate',
+      'unsafe_publish_count',
+    ].includes(metric.key)) {
+      metric.measurementSemantics = 'REAL_PUBLICATION_OR_MONITOR_EVIDENCE';
+    }
+  }
   const allApplicableMetricsMeasured = metrics.every(metric =>
     metric.measurementState === 'MEASURED' || metric.measurementState === 'NOT_APPLICABLE');
   const measurementComplete = terminals.length >= minimumSamples
@@ -874,7 +1084,6 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     ? noLegitimateMonitorTarget ? 'RECOVERY' : 'MEASURED'
     : runtimeObserved || terminals.length > 0 ? 'INSUFFICIENT_DATA' : 'BOOTSTRAP';
   const measuredAt = new Date(now).toISOString();
-  const releaseIdentity = getReleaseIdentity().releaseId;
   const productionReleaseEvidenceRequired = process.env.NODE_ENV === 'production';
   const runtimeReleaseReasons = [
     ...(!latestRuntime?.web.releaseId ? ['RUNTIME_WEB_RELEASE_ID_MISSING'] : []),
@@ -893,20 +1102,18 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       ? ['RUNTIME_BUILD_RELEASE_UNVERIFIED']
       : []),
   ];
-  const runtimeEvidenceComplete = runtimeRead.available
-    && runtimeObserved
-    && runtimeReleaseReasons.length === 0;
   const runtimeReferences = latestRuntime?.id ? [latestRuntime.id] : [];
   const jobObservedAt = latestIsoTimestamp(terminals.map(jobObservationTime));
-  const pickupObservedAt = latestIsoTimestamp(pickupObservations.map(item => item.claimedAt));
+  const pickupObservedAt = latestIsoTimestamp(
+    currentPickupRecords.map(item => new Date(item.observation.claimedAt).toISOString()),
+  );
   const publicationObservedAt = latestIsoTimestamp([
     ...audits.map(item => item.timestamp),
     ...events.map(item => item.createdAt),
   ]) || measuredAt;
   const productObservedAt = latestIsoTimestamp(allProducts.map(product => product.updatedAt)) || measuredAt;
   const jobReferences = terminals.slice(-10).map(job => job.id);
-  const pickupReferences = pickupObservations.slice(-10).map(item =>
-    `${item.runnableReason}:${item.claimedAt}`);
+  const pickupReferences = currentPickupRecords.slice(-10).map(item => item.observedId);
   const publicationReferences = [
     ...audits.slice(-5).flatMap(item => item.runId || []),
     ...events.slice(-5).flatMap(item => item.effectKey || []),
@@ -919,14 +1126,29 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
         : metric.key === 'scheduler_heartbeat_fresh'
           ? latestRuntime?.scheduler.heartbeatAt || null
           : latestRuntime?.checkedAt || null;
+      const metricReleaseReasons = metric.key === 'worker_heartbeat_fresh'
+        ? runtimeReleaseReasons.filter(reason =>
+            reason.startsWith('RUNTIME_WEB_') || reason.startsWith('RUNTIME_WORKER_'))
+        : metric.key === 'scheduler_heartbeat_fresh'
+          ? runtimeReleaseReasons.filter(reason =>
+              reason.startsWith('RUNTIME_WEB_') || reason.startsWith('RUNTIME_SCHEDULER_'))
+          : runtimeReleaseReasons;
+      const evidenceReleaseIdentity = metric.key === 'worker_heartbeat_fresh'
+        ? latestRuntime?.worker.releaseId || ''
+        : metric.key === 'scheduler_heartbeat_fresh'
+          ? latestRuntime?.scheduler.releaseId || ''
+          : latestRuntime?.web.releaseId || '';
       return {
         metricKey: metric.key,
         source: 'runtime-health-current',
         observedAt,
-        complete: runtimeEvidenceComplete && validTimestamp(observedAt) !== null,
-        releaseIdentity: latestRuntime?.web.releaseId || '',
+        complete: runtimeRead.available
+          && runtimeObserved
+          && metricReleaseReasons.length === 0
+          && validTimestamp(observedAt) !== null,
+        releaseIdentity: evidenceReleaseIdentity,
         reasonCodes: [
-          ...runtimeReleaseReasons,
+          ...metricReleaseReasons,
           ...(!runtimeRead.available ? ['RUNTIME_HEALTH_COLLECTION_UNAVAILABLE'] : []),
           ...(!runtimeObserved ? ['RUNTIME_HEALTH_CURRENT_OBSERVATION_MISSING'] : []),
         ],
@@ -938,14 +1160,17 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
         metricKey: metric.key,
         source: verifiedIdleQueue ? 'current-job-state' : 'job-attempt-history',
         observedAt: verifiedIdleQueue ? latestRuntime?.checkedAt || null : pickupObservedAt,
-        complete: verifiedIdleQueue || (pickupEvidenceAvailable && pickupObservations.length > 0),
-        releaseIdentity: verifiedIdleQueue ? releaseIdentity : '',
+        complete: verifiedIdleQueue || (pickupEvidenceAvailable && currentPickupRecords.length > 0),
+        releaseIdentity,
         reasonCodes: [
           ...(!attemptsRead.available ? ['JOB_ATTEMPT_TELEMETRY_UNAVAILABLE'] : []),
-          ...(!verifiedIdleQueue && pickupObservations.length === 0 ? ['PICKUP_OBSERVATION_MISSING'] : []),
-          ...(!jobHistoryAvailable ? ['PICKUP_HISTORY_BOUNDED_SAMPLE'] : []),
+          ...(!verifiedIdleQueue && currentPickupRecords.length === 0
+            ? ['CURRENT_RELEASE_PICKUP_OBSERVATION_MISSING']
+            : []),
+          ...(!attemptWindowComplete ? ['PICKUP_HISTORY_BOUNDED_SAMPLE'] : []),
           ...(verifiedIdleQueue ? ['VERIFIED_IDLE_QUEUE_NO_PICKUP_SAMPLE'] : []),
-          ...(!verifiedIdleQueue ? ['HISTORICAL_EVIDENCE_RELEASE_UNATTRIBUTED'] : []),
+          ...(pickupExcludedLegacyCount ? ['LEGACY_PICKUP_SAMPLES_EXCLUDED_FROM_RECOVERY'] : []),
+          ...(pickupInsufficientTimestampCount ? ['PICKUP_TIMESTAMP_EVIDENCE_INSUFFICIENT'] : []),
         ],
         references: pickupReferences,
       };
@@ -1021,6 +1246,10 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       pickupScheduledAttempts,
       pickupRetryAttempts,
       pickupCarriedIntoWindow,
+      legacyPickupLatencies.length,
+      currentPickupRecords.length,
+      pickupExcludedLegacyCount,
+      pickupInsufficientTimestampCount,
     ],
     sourceAvailability: {
       jobAttempts: attemptsRead.available,
@@ -1045,6 +1274,22 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       runnableAtP95Ms: pickupLatencyRunnableAtP95Ms,
       retryP95Ms: retryPickupLatencyP95Ms,
       pendingQueueAgeMs,
+      historicalP50Ms: pickupLatencyHistoricalP50Ms,
+      historicalP95Ms: pickupLatencyHistoricalP95Ms,
+      historicalSampleCount: legacyPickupLatencies.length,
+      currentP50Ms: pickupLatencyCurrentP50Ms,
+      currentP95Ms: pickupLatencyCurrentP95Ms,
+      currentSampleCount: currentPickupRecords.length,
+      excludedLegacyCount: pickupExcludedLegacyCount,
+      insufficientTimestampCount: pickupInsufficientTimestampCount,
+      rolloutBoundary: {
+        cohort: currentRolloutCohort,
+        startedAt: currentRolloutBoundaryAt,
+      },
+      releaseBoundary: {
+        releaseId: releaseIdentity,
+        startedAt: currentReleaseBoundaryAt,
+      },
     },
     values: metrics.map(metric => [
       metric.key,
@@ -1054,6 +1299,9 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       metric.evaluationStatus,
       metric.measurementState,
       metric.stateReason,
+      metric.qualifyingSampleCount,
+      metric.excludedSampleCount,
+      metric.evidenceSufficiency,
     ]),
     unsafeProductIds: unsafeProducts.map(product => product.id).sort(),
     metricEvidence,
@@ -1093,6 +1341,10 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       pickupScheduledAttempts,
       pickupRetryAttempts,
       pickupCarriedIntoWindow,
+      pickupHistoricalSamples: legacyPickupLatencies.length,
+      pickupCurrentSamples: currentPickupRecords.length,
+      pickupExcludedLegacySamples: pickupExcludedLegacyCount,
+      pickupInsufficientTimestampSamples: pickupInsufficientTimestampCount,
     },
     jobProjection: {
       availability: jobProjection.availability,
@@ -1141,6 +1393,26 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     pickupLatencyP95Ms,
     pickupLatencyLegacyP95Ms,
     pickupLatencyRunnableAtP95Ms,
+    pickupLatencyHistoricalP50Ms,
+    pickupLatencyHistoricalP95Ms,
+    pickupLatencyHistoricalSampleCount: legacyPickupLatencies.length,
+    pickupLatencyCurrentP50Ms,
+    pickupLatencyCurrentP95Ms,
+    pickupLatencyCurrentSampleCount: currentPickupRecords.length,
+    pickupLatencyExcludedLegacyCount: pickupExcludedLegacyCount,
+    pickupLatencyInsufficientTimestampCount: pickupInsufficientTimestampCount,
+    pickupLatencyMeasurementSemantics: {
+      historical: 'LEGACY_CREATED_AT',
+      current: 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE',
+    },
+    pickupLatencyRolloutBoundary: {
+      cohort: currentRolloutCohort,
+      startedAt: currentRolloutBoundaryAt,
+    },
+    pickupLatencyReleaseBoundary: {
+      releaseId: releaseIdentity,
+      startedAt: currentReleaseBoundaryAt,
+    },
     retryPickupLatencyP95Ms,
     pickupLatencyMode,
     pickupLatencyFeatureMode: pickupLatencyFeature.mode,
@@ -1342,20 +1614,13 @@ function recoveryEvidenceSummary(
       ...(measurement.dataStatus === 'RECOVERY' ? ['ZERO_PUBLIC_PRODUCT_RECOVERY_EVIDENCE'] : []),
     ])],
     terminalJobSamples: measurement.sourceCounts.terminalJobs,
-    pickupLatencyP95Ms: measurement.pickupLatencyP95Ms,
+    pickupLatencyP95Ms: measurement.pickupLatencyCurrentP95Ms,
     pendingQueueAgeMs: measurement.pendingQueueAgeMs,
     publicationAttempts: measurement.sourceCounts.publicationAttempts,
     monitorOutcomes: measurement.sourceCounts.monitorOutcomes,
     publicProducts: measurement.sourceCounts.publicProducts,
   };
 }
-
-const QUIESCENT_PUBLICATION_RECOVERY_REASONS = new Set([
-  'HEALTH_SLO_FAILED',
-  'DUPLICATE_PUBLISH',
-  'UNSAFE_PUBLISH',
-  'ROLLBACK_BUDGET_EXCEEDED',
-]);
 
 const CURRENT_RUNTIME_RECOVERABLE_REASON_CODES = new Set([
   'WORKER_STALE',
@@ -1401,104 +1666,82 @@ function deriveRuntimeReasonObservations(input: {
   releaseIdentity?: string;
   qualificationReasons: string[];
   evidenceReferences: string[];
+  evidenceRevision: string;
 }> {
-  const { measurement, evaluation, control } = input;
-  const runtimeMetricKeys: SloMetric['key'][] = [
-    'worker_heartbeat_fresh',
-    'scheduler_heartbeat_fresh',
-    'runtime_publish_safe',
-    'public_route_healthy',
-  ];
-  const runtimeMetrics = runtimeMetricKeys.map(key => measurement.metrics.find(metric => metric.key === key));
-  const runtimeEvidence = runtimeMetricKeys.map(key =>
-    measurement.metricEvidence.find(evidence => evidence.metricKey === key));
-  const mandatoryRuntimeHealthy = runtimeMetrics.every(metric => metric?.evaluationStatus === 'PASS')
-    && runtimeEvidence.every(evidence => evidence?.complete === true)
-    && control.publishPausedByOperator !== true
-    && control.killSwitch !== true
-    && control.workerPaused !== true
-    && control.schedulerPaused !== true
-    && control.mode !== 'EMERGENCY_STOP';
-  const coreObservedAt = latestIsoTimestamp(runtimeEvidence.map(evidence => evidence?.observedAt));
-  const coreReferences = runtimeEvidence.flatMap(evidence => evidence?.references || []);
-  const globalMeasuredPass = evaluation.status === 'PASS'
-    && ['MEASURED', 'RECOVERY'].includes(measurement.dataStatus);
+  const { measurement, control } = input;
+  const metricForReason = (reasonCode: string): SloMetric | undefined => {
+    const exact = measurement.metrics.find(item => SLO_REASON_FOR_METRIC[item.key] === reasonCode);
+    if (exact) return exact;
+    if (/^WORKER_(?:STALE|MISSING|CRASHED|UNVERIFIED)$/.test(reasonCode)) {
+      return measurement.metrics.find(item => item.key === 'worker_heartbeat_fresh');
+    }
+    if (/^SCHEDULER_(?:STALE|MISSING|CRASHED|UNVERIFIED)$/.test(reasonCode)) {
+      return measurement.metrics.find(item => item.key === 'scheduler_heartbeat_fresh');
+    }
+    return undefined;
+  };
 
   return input.activeReasons.map(reasonCode => {
-    const metric = measurement.metrics.find(item => SLO_REASON_FOR_METRIC[item.key] === reasonCode);
-    const evidence = metric
+    const metric = metricForReason(reasonCode);
+    const directEvidence = metric
       ? measurement.metricEvidence.find(item => item.metricKey === metric.key)
       : undefined;
+    const runtimeSafeMetric = measurement.metrics.find(item => item.key === 'runtime_publish_safe');
+    const runtimeSafeEvidence = measurement.metricEvidence.find(item =>
+      item.metricKey === 'runtime_publish_safe');
+    const evidence = directEvidence || runtimeSafeEvidence;
     const evidenceReleaseCompatible = evidence?.releaseIdentity === measurement.releaseIdentity;
     const metricPass = metric?.evaluationStatus === 'PASS'
-      && evidence?.complete === true
-      && evidenceReleaseCompatible;
-    const quiescentSourceComplete = reasonCode === 'HEALTH_SLO_FAILED'
-      ? measurement.sourceCompleteness.currentProducts && measurement.jobProjection.currentStateComplete
-      : reasonCode === 'DUPLICATE_PUBLISH'
-        ? measurement.sourceCompleteness.publicationAuditWindow
-          && measurement.sourceCompleteness.outboundEventWindow
-          && measurement.sourceCompleteness.currentProducts
-        : reasonCode === 'UNSAFE_PUBLISH'
-          ? measurement.sourceCompleteness.currentProducts
-          : reasonCode === 'ROLLBACK_BUDGET_EXCEEDED'
-            ? measurement.sourceCompleteness.publicationAuditWindow
-              && measurement.sourceCompleteness.currentProducts
-            : false;
-    const quiescentPublicationRecovery = Boolean(
-      metric
-      && QUIESCENT_PUBLICATION_RECOVERY_REASONS.has(reasonCode)
-      && metric.evaluationStatus === 'NOT_APPLICABLE'
-      && quiescentSourceComplete
-      && measurement.sourceCounts.publicProducts === 0
-      && measurement.sourceCounts.pendingMonitorTargets === 0,
-    );
-    const currentQueueRecovery = reasonCode === 'JOB_PICKUP_LATENCY_SLO_FAILED'
-      && measurement.jobProjection.currentStateComplete
-      && measurement.pendingQueueCount === 0
-      && (measurement.pendingQueueAgeMs === null || measurement.pendingQueueAgeMs <= 30_000);
+      && directEvidence?.complete === true
+      && directEvidence.releaseIdentity === measurement.releaseIdentity;
     const currentRuntimeReasonRecovery = !metric
       && CURRENT_RUNTIME_RECOVERABLE_REASON_CODES.has(reasonCode)
       && !measurement.runtimeReasons.includes(reasonCode)
-      && measurement.runtimePublishSafe === true;
-    const reasonEvidencePass = metricPass
-      || quiescentPublicationRecovery
-      || currentQueueRecovery
-      || currentRuntimeReasonRecovery;
-    const dedicatedCurrentRecoveryProof = quiescentPublicationRecovery
-      || currentQueueRecovery
-      || currentRuntimeReasonRecovery;
-    // A complete, release-matched current-state proof may recover a blocked
-    // idle system without pretending that unrelated zero-sample historical
-    // metrics passed. Missing/partial evidence still remains insufficient and
-    // an actual concurrent breach never advances recovery.
-    const evaluationAllowsRecovery = globalMeasuredPass
-      || (
-        evaluation.status === 'INSUFFICIENT_DATA'
-        && dedicatedCurrentRecoveryProof
-      );
-    const qualificationReasons = [
-      ...(!evaluationAllowsRecovery ? ['RUNTIME_RECOVERY_EVALUATION_NOT_QUALIFIED'] : []),
-      ...(!mandatoryRuntimeHealthy ? ['RUNTIME_RECOVERY_MANDATORY_RUNTIME_EVIDENCE_INCOMPLETE'] : []),
-      ...(!reasonEvidencePass ? ['RUNTIME_RECOVERY_REASON_EVIDENCE_NOT_PASS'] : []),
-      ...(metric?.evaluationStatus === 'PASS' && evidence?.complete === true && !evidenceReleaseCompatible
-        ? ['RUNTIME_RECOVERY_EVIDENCE_RELEASE_UNATTRIBUTED_OR_MISMATCHED']
-        : []),
-      ...(control.publishPausedByOperator ? ['OPERATOR_PAUSE_ACTIVE'] : []),
-      ...(control.killSwitch || control.mode === 'EMERGENCY_STOP' ? ['EMERGENCY_STOP_ACTIVE'] : []),
-      ...(control.workerPaused ? ['WORKER_PAUSE_ACTIVE'] : []),
-      ...(control.schedulerPaused ? ['SCHEDULER_PAUSE_ACTIVE'] : []),
-      ...(currentQueueRecovery ? ['CURRENT_QUEUE_PICKUP_RECOVERY_EVIDENCE'] : []),
-      ...(quiescentPublicationRecovery ? ['QUIESCENT_PUBLICATION_RECOVERY_EVIDENCE'] : []),
-      ...(currentRuntimeReasonRecovery ? ['CURRENT_RUNTIME_REASON_ABSENT'] : []),
-      ...(dedicatedCurrentRecoveryProof ? ['DEDICATED_CURRENT_RECOVERY_PROOF'] : []),
-      ...(evidence?.reasonCodes || []),
-    ];
-    const qualifyingPass = evaluationAllowsRecovery
-      && mandatoryRuntimeHealthy
-      && reasonEvidencePass;
+      && runtimeSafeMetric?.evaluationStatus === 'PASS'
+      && runtimeSafeEvidence?.complete === true
+      && runtimeSafeEvidence.releaseIdentity === measurement.releaseIdentity;
+    const reasonEvidencePass = metricPass || currentRuntimeReasonRecovery;
     const explicitBreach = metric?.evaluationStatus === 'BREACH'
       || measurement.runtimeReasons.includes(reasonCode);
+    const observedAt = evidence?.observedAt || undefined;
+    const evidenceReferences = [...new Set([
+      measurement.id,
+      measurement.evidenceHash,
+      ...(evidence?.references || []),
+    ])].slice(0, 20);
+    const evidenceRevision = createHash('sha256').update(JSON.stringify({
+      reasonCode,
+      metricKey: metric?.key || reasonCode,
+      metricValue: metric?.value ?? null,
+      metricSamples: metric?.sampleSize ?? 0,
+      metricStatus: metric?.evaluationStatus || 'INSUFFICIENT_DATA',
+      observedAt,
+      releaseIdentity: evidence?.releaseIdentity || '',
+      references: evidence?.references || [],
+      currentRuntimeReasonRecovery,
+    })).digest('hex');
+    const qualificationReasons = [
+      ...(!reasonEvidencePass ? ['RUNTIME_RECOVERY_REASON_EVIDENCE_NOT_PASS'] : []),
+      ...(!evidence?.complete ? ['RUNTIME_RECOVERY_REASON_EVIDENCE_INCOMPLETE'] : []),
+      ...(!evidenceReleaseCompatible
+        ? ['RUNTIME_RECOVERY_EVIDENCE_RELEASE_UNATTRIBUTED_OR_MISMATCHED']
+        : []),
+      ...(metric?.evaluationStatus === 'INSUFFICIENT_DATA'
+        ? ['RUNTIME_RECOVERY_METRIC_INSUFFICIENT_DATA']
+        : []),
+      ...(metric?.evaluationStatus === 'NOT_APPLICABLE'
+        ? ['RUNTIME_RECOVERY_METRIC_NOT_APPLICABLE']
+        : []),
+      ...(currentRuntimeReasonRecovery ? ['CURRENT_RUNTIME_REASON_ABSENT'] : []),
+      ...(currentRuntimeReasonRecovery ? ['DEDICATED_CURRENT_RECOVERY_PROOF'] : []),
+      ...(evidence?.reasonCodes || []),
+      ...(control.publishBlockedByPolicy ? ['POLICY_BLOCK_PRESERVED_SEPARATELY'] : []),
+      ...(control.publishPausedByOperator ? ['OPERATOR_PAUSE_PRESERVED_SEPARATELY'] : []),
+    ];
+    const qualifyingPass = !explicitBreach
+      && reasonEvidencePass
+      && evidence?.complete === true
+      && evidenceReleaseCompatible;
     return {
       reasonCode,
       metricKey: metric?.key || reasonCode,
@@ -1510,15 +1753,11 @@ function deriveRuntimeReasonObservations(input: {
       qualifyingStatus: explicitBreach
         ? 'BREACH'
         : qualifyingPass ? 'PASS' : 'INSUFFICIENT_DATA',
-      observedAt: coreObservedAt || undefined,
+      observedAt,
       releaseIdentity: measurement.releaseIdentity,
       qualificationReasons,
-      evidenceReferences: [...new Set([
-        measurement.id,
-        measurement.evidenceHash,
-        ...coreReferences,
-        ...(evidenceReleaseCompatible ? evidence?.references || [] : []),
-      ])].slice(0, 20),
+      evidenceReferences,
+      evidenceRevision,
     };
   });
 }

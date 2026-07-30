@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { readCollection, runTransaction } from '@/lib/storage/adapter';
 import type { FeatureRolloutMode } from './featureRollout';
@@ -51,6 +52,10 @@ export interface RuntimeRecoveryReasonProgress {
   lastQualifiedObservationAt?: string;
   lastReleaseIdentity?: string;
   lastEvidenceReferences?: string[];
+  lastEvidenceRevision?: string;
+  lastFailedEvaluation?: string;
+  lastFailedEvaluationId?: string;
+  lastResetReason?: string;
   qualificationReasons: string[];
   interruptedAt?: string;
   lastTransitionAt: string;
@@ -295,6 +300,18 @@ export function normalizeRuntimeRecoveryState(
               .flatMap(reference => safeOptionalReference(reference) || [])
               .slice(0, 20)
             : [],
+          ...(safeOptionalReference(candidate.lastEvidenceRevision)
+            ? { lastEvidenceRevision: safeOptionalReference(candidate.lastEvidenceRevision) }
+            : {}),
+          ...(candidate.lastFailedEvaluation
+            ? { lastFailedEvaluation: safeTimestamp(candidate.lastFailedEvaluation, now) }
+            : {}),
+          ...(safeOptionalReference(candidate.lastFailedEvaluationId)
+            ? { lastFailedEvaluationId: safeOptionalReference(candidate.lastFailedEvaluationId) }
+            : {}),
+          ...(safeReasons(candidate.lastResetReason ? [candidate.lastResetReason] : [])[0]
+            ? { lastResetReason: safeReasons([candidate.lastResetReason!])[0] }
+            : {}),
           qualificationReasons: safeReasons(candidate.qualificationReasons),
           ...(candidate.interruptedAt
             ? { interruptedAt: safeTimestamp(candidate.interruptedAt, now) }
@@ -353,6 +370,7 @@ export interface RuntimeReasonObservation {
   releaseIdentity?: string;
   qualificationReasons: string[];
   evidenceReferences?: string[];
+  evidenceRevision?: string;
 }
 
 export interface RuntimeReasonRecoveryTransition {
@@ -431,10 +449,20 @@ export async function advanceRuntimeReasonRecoveryState(input: {
       const previous = previousProgress.get(reasonCode);
       const measurement = observation?.measurement || 'INSUFFICIENT_DATA';
       const distinctEvaluation = previous?.lastEvaluationId !== input.evaluationId;
-      if (!distinctEvaluation && previous) {
-        reasonProgress.push(previous);
-        continue;
-      }
+      const evidenceRevision = safeOptionalReference(observation?.evidenceRevision)
+        || (observation
+          ? createHash('sha256').update(JSON.stringify({
+              reasonCode,
+              metricKey: observation.metricKey,
+              observedAt: observation.observedAt,
+              releaseIdentity: observation.releaseIdentity,
+              measurement: observation.measurement,
+              qualifyingStatus: observation.qualifyingStatus,
+              evidenceReferences: observation.evidenceReferences || [],
+            })).digest('hex')
+          : undefined);
+      const distinctEvidence = !previous?.lastEvidenceRevision
+        || previous.lastEvidenceRevision !== evidenceRevision;
 
       const observedAtMs = Date.parse(observation?.observedAt || '');
       const previousObservedAtMs = Date.parse(previous?.lastQualifiedObservationAt || '');
@@ -454,6 +482,15 @@ export async function advanceRuntimeReasonRecoveryState(input: {
         && Number.isFinite(previousWindowStartedAtMs)
         && input.nowMs - previousWindowStartedAtMs <= evidenceWindowMs
       );
+      if (
+        (!distinctEvaluation || !distinctEvidence)
+        && previous
+        && evidenceFresh
+        && previousProgressCompatible
+      ) {
+        reasonProgress.push(previous);
+        continue;
+      }
       const evidenceWindowStartedAtMs = previousProgressCompatible && (previous?.consecutiveHealthyCount || 0) > 0
         ? previousWindowStartedAtMs
         : observedAtMs;
@@ -461,6 +498,7 @@ export async function advanceRuntimeReasonRecoveryState(input: {
         && Number.isFinite(observedAtMs)
         && observedAtMs - evidenceWindowStartedAtMs <= evidenceWindowMs;
       const evidenceReferenced = evidenceReferences.length > 0;
+      const evidenceRevisionPresent = Boolean(evidenceRevision);
       const qualifyingPass = measurement === 'PASS'
         && observation?.qualifyingStatus === 'PASS'
         && evidenceFresh
@@ -468,7 +506,8 @@ export async function advanceRuntimeReasonRecoveryState(input: {
         && releaseCompatible
         && previousProgressCompatible
         && evidenceInsideWindow
-        && evidenceReferenced;
+        && evidenceReferenced
+        && evidenceRevisionPresent;
       const explicitBreach = measurement === 'BREACH' || observation?.qualifyingStatus === 'BREACH';
       const qualificationReasons = safeReasons([
         ...(observation?.qualificationReasons || []),
@@ -478,6 +517,7 @@ export async function advanceRuntimeReasonRecoveryState(input: {
         ...(!previousProgressCompatible ? ['RUNTIME_RECOVERY_STREAK_EXPIRED_OR_RELEASE_CHANGED'] : []),
         ...(!evidenceInsideWindow ? ['RUNTIME_RECOVERY_EVIDENCE_OUTSIDE_WINDOW'] : []),
         ...(!evidenceReferenced ? ['RUNTIME_RECOVERY_EVIDENCE_REFERENCE_REQUIRED'] : []),
+        ...(!evidenceRevisionPresent ? ['RUNTIME_RECOVERY_EVIDENCE_REVISION_REQUIRED'] : []),
         ...(measurement === 'NOT_APPLICABLE' ? ['RUNTIME_RECOVERY_EVIDENCE_NOT_APPLICABLE'] : []),
         ...(measurement === 'INSUFFICIENT_DATA' ? ['RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT'] : []),
       ]);
@@ -523,6 +563,16 @@ export async function advanceRuntimeReasonRecoveryState(input: {
         lastEvidenceReferences: qualifyingPass
           ? evidenceReferences
           : previous?.lastEvidenceReferences || [],
+        lastEvidenceRevision: qualifyingPass
+          ? evidenceRevision
+          : previous?.lastEvidenceRevision,
+        lastFailedEvaluation: qualifyingPass ? previous?.lastFailedEvaluation : now,
+        lastFailedEvaluationId: qualifyingPass ? previous?.lastFailedEvaluationId : input.evaluationId,
+        lastResetReason: qualifyingPass
+          ? undefined
+          : explicitBreach
+            ? reasonCode
+            : qualificationReasons[0] || 'RUNTIME_RECOVERY_EVIDENCE_INSUFFICIENT',
         qualificationReasons,
         interruptedAt: qualifyingPass ? undefined : now,
         lastTransitionAt: measurement !== previous?.measurement || healthyCount !== previous?.consecutiveHealthyCount

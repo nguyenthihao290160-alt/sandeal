@@ -1,4 +1,9 @@
-import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import {
+  generateId,
+  readBoundedCollectionSnapshot,
+  readCollection,
+  runTransaction,
+} from '@/lib/storage/adapter';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 
 const ROLE_COLLECTION = 'runtime-role-leases';
@@ -237,5 +242,9 @@ export async function listRuntimeRoleLeases(): Promise<RuntimeRoleLease[]> {
 }
 
 export async function listRecentRuntimeRoleConflicts(sinceMs: number): Promise<RuntimeRoleConflict[]> {
-  return (await readCollection<RuntimeRoleConflict>(CONFLICT_COLLECTION)).filter(item => Date.parse(item.observedAt) >= sinceMs);
+  const snapshot = await readBoundedCollectionSnapshot<RuntimeRoleConflict>(CONFLICT_COLLECTION, {
+    maximumItems: 500,
+    maximumBytes: 512 * 1024,
+  });
+  return snapshot.items.filter(item => Date.parse(item.observedAt) >= sinceMs);
 }

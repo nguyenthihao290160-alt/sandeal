@@ -95,8 +95,24 @@ export interface RuntimeHealthSnapshot {
     releaseMatchesBuild: boolean | null;
     releaseMismatchReasons?: string[];
   };
-  worker: { status: WorkerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
-  scheduler: { status: SchedulerHealthStatus; holderId?: string; heartbeatAt?: string; releaseId?: string };
+  worker: {
+    status: WorkerHealthStatus;
+    holderId?: string;
+    instanceId?: string;
+    pid?: number;
+    fencingToken?: number;
+    heartbeatAt?: string;
+    releaseId?: string;
+  };
+  scheduler: {
+    status: SchedulerHealthStatus;
+    holderId?: string;
+    instanceId?: string;
+    pid?: number;
+    fencingToken?: number;
+    heartbeatAt?: string;
+    releaseId?: string;
+  };
   providers: Record<string, ProviderHealthStatus>;
   queue: {
     pending: number;
@@ -255,8 +271,24 @@ export async function runRuntimeGuardian(options: {
       releaseMatchesBuild,
       releaseMismatchReasons: release.releaseMismatchReasons,
     },
-    worker: { status: workerStatus, holderId: workerLease?.holderId, heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt, releaseId: workerLease?.releaseId },
-    scheduler: { status: schedulerStatus, holderId: schedulerLease?.holderId, heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt, releaseId: schedulerLease?.releaseId },
+    worker: {
+      status: workerStatus,
+      holderId: workerLease?.holderId,
+      instanceId: workerLease?.instanceId,
+      pid: workerLease?.pid,
+      fencingToken: workerLease?.fencingToken,
+      heartbeatAt: workerLease?.heartbeatAt || control.workerHeartbeatAt,
+      releaseId: workerLease?.releaseId,
+    },
+    scheduler: {
+      status: schedulerStatus,
+      holderId: schedulerLease?.holderId,
+      instanceId: schedulerLease?.instanceId,
+      pid: schedulerLease?.pid,
+      fencingToken: schedulerLease?.fencingToken,
+      heartbeatAt: schedulerLease?.heartbeatAt || control.schedulerHeartbeatAt,
+      releaseId: schedulerLease?.releaseId,
+    },
     providers: options.providers || {},
     queue: {
       pending: jobHealth.statusCounts.PENDING,

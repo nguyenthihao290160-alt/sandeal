@@ -23,6 +23,29 @@ function actionKey(actor: string, action: ProductAutomationAction, productId: st
   return `product:${action}:${digest}`;
 }
 
+function recheckActionKey(
+  action: Extract<ProductAutomationAction, 'health' | 'link' | 'affiliate' | 'image'>,
+  products: NonNullable<Awaited<ReturnType<typeof getProductById>>>[],
+  target: string,
+): string {
+  const revision = products.length
+    ? products
+      .map(product => [
+        product.id,
+        product.evidenceSnapshotHash
+          || product.sourceHash
+          || product.contentHash
+          || product.lifecycleUpdatedAt
+          || product.updatedAt
+          || product.id,
+      ].join(':'))
+      .sort()
+      .join('|')
+    : `all:${target}`;
+  const digest = createHash('sha256').update(`${action}:${revision}`).digest('hex').slice(0, 32);
+  return `product-recheck:${digest}`;
+}
+
 export async function enqueueProductAction(input: {
   actor: string;
   action: ProductAutomationAction;
@@ -36,19 +59,32 @@ export async function enqueueProductAction(input: {
 }) {
   const config = ACTIONS[input.action];
   const ids = [...new Set([...(input.productIds || []), ...(input.productId ? [input.productId] : [])].map(value => value.trim()).filter(Boolean))].slice(0, 100);
+  const products = ids.length
+    ? (await Promise.all(ids.map(getProductById))).filter(
+      (product): product is NonNullable<Awaited<ReturnType<typeof getProductById>>> => Boolean(product),
+    )
+    : [];
   if (ids.length) {
-    const products = await Promise.all(ids.map(getProductById));
-    if (products.some(product => !product)) throw new Error('PRODUCT_NOT_FOUND');
+    if (products.length !== ids.length) throw new Error('PRODUCT_NOT_FOUND');
   }
   if (input.action !== 'health' && !ids.length) throw new Error('PRODUCT_ID_REQUIRED');
-  const product = input.action === 'safe_publish' ? await getProductById(ids[0]) : null;
+  const product = input.action === 'safe_publish' ? products[0] || null : null;
   if (input.action === 'safe_publish' && product) {
     const evaluation = evaluateSafePublish(product);
     if (!evaluation.eligible) throw new Error(`SAFE_PUBLISH_NOT_READY:${evaluation.reasons.join(',')}`);
   }
   const target = ids[0] || 'all';
+  const recheckAction = ['health', 'link', 'affiliate', 'image'].includes(input.action)
+    ? input.action as Extract<ProductAutomationAction, 'health' | 'link' | 'affiliate' | 'image'>
+    : null;
   const idempotencyKey = input.idempotencyKey
-    || (input.action === 'safe_publish' && product ? `safe-publish:${publicationIdempotencyKey(product)}` : actionKey(input.actor, input.action, target));
+    || (input.action === 'safe_publish' && product
+      ? `safe-publish:${publicationIdempotencyKey(product)}`
+      : recheckAction
+        ? products.length
+          ? recheckActionKey(recheckAction, products, target)
+          : actionKey(input.actor, input.action, target)
+        : actionKey(input.actor, input.action, target));
   const payload: Record<string, unknown> = {
     productIds: ids,
     limit: Math.max(1, Math.min(100, Math.floor(input.limit || (ids.length || 50)))),

@@ -70,9 +70,80 @@ type Health = {
   aiUsage: { requests: number; requestLimit: number; tokens: number; tokenLimit: number; blocked: number };
   circuits: { provider: string; state: string; consecutiveFailures: number; nextProbeAt?: string }[];
   providers?: { gemini: string; accessTrade: string };
+  productFlow?: {
+    completeness: 'COMPLETE' | 'PARTIAL' | 'UNKNOWN';
+    stale: boolean;
+    reasonCodes: string[];
+    currentState: {
+      totalCanonicalProducts: number | null;
+      totalActiveCandidates: number | null;
+      totalRecentCandidates: number | null;
+      totalPublishedProducts: number | null;
+      totalPubliclyProjectedProducts: number | null;
+      productsEligibleExceptForRuntimeBlocking: number | null;
+      productsBlockedByMissingEvidence: number | null;
+      productsBlockedByProductPolicy: number | null;
+      productsQuarantined: number | null;
+      productsRequiringRecheck: number | null;
+      productsRequiringManualInput: number | null;
+      productsWithPermanentBlockers: number | null;
+    };
+    recentHistory: {
+      latestSourceIngestionJob: { id: string; type: string; status: string; updatedAt: string } | null;
+      recentSourceIngestionSuccessCount: number | null;
+      recentSourceIngestionFailureCount: number | null;
+      latestCandidateProcessingJob: { id: string; type: string; status: string; updatedAt: string } | null;
+      recentCandidateProcessingSuccessCount: number | null;
+      recentCandidateProcessingFailureCount: number | null;
+      latestRealPublicationAttempt: { id: string; type: string; status: string; updatedAt: string } | null;
+      latestRealPublication: { productId: string; publishedAt: string } | null;
+      latestPostPublishMonitor: { id: string; type: string; status: string; updatedAt: string } | null;
+    };
+    blockers: {
+      topProductBlockerReasonCodes: Array<{ reasonCode: string; count: number }>;
+      topMissingEvidenceFields: Array<{ field: string; count: number }>;
+    };
+    sourceReadiness: {
+      status: string;
+      configured: boolean;
+      ready: boolean;
+      reasonCode: string;
+    };
+    accessTradeReadinessReason: string;
+    aiReadiness: {
+      status: string;
+      configured: boolean;
+      ready: boolean;
+      reasonCode: string;
+    };
+    runtimePublishingBlocked: boolean;
+    rechecks: { awaitingExecution: number | null; duplicateSuppressed: number | null };
+    emptyHomepage: { classification: string; labelVi: string };
+  } | null;
+  projectionMaintenance?: {
+    status: string;
+    jobId: string | null;
+    attemptCount: number;
+    maximumAttempts: number;
+    nextRetryAt: string | null;
+    duplicateRequestsSuppressed: number;
+    reasonCodes: string[];
+  } | null;
   operational: {
     currentActiveReasons: string[];
+    currentPolicyReasons?: string[];
+    projectionQualityWarnings?: string[];
     historicalAuditReasons: string[];
+    reasonReconciliation?: {
+      evaluatedAt: string;
+      transitions: Array<{
+        reasonCode: string;
+        previousState: string;
+        resultingState: string;
+        transitionType: string;
+        evidenceReasonCodes: string[];
+      }>;
+    };
     recovery: {
       state: string;
       consecutiveHealthyCount: number;
@@ -81,6 +152,17 @@ type Health = {
       lastResetReason?: string;
       currentApplicableReasons: string[];
       updatedAt: string;
+      reasonProgress?: Array<{
+        reasonCode: string;
+        metricKey: string;
+        measurement: string;
+        consecutiveHealthyCount: number;
+        requiredHealthyCount: number;
+        lastHealthyEvaluation?: string;
+        lastFailedEvaluation?: string;
+        lastResetReason?: string;
+        lastEvidenceRevision?: string;
+      }>;
     } | null;
     canary: {
       featureMode: string;
@@ -101,6 +183,17 @@ type Health = {
       windowEndedAt: string;
       pickupLatencyP50Ms: number | null;
       pickupLatencyP95Ms: number | null;
+      historicalPickupLatencyP50Ms: number | null;
+      historicalPickupLatencyP95Ms: number | null;
+      historicalPickupSampleCount: number;
+      currentPickupLatencyP50Ms: number | null;
+      currentPickupLatencyP95Ms: number | null;
+      currentPickupSampleCount: number;
+      excludedLegacyPickupCount: number;
+      insufficientPickupTimestampCount: number;
+      pickupMeasurementSemantics: { historical: string; current: string };
+      pickupRolloutBoundary: { cohort: string; startedAt: string | null };
+      pickupReleaseBoundary: { releaseId: string; startedAt: string | null };
       pendingQueueAgeMs: number | null;
       pendingQueueCount: number;
       pickupLatencyMode: string;
@@ -108,12 +201,20 @@ type Health = {
     } | null;
     workerPool: {
       featureMode: string;
+      configuredMode: string;
+      effectiveMode: string;
+      effectiveModeSource: string;
+      implementationActive: boolean;
       maximumSlots: number;
       activeSlots: number;
       availableSlots: number;
       criticalReservedCapacity: number;
       activeCriticalSlots: number;
       activeNormalSlots: number;
+      normalAvailableSlots: number;
+      rolloutCohort: string;
+      disabledReason: string | null;
+      activationControl: string;
       capacityExceeded: boolean;
     };
     release: {
@@ -192,12 +293,19 @@ const COMPONENT_LABELS: Record<string, string> = {
   slo: 'Bằng chứng SLO',
 };
 
+COMPONENT_LABELS.productFlow = 'Chẩn đoán luồng sản phẩm';
+COMPONENT_LABELS.projectionMaintenance = 'Bảo trì phép chiếu Job Health';
+
 const COMPONENT_STATUS_LABELS: Record<Health['components'][string]['status'], string> = {
   available: 'Đã xác minh',
   degraded: 'Bằng chứng chưa đầy đủ',
   unavailable: 'Không thể xác minh',
   insufficient_data: 'Chưa đủ dữ liệu',
 };
+
+function diagnosticCount(value: number | null | undefined) {
+  return value === null || value === undefined ? 'Không xác định' : value.toLocaleString('vi-VN');
+}
 
 function stateClass(value: string) {
   if (['active', 'ready', 'CLOSED', 'CLOSED_HEALTHY', 'READY', 'OPERATIONAL', 'PASS', 'MATCH', 'ACTIVE', 'OFF'].includes(value)) return `${styles.badge} ${styles.success}`;
@@ -284,6 +392,7 @@ export default function SystemHealthPage() {
   const operational = health?.operational;
   const recovery = operational?.recovery;
   const slo = operational?.slo;
+  const productFlow = health?.productFlow;
   const componentIssues = Object.entries(health?.components || {})
     .filter(([, component]) => component.status !== 'available');
 
@@ -411,6 +520,16 @@ export default function SystemHealthPage() {
                 <div className={styles.healthRow}><span>Lý do reset gần nhất</span><strong>{recovery?.lastResetReason || 'Không có'}</strong></div>
                 <div className={styles.healthRow}><span>Canary phục hồi</span><strong>{operational?.canary.featureMode || 'OFF'} · {operational?.canary.activeCount || 0}/{operational?.canary.maximumActive || 1}</strong></div>
                 <div className={styles.healthRow}><span>Permit gần nhất</span><strong>{operational?.canary.latest ? `${operational.canary.latest.status} · ${operational.canary.latest.permitId}` : 'Không có'}</strong></div>
+                {recovery?.reasonProgress?.map(progress => (
+                  <div className={styles.healthRow} key={progress.reasonCode}>
+                    <span>{progress.reasonCode}</span>
+                    <strong>
+                      {progress.consecutiveHealthyCount}/{progress.requiredHealthyCount}
+                      {' · '}{progress.measurement}
+                      {progress.lastHealthyEvaluation ? ` · ${when(progress.lastHealthyEvaluation)}` : ''}
+                    </strong>
+                  </div>
+                ))}
               </div>
             </section>
 
@@ -420,9 +539,40 @@ export default function SystemHealthPage() {
                 <span className={stateClass(slo?.evaluationStatus || 'unverified')}>{slo ? `${slo.evaluationStatus || 'CHƯA ĐÁNH GIÁ'} / ${slo.dataStatus}` : 'Chưa đo'}</span>
               </div>
               <div className={styles.healthList}>
-                <div className={styles.healthRow}><span>Pickup P50 / P95</span><strong>{duration(slo?.pickupLatencyP50Ms ?? null)} / {duration(slo?.pickupLatencyP95Ms ?? null)}</strong></div>
+                <div className={styles.healthRow}>
+                  <span>Pickup hiện tại P50 / P95</span>
+                  <strong>
+                    {duration(slo?.currentPickupLatencyP50Ms ?? null)} / {duration(slo?.currentPickupLatencyP95Ms ?? null)}
+                    {' · '}{slo?.currentPickupSampleCount || 0} mẫu
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Pickup lịch sử P50 / P95</span>
+                  <strong>
+                    {duration(slo?.historicalPickupLatencyP50Ms ?? null)} / {duration(slo?.historicalPickupLatencyP95Ms ?? null)}
+                    {' · '}{slo?.historicalPickupSampleCount || 0} mẫu
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Mẫu loại trừ / thiếu timestamp</span>
+                  <strong>{slo?.excludedLegacyPickupCount || 0} / {slo?.insufficientPickupTimestampCount || 0}</strong>
+                </div>
                 <div className={styles.healthRow}><span>Tuổi hàng đợi chưa được claim</span><strong>{duration(slo?.pendingQueueAgeMs ?? null)} · {slo?.pendingQueueCount || 0} job</strong></div>
-                <div className={styles.healthRow}><span>Ngữ nghĩa pickup</span><strong>{slo?.pickupLatencyMode || 'Chưa có'} · rollout {slo?.pickupLatencyFeatureMode || 'SHADOW'}</strong></div>
+                <div className={styles.healthRow}>
+                  <span>Ngữ nghĩa pickup</span>
+                  <strong>
+                    {slo?.pickupMeasurementSemantics
+                      ? `${slo.pickupMeasurementSemantics.current} · lịch sử ${slo.pickupMeasurementSemantics.historical}`
+                      : slo?.pickupLatencyMode || 'Chưa có'}
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Biên release / rollout</span>
+                  <strong>
+                    {slo?.pickupReleaseBoundary?.releaseId?.slice(0, 12) || 'Chưa có'}
+                    {' · '}{slo?.pickupRolloutBoundary?.cohort || slo?.pickupLatencyFeatureMode || 'SHADOW'}
+                  </strong>
+                </div>
                 <div className={styles.healthRow}><span>Cửa sổ SLO</span><strong>{slo ? `${when(slo.windowStartedAt)} — ${when(slo.windowEndedAt)}` : 'Chưa có dữ liệu'}</strong></div>
               </div>
             </section>
@@ -444,13 +594,18 @@ export default function SystemHealthPage() {
             <section className={`${styles.panel} ${operational?.workerPool.capacityExceeded ? styles.dangerPanel : styles.successPanel}`}>
               <div className={styles.panelHeader}>
                 <h2><DashboardIcon name="worker" size={19} />Pool thực thi Worker</h2>
-                <span className={stateClass(operational?.workerPool.featureMode || 'OFF')}>{operational?.workerPool.featureMode || 'OFF'}</span>
+                <span className={stateClass(operational?.workerPool.effectiveMode || 'OFF')}>{operational?.workerPool.effectiveMode || 'OFF'}</span>
               </div>
               <div className={styles.healthList}>
+                <div className={styles.healthRow}><span>Chế độ cấu hình / hiệu lực</span><strong>{operational?.workerPool.configuredMode || 'OFF'} / {operational?.workerPool.effectiveMode || 'OFF'}</strong></div>
+                <div className={styles.healthRow}><span>Nguồn chế độ hiệu lực</span><strong>{operational?.workerPool.effectiveModeSource || 'SAFE_DEFAULT'}</strong></div>
+                <div className={styles.healthRow}><span>Pool thực sự hoạt động</span><strong>{operational?.workerPool.implementationActive ? 'Có' : 'Không'}</strong></div>
                 <div className={styles.healthRow}><span>Slot đang dùng / tối đa</span><strong>{operational?.workerPool.activeSlots || 0}/{operational?.workerPool.maximumSlots || 0}</strong></div>
                 <div className={styles.healthRow}><span>Slot còn trống</span><strong>{operational?.workerPool.availableSlots || 0}</strong></div>
                 <div className={styles.healthRow}><span>Critical / normal đang chạy</span><strong>{operational?.workerPool.activeCriticalSlots || 0} / {operational?.workerPool.activeNormalSlots || 0}</strong></div>
-                <div className={styles.healthRow}><span>Critical capacity có thể mượn</span><strong>{operational?.workerPool.criticalReservedCapacity || 0}</strong></div>
+                <div className={styles.healthRow}><span>Critical dự phòng / normal còn trống</span><strong>{operational?.workerPool.criticalReservedCapacity || 0} / {operational?.workerPool.normalAvailableSlots || 0}</strong></div>
+                <div className={styles.healthRow}><span>Rollout cohort</span><strong>{operational?.workerPool.rolloutCohort || 'WORKER_POOL:OFF'}</strong></div>
+                <div className={styles.healthRow}><span>Lý do chưa hoạt động</span><strong>{operational?.workerPool.disabledReason || 'Không có'}</strong></div>
               </div>
             </section>
           </div>
@@ -458,9 +613,124 @@ export default function SystemHealthPage() {
           <section className={styles.panel}>
             <div className={styles.panelHeader}><h2><DashboardIcon name="warning" size={19} />Lý do vận hành</h2></div>
             <div className={styles.healthList}>
-              <div className={styles.healthRow}><span>Lý do hiện tại (CURRENT ACTIVE REASONS)</span><strong>{operational?.currentActiveReasons.join(', ') || 'Không có'}</strong></div>
-              <div className={styles.healthRow}><span>Lịch sử audit (HISTORICAL AUDIT REASONS)</span><strong>{operational?.historicalAuditReasons.join(', ') || 'Không có'}</strong></div>
+              <div className={styles.healthRow}>
+                <span>Runtime hiện tại có thẩm quyền</span>
+                <strong>
+                  {operational?.currentActiveReasons.length
+                    ? operational.currentActiveReasons.map(reason => {
+                      const transition = operational.reasonReconciliation?.transitions
+                        .find(item => item.reasonCode === reason);
+                      return transition?.transitionType === 'RETAINED_FAIL_CLOSED'
+                        ? `${reason} (đang chờ đối soát: ${transition.evidenceReasonCodes.join('|') || 'thiếu bằng chứng'})`
+                        : reason;
+                    }).join(', ')
+                    : 'Không có'}
+                </strong>
+              </div>
+              <div className={styles.healthRow}><span>Chặn policy hiện tại</span><strong>{operational?.currentPolicyReasons?.join(', ') || 'Không có'}</strong></div>
+              <div className={styles.healthRow}><span>Cảnh báo chất lượng projection</span><strong>{operational?.projectionQualityWarnings?.join(', ') || 'Không có'}</strong></div>
+              <div className={styles.healthRow}><span>Lịch sử audit</span><strong>{operational?.historicalAuditReasons.join(', ') || 'Không có'}</strong></div>
+              <div className={styles.healthRow}>
+                <span>Bảo trì Job Health</span>
+                <strong>
+                  {health.projectionMaintenance
+                    ? `${health.projectionMaintenance.status} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}`
+                    : 'Chưa có'}
+                </strong>
+              </div>
             </div>
+          </section>
+
+          <section className={`${styles.panel} ${productFlow?.completeness === 'COMPLETE' ? styles.successPanel : styles.warningPanel}`}>
+            <div className={styles.panelHeader}>
+              <h2><DashboardIcon name="queue" size={19} />Chẩn đoán luồng sản phẩm</h2>
+              <span className={stateClass(productFlow?.completeness === 'COMPLETE' ? 'PASS' : 'unverified')}>
+                {productFlow?.completeness || 'UNKNOWN'}
+              </span>
+            </div>
+            {productFlow ? (
+              <div className={styles.healthList}>
+                <div className={styles.healthRow}>
+                  <span>Vì sao trang chủ chưa có sản phẩm</span>
+                  <strong>{productFlow.emptyHomepage.classification} · {productFlow.emptyHomepage.labelVi}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Sản phẩm canonical / published / public</span>
+                  <strong>
+                    {diagnosticCount(productFlow.currentState.totalCanonicalProducts)}
+                    {' / '}{diagnosticCount(productFlow.currentState.totalPublishedProducts)}
+                    {' / '}{diagnosticCount(productFlow.currentState.totalPubliclyProjectedProducts)}
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Ứng viên active / gần đây</span>
+                  <strong>{diagnosticCount(productFlow.currentState.totalActiveCandidates)} / {diagnosticCount(productFlow.currentState.totalRecentCandidates)}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Đủ điều kiện nhưng runtime chặn</span>
+                  <strong>{diagnosticCount(productFlow.currentState.productsEligibleExceptForRuntimeBlocking)}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Thiếu bằng chứng / policy / cách ly</span>
+                  <strong>
+                    {diagnosticCount(productFlow.currentState.productsBlockedByMissingEvidence)}
+                    {' / '}{diagnosticCount(productFlow.currentState.productsBlockedByProductPolicy)}
+                    {' / '}{diagnosticCount(productFlow.currentState.productsQuarantined)}
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Cần recheck / manual / blocker vĩnh viễn</span>
+                  <strong>
+                    {diagnosticCount(productFlow.currentState.productsRequiringRecheck)}
+                    {' / '}{diagnosticCount(productFlow.currentState.productsRequiringManualInput)}
+                    {' / '}{diagnosticCount(productFlow.currentState.productsWithPermanentBlockers)}
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Source AccessTrade</span>
+                  <strong>{productFlow.sourceReadiness.status} · {productFlow.accessTradeReadinessReason}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>AI (tách riêng)</span>
+                  <strong>{productFlow.aiReadiness.status} · {productFlow.aiReadiness.reasonCode}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Source ingestion thành công / lỗi (24 giờ)</span>
+                  <strong>
+                    {diagnosticCount(productFlow.recentHistory.recentSourceIngestionSuccessCount)}
+                    {' / '}{diagnosticCount(productFlow.recentHistory.recentSourceIngestionFailureCount)}
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Candidate processing thành công / lỗi (24 giờ)</span>
+                  <strong>
+                    {diagnosticCount(productFlow.recentHistory.recentCandidateProcessingSuccessCount)}
+                    {' / '}{diagnosticCount(productFlow.recentHistory.recentCandidateProcessingFailureCount)}
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Recheck đang chờ / trùng bị chặn</span>
+                  <strong>{diagnosticCount(productFlow.rechecks.awaitingExecution)} / {diagnosticCount(productFlow.rechecks.duplicateSuppressed)}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Blocker hàng đầu</span>
+                  <strong>{productFlow.blockers.topProductBlockerReasonCodes.map(item => `${item.reasonCode}:${item.count}`).join(', ') || 'Không có'}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Bằng chứng thiếu hàng đầu</span>
+                  <strong>{productFlow.blockers.topMissingEvidenceFields.map(item => `${item.field}:${item.count}`).join(', ') || 'Không có'}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Lần thử publish thật / monitor gần nhất</span>
+                  <strong>
+                    {productFlow.recentHistory.latestRealPublicationAttempt?.status || 'Chưa có'}
+                    {' / '}{productFlow.recentHistory.latestPostPublishMonitor?.status || 'Chưa có'}
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <div className={styles.notice}>Chưa đủ dữ liệu chẩn đoán; hệ thống không coi đây là trạng thái không có sản phẩm.</div>
+            )}
           </section>
 
           {(capability?.technicalReasonCodes.length || operational?.historicalAuditReasons.length || operational?.featureRollouts.length) ? (

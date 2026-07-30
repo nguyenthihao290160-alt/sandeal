@@ -19,6 +19,7 @@ import {
 } from '@/lib/integrations/accesstrade';
 import { eligibilityBlockerMessage, evaluateProductEligibility } from '@/lib/productEligibility';
 import { canonicalizeProductBlockers } from '@/lib/productBlockers';
+import { isPublicSafeProduct } from '@/lib/publicProductFilter';
 import { getDomainCircuitDecision, recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import { applyImportBatch, escapeCsvCell, getImportBatch } from './importer';
@@ -469,6 +470,22 @@ export class ProductHealthPersistenceError extends Error {
   }
 }
 
+export function shouldRetainPublicAfterTransientHealthCheck(input: {
+  wasPublicSafe: boolean;
+  confirmedBroken: boolean;
+  retryScheduled: boolean;
+  operationalBlockers: string[];
+  priorFailureCount: number;
+}): boolean {
+  return input.wasPublicSafe
+    && !input.confirmedBroken
+    && input.retryScheduled
+    && input.priorFailureCount === 0
+    && input.operationalBlockers.length > 0
+    && input.operationalBlockers.every(reason =>
+      /product_url|canonical_url|affiliate|image|health|cooldown/i.test(reason));
+}
+
 async function recheckHealth(job: AutomationJob) {
   const startedAt = Date.now();
   const products = await selectedProducts(job.payload);
@@ -530,6 +547,7 @@ async function recheckHealth(job: AutomationJob) {
 
   for (const product of products) {
     const updates: Partial<Product> = {};
+    const wasPublicSafe = isPublicSafeProduct(product);
     try {
       await assertJobMayContinue(job);
       const operationId = job.operationId || job.id;
@@ -783,6 +801,18 @@ async function recheckHealth(job: AutomationJob) {
       ].includes(reason));
       const healthUnsafe = operationalBlockers.length > 0;
       const publishUnsafe = blockers.length > 0;
+      const permanentFailure = ['broken', 'image_broken', 'invalid_image', 'placeholder'].some(status => [
+        updates.linkHealthStatus,
+        updates.affiliateHealthStatus,
+        updates.imageHealthStatus,
+      ].includes(status as Product['linkHealthStatus']));
+      const retainPublicAfterTransientFailure = shouldRetainPublicAfterTransientHealthCheck({
+        wasPublicSafe,
+        confirmedBroken: permanentFailure,
+        retryScheduled: retryTimes.length > 0,
+        operationalBlockers,
+        priorFailureCount: Math.max(0, Number(product.consecutiveHealthFailures || 0)),
+      });
       const healthReason = blockers.length ? blockers.map(eligibilityBlockerMessage).join(' · ').slice(0, 500) : undefined;
 
       updates.eligibility = eligibility;
@@ -794,20 +824,23 @@ async function recheckHealth(job: AutomationJob) {
       }));
       updates.blockersCheckedAt = new Date().toISOString();
       updates.publicBlockReasons = updates.currentBlockers.map(blocker => blocker.code);
-      updates.publicBlocked = publishUnsafe;
+      updates.publicBlocked = publishUnsafe && !retainPublicAfterTransientFailure;
       updates.publicBlockReason = healthReason;
       if (publishUnsafe) {
-        updates.publicHidden = true;
-        updates.needsVerification = true;
-        updates.autoPublishEligible = false;
-        updates.publicDecision = isThirtyShine ? 'archived' : 'blocked';
-        updates.unpublishedReason = healthReason;
+        if (retainPublicAfterTransientFailure) {
+          updates.publicHidden = false;
+          updates.needsVerification = false;
+          updates.autoPublishEligible = product.autoPublishEligible;
+          updates.publicDecision = product.publicDecision;
+          updates.unpublishedReason = product.unpublishedReason;
+        } else {
+          updates.publicHidden = true;
+          updates.needsVerification = true;
+          updates.autoPublishEligible = false;
+          updates.publicDecision = isThirtyShine ? 'archived' : 'blocked';
+          updates.unpublishedReason = healthReason;
+        }
         if (healthUnsafe && !isThirtyShine && (product.status === 'published' || ['PUBLISHED', 'DEGRADED', 'RECHECKING'].includes(String(product.lifecycleState || '')))) {
-          const permanentFailure = ['broken', 'image_broken', 'invalid_image', 'placeholder'].some(status => [
-            updates.linkHealthStatus,
-            updates.affiliateHealthStatus,
-            updates.imageHealthStatus,
-          ].includes(status as Product['linkHealthStatus']));
           updates.lifecycleState = permanentFailure ? 'CONFIRMED_BROKEN' : 'DEGRADED';
           updates.lifecycleUpdatedAt = new Date().toISOString();
         }
@@ -822,15 +855,23 @@ async function recheckHealth(job: AutomationJob) {
       }
 
       if (failureReasons.length) {
+        updates.consecutiveHealthFailures = Math.max(0, Number(product.consecutiveHealthFailures || 0)) + 1;
         updates.sourceHealthReason = failureReasons.join(',').slice(0, 500);
         const retryAt = latestTimestamp(retryTimes);
         if (retryAt) {
           updates.sourceHealthCooldownUntil = retryAt;
+          updates.nextRetryAt = retryAt;
+          updates.nextAutomaticAction = 'RECHECK_PRODUCT_HEALTH';
           retryScheduled += 1;
+        } else if (permanentFailure) {
+          updates.nextRetryAt = undefined;
+          updates.nextAutomaticAction = 'MANUAL_REVIEW_CONFIRMED_BROKEN';
         }
       } else {
+        updates.consecutiveHealthFailures = 0;
         updates.sourceHealthReason = undefined;
         updates.sourceHealthCooldownUntil = undefined;
+        updates.nextRetryAt = undefined;
       }
 
       updates.lastReprocessOperationId = operationId;

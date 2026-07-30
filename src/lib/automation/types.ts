@@ -147,6 +147,8 @@ export interface AutomationJob {
     source?: string;
     trigger?: string;
   };
+  releaseId?: string;
+  rolloutCohort?: string;
   parentJobId?: string;
   botId?: string;
   capability?: string;
@@ -211,6 +213,8 @@ export interface AutomationJobAttempt {
   claimTokenHash: string;
   workerId: string;
   workerFencingToken?: number;
+  releaseId?: string;
+  rolloutCohort?: string;
 }
 
 /**
@@ -231,6 +235,8 @@ export interface AutomationJobListItem {
   outcomeStatus?: AutomationOutcomeStatus;
   priority: number;
   requestedBy: string;
+  releaseId?: string;
+  rolloutCohort?: string;
   requestedExecutionMode?: RequestedExecutionMode;
   executionMode?: ActualExecutionMode;
   provider?: string;

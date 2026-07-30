@@ -19,6 +19,7 @@ import {
   AUTOMATION_JOB_SCHEMA_VERSION,
   createAutomationJob,
   failAutomationJob,
+  getAllAutomationJobs,
   getAutomationControl,
   getAutomationJob,
   heartbeatAutomationJob,
@@ -29,8 +30,10 @@ import {
   updateAutomationJobExecution,
   waitAutomationJobForChildren,
   waitAutomationJobForManual,
+  rebuildAutomationJobReadModelsFromDurable,
 } from './store';
 import { getAutomationJobHealthView } from './jobHealthSummary';
+import { markJobHealthProjectionMaintenance } from './projectionMaintenance';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
@@ -478,6 +481,46 @@ async function executeJob(
       return executeAutoSafePublish(job, workerId);
     case 'RECONCILE_AUTOMATION':
       if (job.dryRun) return dryRunPreview(job);
+      if (job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD') {
+        await markJobHealthProjectionMaintenance({
+          jobId: job.id,
+          status: 'RUNNING',
+          reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_RUNNING',
+        });
+        try {
+          const manifest = await rebuildAutomationJobReadModelsFromDurable(
+            await getAllAutomationJobs(),
+          );
+          await markJobHealthProjectionMaintenance({
+            jobId: job.id,
+            status: 'SUCCEEDED',
+            reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_SUCCEEDED',
+          });
+          return {
+            maintenanceTask: 'JOB_HEALTH_PROJECTION_REBUILD',
+            retainedJobCount: manifest.retainedJobCount,
+            currentStateComplete: manifest.currentStateComplete,
+            historyComplete: manifest.historyComplete,
+            sourceRevision: manifest.sourceRevision,
+            projectionFingerprint: manifest.projectionFingerprint,
+            executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
+            executionMode: 'LOCAL_RULES',
+            provider: 'system',
+            rulesVersion: 'job-health-projection-rebuild-v1',
+            aiRequests: 0,
+            externalRequests: 0,
+          };
+        } catch (error) {
+          await markJobHealthProjectionMaintenance({
+            jobId: job.id,
+            status: 'FAILED',
+            reasonCode: error instanceof Error
+              ? error.message
+              : 'JOB_HEALTH_PROJECTION_REBUILD_FAILED',
+          });
+          throw error;
+        }
+      }
       return { ...(await runAutonomousReconciler()), executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local', rulesVersion: 'reconciler-v1', aiRequests: 0, externalRequests: 0 };
     case 'POST_PUBLISH_MONITOR':
       if (job.dryRun) return dryRunPreview(job);

@@ -37,6 +37,7 @@
     "test:master:m3:security": "node scripts/master-m3-remote-content-security-tests.cjs",
     "test:master:m3:ui": "node scripts/master-m3-ui-reliability-tests.cjs",
     "test:master:m3": "npm run test:master:m3:client && npm run test:master:m3:security && npm run test:master:m3:ui && npm run test:dashboard",
+    "test:post-m3": "node scripts/post-m3-reconciliation-product-flow-tests.cjs",
     "test:master:m4": "node scripts/master-m4-intelligence-tests.cjs && npm run test:gemini-provider && npm run test:operator-intelligence && node scripts/prompt09-bot-foundation-tests.cjs && node scripts/prompt10-business-source-tests.cjs",
     "test:master:pwa": "node scripts/master-pwa-metadata-tests.cjs",
     "test:master:m5": "node scripts/master-m5-platform-seo-tests.cjs && npm run test:storage && npm run test:storage:mongo && npm run test:storage:migration && npm run test:storage:acceptance && node scripts/prompt10-revenue-integrity-tests.cjs && node scripts/prompt10-business-search-seo-tests.cjs",

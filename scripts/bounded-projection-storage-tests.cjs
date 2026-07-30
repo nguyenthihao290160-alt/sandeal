@@ -174,11 +174,21 @@ async function main() {
 
   await test('a stale caller snapshot cannot establish an authoritative rebuild manifest', async () => {
     const supplied = [job(600, now)];
+    const previousManifest = await health.getAutomationJobProjectionManifestForMaintenance();
+    const previousProjection = await health.readBoundedAutomationJobProjections();
     await adapter.writeCollection('automation-jobs', [...supplied, job(601, now)]);
-    const manifest = await store.rebuildAutomationJobReadModelsFromDurable(supplied, now + 1_500);
-    assert.equal(manifest.baselineEstablished, false);
-    assert.equal(manifest.currentStateComplete, false);
-    assert.equal(manifest.historyComplete, false);
+    await assert.rejects(
+      () => store.rebuildAutomationJobReadModelsFromDurable(supplied, now + 1_500),
+      /JOB_PROJECTION_REBUILD_SOURCE_CHANGED/,
+    );
+    const manifest = await health.getAutomationJobProjectionManifestForMaintenance();
+    const projection = await health.readBoundedAutomationJobProjections();
+    assert.equal(manifest.sourceRevision, previousManifest.sourceRevision);
+    assert.equal(manifest.projectionFingerprint, previousManifest.projectionFingerprint);
+    assert.deepEqual(
+      projection.items.map(item => item.id),
+      previousProjection.items.map(item => item.id),
+    );
   });
 
   await test('pickup latency excludes legacy createdAt and startedAt fallbacks', () => {

@@ -283,7 +283,10 @@ function invalidateChangedUrlHealth(
   const affiliateUrlChanged = Object.prototype.hasOwnProperty.call(updates, 'affiliateUrl')
     && updates.affiliateUrl !== previous.affiliateUrl;
   if ((!productUrlChanged && !affiliateUrlChanged) || verifiedHealthUpdate) return updates;
-  const reasons = new Set(previous.publicBlockReasons || []);
+  const reasons = new Set([
+    ...(previous.publicBlockReasons || []),
+    ...(updates.publicBlockReasons || []),
+  ]);
   if (productUrlChanged) reasons.add('product_url_unhealthy');
   if (affiliateUrlChanged) reasons.add('affiliate_url_unhealthy');
   const reason = productUrlChanged && affiliateUrlChanged
@@ -294,7 +297,7 @@ function invalidateChangedUrlHealth(
   return {
     ...updates,
     ...(productUrlChanged ? {
-      linkHealthStatus: 'unknown' as const,
+      linkHealthStatus: 'unverified' as const,
       linkLastCheckedAt: undefined,
       productUrlHttpStatus: undefined,
       productUrlFinalUrl: undefined,

@@ -45,6 +45,8 @@ function roleLease(role, now, releaseId = releaseSha) {
     ownerId: `${role.toLowerCase()}-owner`,
     instanceId: `${role.toLowerCase()}-instance`,
     holderId: `${role.toLowerCase()}-owner`,
+    pid: role === 'WORKER' ? 1101 : 1102,
+    processStartedAt: current,
     releaseId,
     status: 'ACTIVE',
     acquiredAt: current,
@@ -122,8 +124,24 @@ async function main() {
         publicBuildId: releaseSha,
         releaseMatchesBuild: true,
       },
-      worker: { status: 'active', heartbeatAt: current, releaseId: releaseSha },
-      scheduler: { status: 'active', heartbeatAt: current, releaseId: releaseSha },
+      worker: {
+        status: 'active',
+        holderId: 'worker-owner',
+        instanceId: 'worker-instance',
+        pid: 1101,
+        fencingToken: 1,
+        heartbeatAt: current,
+        releaseId: releaseSha,
+      },
+      scheduler: {
+        status: 'active',
+        holderId: 'scheduler-owner',
+        instanceId: 'scheduler-instance',
+        pid: 1102,
+        fencingToken: 1,
+        heartbeatAt: current,
+        releaseId: releaseSha,
+      },
       providers: {},
       queue: { pending: 0, running: 2, stuck: 0, staleJobs: 0 },
       storage: { status: 'healthy', staleLocks: 0, freeBytes: 1_000_000, criticalCollections: {} },
@@ -208,8 +226,10 @@ async function main() {
     assert.deepEqual(result.currentActiveReasons, [
       'CONTROL_RUNTIME_BLOCK_ACTIVE',
       'CURRENT_RUNTIME_REASON',
+      'JOB_HEALTH_CURRENT_STATE_INCOMPLETE',
       'RECOVERY_REASON_ACTIVE',
     ]);
+    assert.ok(result.projectionQualityWarnings.length > 0);
     assert.deepEqual(result.historicalAuditReasons, [
       'ORIGINATING_BREACH',
       'RESOLVED_RUNTIME_REASON',

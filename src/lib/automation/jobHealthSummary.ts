@@ -54,6 +54,7 @@ export const AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION = 2;
 export const AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION = 2;
 export const AUTOMATION_JOB_HEALTH_SUMMARY_SCHEMA_VERSION = 2;
 export const AUTOMATION_JOB_PROJECTION_MANIFEST_SCHEMA_VERSION = 1;
+export const AUTOMATION_JOB_PROJECTION_VERSION = 'automation-job-projection-v3';
 
 export function getAutomationJobProjectionLimit(): number {
   return Math.min(
@@ -118,6 +119,25 @@ export interface AutomationJobProjectionEvidence {
   manifestRebuiltAt: string | null;
   manifestReleaseId: string | null;
   manifestUpdatedAt: string | null;
+  projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION | null;
+  sourceRevision: string | null;
+  summaryRevision: string | null;
+  projectionFingerprint: string | null;
+  generatedAt: string | null;
+  recordCounts: {
+    durable: number | null;
+    active: number | null;
+    retained: number | null;
+    retainedTerminal: number | null;
+    list: number | null;
+    status: number | null;
+  };
+  completeness: {
+    baselineEstablished: boolean;
+    currentStateComplete: boolean;
+    historyComplete: boolean;
+    truncated: boolean;
+  };
 }
 
 export interface AutomationJobProjectionManifest {
@@ -125,7 +145,27 @@ export interface AutomationJobProjectionManifest {
   id: typeof PROJECTION_MANIFEST_ID;
   listProjectionSchemaVersion: typeof AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION;
   statusProjectionSchemaVersion: typeof AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION;
+  projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION;
   releaseId: string;
+  sourceRevision: string;
+  summaryRevision: string | null;
+  projectionFingerprint: string;
+  generatedAt: string;
+  observedRange: AutomationJobProjectionObservedRange;
+  recordCounts: {
+    durable: number;
+    active: number;
+    retained: number;
+    retainedTerminal: number;
+    list: number;
+    status: number;
+  };
+  completeness: {
+    baselineEstablished: boolean;
+    currentStateComplete: boolean;
+    historyComplete: boolean;
+    truncated: boolean;
+  };
   projectionCapacity: number;
   durableJobCount: number;
   activeJobCount: number;
@@ -142,6 +182,8 @@ export interface AutomationJobProjectionManifest {
   retentionBoundary: AutomationJobProjectionRetentionBoundary | null;
   sourceUpdatedAt: string | null;
   rebuiltAt: string | null;
+  lastRebuildStatus: 'NEVER' | 'SUCCEEDED' | 'FAILED';
+  lastRebuildFailureAt: string | null;
   rebuildToken?: string;
   mutationDuringRebuild: boolean;
   inFlightSyncTokens: string[];
@@ -152,7 +194,15 @@ export interface AutomationJobProjectionManifest {
 export interface AutomationJobHealthSummary {
   schemaVersion: typeof AUTOMATION_JOB_HEALTH_SUMMARY_SCHEMA_VERSION;
   projectionSchemaVersion: typeof AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION;
+  projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION;
   id: typeof HEALTH_SUMMARY_ID;
+  sourceRevision: string;
+  summaryRevision: string;
+  projectionFingerprint: string;
+  generatedAt: string;
+  observedRange: AutomationJobProjectionObservedRange;
+  recordCounts: AutomationJobProjectionEvidence['recordCounts'];
+  completeness: AutomationJobProjectionManifest['completeness'];
   statusCounts: Record<AutomationJobStatus, number>;
   activeTypeCounts: Partial<Record<AutomationJobType, number>>;
   totalProjectedJobs: number;
@@ -185,6 +235,8 @@ export interface AutomationJobHealthSummary {
 export interface AutomationJobHealthView extends AutomationJobHealthSummary {
   availability: 'AVAILABLE' | 'DEGRADED' | 'UNAVAILABLE';
   source: 'summary' | 'bounded_projection_fallback' | 'empty_fallback';
+  projectionStatus: 'VALID' | 'INVALID' | 'REBUILDING' | 'UNAVAILABLE';
+  previousValidProjectionAvailable: boolean;
   stale: boolean;
   reasonCodes: string[];
   evidenceClassification: ProjectionEvidenceClassification;
@@ -214,6 +266,13 @@ export interface BoundedAutomationJobProjectionRead {
   manifestRebuiltAt: string | null;
   manifestReleaseId: string | null;
   manifestUpdatedAt: string | null;
+  projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION | null;
+  sourceRevision: string | null;
+  summaryRevision: string | null;
+  projectionFingerprint: string | null;
+  generatedAt: string | null;
+  recordCounts: AutomationJobProjectionEvidence['recordCounts'];
+  completeness: AutomationJobProjectionEvidence['completeness'];
   coverageComplete: boolean;
   invalidProjectionCount: number;
   legacyProjectionCount: number;
@@ -234,6 +293,13 @@ export interface BoundedAutomationJobStatusRead {
   manifestRebuiltAt: string | null;
   manifestReleaseId: string | null;
   manifestUpdatedAt: string | null;
+  projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION | null;
+  sourceRevision: string | null;
+  summaryRevision: string | null;
+  projectionFingerprint: string | null;
+  generatedAt: string | null;
+  recordCounts: AutomationJobProjectionEvidence['recordCounts'];
+  completeness: AutomationJobProjectionEvidence['completeness'];
   coverageComplete: boolean;
 }
 
@@ -300,6 +366,70 @@ export function automationJobProjectionFingerprint(
     .digest('hex');
 }
 
+function revisionHash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function projectionFingerprint(input: {
+  listProjectionFingerprint: string;
+  statusProjectionFingerprint: string;
+  listProjectionCount: number;
+  statusProjectionCount: number;
+}): string {
+  return revisionHash({
+    list: input.listProjectionFingerprint,
+    status: input.statusProjectionFingerprint,
+    listCount: input.listProjectionCount,
+    statusCount: input.statusProjectionCount,
+  });
+}
+
+function projectionSourceRevision(input: {
+  releaseId: string;
+  projectionFingerprint: string;
+  durableJobCount: number;
+  activeJobCount: number;
+  retainedJobCount: number;
+  sourceUpdatedAt: string | null;
+}): string {
+  return revisionHash({
+    projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+    releaseId: input.releaseId,
+    projectionFingerprint: input.projectionFingerprint,
+    durableJobCount: input.durableJobCount,
+    activeJobCount: input.activeJobCount,
+    retainedJobCount: input.retainedJobCount,
+    sourceUpdatedAt: input.sourceUpdatedAt,
+  });
+}
+
+function healthSummaryRevision(summary: Omit<AutomationJobHealthSummary, 'summaryRevision'>): string {
+  return revisionHash({
+    schemaVersion: summary.schemaVersion,
+    projectionVersion: summary.projectionVersion,
+    sourceRevision: summary.sourceRevision,
+    projectionFingerprint: summary.projectionFingerprint,
+    releaseId: summary.releaseId,
+    statusCounts: summary.statusCounts,
+    activeTypeCounts: summary.activeTypeCounts,
+    totalProjectedJobs: summary.totalProjectedJobs,
+    sourceUpdatedAt: summary.sourceUpdatedAt,
+    runningJobs: summary.runningJobs.map(job => [job.id, job.status, job.updatedAt]),
+    pendingJobs: summary.pendingJobs.map(job => [job.id, job.status, job.updatedAt]),
+    recentJobs: summary.recentJobs.map(job => [job.id, job.status, job.updatedAt]),
+    pickupLatency: {
+      windowStartedAt: summary.pickupLatency.windowStartedAt,
+      windowEndedAt: summary.pickupLatency.windowEndedAt,
+      sampleCount: summary.pickupLatency.sampleCount,
+      p50Ms: summary.pickupLatency.p50Ms,
+      p95Ms: summary.pickupLatency.p95Ms,
+      insufficientEvidenceCount: summary.pickupLatency.insufficientEvidenceCount,
+    },
+    completeness: summary.completeness,
+    recordCounts: summary.recordCounts,
+  });
+}
+
 function emptyProjectionEvidence(
   source: AutomationJobProjectionEvidence['source'],
   classification: ProjectionEvidenceClassification = 'INCOMPLETE',
@@ -316,17 +446,71 @@ function emptyProjectionEvidence(
     manifestRebuiltAt: null,
     manifestReleaseId: null,
     manifestUpdatedAt: null,
+    projectionVersion: null,
+    sourceRevision: null,
+    summaryRevision: null,
+    projectionFingerprint: null,
+    generatedAt: null,
+    recordCounts: {
+      durable: null,
+      active: null,
+      retained: null,
+      retainedTerminal: null,
+      list: null,
+      status: null,
+    },
+    completeness: {
+      baselineEstablished: false,
+      currentStateComplete: false,
+      historyComplete: false,
+      truncated: false,
+    },
   };
 }
 
 function emptyProjectionManifest(now = Date.now()): AutomationJobProjectionManifest {
   const measuredAt = new Date(now).toISOString();
+  const emptyFingerprint = automationJobProjectionFingerprint([]);
+  const combinedFingerprint = projectionFingerprint({
+    listProjectionFingerprint: emptyFingerprint,
+    statusProjectionFingerprint: emptyFingerprint,
+    listProjectionCount: 0,
+    statusProjectionCount: 0,
+  });
+  const releaseId = getReleaseIdentity().releaseId;
   return {
     schemaVersion: AUTOMATION_JOB_PROJECTION_MANIFEST_SCHEMA_VERSION,
     id: PROJECTION_MANIFEST_ID,
     listProjectionSchemaVersion: AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
     statusProjectionSchemaVersion: AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION,
-    releaseId: getReleaseIdentity().releaseId,
+    projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+    releaseId,
+    sourceRevision: projectionSourceRevision({
+      releaseId,
+      projectionFingerprint: combinedFingerprint,
+      durableJobCount: 0,
+      activeJobCount: 0,
+      retainedJobCount: 0,
+      sourceUpdatedAt: null,
+    }),
+    summaryRevision: null,
+    projectionFingerprint: combinedFingerprint,
+    generatedAt: measuredAt,
+    observedRange: observedRange([]),
+    recordCounts: {
+      durable: 0,
+      active: 0,
+      retained: 0,
+      retainedTerminal: 0,
+      list: 0,
+      status: 0,
+    },
+    completeness: {
+      baselineEstablished: false,
+      currentStateComplete: false,
+      historyComplete: false,
+      truncated: false,
+    },
     projectionCapacity: getAutomationJobProjectionLimit(),
     durableJobCount: 0,
     activeJobCount: 0,
@@ -334,8 +518,8 @@ function emptyProjectionManifest(now = Date.now()): AutomationJobProjectionManif
     retainedTerminalCount: 0,
     listProjectionCount: 0,
     statusProjectionCount: 0,
-    listProjectionFingerprint: automationJobProjectionFingerprint([]),
-    statusProjectionFingerprint: automationJobProjectionFingerprint([]),
+    listProjectionFingerprint: emptyFingerprint,
+    statusProjectionFingerprint: emptyFingerprint,
     baselineEstablished: false,
     currentStateComplete: false,
     historyComplete: false,
@@ -343,6 +527,8 @@ function emptyProjectionManifest(now = Date.now()): AutomationJobProjectionManif
     retentionBoundary: null,
     sourceUpdatedAt: null,
     rebuiltAt: null,
+    lastRebuildStatus: 'NEVER',
+    lastRebuildFailureAt: null,
     mutationDuringRebuild: false,
     inFlightSyncTokens: [],
     syncFailureCountSinceRebuild: 0,
@@ -357,9 +543,43 @@ function isProjectionManifest(value: unknown): value is AutomationJobProjectionM
     && manifest.schemaVersion === AUTOMATION_JOB_PROJECTION_MANIFEST_SCHEMA_VERSION
     && manifest.listProjectionSchemaVersion === AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION
     && manifest.statusProjectionSchemaVersion === AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION
+    && manifest.projectionVersion === AUTOMATION_JOB_PROJECTION_VERSION
     && typeof manifest.releaseId === 'string'
     && manifest.releaseId.length > 0
     && manifest.releaseId.length <= 160
+    && typeof manifest.sourceRevision === 'string'
+    && /^[a-f0-9]{64}$/.test(manifest.sourceRevision)
+    && (
+      manifest.summaryRevision === null
+      || (typeof manifest.summaryRevision === 'string' && /^[a-f0-9]{64}$/.test(manifest.summaryRevision))
+    )
+    && typeof manifest.projectionFingerprint === 'string'
+    && /^[a-f0-9]{64}$/.test(manifest.projectionFingerprint)
+    && timestamp(manifest.generatedAt) !== null
+    && manifest.observedRange !== null
+    && typeof manifest.observedRange === 'object'
+    && [
+      manifest.observedRange.earliestCreatedAt,
+      manifest.observedRange.latestCreatedAt,
+      manifest.observedRange.earliestUpdatedAt,
+      manifest.observedRange.latestUpdatedAt,
+    ].every(value => value === null || timestamp(value) !== null)
+    && manifest.recordCounts !== null
+    && typeof manifest.recordCounts === 'object'
+    && [
+      manifest.recordCounts.durable,
+      manifest.recordCounts.active,
+      manifest.recordCounts.retained,
+      manifest.recordCounts.retainedTerminal,
+      manifest.recordCounts.list,
+      manifest.recordCounts.status,
+    ].every(value => Number.isInteger(value) && Number(value) >= 0)
+    && manifest.completeness !== null
+    && typeof manifest.completeness === 'object'
+    && typeof manifest.completeness.baselineEstablished === 'boolean'
+    && typeof manifest.completeness.currentStateComplete === 'boolean'
+    && typeof manifest.completeness.historyComplete === 'boolean'
+    && typeof manifest.completeness.truncated === 'boolean'
     && Number.isInteger(manifest.projectionCapacity)
     && Number(manifest.projectionCapacity) > 0
     && Number.isInteger(manifest.durableJobCount)
@@ -391,6 +611,8 @@ function isProjectionManifest(value: unknown): value is AutomationJobProjectionM
     )
     && (manifest.sourceUpdatedAt === null || timestamp(manifest.sourceUpdatedAt) !== null)
     && (manifest.rebuiltAt === null || timestamp(manifest.rebuiltAt) !== null)
+    && ['NEVER', 'SUCCEEDED', 'FAILED'].includes(String(manifest.lastRebuildStatus))
+    && (manifest.lastRebuildFailureAt === null || timestamp(manifest.lastRebuildFailureAt) !== null)
     && (
       manifest.rebuildToken === undefined
       || (typeof manifest.rebuildToken === 'string' && manifest.rebuildToken.length <= 100)
@@ -400,7 +622,111 @@ function isProjectionManifest(value: unknown): value is AutomationJobProjectionM
     && manifest.inFlightSyncTokens.every(token => typeof token === 'string' && token.length > 0)
     && Number.isInteger(manifest.syncFailureCountSinceRebuild)
     && Number(manifest.syncFailureCountSinceRebuild) >= 0
-    && timestamp(manifest.updatedAt) !== null;
+    && timestamp(manifest.updatedAt) !== null
+    && manifest.recordCounts.durable === manifest.durableJobCount
+    && manifest.recordCounts.active === manifest.activeJobCount
+    && manifest.recordCounts.retained === manifest.retainedJobCount
+    && manifest.recordCounts.retainedTerminal === manifest.retainedTerminalCount
+    && manifest.recordCounts.list === manifest.listProjectionCount
+    && manifest.recordCounts.status === manifest.statusProjectionCount
+    && manifest.completeness.baselineEstablished === manifest.baselineEstablished
+    && manifest.completeness.currentStateComplete === manifest.currentStateComplete
+    && manifest.completeness.historyComplete === manifest.historyComplete
+    && manifest.completeness.truncated === manifest.truncated
+    && manifest.projectionFingerprint === projectionFingerprint({
+      listProjectionFingerprint: manifest.listProjectionFingerprint,
+      statusProjectionFingerprint: manifest.statusProjectionFingerprint,
+      listProjectionCount: manifest.listProjectionCount,
+      statusProjectionCount: manifest.statusProjectionCount,
+    })
+    && manifest.sourceRevision === projectionSourceRevision({
+      releaseId: manifest.releaseId,
+      projectionFingerprint: manifest.projectionFingerprint,
+      durableJobCount: manifest.durableJobCount,
+      activeJobCount: manifest.activeJobCount,
+      retainedJobCount: manifest.retainedJobCount,
+      sourceUpdatedAt: manifest.sourceUpdatedAt ?? null,
+    });
+}
+
+function manifestValidationReasonCodes(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return ['JOB_PROJECTION_MANIFEST_INVALID'];
+  const manifest = value as Partial<AutomationJobProjectionManifest>;
+  const reasons = [
+    ...(manifest.schemaVersion !== AUTOMATION_JOB_PROJECTION_MANIFEST_SCHEMA_VERSION
+      ? ['JOB_PROJECTION_MANIFEST_SCHEMA_MISMATCH']
+      : []),
+    ...(manifest.listProjectionSchemaVersion !== AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION
+      || manifest.statusProjectionSchemaVersion !== AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION
+      ? ['JOB_PROJECTION_MANIFEST_PROJECTION_SCHEMA_MISMATCH']
+      : []),
+    ...(manifest.projectionVersion !== AUTOMATION_JOB_PROJECTION_VERSION
+      ? ['JOB_PROJECTION_MANIFEST_VERSION_MISMATCH']
+      : []),
+    ...(!/^[a-f0-9]{64}$/.test(String(manifest.sourceRevision || ''))
+      ? ['JOB_PROJECTION_MANIFEST_SOURCE_REVISION_INVALID']
+      : []),
+    ...(
+      manifest.summaryRevision !== null
+      && !/^[a-f0-9]{64}$/.test(String(manifest.summaryRevision || ''))
+        ? ['JOB_PROJECTION_MANIFEST_SUMMARY_REVISION_INVALID']
+        : []
+    ),
+    ...(!/^[a-f0-9]{64}$/.test(String(manifest.projectionFingerprint || ''))
+      ? ['JOB_PROJECTION_MANIFEST_FINGERPRINT_INVALID']
+      : []),
+    ...(!manifest.generatedAt || timestamp(manifest.generatedAt) === null
+      ? ['JOB_PROJECTION_MANIFEST_GENERATED_AT_INVALID']
+      : []),
+  ];
+  if (
+    typeof manifest.listProjectionFingerprint === 'string'
+    && typeof manifest.statusProjectionFingerprint === 'string'
+    && Number.isInteger(manifest.listProjectionCount)
+    && Number.isInteger(manifest.statusProjectionCount)
+    && typeof manifest.projectionFingerprint === 'string'
+    && manifest.projectionFingerprint !== projectionFingerprint({
+      listProjectionFingerprint: manifest.listProjectionFingerprint,
+      statusProjectionFingerprint: manifest.statusProjectionFingerprint,
+      listProjectionCount: Number(manifest.listProjectionCount),
+      statusProjectionCount: Number(manifest.statusProjectionCount),
+    })
+  ) {
+    reasons.push('JOB_PROJECTION_MANIFEST_FINGERPRINT_MISMATCH');
+  }
+  if (
+    typeof manifest.releaseId === 'string'
+    && typeof manifest.projectionFingerprint === 'string'
+    && Number.isInteger(manifest.durableJobCount)
+    && Number.isInteger(manifest.activeJobCount)
+    && Number.isInteger(manifest.retainedJobCount)
+    && (manifest.sourceUpdatedAt === null || typeof manifest.sourceUpdatedAt === 'string')
+    && typeof manifest.sourceRevision === 'string'
+    && manifest.sourceRevision !== projectionSourceRevision({
+      releaseId: manifest.releaseId,
+      projectionFingerprint: manifest.projectionFingerprint,
+      durableJobCount: Number(manifest.durableJobCount),
+      activeJobCount: Number(manifest.activeJobCount),
+      retainedJobCount: Number(manifest.retainedJobCount),
+      sourceUpdatedAt: manifest.sourceUpdatedAt ?? null,
+    })
+  ) {
+    reasons.push('JOB_PROJECTION_MANIFEST_SOURCE_REVISION_MISMATCH');
+  }
+  return [...new Set(reasons)];
+}
+
+export function validateAutomationJobProjectionManifest(value: unknown): {
+  valid: boolean;
+  reasonCodes: string[];
+} {
+  const valid = isProjectionManifest(value);
+  return {
+    valid,
+    reasonCodes: valid
+      ? []
+      : ['JOB_PROJECTION_MANIFEST_INVALID', ...manifestValidationReasonCodes(value)],
+  };
 }
 
 async function readProjectionManifest(): Promise<{
@@ -417,12 +743,54 @@ async function readProjectionManifest(): Promise<{
       return { manifest: null, collectionPresent: false, reasonCodes: ['JOB_PROJECTION_MANIFEST_MISSING'] };
     }
     if (snapshot.items.length !== 1 || !isProjectionManifest(snapshot.items[0])) {
-      return { manifest: null, collectionPresent: true, reasonCodes: ['JOB_PROJECTION_MANIFEST_INVALID'] };
+      return {
+        manifest: null,
+        collectionPresent: true,
+        reasonCodes: [
+          'JOB_PROJECTION_MANIFEST_INVALID',
+          ...manifestValidationReasonCodes(snapshot.items[0]),
+        ],
+      };
     }
     return { manifest: snapshot.items[0], collectionPresent: true, reasonCodes: [] };
   } catch {
     return { manifest: null, collectionPresent: false, reasonCodes: ['JOB_PROJECTION_MANIFEST_UNAVAILABLE'] };
   }
+}
+
+export async function getAutomationJobProjectionManifestForMaintenance(): Promise<AutomationJobProjectionManifest | null> {
+  return (await readProjectionManifest()).manifest;
+}
+
+export async function restoreAutomationJobProjectionManifestAfterFailedRebuild(
+  token: string,
+  previous: AutomationJobProjectionManifest,
+  expectedCurrentSourceRevision?: string,
+  now = Date.now(),
+): Promise<AutomationJobProjectionManifest> {
+  const measuredAt = new Date(now).toISOString();
+  let output = previous;
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    const current = isProjectionManifest(items[0]) ? items[0] : null;
+    const ownedInFlight = current?.rebuildToken === token;
+    const ownedCommitted = !current?.rebuildToken
+      && Boolean(expectedCurrentSourceRevision)
+      && current?.sourceRevision === expectedCurrentSourceRevision;
+    if (!ownedInFlight && !ownedCommitted) {
+      output = current || previous;
+      return undefined;
+    }
+    output = {
+      ...previous,
+      rebuildToken: undefined,
+      mutationDuringRebuild: false,
+      lastRebuildStatus: 'FAILED',
+      lastRebuildFailureAt: measuredAt,
+      updatedAt: measuredAt,
+    };
+    return [output];
+  });
+  return output;
 }
 
 export async function beginAutomationJobProjectionSync(now = Date.now()): Promise<string> {
@@ -431,13 +799,33 @@ export async function beginAutomationJobProjectionSync(now = Date.now()): Promis
   await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
     const current = isProjectionManifest(items[0]) ? items[0] : emptyProjectionManifest(now);
     const tokens = [...new Set([...current.inFlightSyncTokens, token])].slice(-100);
-    const releaseMatches = current.releaseId === getReleaseIdentity().releaseId;
+    const releaseId = getReleaseIdentity().releaseId;
+    const releaseMatches = current.releaseId === releaseId;
+    const baselineEstablished = current.baselineEstablished && releaseMatches;
+    const historyComplete = current.historyComplete && releaseMatches;
     return [{
       ...current,
-      releaseId: getReleaseIdentity().releaseId,
-      baselineEstablished: current.baselineEstablished && releaseMatches,
+      projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+      releaseId,
+      sourceRevision: projectionSourceRevision({
+        releaseId,
+        projectionFingerprint: current.projectionFingerprint,
+        durableJobCount: current.durableJobCount,
+        activeJobCount: current.activeJobCount,
+        retainedJobCount: current.retainedJobCount,
+        sourceUpdatedAt: current.sourceUpdatedAt,
+      }),
+      summaryRevision: null,
+      generatedAt: measuredAt,
+      baselineEstablished,
       currentStateComplete: false,
-      historyComplete: current.historyComplete && releaseMatches,
+      historyComplete,
+      completeness: {
+        baselineEstablished,
+        currentStateComplete: false,
+        historyComplete,
+        truncated: current.truncated,
+      },
       mutationDuringRebuild: current.mutationDuringRebuild || Boolean(current.rebuildToken),
       inFlightSyncTokens: tokens,
       syncFailureCountSinceRebuild: tokens.includes(token)
@@ -494,12 +882,56 @@ export async function finishAutomationJobProjectionSync(
       && !current.rebuildToken
       && !current.mutationDuringRebuild
       && result.activeJobCount <= getAutomationJobProjectionLimit();
+    const releaseId = getReleaseIdentity().releaseId;
+    const combinedFingerprint = projectionFingerprint(result);
+    const durableJobCount = current.durableJobCount + (result.success && result.inserted ? 1 : 0);
+    const retainedJobCount = Math.min(result.listProjectionCount, result.statusProjectionCount);
+    const sourceUpdatedAt = newestTimestamp([
+      current.sourceUpdatedAt || undefined,
+      result.sourceUpdatedAt || undefined,
+    ]);
+    const sourceRevision = projectionSourceRevision({
+      releaseId,
+      projectionFingerprint: combinedFingerprint,
+      durableJobCount,
+      activeJobCount: result.activeJobCount,
+      retainedJobCount,
+      sourceUpdatedAt,
+    });
+    const updatedRange: AutomationJobProjectionObservedRange = {
+      earliestCreatedAt: current.observedRange.earliestCreatedAt,
+      latestCreatedAt: current.observedRange.latestCreatedAt,
+      earliestUpdatedAt: result.retentionBoundary?.oldestRetainedAt
+        || current.observedRange.earliestUpdatedAt,
+      latestUpdatedAt: sourceUpdatedAt,
+    };
     return [{
       ...current,
+      projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+      releaseId,
+      sourceRevision,
+      summaryRevision: null,
+      projectionFingerprint: combinedFingerprint,
+      generatedAt: measuredAt,
+      observedRange: updatedRange,
+      recordCounts: {
+        durable: durableJobCount,
+        active: result.activeJobCount,
+        retained: retainedJobCount,
+        retainedTerminal: result.retainedTerminalCount,
+        list: result.listProjectionCount,
+        status: result.statusProjectionCount,
+      },
+      completeness: {
+        baselineEstablished,
+        currentStateComplete,
+        historyComplete,
+        truncated,
+      },
       projectionCapacity: getAutomationJobProjectionLimit(),
-      durableJobCount: current.durableJobCount + (result.success && result.inserted ? 1 : 0),
+      durableJobCount,
       activeJobCount: result.activeJobCount,
-      retainedJobCount: Math.min(result.listProjectionCount, result.statusProjectionCount),
+      retainedJobCount,
       retainedTerminalCount: result.retainedTerminalCount,
       listProjectionCount: result.listProjectionCount,
       statusProjectionCount: result.statusProjectionCount,
@@ -510,10 +942,7 @@ export async function finishAutomationJobProjectionSync(
       historyComplete,
       truncated,
       retentionBoundary: result.retentionBoundary || current.retentionBoundary,
-      sourceUpdatedAt: newestTimestamp([
-        current.sourceUpdatedAt || undefined,
-        result.sourceUpdatedAt || undefined,
-      ]),
+      sourceUpdatedAt,
       inFlightSyncTokens,
       syncFailureCountSinceRebuild,
       updatedAt: measuredAt,
@@ -528,12 +957,9 @@ export async function beginAutomationJobProjectionRebuild(now = Date.now()): Pro
     const current = isProjectionManifest(items[0]) ? items[0] : emptyProjectionManifest(now);
     return [{
       ...current,
-      releaseId: getReleaseIdentity().releaseId,
-      baselineEstablished: false,
-      currentStateComplete: false,
-      historyComplete: false,
       rebuildToken: token,
       mutationDuringRebuild: current.inFlightSyncTokens.length > 0,
+      generatedAt: measuredAt,
       updatedAt: measuredAt,
     }];
   });
@@ -552,6 +978,7 @@ export interface AutomationJobProjectionRebuildResult {
   truncated: boolean;
   sourceUpdatedAt: string | null;
   retentionBoundary: AutomationJobProjectionRetentionBoundary | null;
+  observedRange?: AutomationJobProjectionObservedRange;
 }
 
 export async function finishAutomationJobProjectionRebuild(
@@ -574,31 +1001,84 @@ export async function finishAutomationJobProjectionRebuild(
       && result.retainedJobCount === result.listProjectionCount
       && result.listProjectionFingerprint === result.statusProjectionFingerprint
     );
+    if (!validResult || concurrentMutation || !result) {
+      output = {
+        ...current,
+        rebuildToken: undefined,
+        mutationDuringRebuild: false,
+        lastRebuildStatus: 'FAILED',
+        lastRebuildFailureAt: measuredAt,
+        syncFailureCountSinceRebuild: current.syncFailureCountSinceRebuild,
+        generatedAt: measuredAt,
+        updatedAt: measuredAt,
+      };
+      return [output];
+    }
     const atCapacity = Boolean(result && result.retainedJobCount >= getAutomationJobProjectionLimit());
-    const baselineEstablished = validResult && !concurrentMutation;
+    const baselineEstablished = true;
+    const currentStateComplete = Number(result.activeJobCount || 0) <= getAutomationJobProjectionLimit();
+    const historyComplete = !result.truncated && !atCapacity;
+    const truncated = Boolean(result.truncated || atCapacity);
+    const releaseId = getReleaseIdentity().releaseId;
+    const combinedFingerprint = projectionFingerprint(result);
+    const sourceRevision = projectionSourceRevision({
+      releaseId,
+      projectionFingerprint: combinedFingerprint,
+      durableJobCount: result.durableJobCount,
+      activeJobCount: result.activeJobCount,
+      retainedJobCount: result.retainedJobCount,
+      sourceUpdatedAt: result.sourceUpdatedAt,
+    });
+    const rebuiltObservedRange = result.observedRange || {
+      earliestCreatedAt: null,
+      latestCreatedAt: null,
+      earliestUpdatedAt: result.retentionBoundary?.oldestRetainedAt || null,
+      latestUpdatedAt: result.sourceUpdatedAt,
+    };
     output = {
       ...current,
-      releaseId: getReleaseIdentity().releaseId,
+      projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+      releaseId,
+      sourceRevision,
+      summaryRevision: null,
+      projectionFingerprint: combinedFingerprint,
+      generatedAt: measuredAt,
+      observedRange: rebuiltObservedRange,
+      recordCounts: {
+        durable: result.durableJobCount,
+        active: result.activeJobCount,
+        retained: result.retainedJobCount,
+        retainedTerminal: result.retainedTerminalCount,
+        list: result.listProjectionCount,
+        status: result.statusProjectionCount,
+      },
+      completeness: {
+        baselineEstablished,
+        currentStateComplete,
+        historyComplete,
+        truncated,
+      },
       projectionCapacity: getAutomationJobProjectionLimit(),
-      durableJobCount: result?.durableJobCount || 0,
-      activeJobCount: result?.activeJobCount || 0,
-      retainedJobCount: result?.retainedJobCount || 0,
-      retainedTerminalCount: result?.retainedTerminalCount || 0,
-      listProjectionCount: result?.listProjectionCount || 0,
-      statusProjectionCount: result?.statusProjectionCount || 0,
-      listProjectionFingerprint: result?.listProjectionFingerprint || automationJobProjectionFingerprint([]),
-      statusProjectionFingerprint: result?.statusProjectionFingerprint || automationJobProjectionFingerprint([]),
+      durableJobCount: result.durableJobCount,
+      activeJobCount: result.activeJobCount,
+      retainedJobCount: result.retainedJobCount,
+      retainedTerminalCount: result.retainedTerminalCount,
+      listProjectionCount: result.listProjectionCount,
+      statusProjectionCount: result.statusProjectionCount,
+      listProjectionFingerprint: result.listProjectionFingerprint,
+      statusProjectionFingerprint: result.statusProjectionFingerprint,
       baselineEstablished,
-      currentStateComplete: baselineEstablished
-        && Number(result?.activeJobCount || 0) <= getAutomationJobProjectionLimit(),
-      historyComplete: baselineEstablished && !result?.truncated && !atCapacity,
-      truncated: Boolean(result?.truncated || atCapacity),
-      retentionBoundary: result?.retentionBoundary || null,
-      sourceUpdatedAt: result?.sourceUpdatedAt || null,
-      rebuiltAt: baselineEstablished ? measuredAt : null,
+      currentStateComplete,
+      historyComplete,
+      truncated,
+      retentionBoundary: result.retentionBoundary || null,
+      sourceUpdatedAt: result.sourceUpdatedAt || null,
+      rebuiltAt: measuredAt,
+      lastRebuildStatus: 'SUCCEEDED',
+      lastRebuildFailureAt: current.lastRebuildFailureAt,
       rebuildToken: undefined,
       mutationDuringRebuild: false,
-      syncFailureCountSinceRebuild: baselineEstablished ? 0 : current.syncFailureCountSinceRebuild + 1,
+      syncFailureCountSinceRebuild: 0,
       updatedAt: measuredAt,
     };
     return [output];
@@ -693,6 +1173,7 @@ function projectionEvidence(input: {
     ...(input.manifest && !countMatches ? ['JOB_PROJECTION_MANIFEST_COUNT_MISMATCH'] : []),
     ...(input.manifest && !fingerprintMatches ? ['JOB_PROJECTION_MANIFEST_FINGERPRINT_MISMATCH'] : []),
     ...(input.manifest?.rebuildToken ? ['JOB_PROJECTION_REBUILD_IN_PROGRESS'] : []),
+    ...(input.manifest?.lastRebuildStatus === 'FAILED' ? ['JOB_PROJECTION_REBUILD_LAST_FAILED'] : []),
     ...(input.manifest?.inFlightSyncTokens.length ? ['JOB_PROJECTION_SYNC_IN_PROGRESS'] : []),
     ...(input.manifest?.syncFailureCountSinceRebuild ? ['JOB_PROJECTION_SYNC_FAILED_SINCE_REBUILD'] : []),
     ...(input.legacyCount ? ['JOB_PROJECTION_SCHEMA_LEGACY'] : []),
@@ -714,6 +1195,25 @@ function projectionEvidence(input: {
       manifestRebuiltAt: input.manifest?.rebuiltAt || null,
       manifestReleaseId: input.manifest?.releaseId || null,
       manifestUpdatedAt: input.manifest?.updatedAt || null,
+      projectionVersion: input.manifest?.projectionVersion || null,
+      sourceRevision: input.manifest?.sourceRevision || null,
+      summaryRevision: input.manifest?.summaryRevision || null,
+      projectionFingerprint: input.manifest?.projectionFingerprint || null,
+      generatedAt: input.manifest?.generatedAt || null,
+      recordCounts: input.manifest?.recordCounts || {
+        durable: null,
+        active: null,
+        retained: input.rawCount,
+        retainedTerminal: null,
+        list: input.source === 'job-list-projection-v2' ? input.rawCount : null,
+        status: input.source === 'job-status-projection-v1' ? input.rawCount : null,
+      },
+      completeness: {
+        baselineEstablished: input.manifest?.baselineEstablished === true,
+        currentStateComplete,
+        historyComplete,
+        truncated,
+      },
     },
     reasonCodes: [...new Set(reasonCodes)],
   };
@@ -788,10 +1288,19 @@ function normalizeExistingSamples(
 function emptySummary(now = Date.now()): AutomationJobHealthSummary {
   const measuredAt = new Date(now).toISOString();
   const projectionEvidence = emptyProjectionEvidence('job-list-projection-v2', 'UNAVAILABLE');
+  const manifest = emptyProjectionManifest(now);
   return {
     schemaVersion: AUTOMATION_JOB_HEALTH_SUMMARY_SCHEMA_VERSION,
     projectionSchemaVersion: AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
+    projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
     id: HEALTH_SUMMARY_ID,
+    sourceRevision: manifest.sourceRevision,
+    summaryRevision: revisionHash({ empty: true, sourceRevision: manifest.sourceRevision, measuredAt }),
+    projectionFingerprint: manifest.projectionFingerprint,
+    generatedAt: measuredAt,
+    observedRange: manifest.observedRange,
+    recordCounts: manifest.recordCounts,
+    completeness: manifest.completeness,
     statusCounts: statusCounts(),
     activeTypeCounts: {},
     totalProjectedJobs: 0,
@@ -904,10 +1413,46 @@ export function buildAutomationJobHealthSummary(
     truncated: projections.length >= projectionCapacity,
     retentionBoundary: retentionBoundary(observedRange(current), projections.length >= projectionCapacity),
   };
-  return {
+  const currentFingerprint = evidence.projectionFingerprint
+    || projectionFingerprint({
+      listProjectionFingerprint: automationJobProjectionFingerprint(current),
+      statusProjectionFingerprint: automationJobProjectionFingerprint(current),
+      listProjectionCount: current.length,
+      statusProjectionCount: current.length,
+    });
+  const sourceRevision = evidence.sourceRevision || projectionSourceRevision({
+    releaseId: getReleaseIdentity().releaseId,
+    projectionFingerprint: currentFingerprint,
+    durableJobCount: evidence.recordCounts.durable ?? current.length,
+    activeJobCount: evidence.recordCounts.active
+      ?? current.filter(job => ACTIVE_STATUSES.has(job.status)).length,
+    retainedJobCount: current.length,
+    sourceUpdatedAt: newestTimestamp(current.map(job => job.updatedAt)),
+  });
+  const summaryWithoutRevision: Omit<AutomationJobHealthSummary, 'summaryRevision'> = {
     schemaVersion: AUTOMATION_JOB_HEALTH_SUMMARY_SCHEMA_VERSION,
     projectionSchemaVersion: AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
+    projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
     id: HEALTH_SUMMARY_ID,
+    sourceRevision,
+    projectionFingerprint: currentFingerprint,
+    generatedAt: measuredAt,
+    observedRange: evidence.observedRange,
+    recordCounts: {
+      durable: evidence.recordCounts.durable,
+      active: evidence.recordCounts.active,
+      retained: evidence.recordCounts.retained ?? current.length,
+      retainedTerminal: evidence.recordCounts.retainedTerminal
+        ?? current.filter(job => !ACTIVE_STATUSES.has(job.status)).length,
+      list: evidence.recordCounts.list ?? current.length,
+      status: evidence.recordCounts.status,
+    },
+    completeness: {
+      baselineEstablished: evidence.completeness.baselineEstablished,
+      currentStateComplete: evidence.currentStateComplete,
+      historyComplete: evidence.historyComplete,
+      truncated: evidence.truncated,
+    },
     statusCounts: counts,
     activeTypeCounts,
     totalProjectedJobs: current.length,
@@ -938,6 +1483,15 @@ export function buildAutomationJobHealthSummary(
     releaseId: getReleaseIdentity().releaseId,
     updatedAt: measuredAt,
   };
+  const summaryRevision = healthSummaryRevision(summaryWithoutRevision);
+  return {
+    ...summaryWithoutRevision,
+    projectionEvidence: {
+      ...summaryWithoutRevision.projectionEvidence,
+      summaryRevision,
+    },
+    summaryRevision,
+  };
 }
 
 function isHealthReference(value: unknown): value is AutomationHealthJobReference {
@@ -961,6 +1515,38 @@ function isHealthSummary(value: unknown): value is AutomationJobHealthSummary {
   return summary.id === HEALTH_SUMMARY_ID
     && summary.schemaVersion === AUTOMATION_JOB_HEALTH_SUMMARY_SCHEMA_VERSION
     && summary.projectionSchemaVersion === AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION
+    && summary.projectionVersion === AUTOMATION_JOB_PROJECTION_VERSION
+    && typeof summary.sourceRevision === 'string'
+    && /^[a-f0-9]{64}$/.test(summary.sourceRevision)
+    && typeof summary.summaryRevision === 'string'
+    && /^[a-f0-9]{64}$/.test(summary.summaryRevision)
+    && typeof summary.projectionFingerprint === 'string'
+    && /^[a-f0-9]{64}$/.test(summary.projectionFingerprint)
+    && timestamp(summary.generatedAt) !== null
+    && summary.observedRange !== null
+    && typeof summary.observedRange === 'object'
+    && [
+      summary.observedRange.earliestCreatedAt,
+      summary.observedRange.latestCreatedAt,
+      summary.observedRange.earliestUpdatedAt,
+      summary.observedRange.latestUpdatedAt,
+    ].every(item => item === null || timestamp(item) !== null)
+    && summary.recordCounts !== null
+    && typeof summary.recordCounts === 'object'
+    && [
+      summary.recordCounts.durable,
+      summary.recordCounts.active,
+      summary.recordCounts.retained,
+      summary.recordCounts.retainedTerminal,
+      summary.recordCounts.list,
+      summary.recordCounts.status,
+    ].every(item => item === null || (Number.isInteger(item) && Number(item) >= 0))
+    && summary.completeness !== null
+    && typeof summary.completeness === 'object'
+    && typeof summary.completeness.baselineEstablished === 'boolean'
+    && typeof summary.completeness.currentStateComplete === 'boolean'
+    && typeof summary.completeness.historyComplete === 'boolean'
+    && typeof summary.completeness.truncated === 'boolean'
     && summary.statusCounts !== null
     && typeof summary.statusCounts === 'object'
     && summary.projectionEvidence !== null
@@ -970,6 +1556,13 @@ function isHealthSummary(value: unknown): value is AutomationJobHealthSummary {
     && typeof summary.projectionEvidence.historyComplete === 'boolean'
     && typeof summary.projectionEvidence.truncated === 'boolean'
     && typeof summary.projectionEvidence.collectionPresent === 'boolean'
+    && summary.projectionEvidence.projectionVersion === summary.projectionVersion
+    && summary.projectionEvidence.sourceRevision === summary.sourceRevision
+    && summary.projectionEvidence.summaryRevision === summary.summaryRevision
+    && summary.projectionEvidence.projectionFingerprint === summary.projectionFingerprint
+    && summary.completeness.currentStateComplete === summary.projectionEvidence.currentStateComplete
+    && summary.completeness.historyComplete === summary.projectionEvidence.historyComplete
+    && summary.completeness.truncated === summary.projectionEvidence.truncated
     && (
       summary.projectionEvidence.manifestUpdatedAt === null
       || timestamp(summary.projectionEvidence.manifestUpdatedAt) !== null
@@ -1002,7 +1595,11 @@ function isHealthSummary(value: unknown): value is AutomationJobHealthSummary {
       && Number(summary.statusCounts?.[status]) >= 0)
     && typeof summary.releaseId === 'string'
     && summary.releaseId.length > 0
-    && timestamp(summary.updatedAt) !== null;
+    && timestamp(summary.updatedAt) !== null
+    && (() => {
+      const { summaryRevision, ...withoutRevision } = summary as AutomationJobHealthSummary;
+      return summaryRevision === healthSummaryRevision(withoutRevision);
+    })();
 }
 
 export async function readBoundedAutomationJobProjections(): Promise<BoundedAutomationJobProjectionRead> {
@@ -1171,6 +1768,13 @@ export async function refreshAutomationJobHealthSummary(now = Date.now()): Promi
         manifestRebuiltAt: projections.manifestRebuiltAt,
         manifestReleaseId: projections.manifestReleaseId,
         manifestUpdatedAt: projections.manifestUpdatedAt,
+        projectionVersion: projections.projectionVersion,
+        sourceRevision: projections.sourceRevision,
+        summaryRevision: projections.summaryRevision,
+        projectionFingerprint: projections.projectionFingerprint,
+        generatedAt: projections.generatedAt,
+        recordCounts: projections.recordCounts,
+        completeness: projections.completeness,
       },
     });
     const previousSourceAt = timestamp(previous?.sourceUpdatedAt);
@@ -1182,7 +1786,8 @@ export async function refreshAutomationJobHealthSummary(now = Date.now()): Promi
     const generatedAtRegressed = previousUpdatedAt !== null
       && candidateUpdatedAt !== null
       && candidateUpdatedAt < previousUpdatedAt;
-    if (previous && (sourceRegressed || generatedAtRegressed)) {
+    const sameSourceRevision = previous?.sourceRevision === candidate.sourceRevision;
+    if (previous && sameSourceRevision && (sourceRegressed || generatedAtRegressed)) {
       output = previous;
       return undefined;
     }
@@ -1190,6 +1795,27 @@ export async function refreshAutomationJobHealthSummary(now = Date.now()): Promi
     return [candidate];
   });
   if (!output) throw new Error('JOB_HEALTH_SUMMARY_REFRESH_FAILED');
+  let linked = false;
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    if (!isProjectionManifest(items[0])) return undefined;
+    const current = items[0];
+    if (
+      current.sourceRevision !== output!.sourceRevision
+      || current.projectionFingerprint !== output!.projectionFingerprint
+      || current.rebuildToken
+      || current.inFlightSyncTokens.length > 0
+    ) {
+      return undefined;
+    }
+    linked = true;
+    if (current.summaryRevision === output!.summaryRevision) return undefined;
+    return [{
+      ...current,
+      summaryRevision: output!.summaryRevision,
+      updatedAt: new Date(now).toISOString(),
+    }];
+  });
+  if (!linked) throw new Error('JOB_HEALTH_SUMMARY_SOURCE_REVISION_CHANGED');
   return output;
 }
 
@@ -1200,6 +1826,7 @@ function healthView(
     availability: AutomationJobHealthView['availability'];
     source: AutomationJobHealthView['source'];
     reasonCodes: string[];
+    previousValidProjectionAvailable?: boolean;
   },
 ): AutomationJobHealthView {
   const hasActiveJobs = ALL_STATUSES.some(status => ACTIVE_STATUSES.has(status) && summary.statusCounts[status] > 0);
@@ -1233,6 +1860,14 @@ function healthView(
     ...summary,
     availability: input.availability === 'AVAILABLE' && reasonCodes.length ? 'DEGRADED' : input.availability,
     source: input.source,
+    projectionStatus: input.availability === 'UNAVAILABLE'
+      ? 'UNAVAILABLE'
+      : reasonCodes.includes('JOB_PROJECTION_REBUILD_IN_PROGRESS')
+        ? 'REBUILDING'
+        : input.source === 'summary' && summary.projectionEvidence.currentStateComplete
+          ? 'VALID'
+          : 'INVALID',
+    previousValidProjectionAvailable: input.previousValidProjectionAvailable === true,
     stale,
     reasonCodes: [...new Set(reasonCodes)],
     evidenceClassification: summary.projectionEvidence.evidenceClassification,
@@ -1268,13 +1903,17 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
   }
   if (isHealthSummary(stored[0]) && stored[0].releaseId === getReleaseIdentity().releaseId) {
     projectionRead = await readBoundedAutomationJobProjections();
-    const expectedManifestUpdatedAt = stored[0].projectionEvidence.manifestUpdatedAt;
     const projectionMatches = projectionRead.availability !== 'UNAVAILABLE'
       && projectionRead.currentStateComplete
       && stored[0].projectionEvidence.currentStateComplete
-      && projectionRead.manifestUpdatedAt === expectedManifestUpdatedAt
+      && projectionRead.projectionVersion === stored[0].projectionVersion
+      && projectionRead.sourceRevision === stored[0].sourceRevision
+      && projectionRead.summaryRevision === stored[0].summaryRevision
+      && projectionRead.projectionFingerprint === stored[0].projectionFingerprint
       && projectionRead.manifestReleaseId === stored[0].releaseId
       && projectionRead.items.length === stored[0].totalProjectedJobs
+      && projectionRead.recordCounts.list === stored[0].recordCounts.list
+      && projectionRead.recordCounts.status === stored[0].recordCounts.status
       && projectionRead.historyComplete === stored[0].projectionEvidence.historyComplete
       && projectionRead.truncated === stored[0].projectionEvidence.truncated;
     if (projectionMatches) {
@@ -1283,6 +1922,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
         availability: 'AVAILABLE',
         source: 'summary',
         reasonCodes: projectionRead.reasonCodes,
+        previousValidProjectionAvailable: true,
       });
     }
     storedReason = projectionRead.availability === 'UNAVAILABLE'
@@ -1306,12 +1946,20 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
         manifestRebuiltAt: projection.manifestRebuiltAt,
         manifestReleaseId: projection.manifestReleaseId,
         manifestUpdatedAt: projection.manifestUpdatedAt,
+        projectionVersion: projection.projectionVersion,
+        sourceRevision: projection.sourceRevision,
+        summaryRevision: projection.summaryRevision,
+        projectionFingerprint: projection.projectionFingerprint,
+        generatedAt: projection.generatedAt,
+        recordCounts: projection.recordCounts,
+        completeness: projection.completeness,
       },
     });
     return healthView(fallback, {
       now,
       availability: 'DEGRADED',
       source: 'bounded_projection_fallback',
+      previousValidProjectionAvailable: isHealthSummary(stored[0]),
       reasonCodes: [
         storedReason || (
           stored.length && isHealthSummary(stored[0])
@@ -1329,6 +1977,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
     now,
     availability: 'UNAVAILABLE',
     source: 'empty_fallback',
+    previousValidProjectionAvailable: isHealthSummary(stored[0]),
     reasonCodes: [
       storedReason || (stored.length ? 'JOB_HEALTH_SUMMARY_SCHEMA_INVALID' : 'JOB_HEALTH_SUMMARY_MISSING'),
       ...projection.reasonCodes,

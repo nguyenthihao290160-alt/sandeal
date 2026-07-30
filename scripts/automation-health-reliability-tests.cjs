@@ -124,39 +124,39 @@ async function main() {
   const now = Date.now();
 
   await test('a 13,000-record durable fixture is not read by cold or warm App Health', async () => {
-    let durableJobs = Array.from({ length: 13_000 }, (_, index) => ({
-      ...projectedJob(index, now),
-      payload: { evidence: 'x'.repeat(3_500), sequence: index },
-      result: { representative: true },
-    }));
-    await adapter.writeCollection('automation-jobs', durableJobs);
-    durableJobs = null;
-
-    const projections = Array.from({ length: 2_000 }, (_, index) => {
-      if (index < 4) {
-        return projectedJob(index, now, {
-          status: 'RUNNING',
-          type: index === 0 ? 'RUNTIME_GUARDIAN' : 'HEALTH_CHECK',
-          completedAt: undefined,
-          heartbeatAt: iso(now - 1_000),
-          leaseExpiresAt: iso(now + 60_000),
-          executionCritical: index === 0,
-        });
-      }
-      if (index < 14) {
-        return projectedJob(index, now, {
-          status: 'PENDING',
-          completedAt: undefined,
-          claimedAt: undefined,
-          startedAt: undefined,
-          runnableAt: iso(now - 10_000),
-        });
-      }
-      return projectedJob(index, now);
+    let durableJobs = Array.from({ length: 13_000 }, (_, index) => {
+      const lifecycle = index < 4
+        ? {
+            status: 'RUNNING',
+            type: index === 0 ? 'RUNTIME_GUARDIAN' : 'HEALTH_CHECK',
+            completedAt: undefined,
+            heartbeatAt: iso(now - 1_000),
+            leaseExpiresAt: iso(now + 60_000),
+            executionCritical: index === 0,
+          }
+        : index < 14
+          ? {
+              status: 'PENDING',
+              completedAt: undefined,
+              claimedAt: undefined,
+              startedAt: undefined,
+              runnableAt: iso(now - 10_000),
+            }
+          : {};
+      return {
+        ...projectedJob(index, now, lifecycle),
+        payload: { evidence: 'x'.repeat(3_500), sequence: index },
+        result: { representative: true },
+      };
     });
-    await adapter.writeCollection('automation-job-list-projections-v2', projections);
-    await healthSummary.refreshAutomationJobHealthSummary(now);
-    await adapter.writeCollection('runtime-health', [runtimeSnapshot(now)]);
+    await adapter.writeCollection('automation-jobs', durableJobs);
+    await store.rebuildAutomationJobReadModelsFromDurable(durableJobs, now);
+    durableJobs = null;
+    await adapter.writeCollection(
+      'runtime-health',
+      Array.from({ length: 500 }, (_, index) =>
+        runtimeSnapshot(now - (499 - index) * 1_000)),
+    );
     const permitHistory = Array.from({ length: 13_000 }, (_, index) => ({
       schemaVersion: 1,
       id: `historical-permit-${index}`,
@@ -222,7 +222,7 @@ async function main() {
       assert.ok(Buffer.byteLength(JSON.stringify(cold)) < 512 * 1024);
       assert.ok(Buffer.byteLength(JSON.stringify(warm)) < 512 * 1024);
       assert.equal(cold.jobReadModel.totalProjectedJobs, 2_000);
-      console.log(`BENCHMARK cold=${coldMs.toFixed(1)}ms warm=${warmMs.toFixed(1)}ms durableJobReads=${durableHistoryReads} durablePermitReads=${durablePermitHistoryReads}`);
+      console.log(`BENCHMARK cold=${coldMs.toFixed(1)}ms warm=${warmMs.toFixed(1)}ms runtimeSnapshots=500 durableJobReads=${durableHistoryReads} durablePermitReads=${durablePermitHistoryReads}`);
     } finally {
       fsPromises.readFile = originalReadFile;
     }
@@ -398,9 +398,12 @@ async function main() {
       status: 'draft',
       updatedAt: iso(now - index),
     })));
-    const jobs = Array.from({ length: 5 }, (_, index) => projectedJob(index, now, {
+    let jobs = Array.from({ length: 2 }, (_, index) => projectedJob(index, now, {
       type: 'AUTO_PILOT',
       requestedBy: 'scheduler',
+      releaseId: 'a'.repeat(40),
+      rolloutCohort: 'SLO_RUNNABLE_AT_V2:ACTIVE',
+      runnableReason: 'SCHEDULED_AT',
     }));
     await adapter.writeCollection('automation-jobs', jobs);
     await adapter.writeCollection('automation-job-attempts', []);
@@ -420,7 +423,19 @@ async function main() {
 
     let applied;
     for (let index = 0; index < 3; index += 1) {
-      const evaluatedAt = now + index * 45_000;
+      const evaluatedAt = now + index * 30_000;
+      jobs = [
+        ...jobs,
+        projectedJob(100 + index, evaluatedAt, {
+          type: 'AUTO_PILOT',
+          requestedBy: 'scheduler',
+          releaseId: 'a'.repeat(40),
+          rolloutCohort: 'SLO_RUNNABLE_AT_V2:ACTIVE',
+          runnableReason: 'SCHEDULED_AT',
+        }),
+      ];
+      await adapter.writeCollection('automation-jobs', jobs);
+      await store.rebuildAutomationJobReadModelsFromDurable(jobs, evaluatedAt);
       await adapter.writeCollection('runtime-health', [runtimeSnapshot(evaluatedAt)]);
       applied = await slo.applyAutomationErrorBudget({
         now: evaluatedAt,
@@ -433,7 +448,16 @@ async function main() {
     assert.equal(pickup.evaluationStatus, 'PASS');
     assert.equal(postPublish.evaluationStatus, 'INSUFFICIENT_DATA');
     assert.equal(postPublish.stateReason, 'PRODUCT_CURRENT_STATE_BOUNDED');
-    assert.equal(applied.control.publishBlockedByRuntime, false);
+    assert.equal(
+      applied.control.publishBlockedByRuntime,
+      false,
+      JSON.stringify({
+        runtimeReasons: applied.control.publishRuntimeReasons,
+        recovery: applied.recovery,
+        evaluation: applied.evaluation,
+        pickup,
+      }),
+    );
     assert.equal(applied.control.publishBlockedByPolicy, true);
     assert.deepEqual(applied.control.publishPolicyReasons, ['POLICY_FIXTURE_BLOCK']);
     assert.equal((await adapter.readCollection('publication-audit')).length, 0);
@@ -494,9 +518,15 @@ async function main() {
 
   const routeSource = fs.readFileSync(path.join(process.cwd(), 'src/app/api/automation/health/route.ts'), 'utf8');
   const guardianSource = fs.readFileSync(path.join(process.cwd(), 'src/lib/automation/runtimeGuardian.ts'), 'utf8');
+  const productFlowSource = fs.readFileSync(path.join(process.cwd(), 'src/lib/automation/productFlowDiagnostics.ts'), 'utf8');
   await test('latency-sensitive App Health and Runtime Guardian source paths forbid full history reads', () => {
     assert.equal(routeSource.includes('getAllAutomationJobs'), false);
     assert.equal(guardianSource.includes('getAllAutomationJobs'), false);
+    assert.equal(productFlowSource.includes('getAllAutomationJobs'), false);
+    assert.equal(productFlowSource.includes('getAllProducts'), false);
+    assert.equal(productFlowSource.includes('listCandidateQueue'), false);
+    assert.ok(productFlowSource.includes('readBoundedCollectionSnapshot'));
+    assert.ok(productFlowSource.includes('readBoundedAutomationJobStatuses'));
   });
 
   await test('App Health route keeps stable codes separate from valid Vietnamese messages', () => {

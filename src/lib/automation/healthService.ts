@@ -5,6 +5,8 @@ import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { getPrimaryCredential } from '@/lib/storage/tokenVault';
 import { buildAutomationOperationalHealth } from './operationalHealth';
 import { getAutomationJobHealthView, publicAutomationJobHealthView } from './jobHealthSummary';
+import { buildProductFlowDiagnostics } from './productFlowDiagnostics';
+import { ensureJobHealthProjectionMaintenanceRequest } from './projectionMaintenance';
 import { getLatestRuntimeHealth, providerHealth } from './runtimeGuardian';
 import { listRuntimeRoleLeases } from './runtimeRoles';
 import { DEFAULT_CONTROL, getAiUsage, getAutomationControl, getCircuit } from './store';
@@ -33,6 +35,8 @@ export interface AutomationHealthDependencies {
   getGeminiReadiness: typeof getGeminiProviderReadiness;
   getAccessTradeCredential: () => ReturnType<typeof getPrimaryCredential>;
   buildOperational: typeof buildAutomationOperationalHealth;
+  buildProductFlow: typeof buildProductFlowDiagnostics;
+  ensureProjectionMaintenance: typeof ensureJobHealthProjectionMaintenanceRequest;
 }
 
 const DEFAULT_DEPENDENCIES: AutomationHealthDependencies = {
@@ -46,6 +50,8 @@ const DEFAULT_DEPENDENCIES: AutomationHealthDependencies = {
   getGeminiReadiness: getGeminiProviderReadiness,
   getAccessTradeCredential: () => getPrimaryCredential('accesstrade'),
   buildOperational: buildAutomationOperationalHealth,
+  buildProductFlow: buildProductFlowDiagnostics,
+  ensureProjectionMaintenance: ensureJobHealthProjectionMaintenanceRequest,
 };
 
 interface ComponentResult<T> {
@@ -227,6 +233,8 @@ function failClosedCore(generatedAt: string) {
     providerDetails: { gemini: null },
     runtime: null,
     operational: null,
+    productFlow: null,
+    projectionMaintenance: null,
     control,
     killSwitch: control.killSwitch,
     updatedAt: generatedAt,
@@ -238,7 +246,13 @@ export async function buildAutomationHealthResponse(
   options: {
     now?: number;
     dependencies?: Partial<AutomationHealthDependencies>;
-    budgets?: { coreMs?: number; providerMs?: number; operationalMs?: number };
+    budgets?: {
+      coreMs?: number;
+      providerMs?: number;
+      operationalMs?: number;
+      productFlowMs?: number;
+      maintenanceMs?: number;
+    };
   } = {},
 ) {
   const now = options.now ?? Date.now();
@@ -247,6 +261,8 @@ export async function buildAutomationHealthResponse(
   const coreMs = Math.max(100, options.budgets?.coreMs ?? 3_000);
   const providerMs = Math.max(100, options.budgets?.providerMs ?? 1_500);
   const operationalMs = Math.max(100, options.budgets?.operationalMs ?? 1_200);
+  const productFlowMs = Math.max(100, options.budgets?.productFlowMs ?? 1_800);
+  const maintenanceMs = Math.max(100, options.budgets?.maintenanceMs ?? 1_000);
 
   const geminiPromise = component('provider_gemini', providerMs, dependencies.getGeminiReadiness);
   const accessTradePromise = component('provider_accesstrade', providerMs, dependencies.getAccessTradeCredential);
@@ -310,14 +326,53 @@ export async function buildAutomationHealthResponse(
         : runtimeFresh ? 'OK' : 'RUNTIME_HEALTH_SNAPSHOT_STALE'
       : 'RUNTIME_HEALTH_SNAPSHOT_MISSING',
   };
-  const operational = await component('operational_health', operationalMs, () => dependencies.buildOperational(now, {
-    summary,
-    settings,
-    control,
-    runtime,
-    leases,
-  }));
+  const [operational, productFlow, projectionMaintenance] = await Promise.all([
+    component('operational_health', operationalMs, () => dependencies.buildOperational(now, {
+      summary,
+      settings,
+      control,
+      runtime,
+      leases,
+    })),
+    component(
+      'product_flow',
+      productFlowMs,
+      () => dependencies.buildProductFlow(now, {
+        getAiReadiness: async () => gemini.value || {
+          status: 'not_configured',
+          adapterAvailable: true,
+          configured: false,
+          totalConnections: 0,
+          enabledConnections: 0,
+          validConnections: 0,
+          generationReadyConnections: 0,
+          productionReadyConnections: 0,
+          primaryCredentialId: null,
+          primaryReady: false,
+          reason: 'NOT_CONFIGURED',
+        },
+        getControl: async () => control,
+      }),
+      {
+        classify: value => ({
+          status: value.completeness === 'COMPLETE'
+            ? 'available'
+            : value.completeness === 'UNKNOWN' ? 'unavailable' : 'insufficient_data',
+          stale: value.stale,
+          reasonCode: value.reasonCodes[0]
+            || (value.completeness === 'COMPLETE' ? 'OK' : 'PRODUCT_FLOW_DATA_INCOMPLETE'),
+        }),
+      },
+    ),
+    component(
+      'projection_maintenance',
+      maintenanceMs,
+      () => dependencies.ensureProjectionMaintenance(summary, now),
+    ),
+  ]);
   components.operational = operational.meta;
+  components.productFlow = productFlow.meta;
+  components.projectionMaintenance = projectionMaintenance.meta;
   components.slo = operational.value?.slo
     ? {
         status: operational.value.slo.dataStatus === 'MEASURED' || operational.value.slo.dataStatus === 'RECOVERY'
@@ -489,6 +544,8 @@ export async function buildAutomationHealthResponse(
       checkedAt: runtime.checkedAt,
     } : null,
     operational: operational.value || null,
+    productFlow: productFlow.value || null,
+    projectionMaintenance: projectionMaintenance.value || null,
     control,
     killSwitch: control.killSwitch,
     updatedAt: generatedAt,

@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
-import { backupCollection, generateId, readCollection, readCollectionPage, runTransaction } from '@/lib/storage/adapter';
+import {
+  backupCollection,
+  generateId,
+  readBoundedCollectionSnapshot,
+  readCollection,
+  readCollectionPage,
+  runTransaction,
+} from '@/lib/storage/adapter';
 import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
+import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getJobRegistryDefaults } from './botRegistry';
 import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, listAutomationPolicies } from './policyRegistry';
 import { buildAutoPilotExecutionPlan } from './autoPilotGraph';
@@ -9,6 +17,7 @@ import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
 import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
+import { getFeatureRolloutState } from './featureRollout';
 import {
   AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
   AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION,
@@ -18,9 +27,11 @@ import {
   finishAutomationJobProjectionRebuild,
   finishAutomationJobProjectionSync,
   getAutomationJobHealthView,
+  getAutomationJobProjectionManifestForMaintenance,
   getAutomationJobProjectionLimit,
   readBoundedAutomationJobProjections,
   refreshAutomationJobHealthSummary,
+  restoreAutomationJobProjectionManifestAfterFailedRebuild,
   type AutomationJobProjectionManifest,
   type AutomationJobProjectionRetentionBoundary,
 } from './jobHealthSummary';
@@ -54,6 +65,7 @@ const JOB_ATTEMPTS = 'automation-job-attempts';
 const JOB_HEARTBEATS = 'automation-job-heartbeats';
 const JOB_PROJECTIONS = 'automation-job-projections';
 const JOB_LIST_PROJECTIONS = 'automation-job-list-projections-v2';
+const JOB_PROJECTION_REBUILD_STAGING = 'automation-job-projection-rebuild-staging-v1';
 const CONTROL = 'automation-control';
 const AUDIT = 'automation-audit';
 const USAGE = 'automation-ai-usage';
@@ -137,6 +149,8 @@ export function projectAutomationJobListItem(job: AutomationJob): AutomationJobL
     outcomeStatus: job.outcomeStatus,
     priority: job.priority,
     requestedBy: shortReason(job.requestedBy)?.slice(0, 160) || 'system',
+    releaseId: shortReason(job.releaseId)?.slice(0, 160),
+    rolloutCohort: shortReason(job.rolloutCohort)?.slice(0, 160),
     requestedExecutionMode: job.requestedExecutionMode,
     executionMode: job.executionMode,
     provider: shortReason(disclosure?.provider),
@@ -192,6 +206,7 @@ const STATUS_RESULT_FIELDS = [
   'discarded',
   'duplicate',
   'duplicateRejected',
+  'duplicateRechecksSuppressed',
   'durationMs',
   'evidenceVerified',
   'executionStatus',
@@ -216,6 +231,8 @@ const STATUS_RESULT_FIELDS = [
   'reopened',
   'resolutionDeferred',
   'resolved',
+  'recheckJobs',
+  'rechecksAwaitingExecution',
   'seoBlocked',
   'seoReady',
   'skipped',
@@ -341,6 +358,8 @@ export function projectAutomationJobStatusItem(job: AutomationJob): AutomationJo
     idempotencyKey: '',
     operationId: shortReason(job.operationId)?.slice(0, 160) || job.id,
     requestedBy: shortReason(job.requestedBy)?.slice(0, 160) || 'unknown',
+    releaseId: shortReason(job.releaseId)?.slice(0, 160),
+    rolloutCohort: shortReason(job.rolloutCohort)?.slice(0, 160),
     sourceMetadata: job.sourceMetadata ? {
       producer: shortReason(job.sourceMetadata.producer)?.slice(0, 160) || 'unknown',
       source: shortReason(job.sourceMetadata.source)?.slice(0, 160),
@@ -463,7 +482,20 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     ))
     .digest('hex');
   const expectedFingerprint = snapshotFingerprint(jobs);
+  const [previousManifest, previousStatusSnapshot, previousListSnapshot] = await Promise.all([
+    getAutomationJobProjectionManifestForMaintenance(),
+    readBoundedCollectionSnapshot<AutomationJobStatusProjection>(JOB_PROJECTIONS, {
+      maximumItems: MAX_JOB_PROJECTIONS,
+      maximumBytes: 32 * 1024 * 1024,
+    }),
+    readBoundedCollectionSnapshot<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, {
+      maximumItems: MAX_JOB_PROJECTIONS,
+      maximumBytes: 32 * 1024 * 1024,
+    }),
+  ]);
   const rebuildToken = await beginAutomationJobProjectionRebuild(now);
+  let liveProjectionWriteStarted = false;
+  let committedSourceRevision: string | undefined;
   try {
     const newestFirst = (left: AutomationJob, right: AutomationJob) => {
       const byUpdatedAt = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
@@ -477,14 +509,76 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     ];
     const statusProjections = retained.map(projectAutomationJobStatusItem);
     const listProjections = retained.map(projectAutomationJobListItem);
-    await runTransaction<AutomationJobStatusProjection>(JOB_PROJECTIONS, () => statusProjections);
-    await runTransaction<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, () => listProjections);
+    const listFingerprint = automationJobProjectionFingerprint(listProjections);
+    const statusFingerprint = automationJobProjectionFingerprint(statusProjections);
+    const stagedAt = new Date(now).toISOString();
+    await runTransaction<{
+      id: string;
+      schemaVersion: 1;
+      rebuildToken: string;
+      status: 'STAGED' | 'APPLIED' | 'FAILED';
+      stagedAt: string;
+      completedAt?: string;
+      listProjectionCount: number;
+      statusProjectionCount: number;
+      listProjectionFingerprint: string;
+      statusProjectionFingerprint: string;
+      listProjections?: AutomationJobListProjection[];
+      statusProjections?: AutomationJobStatusProjection[];
+      reasonCode?: string;
+    }>(JOB_PROJECTION_REBUILD_STAGING, items => [
+      ...items.filter(item => item.id !== rebuildToken).slice(-9).map(item => ({
+        ...item,
+        listProjections: undefined,
+        statusProjections: undefined,
+      })),
+      {
+        id: rebuildToken,
+        schemaVersion: 1,
+        rebuildToken,
+        status: 'STAGED',
+        stagedAt,
+        listProjectionCount: listProjections.length,
+        statusProjectionCount: statusProjections.length,
+        listProjectionFingerprint: listFingerprint,
+        statusProjectionFingerprint: statusFingerprint,
+        listProjections,
+        statusProjections,
+      },
+    ]);
+    if (
+      listProjections.length !== statusProjections.length
+      || listFingerprint !== statusFingerprint
+    ) {
+      throw new Error('JOB_PROJECTION_REBUILD_STAGING_MISMATCH');
+    }
     // The caller's snapshot can become stale between its authoritative read
-    // and these projection writes. Re-read only in this explicit maintenance
+    // and the staged replacement. Re-read only in this explicit maintenance
     // workflow; an interactive request must never pay this full-history cost.
     const verifiedDurableJobs = await readCollection<AutomationJob>(JOBS);
     if (snapshotFingerprint(verifiedDurableJobs) !== expectedFingerprint) {
-      return finishAutomationJobProjectionRebuild(rebuildToken, null, now);
+      throw new Error('JOB_PROJECTION_REBUILD_SOURCE_CHANGED');
+    }
+    liveProjectionWriteStarted = true;
+    await runTransaction<AutomationJobStatusProjection>(JOB_PROJECTIONS, () => statusProjections);
+    await runTransaction<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, () => listProjections);
+    const [writtenStatuses, writtenList] = await Promise.all([
+      readBoundedCollectionSnapshot<AutomationJobStatusProjection>(JOB_PROJECTIONS, {
+        maximumItems: MAX_JOB_PROJECTIONS,
+        maximumBytes: 32 * 1024 * 1024,
+      }),
+      readBoundedCollectionSnapshot<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, {
+        maximumItems: MAX_JOB_PROJECTIONS,
+        maximumBytes: 32 * 1024 * 1024,
+      }),
+    ]);
+    if (
+      writtenStatuses.items.length !== statusProjections.length
+      || writtenList.items.length !== listProjections.length
+      || automationJobProjectionFingerprint(writtenStatuses.items) !== statusFingerprint
+      || automationJobProjectionFingerprint(writtenList.items) !== listFingerprint
+    ) {
+      throw new Error('JOB_PROJECTION_REBUILD_ATOMIC_VERIFY_FAILED');
     }
     const retainedOldestFirst = [...retained].sort((left, right) => {
       const byUpdatedAt = Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
@@ -492,23 +586,108 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     });
     const sourceUpdatedAt = retainedOldestFirst.at(-1)?.updatedAt || null;
     const atCapacity = retained.length >= MAX_JOB_PROJECTIONS;
-    return finishAutomationJobProjectionRebuild(rebuildToken, {
+    const manifest = await finishAutomationJobProjectionRebuild(rebuildToken, {
       durableJobCount: jobs.length,
       activeJobCount: active.length,
       retainedJobCount: retained.length,
       retainedTerminalCount: retained.filter(job => TERMINAL.has(job.status)).length,
       listProjectionCount: listProjections.length,
       statusProjectionCount: statusProjections.length,
-      listProjectionFingerprint: automationJobProjectionFingerprint(listProjections),
-      statusProjectionFingerprint: automationJobProjectionFingerprint(statusProjections),
+      listProjectionFingerprint: listFingerprint,
+      statusProjectionFingerprint: statusFingerprint,
       truncated: jobs.length > retained.length || atCapacity,
       sourceUpdatedAt,
       retentionBoundary: atCapacity && retainedOldestFirst[0]
         ? { field: 'updatedAt', oldestRetainedAt: retainedOldestFirst[0].updatedAt }
         : null,
+      observedRange: {
+        earliestCreatedAt: retainedOldestFirst[0]?.createdAt || null,
+        latestCreatedAt: [...retained]
+          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0]?.createdAt || null,
+        earliestUpdatedAt: retainedOldestFirst[0]?.updatedAt || null,
+        latestUpdatedAt: sourceUpdatedAt,
+      },
     }, now);
+    committedSourceRevision = manifest.sourceRevision;
+    if (!manifest.baselineEstablished || !manifest.currentStateComplete) {
+      throw new Error('JOB_PROJECTION_REBUILD_MANIFEST_NOT_VERIFIED');
+    }
+    const summary = await refreshAutomationJobHealthSummary(now);
+    if (
+      summary.sourceRevision !== manifest.sourceRevision
+      || summary.projectionFingerprint !== manifest.projectionFingerprint
+    ) {
+      throw new Error('JOB_PROJECTION_REBUILD_SUMMARY_NOT_VERIFIED');
+    }
+    await runTransaction<{
+      id: string;
+      schemaVersion: 1;
+      rebuildToken: string;
+      status: 'STAGED' | 'APPLIED' | 'FAILED';
+      stagedAt: string;
+      completedAt?: string;
+      listProjectionCount: number;
+      statusProjectionCount: number;
+      listProjectionFingerprint: string;
+      statusProjectionFingerprint: string;
+      listProjections?: AutomationJobListProjection[];
+      statusProjections?: AutomationJobStatusProjection[];
+      reasonCode?: string;
+    }>(JOB_PROJECTION_REBUILD_STAGING, items => items.map(item => item.id === rebuildToken ? {
+      ...item,
+      status: 'APPLIED',
+      completedAt: new Date(now).toISOString(),
+      listProjections: undefined,
+      statusProjections: undefined,
+    } : item));
+    return (await getAutomationJobProjectionManifestForMaintenance()) || manifest;
   } catch (error) {
-    await finishAutomationJobProjectionRebuild(rebuildToken, null, now).catch(() => undefined);
+    if (liveProjectionWriteStarted) {
+      await Promise.all([
+        runTransaction<AutomationJobStatusProjection>(
+          JOB_PROJECTIONS,
+          () => previousStatusSnapshot.items,
+        ),
+        runTransaction<AutomationJobListProjection>(
+          JOB_LIST_PROJECTIONS,
+          () => previousListSnapshot.items,
+        ),
+      ]).catch(() => undefined);
+    }
+    if (previousManifest) {
+      await restoreAutomationJobProjectionManifestAfterFailedRebuild(
+        rebuildToken,
+        previousManifest,
+        committedSourceRevision,
+        now,
+      ).catch(() => undefined);
+    } else {
+      await finishAutomationJobProjectionRebuild(rebuildToken, null, now).catch(() => undefined);
+    }
+    await runTransaction<{
+      id: string;
+      schemaVersion: 1;
+      rebuildToken: string;
+      status: 'STAGED' | 'APPLIED' | 'FAILED';
+      stagedAt: string;
+      completedAt?: string;
+      listProjectionCount: number;
+      statusProjectionCount: number;
+      listProjectionFingerprint: string;
+      statusProjectionFingerprint: string;
+      listProjections?: AutomationJobListProjection[];
+      statusProjections?: AutomationJobStatusProjection[];
+      reasonCode?: string;
+    }>(JOB_PROJECTION_REBUILD_STAGING, items => items.map(item => item.id === rebuildToken ? {
+      ...item,
+      status: 'FAILED',
+      completedAt: new Date(now).toISOString(),
+      listProjections: undefined,
+      statusProjections: undefined,
+      reasonCode: error instanceof Error
+        ? error.message.replace(/[^A-Z0-9_:-]/gi, '_').slice(0, 120)
+        : 'JOB_PROJECTION_REBUILD_FAILED',
+    } : item)).catch(() => undefined);
     throw error;
   }
 }
@@ -1433,11 +1612,15 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
   const correlationId = typeof input.correlationId === 'string' && input.correlationId.trim() ? input.correlationId.trim().slice(0, 160) : operationId;
   const source = typeof payload.source === 'string' ? payload.source.slice(0, 100) : undefined;
   const trigger = typeof payload.trigger === 'string' ? payload.trigger.slice(0, 100) : undefined;
+  const releaseId = getReleaseIdentity().releaseId;
+  const pickupRollout = getFeatureRolloutState('SLO_RUNNABLE_AT_V2');
   const job: AutomationJob = {
     schemaVersion: AUTOMATION_JOB_SCHEMA_VERSION, policyVersion: jobPolicy.policyVersion, handlerVersion: jobPolicy.handlerVersion,
     id: generateId(), correlationId, type: input.type, status, payload,
     priority: Math.max(0, Math.min(100, input.priority ?? 50)), idempotencyKey: key, operationId, requestedBy,
     sourceMetadata: { producer: requestedBy, source, trigger },
+    releaseId,
+    rolloutCohort: `SLO_RUNNABLE_AT_V2:${pickupRollout.mode}`,
     parentJobId: input.parentJobId,
     botId: jobPolicy.botId,
     capability,
@@ -2267,6 +2450,9 @@ export async function claimAutomationJobs(
             claimTokenHash: createHash('sha256').update(job.claimToken || '').digest('hex'),
             workerId,
             workerFencingToken: job.workerFencingToken,
+            releaseId: job.releaseId || getReleaseIdentity().releaseId,
+            rolloutCohort: job.rolloutCohort
+              || `SLO_RUNNABLE_AT_V2:${getFeatureRolloutState('SLO_RUNNABLE_AT_V2').mode}`,
           });
           existingIds.add(id);
         }

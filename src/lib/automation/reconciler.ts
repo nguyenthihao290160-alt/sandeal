@@ -15,6 +15,7 @@ import {
 import type { AutomationJob } from './types';
 import { reconcilePendingLifecycleTransitions } from '@/lib/autonomous/lifecycleStore';
 import { recordSuccessfulShadowCycle } from './canaryController';
+import { scheduleSafeProductRechecks } from './safeProductRechecks';
 
 const TERMINAL_JOB_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED']);
 
@@ -33,6 +34,9 @@ export interface ReconcilerResult {
   staleApprovalsExpired: number;
   lifecycleTransitionsReconciled: number;
   jobProjectionsRebuilt: number;
+  recheckJobs: number;
+  duplicateRechecksSuppressed: number;
+  rechecksAwaitingExecution: number;
   skipped: number;
 }
 
@@ -57,7 +61,26 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
   // Deliberate maintenance-only full-history scan. This durable worker job
   // repairs lineage and never runs inside an interactive health/dashboard
   // request; current-state consumers use compact projections.
-  const result: ReconcilerResult = { inspected: 0, repaired: 0, bridgeJobs: 0, publishJobs: 0, monitorJobs: 0, staleCandidates: 0, journalsReconciled: 0, orphans: 0, parentJobsCompleted: 0, shadowCyclesRecorded: 0, duplicateJobsCancelled: 0, staleApprovalsExpired: 0, lifecycleTransitionsReconciled: 0, jobProjectionsRebuilt: 0, skipped: 0 };
+  const result: ReconcilerResult = {
+    inspected: 0,
+    repaired: 0,
+    bridgeJobs: 0,
+    publishJobs: 0,
+    monitorJobs: 0,
+    staleCandidates: 0,
+    journalsReconciled: 0,
+    orphans: 0,
+    parentJobsCompleted: 0,
+    shadowCyclesRecorded: 0,
+    duplicateJobsCancelled: 0,
+    staleApprovalsExpired: 0,
+    lifecycleTransitionsReconciled: 0,
+    jobProjectionsRebuilt: 0,
+    recheckJobs: 0,
+    duplicateRechecksSuppressed: 0,
+    rechecksAwaitingExecution: 0,
+    skipped: 0,
+  };
   const control = await getAutomationControl();
   result.staleCandidates = await recoverStaleProcessing(nowMs);
   result.repaired += result.staleCandidates;
@@ -187,6 +210,15 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
       }
     }
   }
+  const rechecks = await scheduleSafeProductRechecks(products, { now: nowMs, limit: 50 });
+  result.recheckJobs = rechecks.created;
+  result.duplicateRechecksSuppressed = rechecks.duplicateSuppressed;
+  result.rechecksAwaitingExecution = rechecks.created + rechecks.duplicateSuppressed;
+  result.repaired += rechecks.created;
+  result.skipped += rechecks.duplicateSuppressed
+    + rechecks.notDue
+    + rechecks.permanent
+    + rechecks.manualInputRequired;
 
   for (const journal of await listInconsistentJournals()) {
     const product = products.find(item => item.publicationJobId === journal.jobId || item.relatedJobId === journal.jobId);
