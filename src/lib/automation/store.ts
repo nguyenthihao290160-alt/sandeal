@@ -20,8 +20,13 @@ import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
 import { getFeatureRolloutState } from './featureRollout';
 import {
   AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
+  AUTOMATION_JOB_PROJECTION_NAME,
+  AUTOMATION_JOB_PROJECTION_VERSION,
   AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION,
+  automationJobCombinedProjectionFingerprint,
+  automationJobProjectionContentFingerprint,
   automationJobProjectionFingerprint,
+  automationJobProjectionSourceRevision,
   beginAutomationJobProjectionRebuild,
   beginAutomationJobProjectionSync,
   finishAutomationJobProjectionRebuild,
@@ -29,6 +34,7 @@ import {
   getAutomationJobHealthView,
   getAutomationJobProjectionManifestForMaintenance,
   getAutomationJobProjectionLimit,
+  deterministicProjectionFingerprint,
   readBoundedAutomationJobProjections,
   refreshAutomationJobHealthSummary,
   restoreAutomationJobProjectionManifestAfterFailedRebuild,
@@ -75,6 +81,19 @@ export const AUTOMATION_JOB_SCHEMA_VERSION = 2;
 export const AUTOMATION_JOB_LIST_PAYLOAD_BUDGET_BYTES = 300 * 1024;
 const SECRET_KEY = /token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key|credential/i;
 const TERMINAL = new Set<AutomationJobStatus>(['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED']);
+const ALL_JOB_STATUSES = new Set<AutomationJobStatus>([
+  'PENDING',
+  'WAITING_APPROVAL',
+  'WAITING_FOR_MANUAL_INPUT',
+  'WAITING_CHILDREN',
+  'RUNNING',
+  'RETRY_SCHEDULED',
+  'SUCCEEDED',
+  'FAILED',
+  'CANCELLED',
+  'BLOCKED',
+  'PAUSED',
+]);
 const FAIRNESS_AFTER_MS = Math.max(15_000, Number(process.env.SANDEAL_JOB_FAIRNESS_AFTER_MS) || 60_000);
 const MAX_JOB_PROJECTIONS = getAutomationJobProjectionLimit();
 const PROJECTION_RECONCILE_AFTER_MS = Math.max(30_000, Number(process.env.SANDEAL_JOB_PROJECTION_RECONCILE_MS) || 60_000);
@@ -457,6 +476,211 @@ export function projectAutomationJobStatusItem(job: AutomationJob): AutomationJo
  * baseline. Callers must provide the durable automation-jobs snapshot they
  * already read; health/dashboard request paths must never invoke this rebuild.
  */
+export interface AutomationJobProjectionRebuildCandidate {
+  schemaVersion: 1;
+  projectionName: typeof AUTOMATION_JOB_PROJECTION_NAME;
+  projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION;
+  releaseId: string;
+  sourceSnapshotFingerprint: string;
+  sourceRevision: string;
+  projectionFingerprint: string;
+  candidateFingerprint: string;
+  generatedAt: string;
+  observedRange: {
+    earliestCreatedAt: string | null;
+    latestCreatedAt: string | null;
+    earliestUpdatedAt: string | null;
+    latestUpdatedAt: string | null;
+  };
+  recordCounts: {
+    durable: number;
+    active: number;
+    retained: number;
+    retainedTerminal: number;
+    list: number;
+    status: number;
+  };
+  completeness: {
+    baselineEstablished: boolean;
+    currentStateComplete: boolean;
+    historyComplete: boolean;
+    truncated: boolean;
+  };
+  projectionCapacity: number;
+  sourceUpdatedAt: string | null;
+  retentionBoundary: AutomationJobProjectionRetentionBoundary | null;
+  listProjectionFingerprint: string;
+  statusProjectionFingerprint: string;
+  listProjectionContentFingerprint: string;
+  statusProjectionContentFingerprint: string;
+  listProjections: AutomationJobListProjection[];
+  statusProjections: AutomationJobStatusProjection[];
+}
+
+interface AutomationJobProjectionRebuildStagingRecord {
+  schemaVersion: 1;
+  id: string;
+  rebuildToken: string;
+  status: 'STAGED' | 'APPLIED' | 'FAILED';
+  stagedAt: string;
+  completedAt?: string;
+  reasonCode?: string;
+  listProjectionCount: number;
+  statusProjectionCount: number;
+  listProjectionFingerprint: string;
+  statusProjectionFingerprint: string;
+  listProjectionContentFingerprint: string;
+  statusProjectionContentFingerprint: string;
+  candidate?: AutomationJobProjectionRebuildCandidate;
+}
+
+function projectionRange(items: AutomationJobListProjection[]): AutomationJobProjectionRebuildCandidate['observedRange'] {
+  const created = items.map(item => item.createdAt).filter(value => Number.isFinite(Date.parse(value)));
+  const updated = items.map(item => item.updatedAt).filter(value => Number.isFinite(Date.parse(value)));
+  created.sort((left, right) => Date.parse(left) - Date.parse(right) || left.localeCompare(right));
+  updated.sort((left, right) => Date.parse(left) - Date.parse(right) || left.localeCompare(right));
+  return {
+    earliestCreatedAt: created[0] || null,
+    latestCreatedAt: created.at(-1) || null,
+    earliestUpdatedAt: updated[0] || null,
+    latestUpdatedAt: updated.at(-1) || null,
+  };
+}
+
+function projectionCandidateFingerprint(
+  candidate: Omit<AutomationJobProjectionRebuildCandidate, 'candidateFingerprint' | 'generatedAt'>,
+): string {
+  return deterministicProjectionFingerprint(candidate);
+}
+
+export function validateAutomationJobProjectionRebuildCandidate(
+  value: unknown,
+  expected: { sourceSnapshotFingerprint?: string } = {},
+): { valid: boolean; reasonCodes: string[] } {
+  if (!value || typeof value !== 'object') {
+    return { valid: false, reasonCodes: ['JOB_PROJECTION_CANDIDATE_INVALID'] };
+  }
+  const candidate = value as AutomationJobProjectionRebuildCandidate;
+  const list = Array.isArray(candidate.listProjections) ? candidate.listProjections : [];
+  const statuses = Array.isArray(candidate.statusProjections) ? candidate.statusProjections : [];
+  const listIdentity = automationJobProjectionFingerprint(list);
+  const statusIdentity = automationJobProjectionFingerprint(statuses);
+  const listContent = automationJobProjectionContentFingerprint(list);
+  const statusContent = automationJobProjectionContentFingerprint(statuses);
+  const combined = automationJobCombinedProjectionFingerprint({
+    listProjectionFingerprint: listIdentity,
+    statusProjectionFingerprint: statusIdentity,
+    listProjectionContentFingerprint: listContent,
+    statusProjectionContentFingerprint: statusContent,
+    listProjectionCount: list.length,
+    statusProjectionCount: statuses.length,
+  });
+  const range = projectionRange(list);
+  const activeCount = list.filter(item => !TERMINAL.has(item.status)).length;
+  const retainedTerminalCount = list.length - activeCount;
+  const matchingIdentities = deterministicProjectionFingerprint(
+    list.map(item => [item.id, item.status, item.updatedAt]).sort(),
+  ) === deterministicProjectionFingerprint(
+    statuses.map(item => [item.id, item.status, item.updatedAt]).sort(),
+  );
+  const expectedSourceRevision = automationJobProjectionSourceRevision({
+    releaseId: candidate.releaseId,
+    projectionFingerprint: combined,
+    durableJobCount: Number(candidate.recordCounts?.durable),
+    activeJobCount: Number(candidate.recordCounts?.active),
+    retainedJobCount: Number(candidate.recordCounts?.retained),
+    sourceUpdatedAt: candidate.sourceUpdatedAt,
+  });
+  const { candidateFingerprint: _candidateFingerprint, generatedAt: _generatedAt, ...fingerprinted } = candidate;
+  void _candidateFingerprint;
+  void _generatedAt;
+  const reasons = [
+    ...(candidate.schemaVersion !== 1 ? ['JOB_PROJECTION_CANDIDATE_SCHEMA_MISMATCH'] : []),
+    ...(candidate.projectionName !== AUTOMATION_JOB_PROJECTION_NAME
+      ? ['JOB_PROJECTION_CANDIDATE_NAME_MISMATCH']
+      : []),
+    ...(candidate.projectionVersion !== AUTOMATION_JOB_PROJECTION_VERSION
+      ? ['JOB_PROJECTION_CANDIDATE_VERSION_MISMATCH']
+      : []),
+    ...(!/^[a-f0-9]{64}$/.test(String(candidate.sourceSnapshotFingerprint || ''))
+      ? ['JOB_PROJECTION_CANDIDATE_SOURCE_FINGERPRINT_INVALID']
+      : []),
+    ...(expected.sourceSnapshotFingerprint
+      && candidate.sourceSnapshotFingerprint !== expected.sourceSnapshotFingerprint
+      ? ['JOB_PROJECTION_CANDIDATE_SOURCE_CHANGED']
+      : []),
+    ...(!Array.isArray(candidate.listProjections) || !Array.isArray(candidate.statusProjections)
+      ? ['JOB_PROJECTION_CANDIDATE_ITEMS_INVALID']
+      : []),
+    ...(list.length !== statuses.length || !matchingIdentities
+      ? ['JOB_PROJECTION_CANDIDATE_IDENTITY_MISMATCH']
+      : []),
+    ...(new Set(list.map(item => item.id)).size !== list.length
+      || new Set(statuses.map(item => item.id)).size !== statuses.length
+      ? ['JOB_PROJECTION_CANDIDATE_DUPLICATE_ID']
+      : []),
+    ...(list.some(item => item.projectionSchemaVersion !== AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION)
+      || statuses.some(item => item.projectionSchemaVersion !== AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION)
+      ? ['JOB_PROJECTION_CANDIDATE_ITEM_SCHEMA_MISMATCH']
+      : []),
+    ...(list.some(item => (
+      !item
+      || typeof item.id !== 'string'
+      || typeof item.type !== 'string'
+      || !ALL_JOB_STATUSES.has(item.status)
+      || !Number.isFinite(Date.parse(item.createdAt))
+      || !Number.isFinite(Date.parse(item.updatedAt))
+    )) || statuses.some(item => (
+      !item
+      || typeof item.id !== 'string'
+      || typeof item.type !== 'string'
+      || !ALL_JOB_STATUSES.has(item.status)
+      || !Number.isFinite(Date.parse(item.createdAt))
+      || !Number.isFinite(Date.parse(item.updatedAt))
+    )) ? ['JOB_PROJECTION_CANDIDATE_ITEM_INVALID'] : []),
+    ...(candidate.listProjectionFingerprint !== listIdentity
+      || candidate.statusProjectionFingerprint !== statusIdentity
+      || candidate.listProjectionContentFingerprint !== listContent
+      || candidate.statusProjectionContentFingerprint !== statusContent
+      || candidate.projectionFingerprint !== combined
+      ? ['JOB_PROJECTION_CANDIDATE_FINGERPRINT_MISMATCH']
+      : []),
+    ...(candidate.recordCounts?.retained !== list.length
+      || candidate.recordCounts?.list !== list.length
+      || candidate.recordCounts?.status !== statuses.length
+      || candidate.recordCounts?.retainedTerminal !== retainedTerminalCount
+      || candidate.recordCounts?.active < activeCount
+      || (candidate.completeness?.currentStateComplete && candidate.recordCounts.active !== activeCount)
+      || !Number.isInteger(candidate.recordCounts?.durable)
+      || candidate.recordCounts.durable < list.length
+      ? ['JOB_PROJECTION_CANDIDATE_COUNT_MISMATCH']
+      : []),
+    ...(candidate.projectionCapacity !== getAutomationJobProjectionLimit()
+      || list.length > candidate.projectionCapacity
+      ? ['JOB_PROJECTION_CANDIDATE_CAPACITY_INVALID']
+      : []),
+    ...(candidate.completeness?.baselineEstablished !== true
+      || candidate.completeness.currentStateComplete !== (candidate.recordCounts?.active <= candidate.projectionCapacity)
+      || candidate.completeness.historyComplete !== !candidate.completeness.truncated
+      ? ['JOB_PROJECTION_CANDIDATE_COMPLETENESS_INVALID']
+      : []),
+    ...(deterministicProjectionFingerprint(candidate.observedRange) !== deterministicProjectionFingerprint(range)
+      || candidate.sourceUpdatedAt !== range.latestUpdatedAt
+      ? ['JOB_PROJECTION_CANDIDATE_OBSERVED_RANGE_MISMATCH']
+      : []),
+    ...(candidate.sourceRevision !== expectedSourceRevision
+      ? ['JOB_PROJECTION_CANDIDATE_SOURCE_REVISION_MISMATCH']
+      : []),
+    ...(candidate.candidateFingerprint !== projectionCandidateFingerprint(fingerprinted)
+      ? ['JOB_PROJECTION_CANDIDATE_SERIALIZATION_MISMATCH']
+      : []),
+    ...(Number.isNaN(Date.parse(candidate.generatedAt))
+      ? ['JOB_PROJECTION_CANDIDATE_GENERATED_AT_INVALID']
+      : []),
+  ];
+  return { valid: reasons.length === 0, reasonCodes: [...new Set(reasons)] };
+}
+
 export async function rebuildAutomationJobReadModelsFromDurable(
   jobs: AutomationJob[],
   now = Date.now(),
@@ -469,18 +693,16 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     }
     ids.add(job.id);
   }
-  const snapshotFingerprint = (values: AutomationJob[]) => createHash('sha256')
-    .update(JSON.stringify(
-      [...values]
-        .sort((left, right) => left.id.localeCompare(right.id))
-        .map(value => ({
-          id: value.id,
-          status: value.status,
-          updatedAt: value.updatedAt,
-          resources: automationJobResourceReferences(value),
-        })),
-    ))
-    .digest('hex');
+  const snapshotFingerprint = (values: AutomationJob[]) => deterministicProjectionFingerprint(
+    [...values]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(value => ({
+        id: value.id,
+        status: value.status,
+        updatedAt: value.updatedAt,
+        resources: automationJobResourceReferences(value),
+      })),
+  );
   const expectedFingerprint = snapshotFingerprint(jobs);
   const [previousManifest, previousStatusSnapshot, previousListSnapshot] = await Promise.all([
     getAutomationJobProjectionManifestForMaintenance(),
@@ -511,26 +733,82 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     const listProjections = retained.map(projectAutomationJobListItem);
     const listFingerprint = automationJobProjectionFingerprint(listProjections);
     const statusFingerprint = automationJobProjectionFingerprint(statusProjections);
+    const listContentFingerprint = automationJobProjectionContentFingerprint(listProjections);
+    const statusContentFingerprint = automationJobProjectionContentFingerprint(statusProjections);
     const stagedAt = new Date(now).toISOString();
-    await runTransaction<{
-      id: string;
-      schemaVersion: 1;
-      rebuildToken: string;
-      status: 'STAGED' | 'APPLIED' | 'FAILED';
-      stagedAt: string;
-      completedAt?: string;
-      listProjectionCount: number;
-      statusProjectionCount: number;
-      listProjectionFingerprint: string;
-      statusProjectionFingerprint: string;
-      listProjections?: AutomationJobListProjection[];
-      statusProjections?: AutomationJobStatusProjection[];
-      reasonCode?: string;
-    }>(JOB_PROJECTION_REBUILD_STAGING, items => [
+    const range = projectionRange(listProjections);
+    const atCapacity = retained.length >= MAX_JOB_PROJECTIONS;
+    const truncated = jobs.length > retained.length || atCapacity;
+    const retentionBoundary = atCapacity && range.earliestUpdatedAt
+      ? { field: 'updatedAt' as const, oldestRetainedAt: range.earliestUpdatedAt }
+      : null;
+    const projectionFingerprint = automationJobCombinedProjectionFingerprint({
+      listProjectionFingerprint: listFingerprint,
+      statusProjectionFingerprint: statusFingerprint,
+      listProjectionContentFingerprint: listContentFingerprint,
+      statusProjectionContentFingerprint: statusContentFingerprint,
+      listProjectionCount: listProjections.length,
+      statusProjectionCount: statusProjections.length,
+    });
+    const releaseId = getReleaseIdentity().releaseId;
+    const recordCounts = {
+      durable: jobs.length,
+      active: active.length,
+      retained: retained.length,
+      retainedTerminal: retained.filter(job => TERMINAL.has(job.status)).length,
+      list: listProjections.length,
+      status: statusProjections.length,
+    };
+    const completeness = {
+      baselineEstablished: true,
+      currentStateComplete: active.length <= MAX_JOB_PROJECTIONS,
+      historyComplete: !truncated,
+      truncated,
+    };
+    const sourceRevision = automationJobProjectionSourceRevision({
+      releaseId,
+      projectionFingerprint,
+      durableJobCount: recordCounts.durable,
+      activeJobCount: recordCounts.active,
+      retainedJobCount: recordCounts.retained,
+      sourceUpdatedAt: range.latestUpdatedAt,
+    });
+    const candidateIdentity: Omit<AutomationJobProjectionRebuildCandidate, 'candidateFingerprint' | 'generatedAt'> = {
+      schemaVersion: 1,
+      projectionName: AUTOMATION_JOB_PROJECTION_NAME,
+      projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+      releaseId,
+      sourceSnapshotFingerprint: expectedFingerprint,
+      sourceRevision,
+      projectionFingerprint,
+      observedRange: range,
+      recordCounts,
+      completeness,
+      projectionCapacity: MAX_JOB_PROJECTIONS,
+      sourceUpdatedAt: range.latestUpdatedAt,
+      retentionBoundary,
+      listProjectionFingerprint: listFingerprint,
+      statusProjectionFingerprint: statusFingerprint,
+      listProjectionContentFingerprint: listContentFingerprint,
+      statusProjectionContentFingerprint: statusContentFingerprint,
+      listProjections,
+      statusProjections,
+    };
+    const candidate: AutomationJobProjectionRebuildCandidate = {
+      ...candidateIdentity,
+      generatedAt: stagedAt,
+      candidateFingerprint: projectionCandidateFingerprint(candidateIdentity),
+    };
+    const candidateValidation = validateAutomationJobProjectionRebuildCandidate(candidate, {
+      sourceSnapshotFingerprint: expectedFingerprint,
+    });
+    if (!candidateValidation.valid) {
+      throw new Error(candidateValidation.reasonCodes[0] || 'JOB_PROJECTION_REBUILD_CANDIDATE_INVALID');
+    }
+    await runTransaction<AutomationJobProjectionRebuildStagingRecord>(JOB_PROJECTION_REBUILD_STAGING, items => [
       ...items.filter(item => item.id !== rebuildToken).slice(-9).map(item => ({
         ...item,
-        listProjections: undefined,
-        statusProjections: undefined,
+        candidate: undefined,
       })),
       {
         id: rebuildToken,
@@ -542,15 +820,21 @@ export async function rebuildAutomationJobReadModelsFromDurable(
         statusProjectionCount: statusProjections.length,
         listProjectionFingerprint: listFingerprint,
         statusProjectionFingerprint: statusFingerprint,
-        listProjections,
-        statusProjections,
+        listProjectionContentFingerprint: listContentFingerprint,
+        statusProjectionContentFingerprint: statusContentFingerprint,
+        candidate,
       },
     ]);
-    if (
-      listProjections.length !== statusProjections.length
-      || listFingerprint !== statusFingerprint
-    ) {
-      throw new Error('JOB_PROJECTION_REBUILD_STAGING_MISMATCH');
+    const stagedSnapshot = await readBoundedCollectionSnapshot<AutomationJobProjectionRebuildStagingRecord>(
+      JOB_PROJECTION_REBUILD_STAGING,
+      { maximumItems: 10, maximumBytes: 32 * 1024 * 1024 },
+    );
+    const stagedCandidate = stagedSnapshot.items.find(item => item.id === rebuildToken)?.candidate;
+    const stagedValidation = validateAutomationJobProjectionRebuildCandidate(stagedCandidate, {
+      sourceSnapshotFingerprint: expectedFingerprint,
+    });
+    if (!stagedValidation.valid || !stagedCandidate) {
+      throw new Error(stagedValidation.reasonCodes[0] || 'JOB_PROJECTION_REBUILD_STAGING_MISMATCH');
     }
     // The caller's snapshot can become stale between its authoritative read
     // and the staged replacement. Re-read only in this explicit maintenance
@@ -560,8 +844,14 @@ export async function rebuildAutomationJobReadModelsFromDurable(
       throw new Error('JOB_PROJECTION_REBUILD_SOURCE_CHANGED');
     }
     liveProjectionWriteStarted = true;
-    await runTransaction<AutomationJobStatusProjection>(JOB_PROJECTIONS, () => statusProjections);
-    await runTransaction<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, () => listProjections);
+    await runTransaction<AutomationJobStatusProjection>(
+      JOB_PROJECTIONS,
+      () => stagedCandidate.statusProjections,
+    );
+    await runTransaction<AutomationJobListProjection>(
+      JOB_LIST_PROJECTIONS,
+      () => stagedCandidate.listProjections,
+    );
     const [writtenStatuses, writtenList] = await Promise.all([
       readBoundedCollectionSnapshot<AutomationJobStatusProjection>(JOB_PROJECTIONS, {
         maximumItems: MAX_JOB_PROJECTIONS,
@@ -577,39 +867,38 @@ export async function rebuildAutomationJobReadModelsFromDurable(
       || writtenList.items.length !== listProjections.length
       || automationJobProjectionFingerprint(writtenStatuses.items) !== statusFingerprint
       || automationJobProjectionFingerprint(writtenList.items) !== listFingerprint
+      || automationJobProjectionContentFingerprint(writtenStatuses.items) !== statusContentFingerprint
+      || automationJobProjectionContentFingerprint(writtenList.items) !== listContentFingerprint
     ) {
       throw new Error('JOB_PROJECTION_REBUILD_ATOMIC_VERIFY_FAILED');
     }
-    const retainedOldestFirst = [...retained].sort((left, right) => {
-      const byUpdatedAt = Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
-      return byUpdatedAt || left.id.localeCompare(right.id);
-    });
-    const sourceUpdatedAt = retainedOldestFirst.at(-1)?.updatedAt || null;
-    const atCapacity = retained.length >= MAX_JOB_PROJECTIONS;
+    const postWriteDurableJobs = await readCollection<AutomationJob>(JOBS);
+    if (snapshotFingerprint(postWriteDurableJobs) !== expectedFingerprint) {
+      throw new Error('JOB_PROJECTION_REBUILD_SOURCE_CHANGED_AFTER_WRITE');
+    }
     const manifest = await finishAutomationJobProjectionRebuild(rebuildToken, {
-      durableJobCount: jobs.length,
-      activeJobCount: active.length,
-      retainedJobCount: retained.length,
-      retainedTerminalCount: retained.filter(job => TERMINAL.has(job.status)).length,
-      listProjectionCount: listProjections.length,
-      statusProjectionCount: statusProjections.length,
-      listProjectionFingerprint: listFingerprint,
-      statusProjectionFingerprint: statusFingerprint,
-      truncated: jobs.length > retained.length || atCapacity,
-      sourceUpdatedAt,
-      retentionBoundary: atCapacity && retainedOldestFirst[0]
-        ? { field: 'updatedAt', oldestRetainedAt: retainedOldestFirst[0].updatedAt }
-        : null,
-      observedRange: {
-        earliestCreatedAt: retainedOldestFirst[0]?.createdAt || null,
-        latestCreatedAt: [...retained]
-          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0]?.createdAt || null,
-        earliestUpdatedAt: retainedOldestFirst[0]?.updatedAt || null,
-        latestUpdatedAt: sourceUpdatedAt,
-      },
+      durableJobCount: stagedCandidate.recordCounts.durable,
+      activeJobCount: stagedCandidate.recordCounts.active,
+      retainedJobCount: stagedCandidate.recordCounts.retained,
+      retainedTerminalCount: stagedCandidate.recordCounts.retainedTerminal,
+      listProjectionCount: stagedCandidate.recordCounts.list,
+      statusProjectionCount: stagedCandidate.recordCounts.status,
+      listProjectionFingerprint: stagedCandidate.listProjectionFingerprint,
+      statusProjectionFingerprint: stagedCandidate.statusProjectionFingerprint,
+      listProjectionContentFingerprint: stagedCandidate.listProjectionContentFingerprint,
+      statusProjectionContentFingerprint: stagedCandidate.statusProjectionContentFingerprint,
+      truncated: stagedCandidate.completeness.truncated,
+      sourceUpdatedAt: stagedCandidate.sourceUpdatedAt,
+      retentionBoundary: stagedCandidate.retentionBoundary,
+      observedRange: stagedCandidate.observedRange,
     }, now);
     committedSourceRevision = manifest.sourceRevision;
-    if (!manifest.baselineEstablished || !manifest.currentStateComplete) {
+    if (
+      !manifest.baselineEstablished
+      || !manifest.currentStateComplete
+      || manifest.sourceRevision !== stagedCandidate.sourceRevision
+      || manifest.projectionFingerprint !== stagedCandidate.projectionFingerprint
+    ) {
       throw new Error('JOB_PROJECTION_REBUILD_MANIFEST_NOT_VERIFIED');
     }
     const summary = await refreshAutomationJobHealthSummary(now);
@@ -619,27 +908,15 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     ) {
       throw new Error('JOB_PROJECTION_REBUILD_SUMMARY_NOT_VERIFIED');
     }
-    await runTransaction<{
-      id: string;
-      schemaVersion: 1;
-      rebuildToken: string;
-      status: 'STAGED' | 'APPLIED' | 'FAILED';
-      stagedAt: string;
-      completedAt?: string;
-      listProjectionCount: number;
-      statusProjectionCount: number;
-      listProjectionFingerprint: string;
-      statusProjectionFingerprint: string;
-      listProjections?: AutomationJobListProjection[];
-      statusProjections?: AutomationJobStatusProjection[];
-      reasonCode?: string;
-    }>(JOB_PROJECTION_REBUILD_STAGING, items => items.map(item => item.id === rebuildToken ? {
+    await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
+      JOB_PROJECTION_REBUILD_STAGING,
+      items => items.map(item => item.id === rebuildToken ? {
       ...item,
       status: 'APPLIED',
       completedAt: new Date(now).toISOString(),
-      listProjections: undefined,
-      statusProjections: undefined,
-    } : item));
+      candidate: undefined,
+    } : item),
+    );
     return (await getAutomationJobProjectionManifestForMaintenance()) || manifest;
   } catch (error) {
     if (liveProjectionWriteStarted) {
@@ -664,30 +941,18 @@ export async function rebuildAutomationJobReadModelsFromDurable(
     } else {
       await finishAutomationJobProjectionRebuild(rebuildToken, null, now).catch(() => undefined);
     }
-    await runTransaction<{
-      id: string;
-      schemaVersion: 1;
-      rebuildToken: string;
-      status: 'STAGED' | 'APPLIED' | 'FAILED';
-      stagedAt: string;
-      completedAt?: string;
-      listProjectionCount: number;
-      statusProjectionCount: number;
-      listProjectionFingerprint: string;
-      statusProjectionFingerprint: string;
-      listProjections?: AutomationJobListProjection[];
-      statusProjections?: AutomationJobStatusProjection[];
-      reasonCode?: string;
-    }>(JOB_PROJECTION_REBUILD_STAGING, items => items.map(item => item.id === rebuildToken ? {
+    await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
+      JOB_PROJECTION_REBUILD_STAGING,
+      items => items.map(item => item.id === rebuildToken ? {
       ...item,
       status: 'FAILED',
       completedAt: new Date(now).toISOString(),
-      listProjections: undefined,
-      statusProjections: undefined,
+      candidate: undefined,
       reasonCode: error instanceof Error
         ? error.message.replace(/[^A-Z0-9_:-]/gi, '_').slice(0, 120)
         : 'JOB_PROJECTION_REBUILD_FAILED',
-    } : item)).catch(() => undefined);
+    } : item),
+    ).catch(() => undefined);
     throw error;
   }
 }
@@ -698,6 +963,7 @@ interface ProjectionMutationStats {
   activeCount: number;
   terminalCount: number;
   fingerprint: string;
+  contentFingerprint: string;
   retentionLimitReached: boolean;
   currentStateTruncated: boolean;
   sourceUpdatedAt: string | null;
@@ -733,6 +999,7 @@ function boundedProjectionItems<T extends Pick<AutomationJob, 'id' | 'status' | 
       activeCount: retained.filter(item => !TERMINAL.has(item.status)).length,
       terminalCount: retained.filter(item => TERMINAL.has(item.status)).length,
       fingerprint: automationJobProjectionFingerprint(retained),
+      contentFingerprint: automationJobProjectionContentFingerprint(retained),
       retentionLimitReached,
       currentStateTruncated: activeBeforeRetention > MAX_JOB_PROJECTIONS,
       sourceUpdatedAt: timestamps.at(-1)?.value || null,
@@ -829,6 +1096,10 @@ async function syncJobReadModelsBestEffort(job: AutomationJob, removeHeartbeat =
       statusProjectionCount: statusStats?.count || 0,
       listProjectionFingerprint: listStats?.fingerprint || automationJobProjectionFingerprint([]),
       statusProjectionFingerprint: statusStats?.fingerprint || automationJobProjectionFingerprint([]),
+      listProjectionContentFingerprint: listStats?.contentFingerprint
+        || automationJobProjectionContentFingerprint([]),
+      statusProjectionContentFingerprint: statusStats?.contentFingerprint
+        || automationJobProjectionContentFingerprint([]),
       activeJobCount: Math.max(statusStats?.activeCount || 0, listStats?.activeCount || 0),
       retainedTerminalCount: projectionSyncSucceeded
         ? Math.min(statusStats?.terminalCount || 0, listStats?.terminalCount || 0)
@@ -2617,6 +2888,8 @@ export async function heartbeatAutomationJob(
         statusProjectionCount: 0,
         listProjectionFingerprint: automationJobProjectionFingerprint([]),
         statusProjectionFingerprint: automationJobProjectionFingerprint([]),
+        listProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
+        statusProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
         activeJobCount: 0,
         retainedTerminalCount: 0,
         retentionLimitReached: false,

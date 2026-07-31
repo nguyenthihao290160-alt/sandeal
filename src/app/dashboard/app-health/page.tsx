@@ -122,12 +122,18 @@ type Health = {
   } | null;
   projectionMaintenance?: {
     status: string;
+    repairState: 'IDLE' | 'SCHEDULED' | 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED' | 'EXHAUSTED';
     jobId: string | null;
     attemptCount: number;
     maximumAttempts: number;
     nextRetryAt: string | null;
     duplicateRequestsSuppressed: number;
     reasonCodes: string[];
+    requestedAt: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    durationMs: number | null;
+    outcomeReasonCode: string | null;
   } | null;
   operational: {
     currentActiveReasons: string[];
@@ -248,6 +254,9 @@ type Health = {
     availability: 'AVAILABLE' | 'DEGRADED' | 'UNAVAILABLE';
     evidenceClassification?: 'COMPLETE' | 'INCOMPLETE' | 'UNAVAILABLE';
     reasonCodes: string[];
+    projectionStatus: 'VALID' | 'STALE' | 'INVALID' | 'REBUILD_SCHEDULED' | 'REBUILD_RUNNING' | 'REBUILD_FAILED' | 'UNKNOWN';
+    previousValidProjectionAvailable: boolean;
+    previousValidProjectionGeneratedAt: string | null;
   } | null;
 };
 
@@ -303,6 +312,16 @@ const COMPONENT_STATUS_LABELS: Record<Health['components'][string]['status'], st
   insufficient_data: 'Chưa đủ dữ liệu',
 };
 
+const PROJECTION_REPAIR_LABELS: Record<NonNullable<Health['projectionMaintenance']>['repairState'], string> = {
+  IDLE: 'Không cần sửa',
+  SCHEDULED: 'Đã xếp lịch sửa nền',
+  RUNNING: 'Worker đang sửa',
+  RETRY_SCHEDULED: 'Đã xếp lịch thử lại',
+  SUCCEEDED: 'Lần sửa gần nhất đã hoàn tất',
+  FAILED: 'Lần sửa gần nhất thất bại',
+  EXHAUSTED: 'Đã hết số lần thử',
+};
+
 function diagnosticCount(value: number | null | undefined) {
   return value === null || value === undefined ? 'Không xác định' : value.toLocaleString('vi-VN');
 }
@@ -333,7 +352,7 @@ export default function SystemHealthPage() {
   const health = refreshState.snapshot;
   const error = refreshState.message;
   const load = useCallback(async () => {
-    requestRef.current?.abort(new DOMException('Superseded health request', 'AbortError'));
+    if (requestRef.current) return;
     const controller = new AbortController();
     requestRef.current = controller;
     const sequence = ++requestSequenceRef.current;
@@ -352,8 +371,17 @@ export default function SystemHealthPage() {
         || body.data.components.historySummary?.stale === true;
       const incompleteProjection = body.data.jobReadModel?.evidenceClassification === 'INCOMPLETE'
         || body.data.jobReadModel?.evidenceClassification === 'UNAVAILABLE';
+      const repairState = body.data.projectionMaintenance?.repairState;
       const partialMessage = body.data.partial
-        ? staleProjection
+        ? repairState === 'SCHEDULED'
+          ? 'Phép chiếu Job Health chưa hợp lệ; một tác vụ sửa nền đã được xếp lịch.'
+          : repairState === 'RUNNING'
+            ? 'Worker đang sửa phép chiếu Job Health ở nền; bản chụp hợp lệ gần nhất vẫn được giữ.'
+            : repairState === 'RETRY_SCHEDULED'
+              ? 'Lần sửa phép chiếu chưa thành công; Worker đã xếp lịch thử lại.'
+              : repairState === 'FAILED' || repairState === 'EXHAUSTED'
+                ? 'Sửa phép chiếu Job Health chưa thành công; bản chụp hợp lệ gần nhất vẫn được giữ.'
+                : staleProjection
           ? 'Bản tổng hợp hàng đợi đã cũ; các thành phần đã xác minh vẫn được hiển thị.'
           : incompleteProjection
             ? 'Bằng chứng hàng đợi chưa đầy đủ; số không không được hiểu là không có tác vụ.'
@@ -421,7 +449,7 @@ export default function SystemHealthPage() {
             : health?.partial
               ? 'Sức khỏe một phần.'
               : 'Không thể xác minh tình trạng hệ thống.'}</strong> {error}{' '}
-          <button className={styles.button} onClick={() => void load()}>Thử lại</button>
+          <button className={styles.button} onClick={() => void load()} disabled={loading}>Thử lại</button>
         </div>
       )}
 
@@ -634,7 +662,7 @@ export default function SystemHealthPage() {
                 <span>Bảo trì Job Health</span>
                 <strong>
                   {health.projectionMaintenance
-                    ? `${health.projectionMaintenance.status} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}`
+                    ? `${PROJECTION_REPAIR_LABELS[health.projectionMaintenance.repairState]} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}${health.projectionMaintenance.nextRetryAt ? ` · thử lại ${when(health.projectionMaintenance.nextRetryAt)}` : ''}`
                     : 'Chưa có'}
                 </strong>
               </div>

@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
   if (authError) return authError;
 
   try {
-    const data = await buildAutomationHealthResponse();
+    const data = await buildAutomationHealthResponse({ signal: request.signal });
     return NextResponse.json({
       ok: true,
       code: data.partial ? 'DEGRADED_HEALTH' : 'OK',

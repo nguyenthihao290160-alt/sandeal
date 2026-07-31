@@ -6,6 +6,7 @@ export type AutomationConcurrencyClass =
   | 'PRODUCT'
   | 'SOURCE_NETWORK'
   | 'PROVIDER'
+  | 'PROJECTION_MAINTENANCE'
   | 'STORAGE_EXCLUSIVE'
   | 'GENERAL';
 
@@ -116,6 +117,18 @@ function payloadIdentifiers(payload: Record<string, unknown>, singular: string, 
 export function getAutomationExecutionDescriptor(
   job: Pick<AutomationJob, 'type' | 'payload' | 'operationId'>,
 ): AutomationExecutionDescriptor {
+  if (
+    job.type === 'RECONCILE_AUTOMATION'
+    && job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD'
+  ) {
+    return {
+      concurrencyClass: 'PROJECTION_MAINTENANCE',
+      critical: false,
+      exclusive: false,
+      resourceScope: 'NONE',
+      resourceKeys: ['projection:automation-job-health'],
+    };
+  }
   const policy = policyForType(job.type);
   const keys = new Set<string>();
   if (policy.resourceScope === 'GLOBAL') keys.add('storage:global');

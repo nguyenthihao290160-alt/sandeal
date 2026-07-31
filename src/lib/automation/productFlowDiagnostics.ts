@@ -10,6 +10,7 @@ import type { Product } from '@/lib/types';
 import {
   AUTOMATION_JOB_PROJECTION_VERSION,
   readBoundedAutomationJobStatuses,
+  type AutomationJobHealthView,
   type BoundedAutomationJobStatusRead,
   type ProjectionEvidenceClassification,
 } from './jobHealthSummary';
@@ -472,7 +473,8 @@ export function deriveProductFlowDiagnostics(
     projectionMismatch: projectionMismatches.length,
   });
   const manifestUpdatedAt = parsed(input.jobs.manifestUpdatedAt || undefined);
-  const stale = manifestUpdatedAt !== null && now - manifestUpdatedAt > STALE_PROJECTION_MS;
+  const stale = input.jobs.reasonCodes.includes('PRODUCT_FLOW_JOB_PROJECTION_STALE')
+    || (manifestUpdatedAt !== null && now - manifestUpdatedAt > STALE_PROJECTION_MS);
   const unknownProductCount = productsComplete ? undefined : null;
   const unknownCandidateCount = candidatesComplete ? undefined : null;
   const unknownJobCount = jobsCurrentComplete && recentJobHistoryComplete ? undefined : null;
@@ -634,6 +636,42 @@ async function boundedCurrentState<T>(
   }
 }
 
+function unavailableJobReadFromProjectionStatus(
+  status: AutomationJobHealthView,
+): BoundedAutomationJobStatusRead {
+  return {
+    items: [],
+    availability: status.projectionStatus === 'UNKNOWN' ? 'UNAVAILABLE' : 'DEGRADED',
+    reasonCodes: [...new Set([
+      ...status.reasonCodes.map(code => code.replace(/^JOB_PROJECTION_/, 'JOB_STATUS_PROJECTION_')),
+      'JOB_STATUS_PROJECTION_CURRENT_STATE_INCOMPLETE',
+    ])],
+    evidenceClassification: status.projectionStatus === 'UNKNOWN' ? 'UNAVAILABLE' : 'INCOMPLETE',
+    source: 'job-status-projection-v1',
+    collectionPresent: status.collectionPresent,
+    currentStateComplete: false,
+    historyComplete: false,
+    truncated: status.truncated,
+    observedRange: status.observedRange,
+    retentionBoundary: status.retentionBoundary,
+    manifestRebuiltAt: status.projectionEvidence.manifestRebuiltAt,
+    manifestReleaseId: status.projectionEvidence.manifestReleaseId,
+    manifestUpdatedAt: status.projectionEvidence.manifestUpdatedAt,
+    projectionVersion: status.projectionEvidence.projectionVersion,
+    sourceRevision: status.sourceRevision,
+    summaryRevision: status.summaryRevision,
+    projectionFingerprint: status.projectionFingerprint,
+    generatedAt: status.projectionEvidence.generatedAt,
+    recordCounts: status.recordCounts,
+    completeness: {
+      ...status.completeness,
+      currentStateComplete: false,
+      historyComplete: false,
+    },
+    coverageComplete: false,
+  };
+}
+
 export async function buildProductFlowDiagnostics(
   now = Date.now(),
   dependencies: {
@@ -643,13 +681,18 @@ export async function buildProductFlowDiagnostics(
     getSourceHealth?: () => Promise<SourceHealth>;
     getAiReadiness?: () => Promise<GeminiProviderReadiness>;
     getControl?: () => Promise<AutomationControlState>;
+    projectionStatus?: AutomationJobHealthView;
   } = {},
 ): Promise<ProductFlowDiagnostics> {
   const accessTrade = createDefaultSourceAdapterRegistry().get('accesstrade');
-  const [products, candidates, jobs, sourceHealth, aiReadiness, control] = await Promise.all([
+  const canReadJobProjection = !dependencies.projectionStatus
+    || ['VALID', 'STALE'].includes(dependencies.projectionStatus.projectionStatus);
+  const [products, candidates, jobsRead, sourceHealth, aiReadiness, control] = await Promise.all([
     dependencies.readProducts?.() || boundedCurrentState<Product>('products', 'PRODUCT_STATE'),
     dependencies.readCandidates?.() || boundedCurrentState<CandidateQueueItem>('candidate-queue', 'CANDIDATE_STATE'),
-    dependencies.readJobs?.() || readBoundedAutomationJobStatuses(),
+    canReadJobProjection
+      ? dependencies.readJobs?.() || readBoundedAutomationJobStatuses()
+      : Promise.resolve(unavailableJobReadFromProjectionStatus(dependencies.projectionStatus!)),
     dependencies.getSourceHealth?.()
       || accessTrade?.healthCheck({ probe: false })
       || Promise.resolve<SourceHealth>({
@@ -661,6 +704,12 @@ export async function buildProductFlowDiagnostics(
     dependencies.getAiReadiness?.() || getGeminiProviderReadiness(now),
     dependencies.getControl?.() || getAutomationControl(),
   ]);
+  const jobs = dependencies.projectionStatus?.projectionStatus === 'STALE'
+    ? {
+        ...jobsRead,
+        reasonCodes: [...new Set([...jobsRead.reasonCodes, 'PRODUCT_FLOW_JOB_PROJECTION_STALE'])],
+      }
+    : jobsRead;
   return deriveProductFlowDiagnostics({
     products,
     candidates,

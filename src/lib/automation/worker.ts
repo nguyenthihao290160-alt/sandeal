@@ -32,7 +32,10 @@ import {
   waitAutomationJobForManual,
   rebuildAutomationJobReadModelsFromDurable,
 } from './store';
-import { getAutomationJobHealthView } from './jobHealthSummary';
+import {
+  getAutomationJobHealthView,
+  getAutomationJobProjectionManifestForMaintenance,
+} from './jobHealthSummary';
 import { markJobHealthProjectionMaintenance } from './projectionMaintenance';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
@@ -161,6 +164,14 @@ function errorCategory(code: string): AutomationErrorCategory {
   if (/CREDENTIAL|SOURCE/.test(code)) return 'INVALID_SOURCE_DATA';
   if (/VALIDATION|SCHEMA|SAFETY|POLICY|APPROVAL|KILL/.test(code)) return 'VALIDATION_FAILED';
   return 'INTERNAL_CODE_ERROR';
+}
+
+function projectionMaintenanceErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/SOURCE_CHANGED|CONCURRENT|UNAVAILABLE|TRANSACTION|LOCK|ATOMIC_VERIFY|TEMPORARY/i.test(message)) {
+    return 'TEMPORARY_ERROR';
+  }
+  return errorCode(error);
 }
 
 function claimMutationGuard(job: AutomationJob, ownership?: RuntimeRoleOwnership) {
@@ -482,44 +493,31 @@ async function executeJob(
     case 'RECONCILE_AUTOMATION':
       if (job.dryRun) return dryRunPreview(job);
       if (job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD') {
+        const previousManifest = await getAutomationJobProjectionManifestForMaintenance();
         await markJobHealthProjectionMaintenance({
           jobId: job.id,
           status: 'RUNNING',
           reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_RUNNING',
-        });
-        try {
-          const manifest = await rebuildAutomationJobReadModelsFromDurable(
-            await getAllAutomationJobs(),
-          );
-          await markJobHealthProjectionMaintenance({
-            jobId: job.id,
-            status: 'SUCCEEDED',
-            reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_SUCCEEDED',
-          });
-          return {
-            maintenanceTask: 'JOB_HEALTH_PROJECTION_REBUILD',
-            retainedJobCount: manifest.retainedJobCount,
-            currentStateComplete: manifest.currentStateComplete,
-            historyComplete: manifest.historyComplete,
-            sourceRevision: manifest.sourceRevision,
-            projectionFingerprint: manifest.projectionFingerprint,
-            executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
-            executionMode: 'LOCAL_RULES',
-            provider: 'system',
-            rulesVersion: 'job-health-projection-rebuild-v1',
-            aiRequests: 0,
-            externalRequests: 0,
-          };
-        } catch (error) {
-          await markJobHealthProjectionMaintenance({
-            jobId: job.id,
-            status: 'FAILED',
-            reasonCode: error instanceof Error
-              ? error.message
-              : 'JOB_HEALTH_PROJECTION_REBUILD_FAILED',
-          });
-          throw error;
-        }
+          sourceRevision: previousManifest?.sourceRevision || null,
+        }).catch(() => null);
+        const manifest = await rebuildAutomationJobReadModelsFromDurable(
+          await getAllAutomationJobs(),
+        );
+        return {
+          maintenanceTask: 'JOB_HEALTH_PROJECTION_REBUILD',
+          retainedJobCount: manifest.retainedJobCount,
+          currentStateComplete: manifest.currentStateComplete,
+          historyComplete: manifest.historyComplete,
+          repairSourceRevision: previousManifest?.sourceRevision || null,
+          sourceRevision: manifest.sourceRevision,
+          projectionFingerprint: manifest.projectionFingerprint,
+          executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
+          executionMode: 'LOCAL_RULES',
+          provider: 'system',
+          rulesVersion: 'job-health-projection-rebuild-v2',
+          aiRequests: 0,
+          externalRequests: 0,
+        };
       }
       return { ...(await runAutonomousReconciler()), executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local', rulesVersion: 'reconciler-v1', aiRequests: 0, externalRequests: 0 };
     case 'POST_PUBLISH_MONITOR':
@@ -727,21 +725,44 @@ export async function processAutomationBatch(
         output,
         claimMutationGuard(job, ownership),
       );
-      if (completed) result.succeeded += 1; else result.skipped += 1;
+      if (completed) {
+        result.succeeded += 1;
+        if (job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD') {
+          await markJobHealthProjectionMaintenance({
+            jobId: job.id,
+            status: 'SUCCEEDED',
+            reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_SUCCEEDED',
+            sourceRevision: typeof output.repairSourceRevision === 'string'
+              ? output.repairSourceRevision
+              : null,
+            resultRevision: typeof output.sourceRevision === 'string' ? output.sourceRevision : null,
+            resultFingerprint: typeof output.projectionFingerprint === 'string'
+              ? output.projectionFingerprint
+              : null,
+          }).catch(error => {
+            console.error(JSON.stringify({
+              type: 'job_health_projection_maintenance_record_failed',
+              jobId: job.id,
+              reasonCode: errorCode(error),
+            }));
+          });
+        }
+      } else result.skipped += 1;
     } catch (error) {
       const latest = await getAutomationJob(job.id);
       if (latest?.status === 'CANCELLED') {
         result.skipped += 1;
         return;
       }
-      const code = errorCode(error);
+      const projectionMaintenance = job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD';
+      const code = projectionMaintenance ? projectionMaintenanceErrorCode(error) : errorCode(error);
       if (code === 'WORKER_FENCING_REJECTED') {
         workerFencingRejected = true;
         logAutomationJobEvent('job_skipped', job, { workerId, reasonCode: code });
         result.skipped += 1;
         return;
       }
-      await failAutomationJob(job.id, workerId, code, error, {
+      const failedJob = await failAutomationJob(job.id, workerId, code, error, {
         errorCategory: errorCategory(code),
         nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
         result: error && typeof error === 'object' && (error as { result?: unknown }).result
@@ -750,6 +771,22 @@ export async function processAutomationBatch(
           : undefined,
         ...claimMutationGuard(job, ownership),
       });
+      if (projectionMaintenance && failedJob) {
+        await markJobHealthProjectionMaintenance({
+          jobId: job.id,
+          status: failedJob.status === 'RETRY_SCHEDULED' ? 'RETRY_SCHEDULED' : 'FAILED',
+          nextRetryAt: failedJob.nextRetryAt || null,
+          reasonCode: error instanceof Error
+            ? error.message
+            : 'JOB_HEALTH_PROJECTION_REBUILD_FAILED',
+        }).catch(recordError => {
+          console.error(JSON.stringify({
+            type: 'job_health_projection_maintenance_record_failed',
+            jobId: job.id,
+            reasonCode: errorCode(recordError),
+          }));
+        });
+      }
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);

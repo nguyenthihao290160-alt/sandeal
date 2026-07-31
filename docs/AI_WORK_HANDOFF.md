@@ -1,5 +1,154 @@
 # AI Work Handoff
 
+## Current handoff: SanDeal M3.1.1
+
+### Task
+
+SanDeal M3.1.1 - Asynchronous Projection Repair and Product Flow Recovery
+
+### Repository and recovery state
+
+- Branch: `master`
+- Baseline and current HEAD: `5386e7818869a9dcf21b3e1330af71a2a19a5219`
+- The interrupted worktree was preserved. The only pre-existing partial edit was `src/lib/automation/jobHealthSummary.ts` (35 insertions and 2 deletions); the backup patch was not applied.
+- The recovered partial edit had started canonical serialization, a deterministic revision hash, a stable projection name, and previous-valid timestamp retention. It had not yet connected asynchronous scheduling, Worker execution, staged validation/activation, product-flow recovery, UI states, or M3.1.1 tests.
+- No unrelated change, baseline drift, secret, or production dependency was found.
+- No commit, push, deployment, VPS/PM2 access, production data/configuration change, mode activation, destructive Git action, or backup operation was performed.
+
+### Confirmed root causes
+
+1. `projection_maintenance` was a mutating component behind a one-second `Promise.race`. When it timed out, `ensureJobHealthProjectionMaintenanceRequest()` could continue enqueuing after the HTTP component had returned. The reported 1.1-1.6 second production duration is consistent with that boundary plus storage work.
+2. Maintenance enqueue used the generic durable automation-job transaction, which can scan/write job state. It was therefore unsafe to abandon through an interactive timeout even though the actual projection rebuild already belonged in the Worker.
+3. App Health and product-flow diagnostics independently loaded compact job projections instead of sharing one request-scoped projection-status result.
+4. Manifest revision/source hashing used non-canonical JSON serialization and identity-only projection fingerprints. Object-key order could produce unstable hashes, while semantically changed compact records could retain the same identity fingerprint. The old schema also lacked full-content parity checks.
+5. Worker repair bookkeeping could report success before the fenced durable completion committed, and maintenance shared the broad storage-exclusive class with Runtime Guardian.
+
+### Completed implementation
+
+#### Interactive App Health
+
+- Projection inspection is bounded to summary, manifest, and compact projection metadata/content. It never reads complete durable job history and never rebuilds a projection in the request.
+- Public projection states are `VALID`, `STALE`, `INVALID`, `REBUILD_SCHEDULED`, `REBUILD_RUNNING`, `REBUILD_FAILED`, and `UNKNOWN`.
+- Invalid or rebuilding state remains fail-closed while retaining the previous valid bounded summary for context; it cannot be reported as PASS.
+- The mutating enqueue check is awaited and is no longer wrapped in an abandoning timeout. Request abort is honored before supported work begins; no non-abortable rebuild is started by HTTP.
+- One request-scoped projection status is passed to product-flow diagnostics. Web, Worker, Scheduler, lease, release, and control components remain independent.
+
+#### Deduplicated maintenance lifecycle
+
+- One `RECONCILE_AUTOMATION` maintenance workflow uses projection name `automation-job-health` and one stable incident idempotency key.
+- Existing `REQUESTED`, `CLAIMED`, `RUNNING`, or retry-scheduled work is reused; repeated App Health refreshes do not enqueue another repair.
+- Repair state is recorded as scheduled, running, retry-scheduled, succeeded, failed, or exhausted with bounded safe reason codes, duration, source revision, and result revision/fingerprint.
+- The Worker performs the rebuild outside HTTP. Success is recorded only after fenced job completion commits. Failure follows the durable retry state and bookkeeping errors do not crash the Worker.
+- Projection maintenance has its own concurrency resource. Two repairs conflict with each other, while Runtime Guardian keeps its reserved capacity and is not starved by a repair.
+
+#### Candidate validation and activation
+
+- A replacement is built and written as a separate staged candidate.
+- Before activation, validation checks schema/projection version, projection name, source snapshot fingerprint/revision, record and active counts, completeness, capacity, observed range, timestamps, item schemas, unique IDs, identity fingerprints, full-content fingerprints, combined fingerprint, and candidate fingerprint.
+- The durable source is checked before live writes and again before manifest activation.
+- The manifest is the atomic reader-visible activation boundary: readers reject the rebuild token/partial state, and the new manifest is published only after both compact projections verify.
+- Validation or write failure restores the previous projections and previous valid manifest. A failed candidate cannot replace a valid projection.
+
+#### Deterministic manifest semantics
+
+- Manifest schema is now version 2.
+- Canonical serialization recursively sorts keys and normalizes `undefined`, non-finite numbers, and `Date` values.
+- Full-content fingerprints complement identity fingerprints. Volatile top-level heartbeat/lease timestamps are normalized out so routine heartbeats do not trigger repairs.
+- File and Mongo adapters use the same serialized manifest contract and fingerprint semantics. Genuine content mismatch remains invalid.
+
+#### Product flow and dashboard
+
+- Authoritative product/candidate counts remain available without a valid job projection.
+- Projection-dependent job fields are `null`/unknown when evidence is incomplete; known zero is preserved, stale bounded data is labelled stale, and current valid data remains authoritative.
+- Product flow does not schedule or rebuild independently and recovers automatically on the next request after a valid manifest becomes active.
+- The App Health dashboard labels scheduled, running, retry-scheduled, failed, and succeeded repair states in valid UTF-8 Vietnamese, preserves the last valid snapshot, and suppresses duplicate refreshes while one request is active.
+- No raw errors, stack traces, filesystem paths, credentials, blocking modal, forced publication, or false completion state was added.
+
+### Files changed by subsystem
+
+#### Projection contract, validation, and storage
+
+- `src/lib/automation/jobHealthSummary.ts`
+- `src/lib/automation/projectionMaintenance.ts`
+- `src/lib/automation/store.ts`
+
+#### Interactive diagnostics and UI
+
+- `src/lib/automation/healthService.ts`
+- `src/lib/automation/productFlowDiagnostics.ts`
+- `src/app/api/automation/health/route.ts`
+- `src/app/dashboard/app-health/page.tsx`
+
+#### Worker and capacity safety
+
+- `src/lib/automation/worker.ts`
+- `src/lib/automation/executionPolicy.ts`
+
+#### Tests and handoff
+
+- `scripts/m3-1-1-projection-repair-tests.cjs` (new)
+- `docs/AI_WORK_HANDOFF.md`
+- `package.json`: unchanged
+- `package-lock.json`: unchanged
+
+### Validation results
+
+Final non-overlapping inventory: **347 assertions passed, 0 failed**. One production-connected suite was intentionally skipped.
+
+| Command | Result |
+| --- | --- |
+| `git diff --check` | PASS |
+| `npm run typecheck` | PASS |
+| `npm run lint` | PASS; 0 errors and 10 pre-existing warnings |
+| `node scripts/m3-1-1-projection-repair-tests.cjs` | 11 PASS, 0 FAIL |
+| `node scripts/bounded-projection-storage-tests.cjs` | 13 PASS, 0 FAIL |
+| `node scripts/post-m3-reconciliation-product-flow-tests.cjs` | 38 PASS, 0 FAIL |
+| `node scripts/automation-health-reliability-tests.cjs` | 12 PASS, 0 FAIL |
+| `npm run test:master:m1` | 99 PASS, 0 FAIL |
+| `node scripts/master-m2-worker-pool-tests.cjs` | 16 PASS, 0 FAIL |
+| `npm run test:master:m2:slo` | 12 PASS, 0 FAIL |
+| `node scripts/master-m2-operational-health-tests.cjs` | 3 PASS, 0 FAIL |
+| `npm run test:master:m3` | 39 PASS, 0 FAIL |
+| `npm run test:storage` | 15 PASS, 0 FAIL |
+| `npm run test:storage:mongo` | 28 PASS, 0 FAIL; fake/local adapter only |
+| `npm run test:storage:migration` | 39 PASS, 0 FAIL |
+| `npm run test:prompt10:job-schema` | 10 PASS, 0 FAIL |
+| `npm run test:prompt10:orchestration` | 12 PASS, 0 FAIL |
+| `npm run test:storage:acceptance` | SKIP: it requires explicit production Mongo opt-in/access, prohibited by this task |
+| `npm run build` | PASS on Next.js 16.2.11 |
+
+### Performance measurements
+
+- Invalid projection status: **3.3 ms**, with **0** complete durable job-history reads (target below 500 ms).
+- App Health production-sized fixture: 13,000 jobs and 500 runtime snapshots; **177.5 ms cold**, **174.1 ms warm**, **0** durable job-history reads and **0** permit-history reads (targets below 5 s cold and 3 s warm).
+- Product-flow fixture: 1,000 products and 2,000 candidates; **25.4 ms** (target below 3 s).
+- Worker fixture: 13,000 pending jobs, bounded ordinary capacity 3 plus one Guardian reservation; fixture setup **1495 ms**, pickup **400 ms**.
+- Memory was not separately profiled. Bounded input/output assertions and the no-full-history checks passed.
+
+### Build result
+
+- Optimized build: PASS; compilation 4.6 seconds, TypeScript 11.4 seconds, static generation 43/43 pages.
+- Existing warnings remain: npm's `min-release-age` config deprecation notice and Turbopack's broad NFT trace through `next.config.ts` / `src/lib/autonomous/backupManager.ts`.
+
+### Safety invariants and remaining risks
+
+- Claim tokens, leases, fencing, heartbeat, retry scheduling, stable idempotency, role ownership, bounded capacity, Runtime Guardian reservation, and fail-closed projection validation remain enforced.
+- Worker Pool remains OFF. CANARY/ACTIVE and publication state were not enabled, and no product was forced public.
+- Manifest v2 deliberately causes an old v1 manifest to schedule one repair; the existing Worker must run for recovery to complete.
+- Storage transactions are not cancellable once committed work begins, so the request prevents abandonment instead of pretending cancellation. The projection rebuild itself never runs in HTTP.
+- Activation is atomic at the manifest boundary. During a staged swap readers fail closed; an ordinary failure restores prior data. A catastrophic storage outage during rollback can leave the projection invalid, but cannot make a partial projection valid.
+- Production/VPS and a real Mongo acceptance environment were not accessed, so live repair latency and post-deployment recovery remain unverified.
+- No full repository test suite was run; validation was intentionally limited to the required M3/M3.1/M3.1.1, Runtime Guardian, Worker, storage, and production-sized focused gates.
+
+### Recommended commit and classification
+
+- Recommended commit: `fix: make projection repair asynchronous and bounded`
+- Classification: `SAFE_TO_COMMIT`
+
+---
+
+## Previous handoff: SanDeal M3.1 (retained for context)
+
 ## Task
 
 SANDEAL M3.1 — Post-M3 Runtime Reconciliation and Product Flow Activation
@@ -263,4 +412,3 @@ Perform a separately authorized **M3.1 controlled rollout verification**: review
 ## Recommended commit message
 
 `fix: reconcile runtime health and product flow diagnostics`
-

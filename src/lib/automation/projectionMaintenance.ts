@@ -1,7 +1,10 @@
-import { createHash } from 'node:crypto';
 import { readBoundedCollectionSnapshot, runTransaction } from '@/lib/storage/adapter';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
-import type { AutomationJobHealthView } from './jobHealthSummary';
+import {
+  AUTOMATION_JOB_PROJECTION_NAME,
+  deterministicProjectionFingerprint,
+  type AutomationJobHealthView,
+} from './jobHealthSummary';
 import {
   appendAutomationAuditOnce,
   createAutomationJob,
@@ -13,6 +16,7 @@ const MAINTENANCE_STATE_STORE = 'automation-job-projection-maintenance-v1';
 const RECORD_ID = 'job-health-projection-rebuild';
 const MAXIMUM_ATTEMPTS = 3;
 const ACTIVE_REQUEST_MAX_AGE_MS = 30 * 60_000;
+const INCOMPLETE_CLAIM_MAX_AGE_MS = 15_000;
 const RETRY_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000] as const;
 
 export type JobHealthProjectionMaintenanceStatus =
@@ -20,6 +24,7 @@ export type JobHealthProjectionMaintenanceStatus =
   | 'CLAIMED'
   | 'REQUESTED'
   | 'RUNNING'
+  | 'RETRY_SCHEDULED'
   | 'SUCCEEDED'
   | 'FAILED'
   | 'EXHAUSTED';
@@ -37,6 +42,10 @@ export interface JobHealthProjectionMaintenanceState {
   startedAt: string | null;
   completedAt: string | null;
   nextRetryAt: string | null;
+  durationMs: number | null;
+  sourceRevision: string | null;
+  resultRevision: string | null;
+  resultFingerprint: string | null;
   reasonCodes: string[];
   outcomeReasonCode: string | null;
   duplicateRequestsSuppressed: number;
@@ -57,6 +66,15 @@ export interface JobHealthProjectionMaintenanceView {
   duplicateRequestsSuppressed: number;
   incidentFingerprint: string | null;
   reasonCodes: string[];
+  repairState: 'IDLE' | 'SCHEDULED' | 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED' | 'EXHAUSTED';
+  requestedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  sourceRevision: string | null;
+  resultRevision: string | null;
+  resultFingerprint: string | null;
+  outcomeReasonCode: string | null;
 }
 
 const REBUILD_REASON_PREFIXES = [
@@ -84,14 +102,17 @@ function actionableReasons(view: AutomationJobHealthView): string[] {
 }
 
 function incidentFingerprint(view: AutomationJobHealthView, reasons: string[], releaseId: string): string {
-  return createHash('sha256').update(JSON.stringify({
+  return deterministicProjectionFingerprint({
+    projectionName: AUTOMATION_JOB_PROJECTION_NAME,
     releaseId,
     projectionVersion: view.projectionVersion,
     projectionStatus: view.projectionStatus,
     sourceRevision: view.sourceRevision,
     projectionFingerprint: view.projectionFingerprint,
+    manifestUpdatedAt: view.projectionEvidence?.manifestUpdatedAt || null,
+    previousValidProjectionGeneratedAt: view.previousValidProjectionGeneratedAt,
     reasons,
-  })).digest('hex');
+  });
 }
 
 function emptyState(
@@ -113,11 +134,23 @@ function emptyState(
     startedAt: null,
     completedAt: null,
     nextRetryAt: null,
+    durationMs: null,
+    sourceRevision: null,
+    resultRevision: null,
+    resultFingerprint: null,
     reasonCodes: reasons,
     outcomeReasonCode: null,
     duplicateRequestsSuppressed: 0,
     updatedAt: new Date(now).toISOString(),
   };
+}
+
+function repairState(
+  state: JobHealthProjectionMaintenanceState | null,
+): JobHealthProjectionMaintenanceView['repairState'] {
+  if (!state || state.status === 'IDLE') return 'IDLE';
+  if (state.status === 'CLAIMED' || state.status === 'REQUESTED') return 'SCHEDULED';
+  return state.status;
 }
 
 function publicView(
@@ -133,8 +166,24 @@ function publicView(
     nextRetryAt: state?.nextRetryAt || null,
     duplicateRequestsSuppressed: state?.duplicateRequestsSuppressed || 0,
     incidentFingerprint: state?.incidentFingerprint || null,
-    reasonCodes,
+    reasonCodes: safeReasons([...reasonCodes, ...(state?.reasonCodes || [])]),
+    repairState: repairState(state),
+    requestedAt: state?.requestedAt || null,
+    startedAt: state?.startedAt || null,
+    completedAt: state?.completedAt || null,
+    durationMs: Number.isFinite(state?.durationMs) ? Number(state?.durationMs) : null,
+    sourceRevision: state?.sourceRevision || null,
+    resultRevision: state?.resultRevision || null,
+    resultFingerprint: state?.resultFingerprint || null,
+    outcomeReasonCode: state?.outcomeReasonCode || null,
   };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error('JOB_HEALTH_PROJECTION_REBUILD_REQUEST_ABORTED');
+  error.name = 'AbortError';
+  throw error;
 }
 
 export async function getJobHealthProjectionMaintenanceState(): Promise<JobHealthProjectionMaintenanceState | null> {
@@ -148,7 +197,9 @@ export async function getJobHealthProjectionMaintenanceState(): Promise<JobHealt
 export async function ensureJobHealthProjectionMaintenanceRequest(
   view: AutomationJobHealthView,
   now = Date.now(),
+  options: { signal?: AbortSignal } = {},
 ): Promise<JobHealthProjectionMaintenanceView> {
+  throwIfAborted(options.signal);
   const reasons = actionableReasons(view);
   if (view.projectionStatus === 'VALID' || reasons.length === 0) {
     return publicView('NOT_REQUIRED', await getJobHealthProjectionMaintenanceState(), reasons);
@@ -165,9 +216,16 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
     const stored = items.find(item => item.id === RECORD_ID);
     const current = stored || emptyState(fingerprint, releaseId, reasons, now);
     const requestAge = now - Date.parse(current.requestedAt || current.updatedAt);
-    const active = ['CLAIMED', 'REQUESTED', 'RUNNING'].includes(current.status)
-      && Number.isFinite(requestAge)
-      && requestAge <= ACTIVE_REQUEST_MAX_AGE_MS;
+    const active = current.status === 'RETRY_SCHEDULED'
+      || (
+        ['CLAIMED', 'REQUESTED', 'RUNNING'].includes(current.status)
+        && Number.isFinite(requestAge)
+        && requestAge <= (
+          current.status === 'CLAIMED' && !current.jobId
+            ? INCOMPLETE_CLAIM_MAX_AGE_MS
+            : ACTIVE_REQUEST_MAX_AGE_MS
+        )
+      );
     if (active) {
       state = {
         ...current,
@@ -228,7 +286,8 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
   if (!claimed) return publicView(resultStatus, state, reasons);
 
   try {
-    const key = `maintenance:job-health:${fingerprint.slice(0, 24)}:${state.attemptCount}`;
+    throwIfAborted(options.signal);
+    const key = `maintenance:${AUTOMATION_JOB_PROJECTION_NAME}:${fingerprint.slice(0, 32)}`;
     const created = await createAutomationJob({
       type: 'RECONCILE_AUTOMATION',
       payload: {
@@ -243,7 +302,7 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
       priority: 90,
       riskLevel: 'MEDIUM',
       dryRun: false,
-      maxAttempts: 1,
+      maxAttempts: MAXIMUM_ATTEMPTS,
     });
     await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => items.map(item =>
       item.id === RECORD_ID && item.incidentFingerprint === fingerprint
@@ -279,7 +338,7 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
       attempts: state.attemptCount,
     });
     return publicView(created.created ? 'REQUESTED' : 'REUSED_ACTIVE_REQUEST', state, reasons);
-  } catch {
+  } catch (error) {
     const attemptIndex = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, state.attemptCount - 1));
     const retryAt = new Date(now + RETRY_BACKOFF_MS[attemptIndex]).toISOString();
     await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => items.map(item =>
@@ -289,7 +348,9 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
             status: item.attemptCount >= item.maximumAttempts ? 'EXHAUSTED' : 'FAILED',
             completedAt: measuredAt,
             nextRetryAt: item.attemptCount >= item.maximumAttempts ? null : retryAt,
-            outcomeReasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_FAILED',
+            outcomeReasonCode: error instanceof Error && error.name === 'AbortError'
+              ? 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_ABORTED'
+              : 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_FAILED',
             updatedAt: measuredAt,
           }
         : item));
@@ -301,8 +362,12 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
 export async function markJobHealthProjectionMaintenance(
   input: {
     jobId: string;
-    status: 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+    status: 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED';
     reasonCode: string;
+    nextRetryAt?: string | null;
+    sourceRevision?: string | null;
+    resultRevision?: string | null;
+    resultFingerprint?: string | null;
     now?: number;
   },
 ): Promise<JobHealthProjectionMaintenanceState | null> {
@@ -314,14 +379,30 @@ export async function markJobHealthProjectionMaintenance(
     if (index < 0) return undefined;
     const current = items[index];
     const attemptIndex = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, current.attemptCount - 1));
+    const startedAt = input.status === 'RUNNING' ? current.startedAt || measuredAt : current.startedAt;
+    const startedAtMs = Date.parse(startedAt || '');
     output = {
       ...current,
       status: input.status,
-      startedAt: input.status === 'RUNNING' ? current.startedAt || measuredAt : current.startedAt,
+      startedAt,
       completedAt: input.status === 'RUNNING' ? null : measuredAt,
-      nextRetryAt: input.status === 'FAILED' && current.attemptCount < current.maximumAttempts
-        ? new Date(now + RETRY_BACKOFF_MS[attemptIndex]).toISOString()
-        : null,
+      nextRetryAt: input.status === 'RETRY_SCHEDULED'
+        ? input.nextRetryAt || new Date(now + RETRY_BACKOFF_MS[attemptIndex]).toISOString()
+        : input.status === 'FAILED' && current.attemptCount < current.maximumAttempts
+          ? new Date(now + RETRY_BACKOFF_MS[attemptIndex]).toISOString()
+          : null,
+      durationMs: input.status === 'RUNNING' || !Number.isFinite(startedAtMs)
+        ? null
+        : Math.max(0, now - startedAtMs),
+      sourceRevision: input.sourceRevision === undefined
+        ? current.sourceRevision || null
+        : input.sourceRevision,
+      resultRevision: input.resultRevision === undefined
+        ? current.resultRevision || null
+        : input.resultRevision,
+      resultFingerprint: input.resultFingerprint === undefined
+        ? current.resultFingerprint || null
+        : input.resultFingerprint,
       outcomeReasonCode: input.reasonCode
         .replace(/[^A-Z0-9_:-]/gi, '_')
         .toUpperCase()

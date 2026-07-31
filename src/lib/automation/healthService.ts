@@ -4,7 +4,11 @@ import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { getPrimaryCredential } from '@/lib/storage/tokenVault';
 import { buildAutomationOperationalHealth } from './operationalHealth';
-import { getAutomationJobHealthView, publicAutomationJobHealthView } from './jobHealthSummary';
+import {
+  applyAutomationJobProjectionMaintenanceState,
+  getAutomationJobHealthView,
+  publicAutomationJobHealthView,
+} from './jobHealthSummary';
 import { buildProductFlowDiagnostics } from './productFlowDiagnostics';
 import { ensureJobHealthProjectionMaintenanceRequest } from './projectionMaintenance';
 import { getLatestRuntimeHealth, providerHealth } from './runtimeGuardian';
@@ -77,7 +81,7 @@ function jobEvidenceReason(input: {
 
 async function component<T>(
   name: string,
-  timeoutMs: number,
+  timeoutMs: number | null,
   work: () => Promise<T>,
   options: {
     classify?: (value: T) => Pick<AutomationHealthComponent, 'status' | 'stale' | 'reasonCode'>;
@@ -87,12 +91,15 @@ async function component<T>(
   const checkedAt = new Date().toISOString();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const value = await Promise.race([
-      work(),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error('COMPONENT_TIMEOUT')), timeoutMs);
-      }),
-    ]);
+    const pending = work();
+    const value = timeoutMs === null
+      ? await pending
+      : await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('COMPONENT_TIMEOUT')), timeoutMs);
+          }),
+        ]);
     const classified = options.classify?.(value) || {
       status: 'available' as const,
       stale: false,
@@ -245,6 +252,7 @@ function failClosedCore(generatedAt: string) {
 export async function buildAutomationHealthResponse(
   options: {
     now?: number;
+    signal?: AbortSignal;
     dependencies?: Partial<AutomationHealthDependencies>;
     budgets?: {
       coreMs?: number;
@@ -262,7 +270,6 @@ export async function buildAutomationHealthResponse(
   const providerMs = Math.max(100, options.budgets?.providerMs ?? 1_500);
   const operationalMs = Math.max(100, options.budgets?.operationalMs ?? 1_200);
   const productFlowMs = Math.max(100, options.budgets?.productFlowMs ?? 1_800);
-  const maintenanceMs = Math.max(100, options.budgets?.maintenanceMs ?? 1_000);
 
   const geminiPromise = component('provider_gemini', providerMs, dependencies.getGeminiReadiness);
   const accessTradePromise = component('provider_accesstrade', providerMs, dependencies.getAccessTradeCredential);
@@ -352,6 +359,7 @@ export async function buildAutomationHealthResponse(
           reason: 'NOT_CONFIGURED',
         },
         getControl: async () => control,
+        projectionStatus: summary,
       }),
       {
         classify: value => ({
@@ -366,13 +374,25 @@ export async function buildAutomationHealthResponse(
     ),
     component(
       'projection_maintenance',
-      maintenanceMs,
-      () => dependencies.ensureProjectionMaintenance(summary, now),
+      null,
+      () => dependencies.ensureProjectionMaintenance(summary, now, { signal: options.signal }),
+      {
+        classify: value => ({
+          status: ['FAILED', 'EXHAUSTED'].includes(value.repairState) ? 'degraded' : 'available',
+          stale: false,
+          reasonCode: value.outcomeReasonCode
+            || (value.repairState === 'IDLE' ? 'OK' : `JOB_HEALTH_PROJECTION_REBUILD_${value.repairState}`),
+        }),
+      },
     ),
   ]);
   components.operational = operational.meta;
   components.productFlow = productFlow.meta;
   components.projectionMaintenance = projectionMaintenance.meta;
+  const effectiveSummary = applyAutomationJobProjectionMaintenanceState(
+    summary,
+    projectionMaintenance.value,
+  );
   components.slo = operational.value?.slo
     ? {
         status: operational.value.slo.dataStatus === 'MEASURED' || operational.value.slo.dataStatus === 'RECOVERY'
@@ -431,7 +451,7 @@ export async function buildAutomationHealthResponse(
     scheduleState: settings.enabled && !control.schedulerPaused ? 'ENABLED' : 'PAUSED',
     scheduleWarning: null,
   };
-  const queue = { ...summary.statusCounts };
+  const queue = { ...effectiveSummary.statusCounts };
   const accessTradeConfigured = Boolean(accessTrade.value && accessTrade.value.status !== 'disabled')
     || Boolean(process.env.ACCESS_TRADE_API_KEY?.trim());
   const runtimeGemini = runtimeFresh ? runtime?.providers.gemini : undefined;
@@ -549,7 +569,7 @@ export async function buildAutomationHealthResponse(
     control,
     killSwitch: control.killSwitch,
     updatedAt: generatedAt,
-    jobReadModel: publicAutomationJobHealthView(summary),
+    jobReadModel: publicAutomationJobHealthView(effectiveSummary),
     healthEvidence: {
       publishingBlocked: healthEvidenceReasons.length > 0,
       reasonCodes: healthEvidenceReasons,
