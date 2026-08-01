@@ -1,7 +1,7 @@
 import type { RuntimeHealthSnapshot } from './runtimeGuardian';
 import type { RuntimeRoleConflict, RuntimeRoleLease } from './runtimeRoles';
 
-export const CURRENT_REASON_RECONCILIATION_VERSION = 'current-reason-reconciliation-v1';
+export const CURRENT_REASON_RECONCILIATION_VERSION = 'current-reason-reconciliation-v2';
 export const DEFAULT_ROLE_HEARTBEAT_FRESHNESS_MS = 90_000;
 export const DEFAULT_RUNTIME_SNAPSHOT_FRESHNESS_MS = 3 * 60_000;
 
@@ -24,6 +24,20 @@ const HEARTBEAT_REASON_CODES: Readonly<Record<RuntimeRole, ReadonlySet<string>>>
     'SCHEDULER_UNVERIFIED',
   ]),
 };
+
+const JOB_PROJECTION_CURRENT_REASON_CODES = new Set([
+  'JOB_HEALTH_CURRENT_STATE_INCOMPLETE',
+  'JOB_PROJECTION_CURRENT_STATE_INCOMPLETE',
+  'JOB_STATUS_PROJECTION_CURRENT_STATE_INCOMPLETE',
+  'JOB_READ_MODEL_INCOMPLETE',
+  'JOB_READ_MODEL_UNAVAILABLE',
+]);
+
+const JOB_PROJECTION_CURRENT_REASON_PREFIXES = [
+  'JOB_HEALTH_SUMMARY_',
+  'JOB_PROJECTION_MANIFEST_',
+  'JOB_STATUS_PROJECTION_MANIFEST_',
+] as const;
 
 export type CurrentReasonTransitionType =
   | 'CLEARED_BY_CURRENT_EVIDENCE'
@@ -86,6 +100,14 @@ export interface CurrentReasonReconciliationInput {
   schedulerRequired?: boolean;
   heartbeatFreshnessMs?: number;
   runtimeFreshnessMs?: number;
+  projectionEvidence?: {
+    currentStateComplete: boolean;
+    projectionStatus: 'VALID' | 'STALE' | 'INVALID' | 'REBUILD_SCHEDULED' | 'REBUILD_RUNNING' | 'REBUILD_FAILED' | 'UNKNOWN';
+    sourceRevision: string | null;
+    summaryRevision: string | null;
+    generatedAt: string | null;
+    currentReasonCodes: string[];
+  };
 }
 
 function unique(values: Iterable<string>): string[] {
@@ -298,6 +320,54 @@ export function reconcileCurrentReasons(
         },
         evidenceReferences: evidence.evidenceReferences,
         evidenceReasonCodes: evidence.reasonCodes,
+      });
+    }
+  }
+
+  const projectionReasons = unique([...initialCurrent, ...historical]).filter(reason =>
+    JOB_PROJECTION_CURRENT_REASON_CODES.has(reason)
+    || JOB_PROJECTION_CURRENT_REASON_PREFIXES.some(prefix => reason.startsWith(prefix)));
+  const projectionEvidence = input.projectionEvidence;
+  const verifiedProjectionEvidence = Boolean(
+    projectionEvidence?.currentStateComplete
+    && projectionEvidence.projectionStatus === 'VALID'
+    && /^[a-f0-9]{64}$/.test(projectionEvidence.sourceRevision || '')
+    && /^[a-f0-9]{64}$/.test(projectionEvidence.summaryRevision || '')
+    && validTimestamp(projectionEvidence.generatedAt) !== null,
+  );
+  const currentlyObservedProjectionReasons = new Set(
+    unique(projectionEvidence?.currentReasonCodes || []),
+  );
+  if (verifiedProjectionEvidence) {
+    for (const reasonCode of projectionReasons) {
+      if (currentlyObservedProjectionReasons.has(reasonCode)) continue;
+      const previousState = stateOf(reasonCode, initialCurrent, historical);
+      resultingCurrent.delete(reasonCode);
+      historical.add(reasonCode);
+      transitions.push({
+        reasonCode,
+        previousState,
+        resultingState: 'HISTORICAL',
+        transitionType: previousState === 'ACTIVE'
+          ? 'CLEARED_BY_CURRENT_EVIDENCE'
+          : 'UNCHANGED_HISTORICAL',
+        evaluatedAt,
+        releaseId: input.releaseId,
+        evidenceTimestamps: {
+          runtimeCheckedAt: projectionEvidence!.generatedAt,
+          leaseHeartbeatAt: null,
+          leaseExpiresAt: null,
+          conflictObservedAt: null,
+        },
+        evidenceReferences: [
+          projectionEvidence!.sourceRevision
+            ? `job-projection-source:${projectionEvidence!.sourceRevision}`
+            : '',
+          projectionEvidence!.summaryRevision
+            ? `job-health-summary:${projectionEvidence!.summaryRevision}`
+            : '',
+        ].filter(Boolean),
+        evidenceReasonCodes: [],
       });
     }
   }

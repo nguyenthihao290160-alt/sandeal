@@ -19,7 +19,6 @@ import {
   AUTOMATION_JOB_SCHEMA_VERSION,
   createAutomationJob,
   failAutomationJob,
-  getAllAutomationJobs,
   getAutomationControl,
   getAutomationJob,
   heartbeatAutomationJob,
@@ -36,7 +35,10 @@ import {
   getAutomationJobHealthView,
   getAutomationJobProjectionManifestForMaintenance,
 } from './jobHealthSummary';
-import { markJobHealthProjectionMaintenance } from './projectionMaintenance';
+import {
+  markJobHealthProjectionMaintenance,
+  materializeJobHealthProjectionMaintenanceRequest,
+} from './projectionMaintenance';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
@@ -497,11 +499,49 @@ async function executeJob(
         await markJobHealthProjectionMaintenance({
           jobId: job.id,
           status: 'RUNNING',
+          phase: 'CLAIMED',
+          attemptNumber: job.attemptCount,
           reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_RUNNING',
           sourceRevision: previousManifest?.sourceRevision || null,
         }).catch(() => null);
         const manifest = await rebuildAutomationJobReadModelsFromDurable(
-          await getAllAutomationJobs(),
+          null,
+          Date.now(),
+          {
+            owner: {
+              repairId: job.id,
+              ownerId: ownership?.ownerId || workerId,
+              ownerInstanceId: ownership?.instanceId || workerId,
+              workerFencingToken: ownership?.fencingToken || 0,
+              claimToken: job.claimToken || '',
+              attemptNumber: Math.max(1, job.attemptCount),
+              supersede: job.attemptCount > 1,
+            },
+            authorizePublication: async () => {
+              if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) return false;
+              const claimedRepair = await getAutomationJob(job.id);
+              return Boolean(
+                claimedRepair
+                && claimedRepair.status === 'RUNNING'
+                && claimedRepair.claimedBy === workerId
+                && claimedRepair.claimToken === job.claimToken
+                && (!ownership || (
+                  claimedRepair.workerInstanceId === ownership.instanceId
+                  && claimedRepair.workerFencingToken === ownership.fencingToken
+                )),
+              );
+            },
+            onPhase: async ({ phase, lastFailureReason }) => {
+              if (phase === 'COMPLETED' || phase === 'FAILED' || phase === 'SUPERSEDED') return;
+              await markJobHealthProjectionMaintenance({
+                jobId: job.id,
+                status: 'RUNNING',
+                phase,
+                attemptNumber: job.attemptCount,
+                reasonCode: lastFailureReason || `JOB_HEALTH_PROJECTION_REPAIR_${phase}`,
+              }).catch(() => null);
+            },
+          },
         );
         return {
           maintenanceTask: 'JOB_HEALTH_PROJECTION_REBUILD',
@@ -514,7 +554,7 @@ async function executeJob(
           executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
           executionMode: 'LOCAL_RULES',
           provider: 'system',
-          rulesVersion: 'job-health-projection-rebuild-v2',
+          rulesVersion: 'job-health-projection-rebuild-v3',
           aiRequests: 0,
           externalRequests: 0,
         };
@@ -603,6 +643,14 @@ export async function processAutomationBatch(
   const lastHeartbeat = Date.parse(initialControl.workerHeartbeatAt || '');
   if (initialControl.workerId !== workerId || !Number.isFinite(lastHeartbeat) || Date.now() - lastHeartbeat >= 15_000) {
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
+  }
+  if (!ownership || await isRuntimeRoleOwner('WORKER', ownership)) {
+    await materializeJobHealthProjectionMaintenanceRequest().catch(error => {
+      console.error(JSON.stringify({
+        type: 'job_health_projection_request_materialization_failed',
+        reasonCode: errorCode(error),
+      }));
+    });
   }
   const claimed = await claimAutomationJobs(workerId, limit, 60_000, Date.now(), ownership, options);
   result.claimed = claimed.length;
@@ -731,6 +779,8 @@ export async function processAutomationBatch(
           await markJobHealthProjectionMaintenance({
             jobId: job.id,
             status: 'SUCCEEDED',
+            phase: 'COMPLETED',
+            attemptNumber: job.attemptCount,
             reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_SUCCEEDED',
             sourceRevision: typeof output.repairSourceRevision === 'string'
               ? output.repairSourceRevision
@@ -775,6 +825,8 @@ export async function processAutomationBatch(
         await markJobHealthProjectionMaintenance({
           jobId: job.id,
           status: failedJob.status === 'RETRY_SCHEDULED' ? 'RETRY_SCHEDULED' : 'FAILED',
+          phase: failedJob.status === 'RETRY_SCHEDULED' ? 'RETRY_WAIT' : 'FAILED',
+          attemptNumber: failedJob.attemptCount,
           nextRetryAt: failedJob.nextRetryAt || null,
           reasonCode: error instanceof Error
             ? error.message

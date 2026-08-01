@@ -150,8 +150,8 @@ async function main() {
       };
     });
     await adapter.writeCollection('automation-jobs', durableJobs);
-    await store.rebuildAutomationJobReadModelsFromDurable(durableJobs, now);
     durableJobs = null;
+    await store.rebuildAutomationJobReadModelsFromDurable(null, now);
     await adapter.writeCollection(
       'runtime-health',
       Array.from({ length: 500 }, (_, index) =>

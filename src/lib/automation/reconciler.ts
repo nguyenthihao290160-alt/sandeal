@@ -10,7 +10,6 @@ import {
   createAutomationJob,
   getAllAutomationJobs,
   getAutomationControl,
-  rebuildAutomationJobReadModelsFromDurable,
 } from './store';
 import type { AutomationJob } from './types';
 import { reconcilePendingLifecycleTransitions } from '@/lib/autonomous/lifecycleStore';
@@ -229,10 +228,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
     result.journalsReconciled += 1;
     result.repaired += 1;
   }
-  const projectionManifest = await rebuildAutomationJobReadModelsFromDurable(
-    await getAllAutomationJobs(),
-    nowMs,
-  );
-  result.jobProjectionsRebuilt = projectionManifest.retainedJobCount;
+  // Projection repair has its own fenced single-flight maintenance job. This
+  // reconciler must not start a second competing rebuild.
   return result;
 }

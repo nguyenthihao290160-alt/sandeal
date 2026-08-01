@@ -421,6 +421,11 @@ async function renameAtomicWithRetry(source: string, target: string): Promise<vo
   }
 }
 
+function isTransientProjectionCandidateCollection(collection: string): boolean {
+  return /^(automation-job-projections|automation-job-list-projections-v2|automation-job-health-summary-v1)-generation-[ab]-repair-[1-9][0-9]*$/
+    .test(collection);
+}
+
 /** Write and fsync a compact snapshot, then atomically replace the collection. */
 async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promise<void> {
   if (!Array.isArray(data)) throw new Error(`Invalid collection payload: ${collection}`);
@@ -439,7 +444,10 @@ async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promis
     if (stat.size !== Buffer.byteLength(content, 'utf8') || (data.length > 0 && stat.size < 2)) {
       throw new Error('atomic_write_validation_failed');
     }
-    await refreshBackup(filePath);
+    // Each fenced repair candidate has a unique collection and is reproducible
+    // from durable jobs. Backing it up would retain another large stale copy
+    // after cleanup; the active legacy projection keeps normal rollback backups.
+    if (!isTransientProjectionCandidateCollection(collection)) await refreshBackup(filePath);
     await renameAtomicWithRetry(tmpPath, filePath);
     await syncDirectory(path.dirname(filePath));
   } catch (error) {

@@ -130,6 +130,8 @@ export interface AutomationExecutionDisclosure {
 
 export interface AutomationJob {
   schemaVersion: number;
+  /** Per-job projection input version; legacy records bootstrap from zero. */
+  projectionSourceVersion?: number;
   policyVersion: string;
   handlerVersion: string;
   id: string;
@@ -268,6 +270,7 @@ export interface AutomationJobListItem {
 /** Internal lease fields needed to reconcile the compact read model. */
 export interface AutomationJobListProjection extends AutomationJobListItem {
   projectionSchemaVersion?: number;
+  projectionSourceVersion?: number;
   claimedAt?: string;
   runnableAt?: string;
   runnableReason?: AutomationJobAttempt['runnableReason'];

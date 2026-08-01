@@ -49,7 +49,7 @@ function job(index, now, overrides = {}) {
     payload: {
       candidateId: `candidate-${index}`,
       productId: `product-${index}`,
-      token: 'must-not-remain-in-projection-payload',
+      token: 'local-test-must-not-remain-in-projection-payload',
     },
     result: { candidateStatus: 'completed', productId: `product-${index}` },
     priority: 50,
@@ -109,7 +109,7 @@ async function main() {
           candidateStatus: 'completed',
           productId: 'product-1',
           durableOnly: 'x'.repeat(100_000),
-          token: 'must-not-remain-in-projection-result',
+          token: 'local-test-must-not-remain-in-projection-result',
         },
       }),
       job(2, now),
@@ -172,22 +172,23 @@ async function main() {
     assert.ok(read.reasonCodes.includes('JOB_STATUS_PROJECTION_MANIFEST_COUNT_MISMATCH'));
   });
 
-  await test('a stale caller snapshot cannot establish an authoritative rebuild manifest', async () => {
+  await test('a stale caller snapshot converges to the latest authoritative durable source', async () => {
     const supplied = [job(600, now)];
     const previousManifest = await health.getAutomationJobProjectionManifestForMaintenance();
-    const previousProjection = await health.readBoundedAutomationJobProjections();
-    await adapter.writeCollection('automation-jobs', [...supplied, job(601, now)]);
-    await assert.rejects(
-      () => store.rebuildAutomationJobReadModelsFromDurable(supplied, now + 1_500),
-      /JOB_PROJECTION_REBUILD_SOURCE_CHANGED/,
-    );
+    const durable = [...supplied, job(601, now)];
+    await adapter.writeCollection('automation-jobs', durable);
+    await store.rebuildAutomationJobReadModelsFromDurable(supplied, now + 1_500);
     const manifest = await health.getAutomationJobProjectionManifestForMaintenance();
     const projection = await health.readBoundedAutomationJobProjections();
-    assert.equal(manifest.sourceRevision, previousManifest.sourceRevision);
-    assert.equal(manifest.projectionFingerprint, previousManifest.projectionFingerprint);
+    assert.equal(manifest.activeGeneration, previousManifest.activeGeneration + 1);
+    assert.equal(manifest.durableJobCount, durable.length);
+    assert.equal(
+      manifest.sourceFingerprint,
+      store.automationJobProjectionSourceFingerprint(durable),
+    );
     assert.deepEqual(
-      projection.items.map(item => item.id),
-      previousProjection.items.map(item => item.id),
+      projection.items.map(item => item.id).sort(),
+      durable.map(item => item.id).sort(),
     );
   });
 
@@ -229,7 +230,7 @@ async function main() {
   });
 
   await test('heartbeat refreshes compact evidence without invalidating the manifest fingerprint', async () => {
-    const claimToken = 'claim-token-heartbeat';
+    const claimToken = 'local-test-claim-token-heartbeat';
     const running = job(820, Date.now(), {
       status: 'RUNNING',
       completedAt: undefined,

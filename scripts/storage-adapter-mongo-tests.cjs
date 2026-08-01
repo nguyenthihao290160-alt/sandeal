@@ -435,6 +435,57 @@ async function main() {
     assert.equal(database.commits, 1);
   });
 
+  await test('fenced projection candidates use generic revisions and publish through one atomic manifest pointer', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    const manifestCollection = 'automation-job-projection-manifest-v1';
+    const candidateCollection = 'automation-job-list-projections-v2-generation-a-repair-7';
+    assert.equal(validateCollectionName(candidateCollection), candidateCollection);
+    await adapter.writeCollection(manifestCollection, [{
+      id: 'automation-job-projection-manifest',
+      activeGeneration: 3,
+      activeSlot: 'LEGACY',
+      activeStorageRepairFence: 0,
+      repairFence: 6,
+    }]);
+    await adapter.writeCollection(candidateCollection, [{ id: 'candidate-job', status: 'SUCCEEDED' }]);
+
+    await assert.rejects(
+      () => adapter.runTransaction(manifestCollection, items => {
+        items[0].activeGeneration = 4;
+        items[0].activeSlot = 'A';
+        items[0].activeStorageRepairFence = 7;
+        throw new Error('SIMULATED_PROMOTION_CRASH');
+      }),
+      /SIMULATED_PROMOTION_CRASH/,
+    );
+    assert.deepEqual(await adapter.readCollection(manifestCollection), [{
+      id: 'automation-job-projection-manifest',
+      activeGeneration: 3,
+      activeSlot: 'LEGACY',
+      activeStorageRepairFence: 0,
+      repairFence: 6,
+    }]);
+
+    await adapter.runTransaction(manifestCollection, items => [{
+      ...items[0],
+      activeGeneration: 4,
+      activeSlot: 'A',
+      activeStorageRepairFence: 7,
+      repairFence: 7,
+    }]);
+    await adapter.runTransaction(manifestCollection, items => {
+      if (items[0].repairFence !== 6) return undefined;
+      return [{ ...items[0], activeStorageRepairFence: 6 }];
+    });
+    const [published] = await adapter.readCollection(manifestCollection);
+    assert.equal(published.activeGeneration, 4);
+    assert.equal(published.activeStorageRepairFence, 7);
+    assert.deepEqual(await adapter.readCollection(candidateCollection), [
+      { id: 'candidate-job', status: 'SUCCEEDED' },
+    ]);
+  });
+
   await test('mongo capabilities expose opt-in revision bulk and preserve partial item results', async () => {
     const database = new FakeDatabase();
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));

@@ -4,6 +4,11 @@ import type { AutomationJobType, AutonomousMode } from '@/lib/automation/types';
 import { readCollection, runTransaction } from '@/lib/storage/adapter';
 import { createStorageSnapshot } from './backupManager';
 import { runAutonomousSchemaBackfill, type BackfillResult } from './migrations';
+import {
+  abortAutomationJobProjectionMutation,
+  beginAutomationJobProjectionMutation,
+  invalidateAutomationJobProjectionMutation,
+} from '@/lib/automation/jobHealthSummary';
 
 export const PERSISTED_ENTITY_SCHEMA_VERSION = 2;
 export const PERSISTED_ENTITY_MIGRATION_ID = 'prompt10-persisted-entities-v2';
@@ -62,6 +67,7 @@ function migrateJob(record: Record<string, unknown>, now: string): { record: Rec
     record: {
       ...record,
       schemaVersion: PERSISTED_ENTITY_SCHEMA_VERSION,
+      projectionSourceVersion: Math.max(0, Math.floor(Number(record.projectionSourceVersion) || 0)) + 1,
       policyVersion: policy.policyVersion,
       handlerVersion: policy.handlerVersion,
       botId: policy.botId,
@@ -120,14 +126,31 @@ export async function runPersistedEntityBackfill(options: { dryRun?: boolean; li
     const nextCursor = cursor + slice.length;
     const completed = nextCursor >= raw.length;
     if (!dryRun) {
-      await runTransaction<Record<string, unknown>>(entity, current => {
-        for (const [index, replacement] of replacements) {
-          const expected = raw[index] as Record<string, unknown> | undefined;
-          if (index >= current.length || current[index]?.id !== expected?.id) throw new Error(`MIGRATION_SOURCE_CHANGED:${entity}:${index}`);
-          current[index] = replacement;
-        }
-        return current;
-      });
+      const projectionMutation = entity === 'automation-jobs' && replacements.size
+        ? await beginAutomationJobProjectionMutation()
+        : null;
+      try {
+        await runTransaction<Record<string, unknown>>(entity, current => {
+          for (const [index, replacement] of replacements) {
+            const expected = raw[index] as Record<string, unknown> | undefined;
+            if (index >= current.length || current[index]?.id !== expected?.id) throw new Error(`MIGRATION_SOURCE_CHANGED:${entity}:${index}`);
+            current[index] = entity === 'automation-jobs'
+              ? {
+                  ...replacement,
+                  projectionSourceVersion: Math.max(
+                    0,
+                    Math.floor(Number(current[index]?.projectionSourceVersion) || 0),
+                  ) + 1,
+                }
+              : replacement;
+          }
+          return current;
+        });
+      } catch (error) {
+        if (projectionMutation) await abortAutomationJobProjectionMutation(projectionMutation).catch(() => undefined);
+        throw error;
+      }
+      if (projectionMutation) await invalidateAutomationJobProjectionMutation(projectionMutation);
       const checkpoint: EntityCheckpoint = {
         schemaVersion: 1, id: `${PERSISTED_ENTITY_MIGRATION_ID}:${entity}`, entity,
         status: failed ? 'FAILED' : completed ? 'COMPLETED' : 'RUNNING', inputChecksum: checksum(await readCollection(entity)), cursor: nextCursor,

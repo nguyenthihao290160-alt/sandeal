@@ -254,6 +254,14 @@ export async function buildAutomationOperationalHealth(
     conflicts,
     workerRequired: true,
     schedulerRequired: settings.enabled,
+    projectionEvidence: {
+      currentStateComplete: summary.currentStateComplete,
+      projectionStatus: summary.projectionStatus,
+      sourceRevision: summary.sourceRevision || null,
+      summaryRevision: summary.summaryRevision || null,
+      generatedAt: summary.generatedAt || null,
+      currentReasonCodes: summary.reasonCodes,
+    },
   });
   const currentActiveReasons = reasonReconciliation.currentActiveReasons;
   const historicalAuditReasons = reasonReconciliation.historicalAuditReasons;

@@ -7,6 +7,7 @@ import {
   readCollectionPage,
   runTransaction,
 } from '@/lib/storage/adapter';
+import type { StorageTransaction } from '@/lib/storage/types';
 import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getJobRegistryDefaults } from './botRegistry';
@@ -27,19 +28,37 @@ import {
   automationJobProjectionContentFingerprint,
   automationJobProjectionFingerprint,
   automationJobProjectionSourceRevision,
+  automationJobProjectionStorageCollections,
+  acknowledgeAutomationJobProjectionCandidateCleanup,
+  abortAutomationJobProjectionMutation,
   beginAutomationJobProjectionRebuild,
+  beginAutomationJobProjectionMutation,
   beginAutomationJobProjectionSync,
+  buildAutomationJobHealthSummary,
+  completeAutomationJobProjectionRepair,
+  failAutomationJobProjectionRepair,
   finishAutomationJobProjectionRebuild,
   finishAutomationJobProjectionSync,
+  getAutomationJobActiveProjectionStorage,
   getAutomationJobHealthView,
   getAutomationJobProjectionManifestForMaintenance,
   getAutomationJobProjectionLimit,
+  invalidateAutomationJobProjectionMutation,
   deterministicProjectionFingerprint,
   readBoundedAutomationJobProjections,
   refreshAutomationJobHealthSummary,
-  restoreAutomationJobProjectionManifestAfterFailedRebuild,
+  transitionAutomationJobProjectionRepair,
+  validateAutomationJobHealthSummary,
+  type AutomationJobHealthSummary,
+  type AutomationJobProjectionMutationHandle,
+  type AutomationJobProjectionEvidence,
   type AutomationJobProjectionManifest,
+  type AutomationJobProjectionRepairContext,
+  type AutomationJobProjectionRepairOwnerInput,
+  type AutomationJobProjectionRepairPhase,
   type AutomationJobProjectionRetentionBoundary,
+  type AutomationJobProjectionSourceBoundary,
+  type AutomationJobProjectionCandidateStorageRef,
 } from './jobHealthSummary';
 import {
   getAutomationExecutionDescriptor,
@@ -69,8 +88,6 @@ import type {
 const JOBS = 'automation-jobs';
 const JOB_ATTEMPTS = 'automation-job-attempts';
 const JOB_HEARTBEATS = 'automation-job-heartbeats';
-const JOB_PROJECTIONS = 'automation-job-projections';
-const JOB_LIST_PROJECTIONS = 'automation-job-list-projections-v2';
 const JOB_PROJECTION_REBUILD_STAGING = 'automation-job-projection-rebuild-staging-v1';
 const CONTROL = 'automation-control';
 const AUDIT = 'automation-audit';
@@ -159,6 +176,7 @@ export function projectAutomationJobListItem(job: AutomationJob): AutomationJobL
   return {
     projectionSchemaVersion: AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
     schemaVersion: job.schemaVersion,
+    projectionSourceVersion: job.projectionSourceVersion,
     id: job.id,
     operationId: shortReason(job.operationId)?.slice(0, 160) || job.id,
     type: job.type,
@@ -365,6 +383,7 @@ export function projectAutomationJobStatusItem(job: AutomationJob): AutomationJo
   return {
     projectionSchemaVersion: AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION,
     schemaVersion: job.schemaVersion,
+    projectionSourceVersion: job.projectionSourceVersion,
     policyVersion: job.policyVersion,
     handlerVersion: job.handlerVersion,
     id: job.id,
@@ -477,11 +496,20 @@ export function projectAutomationJobStatusItem(job: AutomationJob): AutomationJo
  * already read; health/dashboard request paths must never invoke this rebuild.
  */
 export interface AutomationJobProjectionRebuildCandidate {
-  schemaVersion: 1;
+  schemaVersion: 2;
   projectionName: typeof AUTOMATION_JOB_PROJECTION_NAME;
   projectionVersion: typeof AUTOMATION_JOB_PROJECTION_VERSION;
   releaseId: string;
   sourceSnapshotFingerprint: string;
+  startBoundary: AutomationJobProjectionSourceBoundary;
+  sourceBoundary: AutomationJobProjectionSourceBoundary;
+  targetGeneration: number;
+  targetSlot: 'A' | 'B';
+  repairId: string;
+  repairFence: number;
+  repairAttemptNumber: number;
+  catchUpPasses: number;
+  deltaJobCount: number;
   sourceRevision: string;
   projectionFingerprint: string;
   candidateFingerprint: string;
@@ -518,10 +546,15 @@ export interface AutomationJobProjectionRebuildCandidate {
 }
 
 interface AutomationJobProjectionRebuildStagingRecord {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   rebuildToken: string;
-  status: 'STAGED' | 'APPLIED' | 'FAILED';
+  repairId: string;
+  repairFence: number;
+  targetGeneration: number;
+  targetSlot: 'A' | 'B';
+  sourceBoundary: AutomationJobProjectionSourceBoundary;
+  status: 'STAGED' | 'PROMOTED' | 'MIRRORED' | 'FAILED';
   stagedAt: string;
   completedAt?: string;
   reasonCode?: string;
@@ -531,7 +564,7 @@ interface AutomationJobProjectionRebuildStagingRecord {
   statusProjectionFingerprint: string;
   listProjectionContentFingerprint: string;
   statusProjectionContentFingerprint: string;
-  candidate?: AutomationJobProjectionRebuildCandidate;
+  candidateFingerprint: string;
 }
 
 function projectionRange(items: AutomationJobListProjection[]): AutomationJobProjectionRebuildCandidate['observedRange'] {
@@ -595,7 +628,7 @@ export function validateAutomationJobProjectionRebuildCandidate(
   void _candidateFingerprint;
   void _generatedAt;
   const reasons = [
-    ...(candidate.schemaVersion !== 1 ? ['JOB_PROJECTION_CANDIDATE_SCHEMA_MISMATCH'] : []),
+    ...(candidate.schemaVersion !== 2 ? ['JOB_PROJECTION_CANDIDATE_SCHEMA_MISMATCH'] : []),
     ...(candidate.projectionName !== AUTOMATION_JOB_PROJECTION_NAME
       ? ['JOB_PROJECTION_CANDIDATE_NAME_MISMATCH']
       : []),
@@ -608,6 +641,29 @@ export function validateAutomationJobProjectionRebuildCandidate(
     ...(expected.sourceSnapshotFingerprint
       && candidate.sourceSnapshotFingerprint !== expected.sourceSnapshotFingerprint
       ? ['JOB_PROJECTION_CANDIDATE_SOURCE_CHANGED']
+      : []),
+    ...(candidate.startBoundary?.schemaVersion !== 1
+      || candidate.sourceBoundary?.schemaVersion !== 1
+      || !Number.isInteger(candidate.startBoundary?.highWatermark)
+      || !Number.isInteger(candidate.sourceBoundary?.highWatermark)
+      || candidate.sourceBoundary.highWatermark < candidate.startBoundary.highWatermark
+      || candidate.sourceBoundary.sourceFingerprint !== candidate.sourceSnapshotFingerprint
+      ? ['JOB_PROJECTION_CANDIDATE_BOUNDARY_INVALID']
+      : []),
+    ...(!Number.isInteger(candidate.targetGeneration)
+      || candidate.targetGeneration <= 0
+      || (candidate.targetSlot !== 'A' && candidate.targetSlot !== 'B')
+      || candidate.repairId !== String(candidate.repairId || '').slice(0, 160)
+      || !candidate.repairId
+      || !Number.isInteger(candidate.repairFence)
+      || candidate.repairFence <= 0
+      || !Number.isInteger(candidate.repairAttemptNumber)
+      || candidate.repairAttemptNumber <= 0
+      || !Number.isInteger(candidate.catchUpPasses)
+      || candidate.catchUpPasses < 0
+      || !Number.isInteger(candidate.deltaJobCount)
+      || candidate.deltaJobCount < 0
+      ? ['JOB_PROJECTION_CANDIDATE_REPAIR_METADATA_INVALID']
       : []),
     ...(!Array.isArray(candidate.listProjections) || !Array.isArray(candidate.statusProjections)
       ? ['JOB_PROJECTION_CANDIDATE_ITEMS_INVALID']
@@ -681,277 +737,765 @@ export function validateAutomationJobProjectionRebuildCandidate(
   return { valid: reasons.length === 0, reasonCodes: [...new Set(reasons)] };
 }
 
-export async function rebuildAutomationJobReadModelsFromDurable(
-  jobs: AutomationJob[],
-  now = Date.now(),
-): Promise<AutomationJobProjectionManifest> {
+interface AutomationJobProjectionSourceIdentity {
+  fingerprint: string;
+  jobFingerprints: Map<string, string>;
+}
+
+function assertProjectionSourceJobs(jobs: AutomationJob[]): void {
   if (!Array.isArray(jobs)) throw new Error('JOB_PROJECTION_REBUILD_INPUT_INVALID');
   const ids = new Set<string>();
   for (const job of jobs) {
     if (!job || typeof job.id !== 'string' || ids.has(job.id)) {
-      throw new Error(ids.has(job?.id) ? 'JOB_PROJECTION_REBUILD_DUPLICATE_JOB_ID' : 'JOB_PROJECTION_REBUILD_INPUT_INVALID');
+      throw new Error(ids.has(job?.id)
+        ? 'JOB_PROJECTION_REBUILD_DUPLICATE_JOB_ID'
+        : 'JOB_PROJECTION_REBUILD_INPUT_INVALID');
     }
     ids.add(job.id);
   }
-  const snapshotFingerprint = (values: AutomationJob[]) => deterministicProjectionFingerprint(
-    [...values]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map(value => ({
-        id: value.id,
-        status: value.status,
-        updatedAt: value.updatedAt,
-        resources: automationJobResourceReferences(value),
-      })),
-  );
-  const expectedFingerprint = snapshotFingerprint(jobs);
-  const [previousManifest, previousStatusSnapshot, previousListSnapshot] = await Promise.all([
-    getAutomationJobProjectionManifestForMaintenance(),
-    readBoundedCollectionSnapshot<AutomationJobStatusProjection>(JOB_PROJECTIONS, {
-      maximumItems: MAX_JOB_PROJECTIONS,
-      maximumBytes: 32 * 1024 * 1024,
-    }),
-    readBoundedCollectionSnapshot<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, {
-      maximumItems: MAX_JOB_PROJECTIONS,
-      maximumBytes: 32 * 1024 * 1024,
-    }),
-  ]);
-  const rebuildToken = await beginAutomationJobProjectionRebuild(now);
-  let liveProjectionWriteStarted = false;
-  let committedSourceRevision: string | undefined;
-  try {
-    const newestFirst = (left: AutomationJob, right: AutomationJob) => {
-      const byUpdatedAt = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
-      return byUpdatedAt || left.id.localeCompare(right.id);
-    };
-    const active = jobs.filter(job => !TERMINAL.has(job.status)).sort(newestFirst);
-    const terminal = jobs.filter(job => TERMINAL.has(job.status)).sort(newestFirst);
-    const retained = [
+}
+
+function projectionSourceItemFingerprint(job: AutomationJob): string {
+  return deterministicProjectionFingerprint({
+    id: job.id,
+    list: automationJobProjectionContentFingerprint([projectAutomationJobListItem(job)]),
+    status: automationJobProjectionContentFingerprint([projectAutomationJobStatusItem(job)]),
+  });
+}
+
+export function automationJobMutationAffectsProjection(
+  before: AutomationJob | null,
+  after: AutomationJob | null,
+): boolean {
+  if (!before || !after) return before !== after;
+  return projectionSourceItemFingerprint(before) !== projectionSourceItemFingerprint(after);
+}
+
+function selectProjectionSourceJobs(jobs: AutomationJob[]): {
+  active: AutomationJob[];
+  retained: AutomationJob[];
+} {
+  const newestFirst = (left: AutomationJob, right: AutomationJob) => {
+    const byUpdatedAt = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+    return byUpdatedAt || left.id.localeCompare(right.id);
+  };
+  const active = jobs.filter(job => !TERMINAL.has(job.status)).sort(newestFirst);
+  const terminal = jobs.filter(job => TERMINAL.has(job.status)).sort(newestFirst);
+  return {
+    active,
+    retained: [
       ...active.slice(0, MAX_JOB_PROJECTIONS),
       ...terminal.slice(0, Math.max(0, MAX_JOB_PROJECTIONS - active.length)),
-    ];
-    const statusProjections = retained.map(projectAutomationJobStatusItem);
-    const listProjections = retained.map(projectAutomationJobListItem);
-    const listFingerprint = automationJobProjectionFingerprint(listProjections);
-    const statusFingerprint = automationJobProjectionFingerprint(statusProjections);
-    const listContentFingerprint = automationJobProjectionContentFingerprint(listProjections);
-    const statusContentFingerprint = automationJobProjectionContentFingerprint(statusProjections);
-    const stagedAt = new Date(now).toISOString();
-    const range = projectionRange(listProjections);
-    const atCapacity = retained.length >= MAX_JOB_PROJECTIONS;
-    const truncated = jobs.length > retained.length || atCapacity;
-    const retentionBoundary = atCapacity && range.earliestUpdatedAt
-      ? { field: 'updatedAt' as const, oldestRetainedAt: range.earliestUpdatedAt }
-      : null;
-    const projectionFingerprint = automationJobCombinedProjectionFingerprint({
-      listProjectionFingerprint: listFingerprint,
-      statusProjectionFingerprint: statusFingerprint,
-      listProjectionContentFingerprint: listContentFingerprint,
-      statusProjectionContentFingerprint: statusContentFingerprint,
-      listProjectionCount: listProjections.length,
-      statusProjectionCount: statusProjections.length,
-    });
-    const releaseId = getReleaseIdentity().releaseId;
-    const recordCounts = {
-      durable: jobs.length,
-      active: active.length,
-      retained: retained.length,
-      retainedTerminal: retained.filter(job => TERMINAL.has(job.status)).length,
-      list: listProjections.length,
-      status: statusProjections.length,
+    ],
+  };
+}
+
+export function automationJobProjectionSourceFingerprint(jobs: AutomationJob[]): string {
+  return projectionSourceIdentity(jobs).fingerprint;
+}
+
+function projectionSourceIdentity(jobs: AutomationJob[]): AutomationJobProjectionSourceIdentity {
+  assertProjectionSourceJobs(jobs);
+  const jobFingerprints = new Map<string, string>();
+  for (const job of jobs) jobFingerprints.set(job.id, projectionSourceItemFingerprint(job));
+  const selection = selectProjectionSourceJobs(jobs);
+  return {
+    fingerprint: deterministicProjectionFingerprint({
+      durableJobCount: jobs.length,
+      activeJobCount: selection.active.length,
+      retainedProjectionInputs: selection.retained
+        .map(job => [job.id, jobFingerprints.get(job.id)])
+        .sort(([left], [right]) => String(left).localeCompare(String(right))),
+    }),
+    jobFingerprints,
+  };
+}
+
+function changedProjectionSourceJobs(
+  previous: Map<string, string>,
+  current: Map<string, string>,
+): number {
+  let changed = 0;
+  for (const [id, fingerprint] of current) {
+    if (previous.get(id) !== fingerprint) changed += 1;
+  }
+  for (const id of previous.keys()) {
+    if (!current.has(id)) changed += 1;
+  }
+  return changed;
+}
+
+async function applyCurrentProjectionHeartbeats(jobs: AutomationJob[]): Promise<AutomationJob[]> {
+  const heartbeats = await readCollection<AutomationJobHeartbeat>(JOB_HEARTBEATS);
+  if (!heartbeats.length) return jobs;
+  const byJobId = new Map(heartbeats.map(heartbeat => [heartbeat.jobId, heartbeat]));
+  return jobs.map(job => {
+    if (job.status !== 'RUNNING') return job;
+    const heartbeat = byJobId.get(job.id);
+    if (
+      !heartbeat
+      || heartbeat.workerId !== job.claimedBy
+      || (job.claimToken && heartbeat.claimToken !== job.claimToken)
+    ) return job;
+    return {
+      ...job,
+      heartbeatAt: heartbeat.heartbeatAt,
+      leaseExpiresAt: heartbeat.leaseExpiresAt,
     };
-    const completeness = {
-      baselineEstablished: true,
-      currentStateComplete: active.length <= MAX_JOB_PROJECTIONS,
-      historyComplete: !truncated,
-      truncated,
-    };
-    const sourceRevision = automationJobProjectionSourceRevision({
-      releaseId,
-      projectionFingerprint,
-      durableJobCount: recordCounts.durable,
-      activeJobCount: recordCounts.active,
-      retainedJobCount: recordCounts.retained,
-      sourceUpdatedAt: range.latestUpdatedAt,
-    });
-    const candidateIdentity: Omit<AutomationJobProjectionRebuildCandidate, 'candidateFingerprint' | 'generatedAt'> = {
-      schemaVersion: 1,
-      projectionName: AUTOMATION_JOB_PROJECTION_NAME,
-      projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
-      releaseId,
-      sourceSnapshotFingerprint: expectedFingerprint,
-      sourceRevision,
-      projectionFingerprint,
-      observedRange: range,
-      recordCounts,
-      completeness,
-      projectionCapacity: MAX_JOB_PROJECTIONS,
-      sourceUpdatedAt: range.latestUpdatedAt,
-      retentionBoundary,
-      listProjectionFingerprint: listFingerprint,
-      statusProjectionFingerprint: statusFingerprint,
-      listProjectionContentFingerprint: listContentFingerprint,
-      statusProjectionContentFingerprint: statusContentFingerprint,
-      listProjections,
-      statusProjections,
-    };
-    const candidate: AutomationJobProjectionRebuildCandidate = {
-      ...candidateIdentity,
-      generatedAt: stagedAt,
-      candidateFingerprint: projectionCandidateFingerprint(candidateIdentity),
-    };
-    const candidateValidation = validateAutomationJobProjectionRebuildCandidate(candidate, {
-      sourceSnapshotFingerprint: expectedFingerprint,
-    });
-    if (!candidateValidation.valid) {
-      throw new Error(candidateValidation.reasonCodes[0] || 'JOB_PROJECTION_REBUILD_CANDIDATE_INVALID');
+  });
+}
+
+function buildProjectionRepairCandidate(
+  jobs: AutomationJob[],
+  identity: AutomationJobProjectionSourceIdentity,
+  context: AutomationJobProjectionRepairContext,
+  sourceBoundary: AutomationJobProjectionSourceBoundary,
+  input: { now: number; catchUpPasses: number; deltaJobCount: number },
+  reuse?: {
+    identity: AutomationJobProjectionSourceIdentity;
+    candidate: AutomationJobProjectionRebuildCandidate;
+  },
+): AutomationJobProjectionRebuildCandidate {
+  const { active, retained } = selectProjectionSourceJobs(jobs);
+  const reusableStatuses = new Map(reuse?.candidate.statusProjections.map(item => [item.id, item]) || []);
+  const reusableList = new Map(reuse?.candidate.listProjections.map(item => [item.id, item]) || []);
+  const unchanged = (job: AutomationJob) => reuse?.identity.jobFingerprints.get(job.id) === identity.jobFingerprints.get(job.id);
+  const statusProjections = retained.map(job => unchanged(job) && reusableStatuses.has(job.id)
+    ? reusableStatuses.get(job.id)!
+    : projectAutomationJobStatusItem(job));
+  const listProjections = retained.map(job => unchanged(job) && reusableList.has(job.id)
+    ? reusableList.get(job.id)!
+    : projectAutomationJobListItem(job));
+  const listFingerprint = automationJobProjectionFingerprint(listProjections);
+  const statusFingerprint = automationJobProjectionFingerprint(statusProjections);
+  const listContentFingerprint = automationJobProjectionContentFingerprint(listProjections);
+  const statusContentFingerprint = automationJobProjectionContentFingerprint(statusProjections);
+  const range = projectionRange(listProjections);
+  const atCapacity = retained.length >= MAX_JOB_PROJECTIONS;
+  const truncated = jobs.length > retained.length || atCapacity;
+  const retentionBoundary = atCapacity && range.earliestUpdatedAt
+    ? { field: 'updatedAt' as const, oldestRetainedAt: range.earliestUpdatedAt }
+    : null;
+  const projectionFingerprint = automationJobCombinedProjectionFingerprint({
+    listProjectionFingerprint: listFingerprint,
+    statusProjectionFingerprint: statusFingerprint,
+    listProjectionContentFingerprint: listContentFingerprint,
+    statusProjectionContentFingerprint: statusContentFingerprint,
+    listProjectionCount: listProjections.length,
+    statusProjectionCount: statusProjections.length,
+  });
+  const releaseId = getReleaseIdentity().releaseId;
+  const recordCounts = {
+    durable: jobs.length,
+    active: active.length,
+    retained: retained.length,
+    retainedTerminal: retained.filter(job => TERMINAL.has(job.status)).length,
+    list: listProjections.length,
+    status: statusProjections.length,
+  };
+  const completeness = {
+    baselineEstablished: true,
+    currentStateComplete: active.length <= MAX_JOB_PROJECTIONS,
+    historyComplete: !truncated,
+    truncated,
+  };
+  const sourceRevision = automationJobProjectionSourceRevision({
+    releaseId,
+    projectionFingerprint,
+    durableJobCount: recordCounts.durable,
+    activeJobCount: recordCounts.active,
+    retainedJobCount: recordCounts.retained,
+    sourceUpdatedAt: range.latestUpdatedAt,
+  });
+  const candidateIdentity: Omit<AutomationJobProjectionRebuildCandidate, 'candidateFingerprint' | 'generatedAt'> = {
+    schemaVersion: 2,
+    projectionName: AUTOMATION_JOB_PROJECTION_NAME,
+    projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+    releaseId,
+    sourceSnapshotFingerprint: identity.fingerprint,
+    startBoundary: context.startBoundary,
+    sourceBoundary,
+    targetGeneration: context.targetGeneration,
+    targetSlot: context.targetSlot,
+    repairId: context.repairId,
+    repairFence: context.repairFence,
+    repairAttemptNumber: context.attemptNumber,
+    catchUpPasses: input.catchUpPasses,
+    deltaJobCount: input.deltaJobCount,
+    sourceRevision,
+    projectionFingerprint,
+    observedRange: range,
+    recordCounts,
+    completeness,
+    projectionCapacity: MAX_JOB_PROJECTIONS,
+    sourceUpdatedAt: range.latestUpdatedAt,
+    retentionBoundary,
+    listProjectionFingerprint: listFingerprint,
+    statusProjectionFingerprint: statusFingerprint,
+    listProjectionContentFingerprint: listContentFingerprint,
+    statusProjectionContentFingerprint: statusContentFingerprint,
+    listProjections,
+    statusProjections,
+  };
+  return {
+    ...candidateIdentity,
+    generatedAt: new Date(input.now).toISOString(),
+    candidateFingerprint: projectionCandidateFingerprint(candidateIdentity),
+  };
+}
+
+function candidateProjectionEvidence(
+  candidate: AutomationJobProjectionRebuildCandidate,
+): AutomationJobProjectionEvidence {
+  return {
+    evidenceClassification: candidate.completeness.currentStateComplete ? 'COMPLETE' : 'INCOMPLETE',
+    source: 'job-list-projection-v2',
+    collectionPresent: true,
+    currentStateComplete: candidate.completeness.currentStateComplete,
+    historyComplete: candidate.completeness.historyComplete,
+    truncated: candidate.completeness.truncated,
+    observedRange: candidate.observedRange,
+    retentionBoundary: candidate.retentionBoundary,
+    manifestRebuiltAt: candidate.generatedAt,
+    manifestReleaseId: candidate.releaseId,
+    manifestUpdatedAt: candidate.generatedAt,
+    projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+    sourceRevision: candidate.sourceRevision,
+    summaryRevision: null,
+    projectionFingerprint: candidate.projectionFingerprint,
+    generatedAt: candidate.generatedAt,
+    recordCounts: candidate.recordCounts,
+    completeness: candidate.completeness,
+  };
+}
+
+export interface AutomationJobProjectionRepairHooks {
+  afterBaseRebuild?: (input: { context: AutomationJobProjectionRepairContext; candidate: AutomationJobProjectionRebuildCandidate }) => Promise<void> | void;
+  afterCatchUpPass?: (input: { context: AutomationJobProjectionRepairContext; pass: number; deltaJobCount: number }) => Promise<void> | void;
+  beforeCandidateValidation?: (input: { context: AutomationJobProjectionRepairContext; pass: number; candidate: AutomationJobProjectionRebuildCandidate }) => Promise<void> | void;
+  beforePublication?: (input: { context: AutomationJobProjectionRepairContext; pass: number; sourceBoundary: AutomationJobProjectionSourceBoundary }) => Promise<void> | void;
+  afterAtomicPromotion?: (input: { context: AutomationJobProjectionRepairContext; pass: number; sourceBoundary: AutomationJobProjectionSourceBoundary }) => Promise<void> | void;
+  afterLegacyMirror?: (input: { context: AutomationJobProjectionRepairContext; sourceBoundary: AutomationJobProjectionSourceBoundary }) => Promise<void> | void;
+}
+
+export interface AutomationJobProjectionRepairOptions {
+  owner?: AutomationJobProjectionRepairOwnerInput;
+  maximumCatchUpPasses?: number;
+  catchUpBackoffMs?: readonly number[];
+  sleep?: (milliseconds: number) => Promise<void>;
+  authorizePublication?: () => Promise<boolean>;
+  onPhase?: (input: {
+    context: AutomationJobProjectionRepairContext;
+    phase: AutomationJobProjectionRepairPhase;
+    catchUpPasses: number;
+    catchUpPending: boolean;
+    lastFailureReason: string | null;
+  }) => Promise<void> | void;
+  hooks?: AutomationJobProjectionRepairHooks;
+}
+
+function projectionRepairOwned(
+  manifest: AutomationJobProjectionManifest | null,
+  context: AutomationJobProjectionRepairContext,
+): boolean {
+  const repair = manifest?.activeRepair;
+  return Boolean(
+    repair
+    && repair.repairId === context.repairId
+    && repair.rebuildToken === context.rebuildToken
+    && repair.repairFence === context.repairFence,
+  );
+}
+
+async function delayProjectionRepair(milliseconds: number): Promise<void> {
+  await new Promise<void>(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function cleanupStaleProjectionCandidates(now = Date.now()): Promise<void> {
+  const manifest = await getAutomationJobProjectionManifestForMaintenance();
+  const stale = (manifest?.staleCandidateStorage || []).filter(ref => !(
+    manifest?.activeSlot === ref.slot
+    && manifest.activeStorageRepairFence === ref.repairFence
+  ));
+  const cleaned: AutomationJobProjectionCandidateStorageRef[] = [];
+  for (const ref of stale) {
+    const collections = automationJobProjectionStorageCollections(ref.slot, ref.repairFence);
+    try {
+      // Sequential clearing bounds FileStorage to one parsed candidate at a time.
+      await runTransaction<AutomationJobStatusProjection>(collections.status, () => []);
+      await runTransaction<AutomationJobListProjection>(collections.list, () => []);
+      await runTransaction<AutomationJobHealthSummary>(collections.summary, () => []);
+      cleaned.push(ref);
+    } catch {
+      break;
     }
-    await runTransaction<AutomationJobProjectionRebuildStagingRecord>(JOB_PROJECTION_REBUILD_STAGING, items => [
-      ...items.filter(item => item.id !== rebuildToken).slice(-9).map(item => ({
-        ...item,
-        candidate: undefined,
-      })),
-      {
-        id: rebuildToken,
+  }
+  await acknowledgeAutomationJobProjectionCandidateCleanup(cleaned, now);
+}
+
+const activeProjectionRepairFlights = new Map<string, Promise<AutomationJobProjectionManifest>>();
+
+export function rebuildAutomationJobReadModelsFromDurable(
+  suppliedJobs: AutomationJob[] | null,
+  now = Date.now(),
+  options: AutomationJobProjectionRepairOptions = {},
+): Promise<AutomationJobProjectionManifest> {
+  const owner = options.owner;
+  if (!owner) return performAutomationJobReadModelRebuild(suppliedJobs, now, options);
+  const flightKey = deterministicProjectionFingerprint({
+    repairId: owner.repairId,
+    ownerId: owner.ownerId,
+    ownerInstanceId: owner.ownerInstanceId,
+    workerFencingToken: owner.workerFencingToken,
+    claimTokenHash: createHash('sha256').update(owner.claimToken).digest('hex'),
+    attemptNumber: owner.attemptNumber,
+  });
+  const existing = activeProjectionRepairFlights.get(flightKey);
+  if (existing) return existing;
+  const flight = performAutomationJobReadModelRebuild(suppliedJobs, now, options);
+  activeProjectionRepairFlights.set(flightKey, flight);
+  const cleanup = () => {
+    if (activeProjectionRepairFlights.get(flightKey) === flight) {
+      activeProjectionRepairFlights.delete(flightKey);
+    }
+  };
+  void flight.then(cleanup, cleanup);
+  return flight;
+}
+
+async function performAutomationJobReadModelRebuild(
+  suppliedJobs: AutomationJob[] | null,
+  now = Date.now(),
+  options: AutomationJobProjectionRepairOptions = {},
+): Promise<AutomationJobProjectionManifest> {
+  if (suppliedJobs !== null) assertProjectionSourceJobs(suppliedJobs);
+  const localRepairId = `projection-repair:${generateId()}`.slice(0, 160);
+  const owner: AutomationJobProjectionRepairOwnerInput = options.owner || {
+    repairId: localRepairId,
+    ownerId: 'projection-maintenance',
+    ownerInstanceId: 'local-maintenance',
+    workerFencingToken: 0,
+    claimToken: localRepairId,
+    attemptNumber: 1,
+  };
+  const maximumCatchUpPasses = Math.max(1, Math.min(5, options.maximumCatchUpPasses ?? 3));
+  const backoffs = options.catchUpBackoffMs?.length ? options.catchUpBackoffMs : [10, 25, 50, 100, 200];
+  const sleep = options.sleep || delayProjectionRepair;
+  await cleanupStaleProjectionCandidates(now);
+  const context = await beginAutomationJobProjectionRebuild(owner, now);
+  const targetCollections = automationJobProjectionStorageCollections(context.targetSlot, context.repairFence);
+  const observePhase = async (
+    phase: AutomationJobProjectionRepairPhase,
+    input: { catchUpPasses?: number; catchUpPending?: boolean; lastFailureReason?: string | null } = {},
+  ): Promise<void> => {
+    await options.onPhase?.({
+      context,
+      phase,
+      catchUpPasses: input.catchUpPasses || 0,
+      catchUpPending: input.catchUpPending === true,
+      lastFailureReason: input.lastFailureReason || null,
+    });
+  };
+  const transitionRepair = async (
+    phase: AutomationJobProjectionRepairPhase,
+    input: Parameters<typeof transitionAutomationJobProjectionRepair>[2] = {},
+  ): Promise<void> => {
+    const repair = await transitionAutomationJobProjectionRepair(context, phase, input, now);
+    await observePhase(phase, {
+      catchUpPasses: repair.catchUpPasses,
+      catchUpPending: repair.catchUpPending,
+      lastFailureReason: repair.lastFailureReason,
+    });
+  };
+  let promoted = false;
+  let candidate: AutomationJobProjectionRebuildCandidate | undefined;
+  let identity: AutomationJobProjectionSourceIdentity | undefined;
+  let totalDeltaJobCount = 0;
+  try {
+    await cleanupStaleProjectionCandidates(now);
+    await observePhase('CLAIMED');
+    await transitionRepair('REBUILDING');
+    let currentJobs = await applyCurrentProjectionHeartbeats(
+      suppliedJobs || await readCollection<AutomationJob>(JOBS),
+    );
+    suppliedJobs = null;
+    identity = projectionSourceIdentity(currentJobs);
+    candidate = buildProjectionRepairCandidate(currentJobs, identity, context, {
+      schemaVersion: 1,
+      highWatermark: context.startBoundary.highWatermark,
+      sourceFingerprint: identity.fingerprint,
+    }, { now, catchUpPasses: 0, deltaJobCount: 0 });
+    currentJobs = [];
+    await options.hooks?.afterBaseRebuild?.({ context, candidate });
+
+    const activeStorage = await getAutomationJobActiveProjectionStorage();
+    const previousSummarySnapshot = await readBoundedCollectionSnapshot<AutomationJobHealthSummary>(
+      activeStorage.collections.summary,
+      { maximumItems: 1, maximumBytes: 512 * 1024 },
+    ).catch(() => null);
+    const previousSummary = previousSummarySnapshot?.items[0];
+
+    for (let pass = 1; pass <= maximumCatchUpPasses; pass += 1) {
+      await transitionRepair('CATCHING_UP', {
+        catchUpPasses: pass,
+        catchUpPending: true,
+      });
+      const before = await getAutomationJobProjectionManifestForMaintenance();
+      if (!projectionRepairOwned(before, context)) throw new Error('JOB_PROJECTION_REPAIR_FENCING_REJECTED');
+      if (before!.inFlightSyncTokens.length > 0) {
+        await sleep(backoffs[Math.min(pass - 1, backoffs.length - 1)] || 0);
+        continue;
+      }
+
+      // File storage necessarily parses one authoritative jobs revision per pass;
+      // only compact hashes and the bounded candidate survive into the next pass.
+      const previousIdentity = identity;
+      const previousCandidate = candidate;
+      currentJobs = [];
+      candidate = undefined;
+      let latestJobs = await applyCurrentProjectionHeartbeats(
+        await readCollection<AutomationJob>(JOBS),
+      );
+      const latestIdentity = projectionSourceIdentity(latestJobs);
+      const deltaJobCount = changedProjectionSourceJobs(previousIdentity.jobFingerprints, latestIdentity.jobFingerprints);
+      totalDeltaJobCount += deltaJobCount;
+      currentJobs = latestJobs;
+      identity = latestIdentity;
+      const after = await getAutomationJobProjectionManifestForMaintenance();
+      if (!projectionRepairOwned(after, context)) throw new Error('JOB_PROJECTION_REPAIR_FENCING_REJECTED');
+      const sourceBoundary: AutomationJobProjectionSourceBoundary = {
         schemaVersion: 1,
-        rebuildToken,
+        highWatermark: after!.sourceHighWatermark || 0,
+        sourceFingerprint: identity.fingerprint,
+      };
+      candidate = buildProjectionRepairCandidate(currentJobs, identity, context, sourceBoundary, {
+        now,
+        catchUpPasses: pass,
+        deltaJobCount: totalDeltaJobCount,
+      }, previousCandidate ? { identity: previousIdentity, candidate: previousCandidate } : undefined);
+      currentJobs = [];
+      latestJobs = [];
+      await options.hooks?.afterCatchUpPass?.({ context, pass, deltaJobCount });
+      const settled = await getAutomationJobProjectionManifestForMaintenance();
+      const stableBoundary = projectionRepairOwned(settled, context)
+        && settled!.inFlightSyncTokens.length === 0
+        && before!.sourceHighWatermark === after!.sourceHighWatermark
+        && after!.sourceHighWatermark === settled!.sourceHighWatermark;
+      if (!stableBoundary) {
+        await sleep(backoffs[Math.min(pass - 1, backoffs.length - 1)] || 0);
+        continue;
+      }
+
+      await options.hooks?.beforeCandidateValidation?.({ context, pass, candidate });
+      const validation = validateAutomationJobProjectionRebuildCandidate(candidate, {
+        sourceSnapshotFingerprint: identity.fingerprint,
+      });
+      if (!validation.valid) {
+        throw new Error(validation.reasonCodes[0] || 'JOB_PROJECTION_REBUILD_CANDIDATE_INVALID');
+      }
+      await transitionRepair('VALIDATING', {
+        candidateBoundary: sourceBoundary,
+        catchUpPasses: pass,
+        catchUpPending: false,
+      });
+      const summary = buildAutomationJobHealthSummary(candidate.listProjections, {
+        now,
+        previous: previousSummary,
+        evidence: candidateProjectionEvidence(candidate),
+      });
+      if (
+        summary.sourceRevision !== candidate.sourceRevision
+        || summary.projectionFingerprint !== candidate.projectionFingerprint
+        || !summary.projectionEvidence.currentStateComplete
+      ) {
+        throw new Error('JOB_PROJECTION_REBUILD_SUMMARY_NOT_VERIFIED');
+      }
+
+      const stagedAt = new Date(now).toISOString();
+      const stagingRecord: AutomationJobProjectionRebuildStagingRecord = {
+        schemaVersion: 2,
+        id: context.rebuildToken,
+        rebuildToken: context.rebuildToken,
+        repairId: context.repairId,
+        repairFence: context.repairFence,
+        targetGeneration: context.targetGeneration,
+        targetSlot: context.targetSlot,
+        sourceBoundary,
         status: 'STAGED',
         stagedAt,
-        listProjectionCount: listProjections.length,
-        statusProjectionCount: statusProjections.length,
-        listProjectionFingerprint: listFingerprint,
-        statusProjectionFingerprint: statusFingerprint,
-        listProjectionContentFingerprint: listContentFingerprint,
-        statusProjectionContentFingerprint: statusContentFingerprint,
-        candidate,
-      },
-    ]);
-    const stagedSnapshot = await readBoundedCollectionSnapshot<AutomationJobProjectionRebuildStagingRecord>(
-      JOB_PROJECTION_REBUILD_STAGING,
-      { maximumItems: 10, maximumBytes: 32 * 1024 * 1024 },
-    );
-    const stagedCandidate = stagedSnapshot.items.find(item => item.id === rebuildToken)?.candidate;
-    const stagedValidation = validateAutomationJobProjectionRebuildCandidate(stagedCandidate, {
-      sourceSnapshotFingerprint: expectedFingerprint,
+        listProjectionCount: candidate.listProjections.length,
+        statusProjectionCount: candidate.statusProjections.length,
+        listProjectionFingerprint: candidate.listProjectionFingerprint,
+        statusProjectionFingerprint: candidate.statusProjectionFingerprint,
+        listProjectionContentFingerprint: candidate.listProjectionContentFingerprint,
+        statusProjectionContentFingerprint: candidate.statusProjectionContentFingerprint,
+        candidateFingerprint: candidate.candidateFingerprint,
+      };
+      await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
+        JOB_PROJECTION_REBUILD_STAGING,
+        items => [...items.filter(item => item.id !== context.rebuildToken).slice(-9), stagingRecord],
+      );
+      await Promise.all([
+        runTransaction<AutomationJobStatusProjection>(targetCollections.status, () => candidate!.statusProjections),
+        runTransaction<AutomationJobListProjection>(targetCollections.list, () => candidate!.listProjections),
+        runTransaction<AutomationJobHealthSummary>(targetCollections.summary, () => [summary]),
+      ]);
+      const [writtenStatuses, writtenList, writtenSummary, staged] = await Promise.all([
+        readBoundedCollectionSnapshot<AutomationJobStatusProjection>(targetCollections.status, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobListProjection>(targetCollections.list, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobHealthSummary>(targetCollections.summary, {
+          maximumItems: 1,
+          maximumBytes: 512 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobProjectionRebuildStagingRecord>(
+          JOB_PROJECTION_REBUILD_STAGING,
+          { maximumItems: 10, maximumBytes: 128 * 1024 },
+        ),
+      ]);
+      const stagedCandidate = staged.items.find(item => item.id === context.rebuildToken);
+      if (
+        writtenStatuses.items.length !== candidate.statusProjections.length
+        || writtenList.items.length !== candidate.listProjections.length
+        || automationJobProjectionFingerprint(writtenStatuses.items) !== candidate.statusProjectionFingerprint
+        || automationJobProjectionFingerprint(writtenList.items) !== candidate.listProjectionFingerprint
+        || automationJobProjectionContentFingerprint(writtenStatuses.items) !== candidate.statusProjectionContentFingerprint
+        || automationJobProjectionContentFingerprint(writtenList.items) !== candidate.listProjectionContentFingerprint
+        || !validateAutomationJobHealthSummary(writtenSummary.items[0])
+        || writtenSummary.items[0]?.summaryRevision !== summary.summaryRevision
+        || stagedCandidate?.candidateFingerprint !== candidate.candidateFingerprint
+      ) {
+        throw new Error('JOB_PROJECTION_REBUILD_CANDIDATE_STORAGE_MISMATCH');
+      }
+      await options.hooks?.beforePublication?.({ context, pass, sourceBoundary });
+      if (options.authorizePublication && !await options.authorizePublication()) {
+        throw new Error('JOB_PROJECTION_REPAIR_PUBLICATION_NOT_AUTHORIZED');
+      }
+      const [publishStatuses, publishList, publishSummary] = await Promise.all([
+        readBoundedCollectionSnapshot<AutomationJobStatusProjection>(targetCollections.status, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobListProjection>(targetCollections.list, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobHealthSummary>(targetCollections.summary, {
+          maximumItems: 1,
+          maximumBytes: 512 * 1024,
+        }),
+      ]);
+      if (
+        publishStatuses.items.length !== candidate.statusProjections.length
+        || publishList.items.length !== candidate.listProjections.length
+        || automationJobProjectionFingerprint(publishStatuses.items) !== candidate.statusProjectionFingerprint
+        || automationJobProjectionFingerprint(publishList.items) !== candidate.listProjectionFingerprint
+        || automationJobProjectionContentFingerprint(publishStatuses.items)
+          !== candidate.statusProjectionContentFingerprint
+        || automationJobProjectionContentFingerprint(publishList.items)
+          !== candidate.listProjectionContentFingerprint
+        || !validateAutomationJobHealthSummary(publishSummary.items[0])
+        || publishSummary.items[0].summaryRevision !== summary.summaryRevision
+      ) {
+        throw new Error('JOB_PROJECTION_REPAIR_PRE_PUBLISH_VALIDATION_FAILED');
+      }
+      await transitionRepair('PUBLISHING', {
+        candidateBoundary: sourceBoundary,
+        catchUpPending: false,
+      });
+      try {
+        await finishAutomationJobProjectionRebuild(context, {
+          durableJobCount: candidate.recordCounts.durable,
+          activeJobCount: candidate.recordCounts.active,
+          retainedJobCount: candidate.recordCounts.retained,
+          retainedTerminalCount: candidate.recordCounts.retainedTerminal,
+          listProjectionCount: candidate.recordCounts.list,
+          statusProjectionCount: candidate.recordCounts.status,
+          listProjectionFingerprint: candidate.listProjectionFingerprint,
+          statusProjectionFingerprint: candidate.statusProjectionFingerprint,
+          listProjectionContentFingerprint: candidate.listProjectionContentFingerprint,
+          statusProjectionContentFingerprint: candidate.statusProjectionContentFingerprint,
+          truncated: candidate.completeness.truncated,
+          sourceUpdatedAt: candidate.sourceUpdatedAt,
+          retentionBoundary: candidate.retentionBoundary,
+          observedRange: candidate.observedRange,
+          summaryRevision: summary.summaryRevision,
+          sourceBoundary,
+        }, now);
+        promoted = true;
+        await options.hooks?.afterAtomicPromotion?.({ context, pass, sourceBoundary });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'JOB_PROJECTION_REPAIR_BOUNDARY_CHANGED') {
+          await transitionRepair('RETRY_WAIT', {
+            catchUpPending: true,
+            lastFailureReason: error.message,
+          });
+          await sleep(backoffs[Math.min(pass - 1, backoffs.length - 1)] || 0);
+          continue;
+        }
+        throw error;
+      }
+      await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
+        JOB_PROJECTION_REBUILD_STAGING,
+        items => items.map(item => item.id === context.rebuildToken
+          ? { ...item, status: 'PROMOTED' as const }
+          : item),
+      );
+      break;
+    }
+
+    if (!promoted || !candidate) throw new Error('JOB_PROJECTION_CATCH_UP_RETRY_EXHAUSTED');
+
+    let legacyMirrored = false;
+    const legacyCollections = automationJobProjectionStorageCollections('LEGACY');
+    for (let mirrorAttempt = 0; mirrorAttempt < 2 && !legacyMirrored; mirrorAttempt += 1) {
+      const mirrorManifest = await getAutomationJobProjectionManifestForMaintenance();
+      if (!projectionRepairOwned(mirrorManifest, context)) throw new Error('JOB_PROJECTION_REPAIR_FENCING_REJECTED');
+      if (mirrorManifest!.inFlightSyncTokens.length > 0) {
+        await sleep(backoffs[Math.min(mirrorAttempt, backoffs.length - 1)] || 0);
+        continue;
+      }
+      const [statuses, list, summaries] = await Promise.all([
+        readBoundedCollectionSnapshot<AutomationJobStatusProjection>(targetCollections.status, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobListProjection>(targetCollections.list, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobHealthSummary>(targetCollections.summary, {
+          maximumItems: 1,
+          maximumBytes: 512 * 1024,
+        }),
+      ]);
+      await Promise.all([
+        runTransaction<AutomationJobStatusProjection>(legacyCollections.status, () => statuses.items),
+        runTransaction<AutomationJobListProjection>(legacyCollections.list, () => list.items),
+        runTransaction<AutomationJobHealthSummary>(legacyCollections.summary, () => summaries.items),
+      ]);
+      const [mirroredStatuses, mirroredList, mirroredSummary] = await Promise.all([
+        readBoundedCollectionSnapshot<AutomationJobStatusProjection>(legacyCollections.status, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobListProjection>(legacyCollections.list, {
+          maximumItems: MAX_JOB_PROJECTIONS,
+          maximumBytes: 32 * 1024 * 1024,
+        }),
+        readBoundedCollectionSnapshot<AutomationJobHealthSummary>(legacyCollections.summary, {
+          maximumItems: 1,
+          maximumBytes: 512 * 1024,
+        }),
+      ]);
+      if (
+        mirroredStatuses.items.length !== mirrorManifest!.statusProjectionCount
+        || mirroredList.items.length !== mirrorManifest!.listProjectionCount
+        || automationJobProjectionFingerprint(mirroredStatuses.items) !== mirrorManifest!.statusProjectionFingerprint
+        || automationJobProjectionFingerprint(mirroredList.items) !== mirrorManifest!.listProjectionFingerprint
+        || automationJobProjectionContentFingerprint(mirroredStatuses.items)
+          !== mirrorManifest!.statusProjectionContentFingerprint
+        || automationJobProjectionContentFingerprint(mirroredList.items)
+          !== mirrorManifest!.listProjectionContentFingerprint
+        || !validateAutomationJobHealthSummary(mirroredSummary.items[0])
+        || mirroredSummary.items[0].summaryRevision !== mirrorManifest!.summaryRevision
+      ) {
+        throw new Error('JOB_PROJECTION_LEGACY_MIRROR_VALIDATION_FAILED');
+      }
+      try {
+        await completeAutomationJobProjectionRepair(context, {
+          legacyMirrored: true,
+          expectedSourceRevision: mirrorManifest!.sourceRevision,
+          expectedSummaryRevision: mirrorManifest!.summaryRevision || undefined,
+          expectedHighWatermark: mirrorManifest!.sourceHighWatermark || 0,
+        }, now);
+        legacyMirrored = true;
+        await options.hooks?.afterLegacyMirror?.({
+          context,
+          sourceBoundary: candidate.sourceBoundary,
+        });
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'JOB_PROJECTION_LEGACY_MIRROR_BOUNDARY_CHANGED') throw error;
+      }
+    }
+    if (!legacyMirrored) {
+      await completeAutomationJobProjectionRepair(context, { legacyMirrored: false }, now);
+    }
+    await observePhase('COMPLETED', {
+      catchUpPasses: candidate.catchUpPasses,
+      catchUpPending: false,
     });
-    if (!stagedValidation.valid || !stagedCandidate) {
-      throw new Error(stagedValidation.reasonCodes[0] || 'JOB_PROJECTION_REBUILD_STAGING_MISMATCH');
-    }
-    // The caller's snapshot can become stale between its authoritative read
-    // and the staged replacement. Re-read only in this explicit maintenance
-    // workflow; an interactive request must never pay this full-history cost.
-    const verifiedDurableJobs = await readCollection<AutomationJob>(JOBS);
-    if (snapshotFingerprint(verifiedDurableJobs) !== expectedFingerprint) {
-      throw new Error('JOB_PROJECTION_REBUILD_SOURCE_CHANGED');
-    }
-    liveProjectionWriteStarted = true;
-    await runTransaction<AutomationJobStatusProjection>(
-      JOB_PROJECTIONS,
-      () => stagedCandidate.statusProjections,
+    await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
+      JOB_PROJECTION_REBUILD_STAGING,
+      items => items.map(item => item.id === context.rebuildToken ? {
+        ...item,
+        status: legacyMirrored ? 'MIRRORED' : 'PROMOTED',
+        completedAt: new Date(now).toISOString(),
+      } : item),
     );
-    await runTransaction<AutomationJobListProjection>(
-      JOB_LIST_PROJECTIONS,
-      () => stagedCandidate.listProjections,
-    );
-    const [writtenStatuses, writtenList] = await Promise.all([
-      readBoundedCollectionSnapshot<AutomationJobStatusProjection>(JOB_PROJECTIONS, {
-        maximumItems: MAX_JOB_PROJECTIONS,
-        maximumBytes: 32 * 1024 * 1024,
-      }),
-      readBoundedCollectionSnapshot<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, {
-        maximumItems: MAX_JOB_PROJECTIONS,
-        maximumBytes: 32 * 1024 * 1024,
-      }),
-    ]);
+    await cleanupStaleProjectionCandidates(now);
+    const manifest = await getAutomationJobProjectionManifestForMaintenance();
     if (
-      writtenStatuses.items.length !== statusProjections.length
-      || writtenList.items.length !== listProjections.length
-      || automationJobProjectionFingerprint(writtenStatuses.items) !== statusFingerprint
-      || automationJobProjectionFingerprint(writtenList.items) !== listFingerprint
-      || automationJobProjectionContentFingerprint(writtenStatuses.items) !== statusContentFingerprint
-      || automationJobProjectionContentFingerprint(writtenList.items) !== listContentFingerprint
-    ) {
-      throw new Error('JOB_PROJECTION_REBUILD_ATOMIC_VERIFY_FAILED');
-    }
-    const postWriteDurableJobs = await readCollection<AutomationJob>(JOBS);
-    if (snapshotFingerprint(postWriteDurableJobs) !== expectedFingerprint) {
-      throw new Error('JOB_PROJECTION_REBUILD_SOURCE_CHANGED_AFTER_WRITE');
-    }
-    const manifest = await finishAutomationJobProjectionRebuild(rebuildToken, {
-      durableJobCount: stagedCandidate.recordCounts.durable,
-      activeJobCount: stagedCandidate.recordCounts.active,
-      retainedJobCount: stagedCandidate.recordCounts.retained,
-      retainedTerminalCount: stagedCandidate.recordCounts.retainedTerminal,
-      listProjectionCount: stagedCandidate.recordCounts.list,
-      statusProjectionCount: stagedCandidate.recordCounts.status,
-      listProjectionFingerprint: stagedCandidate.listProjectionFingerprint,
-      statusProjectionFingerprint: stagedCandidate.statusProjectionFingerprint,
-      listProjectionContentFingerprint: stagedCandidate.listProjectionContentFingerprint,
-      statusProjectionContentFingerprint: stagedCandidate.statusProjectionContentFingerprint,
-      truncated: stagedCandidate.completeness.truncated,
-      sourceUpdatedAt: stagedCandidate.sourceUpdatedAt,
-      retentionBoundary: stagedCandidate.retentionBoundary,
-      observedRange: stagedCandidate.observedRange,
-    }, now);
-    committedSourceRevision = manifest.sourceRevision;
-    if (
-      !manifest.baselineEstablished
-      || !manifest.currentStateComplete
-      || manifest.sourceRevision !== stagedCandidate.sourceRevision
-      || manifest.projectionFingerprint !== stagedCandidate.projectionFingerprint
+      !manifest
+      || manifest.activeGeneration !== context.targetGeneration
+      || (manifest.sourceHighWatermark || 0) < candidate.sourceBoundary.highWatermark
+      || !manifest.lastSuccessfulRepairAt
     ) {
       throw new Error('JOB_PROJECTION_REBUILD_MANIFEST_NOT_VERIFIED');
     }
-    const summary = await refreshAutomationJobHealthSummary(now);
-    if (
-      summary.sourceRevision !== manifest.sourceRevision
-      || summary.projectionFingerprint !== manifest.projectionFingerprint
-    ) {
-      throw new Error('JOB_PROJECTION_REBUILD_SUMMARY_NOT_VERIFIED');
-    }
-    await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
-      JOB_PROJECTION_REBUILD_STAGING,
-      items => items.map(item => item.id === rebuildToken ? {
-      ...item,
-      status: 'APPLIED',
-      completedAt: new Date(now).toISOString(),
-      candidate: undefined,
-    } : item),
-    );
-    return (await getAutomationJobProjectionManifestForMaintenance()) || manifest;
+    return manifest;
   } catch (error) {
-    if (liveProjectionWriteStarted) {
-      await Promise.all([
-        runTransaction<AutomationJobStatusProjection>(
-          JOB_PROJECTIONS,
-          () => previousStatusSnapshot.items,
-        ),
-        runTransaction<AutomationJobListProjection>(
-          JOB_LIST_PROJECTIONS,
-          () => previousListSnapshot.items,
-        ),
-      ]).catch(() => undefined);
-    }
-    if (previousManifest) {
-      await restoreAutomationJobProjectionManifestAfterFailedRebuild(
-        rebuildToken,
-        previousManifest,
-        committedSourceRevision,
+    if (promoted) {
+      const recovered = await completeAutomationJobProjectionRepair(
+        context,
+        { legacyMirrored: false },
+        now,
+      ).catch(() => getAutomationJobProjectionManifestForMaintenance());
+      if (
+        recovered?.activeGeneration === context.targetGeneration
+        && (recovered.activeSlot === 'LEGACY'
+          || recovered.activeStorageRepairFence === context.repairFence)
+      ) {
+        await observePhase('COMPLETED', {
+          catchUpPasses: candidate?.catchUpPasses || 0,
+          catchUpPending: false,
+        }).catch(() => undefined);
+        await cleanupStaleProjectionCandidates(now).catch(() => undefined);
+        return recovered;
+      }
+    } else {
+      await failAutomationJobProjectionRepair(
+        context,
+        error instanceof Error ? error.message : 'JOB_PROJECTION_REBUILD_FAILED',
         now,
       ).catch(() => undefined);
-    } else {
-      await finishAutomationJobProjectionRebuild(rebuildToken, null, now).catch(() => undefined);
+      await refreshAutomationJobHealthSummary(now).catch(() => undefined);
+      const terminalPhase: AutomationJobProjectionRepairPhase = error instanceof Error
+        && error.message.includes('FENCING')
+        ? 'SUPERSEDED'
+        : 'FAILED';
+      await observePhase(terminalPhase, {
+        catchUpPasses: candidate?.catchUpPasses || 0,
+        catchUpPending: false,
+        lastFailureReason: error instanceof Error ? error.message : 'JOB_PROJECTION_REBUILD_FAILED',
+      }).catch(() => undefined);
     }
+    await cleanupStaleProjectionCandidates(now).catch(() => undefined);
     await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
       JOB_PROJECTION_REBUILD_STAGING,
-      items => items.map(item => item.id === rebuildToken ? {
-      ...item,
-      status: 'FAILED',
-      completedAt: new Date(now).toISOString(),
-      candidate: undefined,
-      reasonCode: error instanceof Error
-        ? error.message.replace(/[^A-Z0-9_:-]/gi, '_').slice(0, 120)
-        : 'JOB_PROJECTION_REBUILD_FAILED',
-    } : item),
+      items => items.map(item => item.id === context.rebuildToken ? {
+        ...item,
+        status: 'FAILED',
+        completedAt: new Date(now).toISOString(),
+        reasonCode: error instanceof Error
+          ? error.message.replace(/[^A-Z0-9_:-]/gi, '_').slice(0, 120)
+          : 'JOB_PROJECTION_REBUILD_FAILED',
+      } : item),
     ).catch(() => undefined);
     throw error;
   }
@@ -959,6 +1503,8 @@ export async function rebuildAutomationJobReadModelsFromDurable(
 
 interface ProjectionMutationStats {
   inserted: boolean;
+  insertedCount: number;
+  sourceAffected: boolean;
   count: number;
   activeCount: number;
   terminalCount: number;
@@ -972,13 +1518,15 @@ interface ProjectionMutationStats {
 
 function boundedProjectionItems<T extends Pick<AutomationJob, 'id' | 'status' | 'updatedAt'>>(
   items: T[],
-): { items: T[]; stats: Omit<ProjectionMutationStats, 'inserted'> } {
+): { items: T[]; stats: Omit<ProjectionMutationStats, 'inserted' | 'insertedCount' | 'sourceAffected'> } {
   const activeBeforeRetention = items.filter(item => !TERMINAL.has(item.status)).length;
   let retained = items;
   if (items.length > MAX_JOB_PROJECTIONS) {
     const oldestFirst = [...items].sort((left, right) => {
       const byUpdatedAt = Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
-      return byUpdatedAt || left.id.localeCompare(right.id);
+      // The rebuild retains lexicographically smaller ids when timestamps tie,
+      // so incremental eviction removes the larger ids first at that boundary.
+      return byUpdatedAt || right.id.localeCompare(left.id);
     });
     const removable = [
       ...oldestFirst.filter(item => TERMINAL.has(item.status)),
@@ -1010,67 +1558,132 @@ function boundedProjectionItems<T extends Pick<AutomationJob, 'id' | 'status' | 
   };
 }
 
-async function syncJobProjection(job: AutomationJob): Promise<ProjectionMutationStats> {
+async function syncJobProjections(
+  jobs: AutomationJob[],
+  collection: string,
+): Promise<ProjectionMutationStats> {
   let output: ProjectionMutationStats | undefined;
-  await runTransaction<AutomationJobStatusProjection>(JOB_PROJECTIONS, items => {
-    const index = items.findIndex(item => item.id === job.id);
-    const inserted = index < 0;
-    const projection = projectAutomationJobStatusItem(job);
-    if (index >= 0) items[index] = projection;
-    else items.push(projection);
+  await runTransaction<AutomationJobStatusProjection>(collection, items => {
+    const previousContentFingerprint = automationJobProjectionContentFingerprint(items);
+    let insertedCount = 0;
+    for (const job of jobs) {
+      const index = items.findIndex(item => item.id === job.id);
+      const projection = projectAutomationJobStatusItem(job);
+      if (index >= 0) {
+        if ((items[index].projectionSourceVersion || 0) > (projection.projectionSourceVersion || 0)) continue;
+        items[index] = projection;
+      } else {
+        insertedCount += 1;
+        items.push(projection);
+      }
+    }
     const bounded = boundedProjectionItems(items);
-    output = { inserted, ...bounded.stats };
+    output = {
+      inserted: insertedCount > 0,
+      insertedCount,
+      sourceAffected: previousContentFingerprint !== bounded.stats.contentFingerprint,
+      ...bounded.stats,
+    };
     return bounded.items;
   });
   if (!output) throw new Error('JOB_STATUS_PROJECTION_SYNC_RESULT_MISSING');
   return output;
 }
 
-async function syncJobListProjection(job: AutomationJob): Promise<ProjectionMutationStats> {
+async function syncJobListProjections(
+  jobs: AutomationJob[],
+  collection: string,
+): Promise<ProjectionMutationStats> {
   let output: ProjectionMutationStats | undefined;
-  await runTransaction<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, items => {
-    const index = items.findIndex(item => item.id === job.id);
-    const inserted = index < 0;
-    const projection = projectAutomationJobListItem(job);
-    if (index >= 0) items[index] = projection;
-    else items.push(projection);
+  await runTransaction<AutomationJobListProjection>(collection, items => {
+    const previousContentFingerprint = automationJobProjectionContentFingerprint(items);
+    let insertedCount = 0;
+    for (const job of jobs) {
+      const index = items.findIndex(item => item.id === job.id);
+      const projection = projectAutomationJobListItem(job);
+      if (index >= 0) {
+        if ((items[index].projectionSourceVersion || 0) > (projection.projectionSourceVersion || 0)) continue;
+        items[index] = projection;
+      } else {
+        insertedCount += 1;
+        items.push(projection);
+      }
+    }
     const bounded = boundedProjectionItems(items);
-    output = { inserted, ...bounded.stats };
+    output = {
+      inserted: insertedCount > 0,
+      insertedCount,
+      sourceAffected: previousContentFingerprint !== bounded.stats.contentFingerprint,
+      ...bounded.stats,
+    };
     return bounded.items;
   });
   if (!output) throw new Error('JOB_LIST_PROJECTION_SYNC_RESULT_MISSING');
   return output;
 }
 
-async function removeJobHeartbeat(jobId: string): Promise<void> {
+async function removeJobProjections<T extends Pick<AutomationJob, 'id' | 'status' | 'updatedAt'>>(
+  jobIds: ReadonlySet<string>,
+  collection: string,
+): Promise<ProjectionMutationStats> {
+  let output: ProjectionMutationStats | undefined;
+  await runTransaction<T>(collection, items => {
+    const filtered = items.filter(item => !jobIds.has(item.id));
+    const removedCount = items.length - filtered.length;
+    const bounded = boundedProjectionItems(filtered);
+    output = {
+      inserted: false,
+      insertedCount: 0,
+      sourceAffected: removedCount > 0,
+      ...bounded.stats,
+    };
+    return removedCount > 0 ? bounded.items : undefined;
+  });
+  if (!output) throw new Error('JOB_PROJECTION_REMOVE_RESULT_MISSING');
+  return output;
+}
+
+async function removeJobHeartbeats(jobIds: string[]): Promise<void> {
+  const ids = new Set(jobIds);
   await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
-    const filtered = items.filter(item => item.jobId !== jobId);
+    const filtered = items.filter(item => !ids.has(item.jobId));
     return filtered.length === items.length ? undefined : filtered;
   });
 }
 
-async function syncJobReadModelsBestEffort(job: AutomationJob, removeHeartbeat = false): Promise<void> {
-  let syncToken: string | undefined;
-  try {
-    syncToken = await beginAutomationJobProjectionSync();
-  } catch (error) {
-    console.error(JSON.stringify({
-      type: 'automation_job_projection_manifest_begin_failed',
-      jobId: job.id,
-      reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
-    }));
+async function syncJobReadModelsBatchBestEffort(
+  jobs: AutomationJob[],
+  input: {
+    removeHeartbeatJobIds?: string[];
+    mutation?: AutomationJobProjectionMutationHandle;
+    sourceMutationCommitted?: boolean;
+    supersededRetry?: boolean;
+  } = {},
+): Promise<void> {
+  if (!jobs.length) {
+    if (input.mutation) await abortAutomationJobProjectionMutation(input.mutation).catch(() => undefined);
+    return;
   }
+  const mutation = input.mutation || await beginAutomationJobProjectionMutation();
+  const sourceVersions = mutation.jobSourceVersions || {};
+  const versionedJobs = jobs.map(job => sourceVersions[job.id] === undefined
+    ? job
+    : { ...job, projectionSourceVersion: sourceVersions[job.id] });
+  const collections = automationJobProjectionStorageCollections(mutation.targetSlot, mutation.targetRepairFence);
   const operations: Array<{ label: string; work: Promise<ProjectionMutationStats | void> }> = [
-    { label: 'status-projection', work: syncJobProjection(job) },
-    { label: 'list-projection-v2', work: syncJobListProjection(job) },
+    { label: 'status-projection', work: syncJobProjections(versionedJobs, collections.status) },
+    { label: 'list-projection-v2', work: syncJobListProjections(versionedJobs, collections.list) },
   ];
-  if (removeHeartbeat) operations.push({ label: 'heartbeat', work: removeJobHeartbeat(job.id) });
+  if (input.removeHeartbeatJobIds?.length) {
+    operations.push({ label: 'heartbeat', work: removeJobHeartbeats(input.removeHeartbeatJobIds) });
+  }
   const results = await Promise.allSettled(operations.map(operation => operation.work));
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       console.error(JSON.stringify({
         type: 'automation_job_read_model_sync_failed',
-        jobId: job.id,
+        jobId: jobs[0].id,
+        jobCount: jobs.length,
         readModel: operations[index].label,
         reasonCode: sanitizeErrorMessage(result.reason instanceof Error ? result.reason.message : 'unknown_error'),
       }));
@@ -1088,10 +1701,19 @@ async function syncJobReadModelsBestEffort(job: AutomationJob, removeHeartbeat =
   const listStats = listResult.status === 'fulfilled' && listResult.value
     ? listResult.value
     : undefined;
-  if (syncToken) {
-    await finishAutomationJobProjectionSync(syncToken, {
+  try {
+    await finishAutomationJobProjectionSync(mutation, {
       success: projectionSyncSucceeded,
       inserted: Boolean(statusStats?.inserted || listStats?.inserted),
+      insertedCount: Math.max(statusStats?.insertedCount || 0, listStats?.insertedCount || 0),
+      // The durable source watermark advances only for a committed JOBS write.
+      // Repairing an already-existing read model must not invent a source event.
+      sourceAffected: input.sourceMutationCommitted === true && (
+        !projectionSyncSucceeded
+        || Boolean(statusStats?.sourceAffected || listStats?.sourceAffected)
+        || Math.max(statusStats?.insertedCount || 0, listStats?.insertedCount || 0) > 0
+      ),
+      projectionChanged: Boolean(statusStats?.sourceAffected || listStats?.sourceAffected),
       listProjectionCount: listStats?.count || 0,
       statusProjectionCount: statusStats?.count || 0,
       listProjectionFingerprint: listStats?.fingerprint || automationJobProjectionFingerprint([]),
@@ -1110,25 +1732,54 @@ async function syncJobReadModelsBestEffort(job: AutomationJob, removeHeartbeat =
         .filter((value): value is string => Boolean(value))
         .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
       retentionBoundary: statusStats?.retentionBoundary || listStats?.retentionBoundary || null,
-    }).catch(error => {
-      console.error(JSON.stringify({
-        type: 'automation_job_projection_manifest_sync_failed',
-        jobId: job.id,
-        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
-      }));
     });
+  } catch (error) {
+    console.error(JSON.stringify({
+      type: 'automation_job_projection_manifest_sync_failed',
+      jobId: jobs[0].id,
+      jobCount: jobs.length,
+      reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+    }));
+    if (
+      input.sourceMutationCommitted === true
+      && input.supersededRetry !== true
+      && error instanceof Error
+      && ['JOB_PROJECTION_MUTATION_SUPERSEDED', 'JOB_PROJECTION_MUTATION_GENERATION_SUPERSEDED'].includes(error.message)
+    ) {
+      await syncJobReadModelsBatchBestEffort(versionedJobs, {
+        removeHeartbeatJobIds: input.removeHeartbeatJobIds,
+        sourceMutationCommitted: true,
+        supersededRetry: true,
+      });
+    }
+    return;
   }
   if (!projectionSyncSucceeded) return;
+  const manifestAfterSync = await getAutomationJobProjectionManifestForMaintenance().catch(() => null);
+  if (manifestAfterSync?.rebuildToken || manifestAfterSync?.inFlightSyncTokens.length) return;
   try {
     await refreshAutomationJobHealthSummary();
   } catch (error) {
     console.error(JSON.stringify({
       type: 'automation_job_health_summary_sync_failed',
-      jobId: job.id,
+      jobId: jobs[0].id,
+      jobCount: jobs.length,
       readModel: 'job-health-summary-v1',
       reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
     }));
   }
+}
+
+async function syncJobReadModelsBestEffort(
+  job: AutomationJob,
+  removeHeartbeat = false,
+  mutation?: AutomationJobProjectionMutationHandle,
+): Promise<void> {
+  await syncJobReadModelsBatchBestEffort([job], {
+    mutation,
+    sourceMutationCommitted: Boolean(mutation),
+    removeHeartbeatJobIds: removeHeartbeat ? [job.id] : [],
+  });
 }
 const COOPERATIVELY_CANCELLABLE = new Set<AutomationJobType>([
   'RECHECK_PRODUCT_HEALTH',
@@ -1887,6 +2538,7 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
   const pickupRollout = getFeatureRolloutState('SLO_RUNNABLE_AT_V2');
   const job: AutomationJob = {
     schemaVersion: AUTOMATION_JOB_SCHEMA_VERSION, policyVersion: jobPolicy.policyVersion, handlerVersion: jobPolicy.handlerVersion,
+    projectionSourceVersion: 1,
     id: generateId(), correlationId, type: input.type, status, payload,
     priority: Math.max(0, Math.min(100, input.priority ?? 50)), idempotencyKey: key, operationId, requestedBy,
     sourceMetadata: { producer: requestedBy, source, trigger },
@@ -1957,6 +2609,7 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
     quotaReserved = !reservation.alreadyProcessed;
   }
   let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
+  const projectionMutation = await beginAutomationJobProjectionMutation();
   try {
     await runTransaction<AutomationJob>(JOBS, items => {
       const sameKey = items
@@ -1978,6 +2631,7 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       return items;
     });
   } catch (error) {
+    await abortAutomationJobProjectionMutation(projectionMutation).catch(() => undefined);
     if (quotaReserved) await releaseProductProcessingCapacity(reservationKey);
     throw error;
   }
@@ -1993,7 +2647,8 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       console.error(JSON.stringify({ type: 'automation_job_created_audit_failed', jobId: response.job.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') }));
     }
   }
-  await syncJobReadModelsBestEffort(response.job);
+  if (response.created) await syncJobReadModelsBestEffort(response.job, false, projectionMutation);
+  else await abortAutomationJobProjectionMutation(projectionMutation);
   logAutomationJobEvent(response.created ? 'job_created' : 'job_reused', response.job, {
     workerId: response.created ? response.job.requestedBy : response.job.claimedBy,
     reasonCode: response.created ? 'CREATED' : response.code === 'ALREADY_PROCESSED' ? 'COMPLETED_RECENTLY' : 'REUSED_ACTIVE_JOB',
@@ -2038,7 +2693,8 @@ export async function getAutomationJob(id: string): Promise<AutomationJob | null
 
 /** Lightweight status read for browser polling; falls back once for legacy jobs. */
 export async function getAutomationJobProjection(id: string): Promise<AutomationJob | null> {
-  const page = await readCollectionPage<AutomationJob>(JOB_PROJECTIONS, {
+  const activeProjection = await getAutomationJobActiveProjectionStorage();
+  const page = await readCollectionPage<AutomationJob>(activeProjection.collections.status, {
     page: 1,
     pageSize: 1,
     filters: { id },
@@ -2076,7 +2732,7 @@ export async function getAutomationJobProjection(id: string): Promise<Automation
     const reconciled = durable.status === 'RUNNING' && heartbeat
       && heartbeat.workerId === durable.claimedBy
       && (!durable.claimToken || heartbeat.claimToken === durable.claimToken)
-      ? { ...durable, heartbeatAt: heartbeat.heartbeatAt, leaseExpiresAt: heartbeat.leaseExpiresAt, updatedAt: heartbeat.heartbeatAt }
+      ? { ...durable, heartbeatAt: heartbeat.heartbeatAt, leaseExpiresAt: heartbeat.leaseExpiresAt }
       : durable;
     await syncJobReadModelsBestEffort(reconciled);
     return reconciled;
@@ -2258,6 +2914,41 @@ function clearAutomationJobClaim(job: AutomationJob): void {
   job.leaseExpiresAt = undefined;
 }
 
+function markAutomationJobProjectionSourceMutation(job: AutomationJob): void {
+  job.projectionSourceVersion = Math.max(0, Math.floor(job.projectionSourceVersion || 0)) + 1;
+}
+
+async function runAutomationJobSourceTransaction(
+  work: StorageTransaction<AutomationJob>,
+): Promise<AutomationJobProjectionMutationHandle> {
+  const mutation = await beginAutomationJobProjectionMutation();
+  try {
+    await runTransaction<AutomationJob>(JOBS, async items => {
+      const previous = new Map(items.map(item => [item.id, {
+        updatedAt: item.updatedAt,
+        version: Math.max(0, Math.floor(item.projectionSourceVersion || 0)),
+      }]));
+      const result = await work(items);
+      if (!result) return undefined;
+      const assignedVersions: Record<string, number> = {};
+      for (const item of result) {
+        const prior = previous.get(item.id);
+        const currentVersion = Math.max(0, Math.floor(item.projectionSourceVersion || 0));
+        if (prior && prior.updatedAt === item.updatedAt && prior.version === currentVersion) continue;
+        const nextVersion = Math.max(currentVersion, (prior?.version || 0) + 1);
+        item.projectionSourceVersion = nextVersion;
+        assignedVersions[item.id] = nextVersion;
+      }
+      mutation.jobSourceVersions = assignedVersions;
+      return result;
+    });
+    return mutation;
+  } catch (error) {
+    await abortAutomationJobProjectionMutation(mutation).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function updateAutomationJobExecution(
   id: string,
   workerId: string,
@@ -2267,7 +2958,7 @@ export async function updateAutomationJobExecution(
   await assertClaimGuardOwnership(guard);
   let updated: AutomationJob | null = null;
   const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
     if (patch.executionMode) job.executionMode = patch.executionMode;
@@ -2278,11 +2969,13 @@ export async function updateAutomationJobExecution(
     if (patch.disclosure) job.disclosure = sanitizeAutomationData(patch.disclosure) as AutomationExecutionDisclosure;
     if (patch.manualTaskId) job.manualTaskId = patch.manualTaskId;
     job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
     updated = { ...job };
     return items;
   });
   const updatedJob = updated as AutomationJob | null;
-  if (updatedJob) await syncJobReadModelsBestEffort(updatedJob);
+  if (updatedJob) await syncJobReadModelsBestEffort(updatedJob, false, projectionMutation);
+  else await abortAutomationJobProjectionMutation(projectionMutation);
   return updatedJob;
 }
 
@@ -2297,7 +2990,7 @@ export async function waitAutomationJobForManual(
   await assertClaimGuardOwnership(guard);
   let waiting: AutomationJob | null = null;
   const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
     job.status = 'WAITING_FOR_MANUAL_INPUT';
@@ -2309,11 +3002,13 @@ export async function waitAutomationJobForManual(
     clearAutomationJobClaim(job);
     job.heartbeatAt = now;
     job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
     waiting = { ...job };
     return items;
   });
   const waitingJob = waiting as AutomationJob | null;
-  if (waitingJob) await syncJobReadModelsBestEffort(waitingJob, true);
+  if (waitingJob) await syncJobReadModelsBestEffort(waitingJob, true, projectionMutation);
+  else await abortAutomationJobProjectionMutation(projectionMutation);
   if (waitingJob) await appendAutomationAudit({
     correlationId: waitingJob.operationId,
     operationId: waitingJob.operationId,
@@ -2339,7 +3034,7 @@ export async function waitAutomationJobForChildren(
   await assertClaimGuardOwnership(guard);
   let waiting: AutomationJob | null = null;
   const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || !activeClaimMatches(job, workerId, guard) || !job.checkpoint?.pendingSteps.length) return undefined;
     job.status = 'WAITING_CHILDREN';
@@ -2347,11 +3042,13 @@ export async function waitAutomationJobForChildren(
     clearAutomationJobClaim(job);
     job.heartbeatAt = now;
     job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
     waiting = { ...job };
     return items;
   });
   const waitingJob = waiting as AutomationJob | null;
-  if (waitingJob) await syncJobReadModelsBestEffort(waitingJob, true);
+  if (waitingJob) await syncJobReadModelsBestEffort(waitingJob, true, projectionMutation);
+  else await abortAutomationJobProjectionMutation(projectionMutation);
   if (waitingJob) await appendAutomationAudit({
     correlationId: waitingJob.operationId,
     operationId: waitingJob.operationId,
@@ -2375,7 +3072,7 @@ export async function completeAutomationParentJob(
 ): Promise<AutomationJob | null> {
   let completed: AutomationJob | null = null;
   const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'WAITING_CHILDREN') return undefined;
     const completedSteps = (job.executionPlan || []).map(step => step.id);
@@ -2402,11 +3099,13 @@ export async function completeAutomationParentJob(
     job.result = sanitizeAutomationData({ ...job.result, executionStatus: 'COMPLETED_WITH_LOCAL_RULES', completedSteps, pendingSteps: [], childSummary }) as Record<string, unknown>;
     job.completedAt = now;
     job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
     completed = { ...job };
     return items;
   });
   const completedJob = completed as AutomationJob | null;
-  if (completedJob) await syncJobReadModelsBestEffort(completedJob);
+  if (completedJob) await syncJobReadModelsBestEffort(completedJob, false, projectionMutation);
+  else await abortAutomationJobProjectionMutation(projectionMutation);
   if (completedJob) await appendAutomationAudit({
     correlationId: completedJob.operationId,
     operationId: completedJob.operationId,
@@ -2427,7 +3126,7 @@ export async function completeAutomationParentJob(
 export async function resumeAutomationJobFromManual(id: string, actor: string, taskId: string): Promise<AutomationJob | null> {
   let resumed: AutomationJob | null = null;
   const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'WAITING_FOR_MANUAL_INPUT' || job.manualTaskId !== taskId) return undefined;
     job.status = 'PENDING';
@@ -2436,11 +3135,13 @@ export async function resumeAutomationJobFromManual(id: string, actor: string, t
     job.claimedBy = undefined;
     job.leaseExpiresAt = undefined;
     job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
     resumed = { ...job };
     return items;
   });
   const resumedJob = resumed as AutomationJob | null;
-  if (resumedJob) await syncJobReadModelsBestEffort(resumedJob);
+  if (resumedJob) await syncJobReadModelsBestEffort(resumedJob, false, projectionMutation);
+  else await abortAutomationJobProjectionMutation(projectionMutation);
   if (resumedJob) await appendAutomationAudit({
     correlationId: resumedJob.operationId,
     operationId: resumedJob.operationId,
@@ -2542,6 +3243,8 @@ export async function claimAutomationJobs(
   const rejectedBeforeClaim: Array<{ job: AutomationJob; validation: AutomationJobContractValidation; previousStatus: AutomationJobStatus }> = [];
   const timedOut: AutomationJob[] = [];
   const requeued: AutomationJob[] = [];
+  const projectionChanges: AutomationJob[] = [];
+  const projectionChangedIds = new Set<string>();
   const now = new Date(nowMs).toISOString();
   const heartbeatItems = await readCollection<AutomationJobHeartbeat>(JOB_HEARTBEATS);
   const heartbeats = new Map(heartbeatItems.map(item => [item.jobId, item]));
@@ -2552,7 +3255,7 @@ export async function claimAutomationJobs(
   let poolActiveSlots = 0;
   let poolAvailableSlots = 0;
   let claimBlockReason: 'WORKER_CAPACITY_FULL' | 'EXECUTION_RESOURCE_CONFLICT' | 'SCHEDULED_FOR_FUTURE' = 'SCHEDULED_FOR_FUTURE';
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     let changed = false;
     for (const item of items) {
       if (!TERMINAL.has(item.status)) {
@@ -2571,7 +3274,9 @@ export async function claimAutomationJobs(
           item.leaseExpiresAt = undefined;
           item.completedAt = now;
           item.updatedAt = now;
+          markAutomationJobProjectionSourceMutation(item);
           rejectedBeforeClaim.push({ job: structuredClone(item), validation, previousStatus });
+          projectionChangedIds.add(item.id);
           changed = true;
           continue;
         }
@@ -2590,8 +3295,10 @@ export async function claimAutomationJobs(
         item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorCategory = 'PROVIDER_TIMEOUT'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.';
         item.retryable = item.status === 'RETRY_SCHEDULED'; item.deadLetterReason = item.retryable ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED'; item.claimedBy = undefined; item.updatedAt = now;
         item.claimedAt = undefined; item.claimToken = undefined; item.workerOwnerId = undefined; item.workerInstanceId = undefined; item.workerFencingToken = undefined; item.leaseExpiresAt = undefined;
+        markAutomationJobProjectionSourceMutation(item);
         if (item.status === 'FAILED') { item.completedAt = now; timedOut.push(structuredClone(item)); }
         else requeued.push(structuredClone(item));
+        projectionChangedIds.add(item.id);
         changed = true;
         }
       }
@@ -2603,6 +3310,8 @@ export async function claimAutomationJobs(
         item.nextRetryAt = undefined;
         item.runnableAt = runnable.runnableAt;
         item.runnableReason = runnable.runnableReason;
+        markAutomationJobProjectionSourceMutation(item);
+        projectionChangedIds.add(item.id);
         changed = true;
       }
       if (item.status === 'PENDING' && item.type === 'PROCESS_CANDIDATE' && candidateQuotaDenied.has(item.id)) {
@@ -2612,6 +3321,8 @@ export async function claimAutomationJobs(
         item.lastErrorMessage = 'Đã đạt giới hạn sản phẩm xử lý trong ngày Việt Nam.';
         item.completedAt = now;
         item.updatedAt = now;
+        markAutomationJobProjectionSourceMutation(item);
+        projectionChangedIds.add(item.id);
         changed = true;
       }
     }
@@ -2693,9 +3404,14 @@ export async function claimAutomationJobs(
       item.runnableAt = runnable.runnableAt;
       item.runnableReason = runnable.runnableReason;
       item.leaseExpiresAt = new Date(nowMs + leaseMs).toISOString(); item.startedAt ||= now; item.attemptCount += 1; item.updatedAt = now;
+      markAutomationJobProjectionSourceMutation(item);
       claimed.push(structuredClone(item));
+      projectionChangedIds.add(item.id);
       changed = true;
     }
+    projectionChanges.push(...items
+      .filter(item => projectionChangedIds.has(item.id))
+      .map(item => structuredClone(item)));
     return changed ? items : undefined;
   });
   if (claimed.length) {
@@ -2737,8 +3453,13 @@ export async function claimAutomationJobs(
       }));
     }
   }
-  for (const job of [...claimed, ...requeued, ...timedOut, ...rejectedBeforeClaim.map(item => item.job)]) {
-    await syncJobReadModelsBestEffort(job);
+  if (projectionChanges.length) {
+    await syncJobReadModelsBatchBestEffort(projectionChanges, {
+      mutation: projectionMutation,
+      sourceMutationCommitted: true,
+    });
+  } else {
+    await abortAutomationJobProjectionMutation(projectionMutation);
   }
   if (claimed.length) {
     await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
@@ -2850,8 +3571,9 @@ export async function heartbeatAutomationJob(
   // Projection is a read model. Update it atomically only while it still
   // represents this claim, so an in-flight heartbeat can never overwrite a
   // terminal projection written by complete/fail.
+  const activeProjection = await getAutomationJobActiveProjectionStorage();
   const projectionUpdates = await Promise.allSettled([
-    runTransaction<AutomationJobStatusProjection>(JOB_PROJECTIONS, items => {
+    runTransaction<AutomationJobStatusProjection>(activeProjection.collections.status, items => {
       const current = items.find(item => item.id === id);
       if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
       if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
@@ -2859,7 +3581,7 @@ export async function heartbeatAutomationJob(
       current.leaseExpiresAt = leaseExpiresAt;
       return items;
     }),
-    runTransaction<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, items => {
+    runTransaction<AutomationJobListProjection>(activeProjection.collections.list, items => {
       const current = items.find(item => item.id === id);
       if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
       if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
@@ -2884,6 +3606,8 @@ export async function heartbeatAutomationJob(
       await finishAutomationJobProjectionSync(failureToken, {
         success: false,
         inserted: false,
+        insertedCount: 0,
+        sourceAffected: false,
         listProjectionCount: 0,
         statusProjectionCount: 0,
         listProjectionFingerprint: automationJobProjectionFingerprint([]),
@@ -2904,6 +3628,8 @@ export async function heartbeatAutomationJob(
     return true;
   }
   if (nowMs - lastHeartbeatHealthSummaryRefreshAt < HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS) return true;
+  const manifest = await getAutomationJobProjectionManifestForMaintenance().catch(() => null);
+  if (manifest?.rebuildToken || manifest?.inFlightSyncTokens.length) return true;
   try {
     await refreshAutomationJobHealthSummary(nowMs);
     lastHeartbeatHealthSummaryRefreshAt = nowMs;
@@ -2925,7 +3651,7 @@ export async function completeAutomationJob(
 ): Promise<AutomationJob | null> {
   await assertClaimGuardOwnership(guard);
   let completed: AutomationJob | null = null; const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
     job.status = 'SUCCEEDED'; job.result = sanitizeAutomationData(result) as Record<string, unknown>; job.completedAt = now;
@@ -2937,11 +3663,12 @@ export async function completeAutomationJob(
         ? { ...job.progress, processed: total ?? Math.max(1, job.progress.processed), succeeded: Math.max(job.progress.succeeded, 1), percentage: total ? 100 : undefined, updatedAt: now }
         : { ...job.progress, updatedAt: now };
     }
-    clearAutomationJobClaim(job); job.heartbeatAt = now; job.updatedAt = now; completed = { ...job }; return items;
+    clearAutomationJobClaim(job); job.heartbeatAt = now; job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job); completed = { ...job }; return items;
   });
   const completedJob = completed as AutomationJob | null;
   if (completedJob) {
-    await syncJobReadModelsBestEffort(completedJob, true);
+    await syncJobReadModelsBestEffort(completedJob, true, projectionMutation);
     logAutomationJobEvent('job_completed', completedJob, { workerId, reasonCode: 'HANDLER_COMPLETED', durationMs: Date.now() - Date.parse(completedJob.startedAt || completedJob.claimedAt || completedJob.updatedAt) });
     try {
       await appendAutomationAudit({ correlationId: completedJob.operationId, operationId: completedJob.operationId, jobId: completedJob.id, operationType: completedJob.type,
@@ -2949,7 +3676,7 @@ export async function completeAutomationJob(
     } catch (error) {
       console.error(JSON.stringify({ type: 'automation_job_completion_audit_failed', jobId: completedJob.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') }));
     }
-  }
+  } else await abortAutomationJobProjectionMutation(projectionMutation);
   return completedJob;
 }
 
@@ -2972,7 +3699,7 @@ export async function failAutomationJob(
   };
   await assertClaimGuardOwnership(guard);
   let failed: AutomationJob | null = null; const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
     const retry = isRetryableAutomationError(code, job.type) && job.attemptCount < Math.min(job.maxAttempts, getAutomationPolicy(job.type).retryPolicy.maxAttempts);
@@ -2989,11 +3716,12 @@ export async function failAutomationJob(
     if (options.result) job.result = sanitizeAutomationData(options.result) as Record<string, unknown>;
     job.retryable = retry;
     job.deadLetterReason = retry ? undefined : `${job.lastErrorCategory}:${code}`.slice(0, 240);
-    clearAutomationJobClaim(job); job.updatedAt = now; if (!retry) job.completedAt = now; failed = { ...job }; return items;
+    clearAutomationJobClaim(job); job.updatedAt = now; if (!retry) job.completedAt = now;
+    markAutomationJobProjectionSourceMutation(job); failed = { ...job }; return items;
   });
   const failedJob = failed as AutomationJob | null;
   if (failedJob) {
-    await syncJobReadModelsBestEffort(failedJob, true);
+    await syncJobReadModelsBestEffort(failedJob, true, projectionMutation);
     logAutomationJobEvent(failedJob.status === 'RETRY_SCHEDULED' ? 'job_requeued' : 'job_failed', failedJob, {
       workerId,
       reasonCode: code,
@@ -3006,45 +3734,47 @@ export async function failAutomationJob(
     } catch (auditError) {
       console.error(JSON.stringify({ type: 'automation_job_failure_audit_failed', jobId: failedJob.id, reasonCode: sanitizeErrorMessage(auditError instanceof Error ? auditError.message : 'unknown_error') }));
     }
-  }
+  } else await abortAutomationJobProjectionMutation(projectionMutation);
   return failedJob;
 }
 
 export async function cancelAutomationJob(id: string, actor: string, reason: string): Promise<AutomationJob | null> {
   let cancelled: AutomationJob | null = null; const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || TERMINAL.has(job.status) || (job.status === 'RUNNING' && !job.dryRun && !canCancelWhileRunning(job))) return undefined;
     const previous = job.status; job.status = 'CANCELLED'; job.cancelledAt = now; job.completedAt = now; job.updatedAt = now;
     clearAutomationJobClaim(job);
-    job.lastErrorCode = 'CANCELLED'; job.lastErrorMessage = sanitizeErrorMessage(reason); cancelled = { ...job, result: { previousState: previous } }; return items;
+    job.lastErrorCode = 'CANCELLED'; job.lastErrorMessage = sanitizeErrorMessage(reason);
+    markAutomationJobProjectionSourceMutation(job); cancelled = { ...job, result: { previousState: previous } }; return items;
   });
   const cancelledJob = cancelled as AutomationJob | null;
   if (cancelledJob?.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(cancelledJob));
   if (cancelledJob) {
-    await syncJobReadModelsBestEffort(cancelledJob, true);
+    await syncJobReadModelsBestEffort(cancelledJob, true, projectionMutation);
     await appendAutomationAudit({ correlationId: cancelledJob.operationId, operationId: cancelledJob.operationId, jobId: cancelledJob.id, operationType: 'JOB_CANCELLED', actor,
       previousState: String(cancelledJob.result?.previousState || ''), nextState: 'CANCELLED', risk: cancelledJob.riskLevel, reasons: [reason], dryRun: cancelledJob.dryRun, attempts: cancelledJob.attemptCount });
-  }
+  } else await abortAutomationJobProjectionMutation(projectionMutation);
   return cancelledJob;
 }
 
 export async function retryAutomationJob(id: string, actor: string): Promise<AutomationJob | null> {
   let retried: AutomationJob | null = null; const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'FAILED' || job.attemptCount >= job.maxAttempts) return undefined;
     job.status = 'PENDING'; job.scheduledAt = now; job.nextRetryAt = undefined; job.runnableAt = now; job.runnableReason = 'RETRY_ELIGIBLE_AT';
     job.completedAt = undefined; job.retryable = undefined; job.deadLetterReason = undefined; job.updatedAt = now;
     clearAutomationJobClaim(job);
+    markAutomationJobProjectionSourceMutation(job);
     retried = { ...job }; return items;
   });
   const retriedJob = retried as AutomationJob | null;
   if (retriedJob) {
-    await syncJobReadModelsBestEffort(retriedJob);
+    await syncJobReadModelsBestEffort(retriedJob, false, projectionMutation);
     await appendAutomationAudit({ correlationId: retriedJob.operationId, operationId: retriedJob.operationId, jobId: retriedJob.id, operationType: 'JOB_RETRIED', actor,
       previousState: 'FAILED', nextState: 'PENDING', risk: retriedJob.riskLevel, reasons: [], dryRun: retriedJob.dryRun, attempts: retriedJob.attemptCount });
-  }
+  } else await abortAutomationJobProjectionMutation(projectionMutation);
   return retriedJob;
 }
 
@@ -3069,7 +3799,7 @@ export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRo
   if (!await isRuntimeRoleOwner('WORKER', ownership, nowMs)) throw new Error('STALE_RECOVERY_FENCING_REJECTED');
   let recovered: AutomationJob | null = null;
   const now = new Date(nowMs).toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'RUNNING' || job.completedAt) return undefined;
     if (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) > nowMs) throw new Error('HEALTHY_JOB_LEASE_TAKEOVER_FORBIDDEN');
@@ -3081,20 +3811,21 @@ export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRo
     job.retryable = retry; job.deadLetterReason = retry ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED';
     clearAutomationJobClaim(job); job.updatedAt = now;
     if (!retry) job.completedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
     recovered = structuredClone(job);
     return items;
   });
   const result = recovered as AutomationJob | null;
   if (result) {
-    await syncJobReadModelsBestEffort(result, true);
+    await syncJobReadModelsBestEffort(result, true, projectionMutation);
     await appendAutomationAudit({ correlationId: result.operationId, operationId: `${result.operationId}:stale-recovery:${ownership.fencingToken}`.slice(0, 160), jobId: result.id, operationType: 'STALE_JOB_RECOVERED', actor, previousState: 'RUNNING', nextState: result.status, risk: 'MEDIUM', reasons: ['LEASE_EXPIRED', `fencing:${ownership.fencingToken}`], dryRun: result.dryRun, attempts: result.attemptCount });
-  }
+  } else await abortAutomationJobProjectionMutation(projectionMutation);
   return result;
 }
 
 export async function approveAutomationJob(id: string, actor: string, reason: string, approve: boolean): Promise<AutomationJob | null> {
   let changed: AutomationJob | null = null; const now = new Date().toISOString();
-  await runTransaction<AutomationJob>(JOBS, items => {
+  const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'WAITING_APPROVAL' || job.riskLevel === 'BLOCKER') return undefined;
     if (!job.approvalExpiresAt || Date.parse(job.approvalExpiresAt) <= Date.now()) {
@@ -3104,14 +3835,14 @@ export async function approveAutomationJob(id: string, actor: string, reason: st
     } else {
       job.approvalStatus = 'REJECTED'; job.approvedBy = actor; job.approvalReason = sanitizeErrorMessage(reason); job.status = 'CANCELLED'; job.cancelledAt = now;
     }
-    job.updatedAt = now; changed = { ...job }; return items;
+    job.updatedAt = now; markAutomationJobProjectionSourceMutation(job); changed = { ...job }; return items;
   });
   const changedJob = changed as AutomationJob | null;
   if (changedJob) {
-    await syncJobReadModelsBestEffort(changedJob, TERMINAL.has(changedJob.status));
+    await syncJobReadModelsBestEffort(changedJob, TERMINAL.has(changedJob.status), projectionMutation);
     await appendAutomationAudit({ correlationId: changedJob.operationId, operationId: changedJob.operationId, jobId: changedJob.id, operationType: approve ? 'JOB_APPROVED' : 'JOB_REJECTED', actor,
       previousState: 'WAITING_APPROVAL', nextState: changedJob.status, risk: changedJob.riskLevel, reasons: [reason], dryRun: changedJob.dryRun, attempts: changedJob.attemptCount });
-  }
+  } else await abortAutomationJobProjectionMutation(projectionMutation);
   return changedJob;
 }
 
@@ -3282,24 +4013,61 @@ export async function compactAutomationJobs(options: {
   const preview = buildCompactionSelection(initial, nowMs, retentionDays, minimumTerminalJobs);
   let backupRef: string | undefined;
   let removedIds = [...preview.removable];
-  let retainedAfterCompaction: AutomationJob[] | undefined;
 
   if (options.apply && removedIds.length) {
     backupRef = await backupCollection(JOBS, 'pre-compaction');
-    await runTransaction<AutomationJob>(JOBS, jobs => {
+    const projectionMutation = await runAutomationJobSourceTransaction(jobs => {
       const current = buildCompactionSelection(jobs, nowMs, retentionDays, minimumTerminalJobs);
       removedIds = [...current.removable];
-      retainedAfterCompaction = jobs.filter(job => !current.removable.has(job.id));
-      return retainedAfterCompaction;
+      const retainedAfterCompaction = jobs.filter(job => !current.removable.has(job.id));
+      return removedIds.length ? retainedAfterCompaction : undefined;
     });
-    const removedSet = new Set(removedIds);
-    await Promise.all([
-      runTransaction<AutomationJobStatusProjection>(JOB_PROJECTIONS, jobs => jobs.filter(job => !removedSet.has(job.id))),
-      runTransaction<AutomationJobListProjection>(JOB_LIST_PROJECTIONS, jobs => jobs.filter(job => !removedSet.has(job.id))),
-      runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, heartbeats => heartbeats.filter(item => !removedSet.has(item.jobId))),
-    ]);
-    if (retainedAfterCompaction) {
-      await rebuildAutomationJobReadModelsFromDurable(retainedAfterCompaction, nowMs);
+    try {
+      if (!removedIds.length) {
+        await abortAutomationJobProjectionMutation(projectionMutation);
+      } else {
+        const removedSet = new Set(removedIds);
+        const collections = automationJobProjectionStorageCollections(
+          projectionMutation.targetSlot,
+          projectionMutation.targetRepairFence,
+        );
+        const [statusStats, listStats] = await Promise.all([
+          removeJobProjections<AutomationJobStatusProjection>(removedSet, collections.status),
+          removeJobProjections<AutomationJobListProjection>(removedSet, collections.list),
+          removeJobHeartbeats(removedIds),
+        ]);
+        await finishAutomationJobProjectionSync(projectionMutation, {
+          success: true,
+          inserted: false,
+          insertedCount: 0,
+          removedCount: removedIds.length,
+          sourceAffected: true,
+          projectionChanged: statusStats.sourceAffected || listStats.sourceAffected,
+          listProjectionCount: listStats.count,
+          statusProjectionCount: statusStats.count,
+          listProjectionFingerprint: listStats.fingerprint,
+          statusProjectionFingerprint: statusStats.fingerprint,
+          listProjectionContentFingerprint: listStats.contentFingerprint,
+          statusProjectionContentFingerprint: statusStats.contentFingerprint,
+          activeJobCount: Math.max(statusStats.activeCount, listStats.activeCount),
+          retainedTerminalCount: Math.min(statusStats.terminalCount, listStats.terminalCount),
+          retentionLimitReached: statusStats.retentionLimitReached || listStats.retentionLimitReached,
+          currentStateTruncated: statusStats.currentStateTruncated || listStats.currentStateTruncated,
+          sourceUpdatedAt: [statusStats.sourceUpdatedAt, listStats.sourceUpdatedAt]
+            .filter((value): value is string => Boolean(value))
+            .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
+          retentionBoundary: statusStats.retentionBoundary || listStats.retentionBoundary,
+        }, nowMs);
+        await refreshAutomationJobHealthSummary(nowMs).catch(error => {
+          console.error(JSON.stringify({
+            type: 'automation_job_health_summary_compaction_failed',
+            reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+          }));
+        });
+      }
+    } catch (error) {
+      await invalidateAutomationJobProjectionMutation(projectionMutation, nowMs).catch(() => undefined);
+      throw error;
     }
     await appendAutomationAudit({
       correlationId: generateId(),

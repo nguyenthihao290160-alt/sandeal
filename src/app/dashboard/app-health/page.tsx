@@ -134,6 +134,9 @@ type Health = {
     completedAt: string | null;
     durationMs: number | null;
     outcomeReasonCode: string | null;
+    phase: string | null;
+    repairId: string | null;
+    lastFailureReason: string | null;
   } | null;
   operational: {
     currentActiveReasons: string[];
@@ -257,6 +260,22 @@ type Health = {
     projectionStatus: 'VALID' | 'STALE' | 'INVALID' | 'REBUILD_SCHEDULED' | 'REBUILD_RUNNING' | 'REBUILD_FAILED' | 'UNKNOWN';
     previousValidProjectionAvailable: boolean;
     previousValidProjectionGeneratedAt: string | null;
+    activeProjectionGeneration: number | null;
+    activeProjectionSlot: 'LEGACY' | 'A' | 'B' | null;
+    currentSourceBoundary: {
+      schemaVersion: number;
+      highWatermark: number;
+      sourceFingerprint: string | null;
+    } | null;
+    lastSuccessfulRepairAt: string | null;
+    activeRepairId: string | null;
+    repairPhase: string | null;
+    repairAttemptNumber: number | null;
+    lastRepairFailureReason: string | null;
+    nextRepairRetryAt: string | null;
+    catchUpPending: boolean;
+    previousValidProjectionServing: boolean;
+    legacyMirrorPending: boolean;
   } | null;
 };
 
@@ -662,8 +681,24 @@ export default function SystemHealthPage() {
                 <span>Bảo trì Job Health</span>
                 <strong>
                   {health.projectionMaintenance
-                    ? `${PROJECTION_REPAIR_LABELS[health.projectionMaintenance.repairState]} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}${health.projectionMaintenance.nextRetryAt ? ` · thử lại ${when(health.projectionMaintenance.nextRetryAt)}` : ''}`
+                    ? `${PROJECTION_REPAIR_LABELS[health.projectionMaintenance.repairState]} · ${health.projectionMaintenance.phase || 'IDLE'} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}${health.projectionMaintenance.nextRetryAt ? ` · thử lại ${when(health.projectionMaintenance.nextRetryAt)}` : ''}${health.projectionMaintenance.lastFailureReason ? ` · lỗi ${health.projectionMaintenance.lastFailureReason}` : ''}`
                     : 'Chưa có'}
+                </strong>
+              </div>
+              <div className={styles.healthRow}>
+                <span>Projection generation / boundary</span>
+                <strong>
+                  {health.jobReadModel
+                    ? `${health.jobReadModel.activeProjectionGeneration ?? 'unknown'}:${health.jobReadModel.activeProjectionSlot || 'unknown'} · hwm ${health.jobReadModel.currentSourceBoundary?.highWatermark ?? 'unknown'} · ${health.jobReadModel.currentSourceBoundary?.sourceFingerprint?.slice(0, 12) || 'fingerprint pending'}`
+                    : 'Unavailable'}
+                </strong>
+              </div>
+              <div className={styles.healthRow}>
+                <span>Projection repair serving state</span>
+                <strong>
+                  {health.jobReadModel
+                    ? `${health.jobReadModel.repairPhase || 'IDLE'} · ${health.jobReadModel.activeRepairId || 'no active repair'} · previous valid ${health.jobReadModel.previousValidProjectionServing ? 'serving' : 'not serving'} · mirror ${health.jobReadModel.legacyMirrorPending ? 'pending' : 'settled'}`
+                    : 'Unavailable'}
                 </strong>
               </div>
             </div>

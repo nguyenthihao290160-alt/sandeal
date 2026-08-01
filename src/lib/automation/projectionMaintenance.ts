@@ -2,7 +2,9 @@ import { readBoundedCollectionSnapshot, runTransaction } from '@/lib/storage/ada
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import {
   AUTOMATION_JOB_PROJECTION_NAME,
+  AUTOMATION_JOB_PROJECTION_VERSION,
   deterministicProjectionFingerprint,
+  type AutomationJobProjectionRepairPhase,
   type AutomationJobHealthView,
 } from './jobHealthSummary';
 import {
@@ -30,11 +32,13 @@ export type JobHealthProjectionMaintenanceStatus =
   | 'EXHAUSTED';
 
 export interface JobHealthProjectionMaintenanceState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: typeof RECORD_ID;
   incidentFingerprint: string;
   releaseId: string;
   status: JobHealthProjectionMaintenanceStatus;
+  phase: AutomationJobProjectionRepairPhase | null;
+  repairId: string | null;
   attemptCount: number;
   maximumAttempts: number;
   jobId: string | null;
@@ -48,6 +52,7 @@ export interface JobHealthProjectionMaintenanceState {
   resultFingerprint: string | null;
   reasonCodes: string[];
   outcomeReasonCode: string | null;
+  lastFailureReason: string | null;
   duplicateRequestsSuppressed: number;
   updatedAt: string;
 }
@@ -75,6 +80,9 @@ export interface JobHealthProjectionMaintenanceView {
   resultRevision: string | null;
   resultFingerprint: string | null;
   outcomeReasonCode: string | null;
+  phase: AutomationJobProjectionRepairPhase | null;
+  repairId: string | null;
+  lastFailureReason: string | null;
 }
 
 const REBUILD_REASON_PREFIXES = [
@@ -96,6 +104,103 @@ function safeReasons(values: string[]): string[] {
     .slice(0, 30);
 }
 
+const MAINTENANCE_STATUS_TRANSITIONS: Readonly<Record<JobHealthProjectionMaintenanceStatus, readonly JobHealthProjectionMaintenanceStatus[]>> = {
+  IDLE: ['CLAIMED'],
+  CLAIMED: ['REQUESTED', 'FAILED', 'EXHAUSTED'],
+  REQUESTED: ['CLAIMED', 'RUNNING', 'RETRY_SCHEDULED', 'FAILED', 'EXHAUSTED'],
+  RUNNING: ['RUNNING', 'RETRY_SCHEDULED', 'SUCCEEDED', 'FAILED', 'EXHAUSTED'],
+  RETRY_SCHEDULED: ['RUNNING', 'FAILED', 'EXHAUSTED'],
+  SUCCEEDED: [],
+  FAILED: ['CLAIMED', 'RUNNING', 'EXHAUSTED'],
+  EXHAUSTED: [],
+};
+
+const MAINTENANCE_PHASE_TRANSITIONS: Readonly<Record<AutomationJobProjectionRepairPhase, readonly AutomationJobProjectionRepairPhase[]>> = {
+  SCHEDULED: ['CLAIMED', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED'],
+  CLAIMED: ['REBUILDING', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED'],
+  REBUILDING: ['CATCHING_UP', 'VALIDATING', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED'],
+  CATCHING_UP: ['CATCHING_UP', 'VALIDATING', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED'],
+  VALIDATING: ['PUBLISHING', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED'],
+  PUBLISHING: ['COMPLETED', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED'],
+  RETRY_WAIT: ['CLAIMED', 'REBUILDING', 'CATCHING_UP', 'FAILED', 'SUPERSEDED'],
+  COMPLETED: [],
+  FAILED: ['SCHEDULED', 'CLAIMED'],
+  SUPERSEDED: [],
+};
+
+function assertMaintenanceStatusTransition(
+  current: JobHealthProjectionMaintenanceStatus,
+  next: JobHealthProjectionMaintenanceStatus,
+  reset = false,
+): void {
+  if (current === next || reset) return;
+  if (!MAINTENANCE_STATUS_TRANSITIONS[current].includes(next)) {
+    throw new Error(`JOB_PROJECTION_MAINTENANCE_INVALID_TRANSITION:${current}:${next}`);
+  }
+}
+
+function assertMaintenancePhaseTransition(
+  current: AutomationJobProjectionRepairPhase | null,
+  next: AutomationJobProjectionRepairPhase | null,
+  reset = false,
+): void {
+  if (current === next || reset || next === null) return;
+  if (current === null || !MAINTENANCE_PHASE_TRANSITIONS[current].includes(next)) {
+    throw new Error(`JOB_PROJECTION_MAINTENANCE_PHASE_INVALID_TRANSITION:${current || 'NONE'}:${next}`);
+  }
+}
+
+function normalizeMaintenanceState(value: unknown): JobHealthProjectionMaintenanceState | null {
+  if (!value || typeof value !== 'object') return null;
+  const state = value as Partial<JobHealthProjectionMaintenanceState> & { schemaVersion?: number };
+  if (state.id !== RECORD_ID || !state.incidentFingerprint || !state.releaseId) return null;
+  if (!['IDLE', 'CLAIMED', 'REQUESTED', 'RUNNING', 'RETRY_SCHEDULED', 'SUCCEEDED', 'FAILED', 'EXHAUSTED']
+    .includes(String(state.status))) return null;
+  const status = state.status as JobHealthProjectionMaintenanceStatus;
+  const validPhases = new Set<AutomationJobProjectionRepairPhase>([
+    'SCHEDULED', 'CLAIMED', 'REBUILDING', 'CATCHING_UP', 'VALIDATING',
+    'PUBLISHING', 'COMPLETED', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED',
+  ]);
+  const legacyPhase: AutomationJobProjectionRepairPhase | null = status === 'CLAIMED' || status === 'REQUESTED'
+    ? 'SCHEDULED'
+    : status === 'RUNNING'
+      ? 'REBUILDING'
+      : status === 'RETRY_SCHEDULED'
+        ? 'RETRY_WAIT'
+        : status === 'SUCCEEDED'
+          ? 'COMPLETED'
+          : status === 'FAILED' || status === 'EXHAUSTED'
+            ? 'FAILED'
+            : null;
+  return {
+    schemaVersion: 2,
+    id: RECORD_ID,
+    incidentFingerprint: String(state.incidentFingerprint),
+    releaseId: String(state.releaseId),
+    status,
+    phase: state.phase && validPhases.has(state.phase) ? state.phase : legacyPhase,
+    repairId: state.repairId || state.jobId || null,
+    attemptCount: Math.max(0, Math.floor(Number(state.attemptCount) || 0)),
+    maximumAttempts: Math.max(1, Math.floor(Number(state.maximumAttempts) || MAXIMUM_ATTEMPTS)),
+    jobId: state.jobId || null,
+    requestedAt: state.requestedAt || null,
+    startedAt: state.startedAt || null,
+    completedAt: state.completedAt || null,
+    nextRetryAt: state.nextRetryAt || null,
+    durationMs: Number.isFinite(state.durationMs) ? Number(state.durationMs) : null,
+    sourceRevision: state.sourceRevision || null,
+    resultRevision: state.resultRevision || null,
+    resultFingerprint: state.resultFingerprint || null,
+    reasonCodes: safeReasons(Array.isArray(state.reasonCodes) ? state.reasonCodes : []),
+    outcomeReasonCode: state.outcomeReasonCode || null,
+    lastFailureReason: state.lastFailureReason || (status === 'FAILED' || status === 'EXHAUSTED'
+      ? state.outcomeReasonCode || null
+      : null),
+    duplicateRequestsSuppressed: Math.max(0, Math.floor(Number(state.duplicateRequestsSuppressed) || 0)),
+    updatedAt: state.updatedAt || new Date(0).toISOString(),
+  };
+}
+
 function actionableReasons(view: AutomationJobHealthView): string[] {
   return safeReasons(view.reasonCodes.filter(reason =>
     REBUILD_REASON_PREFIXES.some(prefix => reason.startsWith(prefix))));
@@ -106,11 +211,7 @@ function incidentFingerprint(view: AutomationJobHealthView, reasons: string[], r
     projectionName: AUTOMATION_JOB_PROJECTION_NAME,
     releaseId,
     projectionVersion: view.projectionVersion,
-    projectionStatus: view.projectionStatus,
-    sourceRevision: view.sourceRevision,
-    projectionFingerprint: view.projectionFingerprint,
-    manifestUpdatedAt: view.projectionEvidence?.manifestUpdatedAt || null,
-    previousValidProjectionGeneratedAt: view.previousValidProjectionGeneratedAt,
+    activeProjectionGeneration: view.activeProjectionGeneration,
     reasons,
   });
 }
@@ -122,11 +223,13 @@ function emptyState(
   now: number,
 ): JobHealthProjectionMaintenanceState {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: RECORD_ID,
     incidentFingerprint: fingerprint,
     releaseId,
     status: 'IDLE',
+    phase: null,
+    repairId: null,
     attemptCount: 0,
     maximumAttempts: MAXIMUM_ATTEMPTS,
     jobId: null,
@@ -140,6 +243,7 @@ function emptyState(
     resultFingerprint: null,
     reasonCodes: reasons,
     outcomeReasonCode: null,
+    lastFailureReason: null,
     duplicateRequestsSuppressed: 0,
     updatedAt: new Date(now).toISOString(),
   };
@@ -176,6 +280,9 @@ function publicView(
     resultRevision: state?.resultRevision || null,
     resultFingerprint: state?.resultFingerprint || null,
     outcomeReasonCode: state?.outcomeReasonCode || null,
+    phase: state?.phase || null,
+    repairId: state?.repairId || null,
+    lastFailureReason: state?.lastFailureReason || null,
   };
 }
 
@@ -187,11 +294,11 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 export async function getJobHealthProjectionMaintenanceState(): Promise<JobHealthProjectionMaintenanceState | null> {
-  const snapshot = await readBoundedCollectionSnapshot<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, {
+  const snapshot = await readBoundedCollectionSnapshot<unknown>(MAINTENANCE_STATE_STORE, {
     maximumItems: 1,
     maximumBytes: 128 * 1024,
   });
-  return snapshot.items.find(item => item.id === RECORD_ID) || null;
+  return normalizeMaintenanceState(snapshot.items[0]);
 }
 
 export async function ensureJobHealthProjectionMaintenanceRequest(
@@ -207,15 +314,17 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
 
   const releaseId = getReleaseIdentity().releaseId;
   const fingerprint = incidentFingerprint(view, reasons, releaseId);
-  let claimed = false;
+  let requested = false;
   let resultStatus: JobHealthProjectionMaintenanceView['status'] = 'REUSED_ACTIVE_REQUEST';
   let state!: JobHealthProjectionMaintenanceState;
   const measuredAt = new Date(now).toISOString();
 
   await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => {
-    const stored = items.find(item => item.id === RECORD_ID);
+    const stored = normalizeMaintenanceState(items.find(item => item.id === RECORD_ID));
     const current = stored || emptyState(fingerprint, releaseId, reasons, now);
-    const requestAge = now - Date.parse(current.requestedAt || current.updatedAt);
+    const requestAge = now - Date.parse(
+      current.status === 'CLAIMED' ? current.updatedAt : current.requestedAt || current.updatedAt,
+    );
     const active = current.status === 'RETRY_SCHEDULED'
       || (
         ['CLAIMED', 'REQUESTED', 'RUNNING'].includes(current.status)
@@ -269,32 +378,56 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
     }
 
     const attemptCount = sameIncident ? current.attemptCount + 1 : 1;
+    assertMaintenanceStatusTransition(current.status, 'REQUESTED', true);
+    assertMaintenancePhaseTransition(
+      current.phase,
+      'SCHEDULED',
+      !sameIncident || current.status === 'IDLE' || current.status === 'SUCCEEDED',
+    );
     state = {
       ...emptyState(fingerprint, releaseId, reasons, now),
-      status: 'CLAIMED',
+      status: 'REQUESTED',
+      phase: 'SCHEDULED',
+      repairId: `repair-request:${fingerprint.slice(0, 32)}`,
       attemptCount,
       jobId: null,
       requestedAt: measuredAt,
       duplicateRequestsSuppressed: sameIncident ? current.duplicateRequestsSuppressed : 0,
       updatedAt: measuredAt,
     };
-    claimed = true;
+    requested = true;
     resultStatus = 'REQUESTED';
     return [state];
   });
 
-  if (!claimed) return publicView(resultStatus, state, reasons);
+  return publicView(requested ? 'REQUESTED' : resultStatus, state, reasons);
+}
 
+/** Materialize the compact request outside the interactive App Health path. */
+export async function materializeJobHealthProjectionMaintenanceRequest(
+  now = Date.now(),
+): Promise<JobHealthProjectionMaintenanceState | null> {
+  const measuredAt = new Date(now).toISOString();
+  let claimed: JobHealthProjectionMaintenanceState | null = null;
+  await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => {
+    const current = normalizeMaintenanceState(items.find(item => item.id === RECORD_ID));
+    if (!current || current.jobId || current.status !== 'REQUESTED') return undefined;
+    assertMaintenanceStatusTransition(current.status, 'CLAIMED');
+    claimed = { ...current, status: 'CLAIMED', phase: 'SCHEDULED', updatedAt: measuredAt };
+    return [claimed];
+  });
+  if (!claimed) return getJobHealthProjectionMaintenanceState();
+
+  const request = claimed as JobHealthProjectionMaintenanceState;
+  const key = `maintenance:${AUTOMATION_JOB_PROJECTION_NAME}:${request.incidentFingerprint.slice(0, 32)}`;
   try {
-    throwIfAborted(options.signal);
-    const key = `maintenance:${AUTOMATION_JOB_PROJECTION_NAME}:${fingerprint.slice(0, 32)}`;
     const created = await createAutomationJob({
       type: 'RECONCILE_AUTOMATION',
       payload: {
         maintenanceTask: 'JOB_HEALTH_PROJECTION_REBUILD',
-        incidentFingerprint: fingerprint,
-        projectionVersion: view.projectionVersion,
-        reasonCodes: reasons,
+        incidentFingerprint: request.incidentFingerprint,
+        projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
+        reasonCodes: request.reasonCodes,
       },
       idempotencyKey: key,
       operationId: key,
@@ -304,20 +437,27 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
       dryRun: false,
       maxAttempts: MAXIMUM_ATTEMPTS,
     });
-    await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => items.map(item =>
-      item.id === RECORD_ID && item.incidentFingerprint === fingerprint
-        ? {
-            ...item,
-            status: 'REQUESTED',
-            jobId: created.job.id,
-            outcomeReasonCode: created.created
-              ? 'JOB_HEALTH_PROJECTION_REBUILD_REQUESTED'
-              : 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_REUSED',
-            duplicateRequestsSuppressed: item.duplicateRequestsSuppressed + (created.created ? 0 : 1),
-            updatedAt: measuredAt,
-          }
-        : item));
-    state = (await getJobHealthProjectionMaintenanceState()) || state;
+    let output: JobHealthProjectionMaintenanceState | null = null;
+    await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => {
+      const current = normalizeMaintenanceState(items.find(item => item.id === RECORD_ID));
+      if (!current || current.incidentFingerprint !== request.incidentFingerprint || current.status !== 'CLAIMED') {
+        return undefined;
+      }
+      assertMaintenanceStatusTransition(current.status, 'REQUESTED');
+      output = {
+        ...current,
+        status: 'REQUESTED',
+        phase: 'SCHEDULED',
+        jobId: created.job.id,
+        repairId: created.job.id,
+        outcomeReasonCode: created.created
+          ? 'JOB_HEALTH_PROJECTION_REBUILD_REQUESTED'
+          : 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_REUSED',
+        duplicateRequestsSuppressed: current.duplicateRequestsSuppressed + (created.created ? 0 : 1),
+        updatedAt: measuredAt,
+      };
+      return [output];
+    });
     await appendAutomationAuditOnce({
       correlationId: key,
       operationId: `${key}:request`,
@@ -329,33 +469,39 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
       target: 'automation-job-health-summary',
       risk: 'MEDIUM',
       result: {
-        incidentFingerprint: fingerprint,
-        attemptCount: state.attemptCount,
+        incidentFingerprint: request.incidentFingerprint,
+        attemptCount: request.attemptCount,
         duplicateSuppressed: !created.created,
       },
-      reasons,
+      reasons: request.reasonCodes,
       dryRun: false,
-      attempts: state.attemptCount,
+      attempts: request.attemptCount,
     });
-    return publicView(created.created ? 'REQUESTED' : 'REUSED_ACTIVE_REQUEST', state, reasons);
+    return output || getJobHealthProjectionMaintenanceState();
   } catch (error) {
-    const attemptIndex = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, state.attemptCount - 1));
+    const attemptIndex = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, request.attemptCount - 1));
     const retryAt = new Date(now + RETRY_BACKOFF_MS[attemptIndex]).toISOString();
-    await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => items.map(item =>
-      item.id === RECORD_ID && item.incidentFingerprint === fingerprint
-        ? {
-            ...item,
-            status: item.attemptCount >= item.maximumAttempts ? 'EXHAUSTED' : 'FAILED',
-            completedAt: measuredAt,
-            nextRetryAt: item.attemptCount >= item.maximumAttempts ? null : retryAt,
-            outcomeReasonCode: error instanceof Error && error.name === 'AbortError'
-              ? 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_ABORTED'
-              : 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_FAILED',
-            updatedAt: measuredAt,
-          }
-        : item));
-    state = (await getJobHealthProjectionMaintenanceState()) || state;
-    return publicView(state.status === 'EXHAUSTED' ? 'EXHAUSTED' : 'BACKOFF', state, reasons);
+    await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => {
+      const current = normalizeMaintenanceState(items.find(item => item.id === RECORD_ID));
+      if (!current || current.incidentFingerprint !== request.incidentFingerprint) return undefined;
+      const nextStatus = current.attemptCount >= current.maximumAttempts ? 'EXHAUSTED' : 'FAILED';
+      assertMaintenanceStatusTransition(current.status, nextStatus);
+      assertMaintenancePhaseTransition(current.phase, 'FAILED');
+      const failure = error instanceof Error && error.name === 'AbortError'
+        ? 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_ABORTED'
+        : 'JOB_HEALTH_PROJECTION_REBUILD_REQUEST_FAILED';
+      return [{
+        ...current,
+        status: nextStatus,
+        phase: 'FAILED',
+        completedAt: measuredAt,
+        nextRetryAt: current.attemptCount >= current.maximumAttempts ? null : retryAt,
+        outcomeReasonCode: failure,
+        lastFailureReason: failure,
+        updatedAt: measuredAt,
+      }];
+    });
+    return getJobHealthProjectionMaintenanceState();
   }
 }
 
@@ -368,6 +514,8 @@ export async function markJobHealthProjectionMaintenance(
     sourceRevision?: string | null;
     resultRevision?: string | null;
     resultFingerprint?: string | null;
+    phase?: AutomationJobProjectionRepairPhase;
+    attemptNumber?: number;
     now?: number;
   },
 ): Promise<JobHealthProjectionMaintenanceState | null> {
@@ -375,15 +523,31 @@ export async function markJobHealthProjectionMaintenance(
   const measuredAt = new Date(now).toISOString();
   let output: JobHealthProjectionMaintenanceState | null = null;
   await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => {
-    const index = items.findIndex(item => item.id === RECORD_ID && item.jobId === input.jobId);
-    if (index < 0) return undefined;
-    const current = items[index];
+    const current = normalizeMaintenanceState(items.find(item => item.id === RECORD_ID));
+    if (!current || current.jobId !== input.jobId) return undefined;
     const attemptIndex = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, current.attemptCount - 1));
+    const nextPhase: AutomationJobProjectionRepairPhase = input.phase
+      || (input.status === 'RUNNING'
+        ? 'CLAIMED'
+        : input.status === 'RETRY_SCHEDULED'
+          ? 'RETRY_WAIT'
+          : input.status === 'SUCCEEDED'
+            ? 'COMPLETED'
+            : 'FAILED');
+    assertMaintenanceStatusTransition(current.status, input.status);
+    assertMaintenancePhaseTransition(current.phase, nextPhase);
     const startedAt = input.status === 'RUNNING' ? current.startedAt || measuredAt : current.startedAt;
     const startedAtMs = Date.parse(startedAt || '');
+    const safeReason = input.reasonCode
+      .replace(/[^A-Z0-9_:-]/gi, '_')
+      .toUpperCase()
+      .slice(0, 120);
     output = {
       ...current,
       status: input.status,
+      phase: nextPhase,
+      repairId: input.jobId,
+      attemptCount: Math.max(current.attemptCount, Math.floor(input.attemptNumber || 0)),
       startedAt,
       completedAt: input.status === 'RUNNING' ? null : measuredAt,
       nextRetryAt: input.status === 'RETRY_SCHEDULED'
@@ -403,14 +567,13 @@ export async function markJobHealthProjectionMaintenance(
       resultFingerprint: input.resultFingerprint === undefined
         ? current.resultFingerprint || null
         : input.resultFingerprint,
-      outcomeReasonCode: input.reasonCode
-        .replace(/[^A-Z0-9_:-]/gi, '_')
-        .toUpperCase()
-        .slice(0, 120),
+      outcomeReasonCode: safeReason,
+      lastFailureReason: input.status === 'FAILED' || input.status === 'RETRY_SCHEDULED'
+        ? safeReason
+        : current.lastFailureReason,
       updatedAt: measuredAt,
     };
-    items[index] = output;
-    return items;
+    return [output];
   });
   return output;
 }

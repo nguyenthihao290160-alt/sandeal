@@ -1,5 +1,146 @@
 # AI Work Handoff
 
+## Current handoff: SanDeal M3.1.2
+
+### Task
+
+SanDeal M3.1.2 - Convergent, Fenced Projection Repair
+
+### Repository and recovery state
+
+- Branch: `master`
+- Baseline and current HEAD: `3a0bf95e83c88e52531ff8a0a5a0a686b93c38f4`
+- The intentionally interrupted working tree was preserved in place. No tracked or untracked change was reset, discarded, rolled back, cleaned, or replaced.
+- The recovered work already contained most of the M3.1.2 protocol plus two untracked test programs. Work resumed by inspecting the complete diff and every untracked file before editing.
+- The remaining integration work found one obsolete M3.1.1-era assertion and one real status-projection version propagation defect. Both were corrected without restarting the implementation.
+- No commit, push, deployment, VPS/PM2 access, production storage access, production configuration change, or production data mutation was performed.
+
+### Completed implementation
+
+#### Convergent source boundary
+
+- Durable job mutations reserve a monotonic projection mutation sequence before the authoritative `automation-jobs` transaction.
+- The manifest records the next mutation sequence, committed semantic high-watermark, in-flight operations, and a bounded semantic source fingerprint.
+- `projectionSourceVersion` fences older compact writes per job. Both list and status projections now carry that version.
+- Heartbeat and lease volatility, including the fencing-only version field, is excluded from semantic source fingerprints. Status, payload/result disclosure, lifecycle, and other compact semantic changes remain fingerprint-significant.
+- A repair performs a base build and then up to five bounded catch-up passes. It re-reads the authoritative durable source, reuses unchanged bounded candidate rows, and publishes only after the source boundary is stable.
+- A stale caller-supplied snapshot is no longer treated as authoritative or rejected immediately; catch-up converges it to the latest durable state.
+- Catch-up exhaustion is explicit as `JOB_PROJECTION_CATCH_UP_RETRY_EXHAUSTED` and leaves the previous active generation visible.
+
+#### Fenced single-flight repair
+
+- A repair claim contains repair id, rebuild token, monotonically increasing repair fence, Worker owner/instance/fencing identity, hashed claim token, attempt number, target generation, and target slot.
+- Duplicate executor calls for the same claim join one local promise. A distinct active repair is rejected unless an authorized newer attempt explicitly supersedes it.
+- Every phase transition is validated: `CLAIMED`, `REBUILDING`, `CATCHING_UP`, `VALIDATING`, `PUBLISHING`, then `COMPLETED`; retry, failed, and superseded terminal paths are explicit.
+- Worker ownership and the durable job claim are re-authorized immediately before publication. A superseded Worker cannot move the manifest pointer.
+- Repair scheduling remains two-stage. App Health writes only one compact `SCHEDULED` request; the Worker materializes the durable maintenance job outside the interactive request.
+- Concurrent refreshes and Worker loops suppress duplicate requests and reuse one repair/job identity.
+
+#### Candidate generation and atomic publication
+
+- Each repair writes list, status, and summary candidates to unique `A`/`B` collections suffixed by the repair fence.
+- Candidate metadata includes generation, slot, repair identity, start/current source boundaries, catch-up counts, schema/version, record counts, full-content fingerprints, combined fingerprint, and summary revision.
+- Candidate collections and the compact staging record are re-read and verified before publication. A second verification runs after the final authorization hook.
+- One manifest transaction is the reader-visible promotion boundary. A crash before it preserves the prior active generation; a crash after it treats the promoted generation as authoritative and completes safely.
+- The promoted generation is mirrored to legacy collection names only while the boundary is unchanged. If mirroring cannot settle, readers remain on the promoted generation and `legacyMirrorPending` stays explicit.
+- Old fenced candidates are recorded for bounded best-effort cleanup. File storage does not create redundant backups for reproducible transient candidate collections.
+
+#### Incremental writes, polling, and maintenance
+
+- Create, claim, retry, completion, failure, cancellation, approval, recovery, parent/manual transitions, compaction, and persisted-entity migration participate in projection mutation fencing.
+- Batched claim changes update both compact projections under one mutation handle. Partial read-model failure invalidates the manifest fail-closed instead of presenting a mixed projection as current.
+- Lightweight job polling follows the active generation and can repair a stale compact row from the durable job. Status projections retain `projectionSourceVersion`, preventing both stale overwrite and the recovered polling regression.
+- Heartbeats update the active compact generation without advancing the semantic source boundary. Current heartbeat evidence refreshes Job Health freshness without producing rebuild churn.
+- The broad autonomous reconciler no longer starts a competing full projection rebuild; the dedicated fenced maintenance workflow owns repair.
+
+#### Health evidence and operator visibility
+
+- Valid projection evidence can move obsolete projection-specific current reasons to historical audit state. It cannot clear SLO, Runtime Guardian, AI policy, publication policy, or unrelated reasons.
+- App Health exposes active generation/slot, source high-watermark/fingerprint, active repair id/phase/attempt, last repair failure, retry time, catch-up state, previous-valid serving state, last successful repair, and legacy mirror state.
+- Legacy M3.1/M3.1.1 manifests remain valid and are upgraded additively in memory. Missing or invalid projections rebuild without deleting durable job history.
+- File and Mongo serialization preserve the same manifest and repair protocol semantics.
+
+### Tests added or updated
+
+- Added `scripts/m3-1-2-convergent-projection-repair-tests.cjs` with 15 scenarios covering semantic/volatile identity, continuous heartbeats, relevant write waves, bounded exhaustion, request and executor single-flight behavior, Worker supersession, crash recovery, retry metadata atomicity, corrupt candidates, current-reason cleanup, legacy bootstrap, missing projection recovery, Mongo parity, and invalid phase transitions.
+- Added `scripts/m3-1-2-projection-repair-performance-tests.cjs` with a 13,000-job / 500-runtime-snapshot / 55.5 MB fixture and explicit latency, durable-read, response-size, retained-candidate, and memory guards.
+- Updated the prior bounded storage test so a stale caller snapshot must converge to current durable truth.
+- Updated M3.1.1, post-M3, App Health reliability, and Mongo adapter tests for two-stage materialization and fenced candidate storage.
+- Added package scripts `test:m3.1.2:projection-repair` and `test:m3.1.2:projection-performance`.
+
+### Validation results
+
+| Command | Result |
+| --- | --- |
+| `git diff --check` | PASS |
+| `npm run typecheck` | PASS |
+| `npm run lint` | PASS with 0 errors; 10 existing warnings remain |
+| `npm run release:secret-scan` | PASS; 485 files scanned |
+| `npm run test:m3.1.2:projection-repair` | 15 PASS, 0 FAIL |
+| `npm run test:m3.1.2:projection-performance` | PASS |
+| `node scripts/bounded-projection-storage-tests.cjs` | 13 PASS, 0 FAIL |
+| `node scripts/m3-1-1-projection-repair-tests.cjs` | 11 PASS, 0 FAIL |
+| `node scripts/post-m3-reconciliation-product-flow-tests.cjs` | 38 PASS, 0 FAIL |
+| `node scripts/automation-health-reliability-tests.cjs` | 12 PASS, 0 FAIL |
+| `node scripts/sandeal-durable-health-regression-tests.cjs` | 26 PASS, 0 FAIL |
+| `npm test` | PASS |
+| `npm run test:master:m1` | PASS |
+| `npm run test:master:m2` | 31 PASS, 0 FAIL |
+| `npm run test:master:m3` | PASS |
+| `npm run test:storage` | 15 PASS, 0 FAIL |
+| `npm run test:storage:mongo` | 29 PASS, 0 FAIL; fake/local adapter only |
+| `npm run test:storage:migration` | 39 PASS, 0 FAIL |
+| `npm run test:prompt10:job-schema` | 10 PASS, 0 FAIL |
+| `npm run test:prompt10:orchestration` | 12 PASS, 0 FAIL |
+| `npm run test:prompt10:lifecycle` | PASS |
+| `npm run test:prompt10:resilience` | 11 PASS, 0 FAIL |
+| `npm run test:prompt10:backup` | 7 PASS, 0 FAIL |
+| `npm run build` | PASS on Next.js 16.2.11; 43/43 static pages |
+| `npm run test:storage:acceptance` | NOT RUN: explicit real-Mongo/production opt-in is prohibited for this task |
+
+Two additional non-gating Prompt 10 commands were inspected and remain red in product-readiness fixtures outside the M3.1.2 diff:
+
+- `npm run test:prompt10:foundation`: 27 PASS, 1 FAIL (`valid server-derived readiness snapshot passes foundation invariant`).
+- `npm run test:prompt10:shadow`: 2 PASS, 3 FAIL (fixtures reach `SAFE_PUBLISH_NOT_READY` before the intended shadow-mode assertions).
+
+The failing reasons concern affiliate/canonical verification, image/content evidence, price freshness, review quality, and autonomous assessment. M3.1.2 does not change those readiness modules or policies; no unrelated policy weakening was made to force these optional suites green.
+
+### Performance measurements
+
+- Fixture: 13,000 durable jobs, 500 runtime snapshots, 55.5 MB `automation-jobs` file.
+- App Health: 118.9 ms cold and 101.6 ms warm; five repeated calls performed 0 complete durable-job reads; heap delta was 0.5 MB.
+- Interactive repair scheduling: 8.8 ms, 0 durable-job reads, and no inline durable maintenance-job enqueue.
+- Base repair: 4,076.5 ms total, 2 full durable reads, 1 catch-up pass, 8.0 ms manifest promotion, and 141.6 ms legacy mirror.
+- Relevant-write repair: 4,885.1 ms total, 3 full durable reads, one changed job caught up, and 7.9 ms manifest promotion.
+- Continuous-heartbeat repair: 4,549.6 ms total, 7 heartbeat writes, 2 full durable reads, 6.5 ms promotion, and no semantic source-boundary movement.
+- Peak memory: 429.6 MB heap and 642.3 MB RSS, below the 1.5 GB test guard. The retained candidate remains bounded to 2,000 list plus 2,000 status records; the test models at most two candidate copies / 8,000 projection records.
+
+### Build result
+
+- Optimized Next.js 16.2.11 build: PASS.
+- Compilation: 4.9 seconds; TypeScript: 14.1 seconds; static generation: 43/43 pages in 643 ms.
+- Existing warnings remain: npm's `min-release-age` deprecation notice and Turbopack's broad NFT trace through `next.config.ts` / `src/lib/autonomous/backupManager.ts`.
+
+### Safety invariants and remaining risks
+
+- Durable source writes, compact projection writes, repair claims, Worker ownership, manifest promotion, and retries are fenced independently and fail closed on ambiguity.
+- A candidate is never reader-visible before manifest promotion. A failed or superseded candidate cannot replace the prior valid generation.
+- Continuous heartbeats do not starve semantic convergence or fabricate source revisions.
+- App Health remains bounded and performs no complete durable job-history read or inline maintenance-job creation.
+- Existing Runtime Guardian capacity reservation, job claim tokens, role leases, Worker fencing, retry limits, idempotency, publication policy, and product eligibility controls remain enforced.
+- Worker Pool rollout state and publication modes were not enabled. No product was forced public.
+- A stale in-flight mutation is conservatively absorbed by a later full repair after its bounded age. Until the Worker retries, projection evidence remains fail-closed.
+- File storage necessarily parses the large durable job collection during explicit repair. The measured peak RSS is within the test guard but remains material; live latency and memory on production hardware are unverified.
+- Production/VPS and a real Mongo acceptance environment were not accessed, so post-deployment recovery and live Mongo transaction latency remain unverified.
+- The two unrelated product-readiness fixture failures above remain visible and were not masked by this change.
+
+### Recommended commit and classification
+
+- Recommended commit: `fix: make projection repair convergent and fenced`
+- Classification: `SAFE_TO_COMMIT_M3_1_2`
+
+---
+
 ## Current handoff: SanDeal M3.1.1
 
 ### Task

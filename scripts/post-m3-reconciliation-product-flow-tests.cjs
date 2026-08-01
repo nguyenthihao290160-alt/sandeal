@@ -508,12 +508,16 @@ async function main() {
     };
     const first = await maintenance.ensureJobHealthProjectionMaintenanceRequest(invalidView, now + 10_000);
     const second = await maintenance.ensureJobHealthProjectionMaintenanceRequest(invalidView, now + 11_000);
+    assert.equal((await adapter.readCollection('automation-jobs')).filter(job =>
+      job.payload?.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD').length, 0);
+    await maintenance.materializeJobHealthProjectionMaintenanceRequest(now + 12_000);
     const jobs = await adapter.readCollection('automation-jobs');
     const rebuildJobs = jobs.filter(job =>
       job.type === 'RECONCILE_AUTOMATION'
       && job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD');
     assert.equal(first.status, 'REQUESTED');
     assert.equal(second.status, 'REUSED_ACTIVE_REQUEST');
+    assert.equal(first.repairId, second.repairId);
     assert.equal(rebuildJobs.length, 1);
     assert.ok(second.duplicateRequestsSuppressed >= 1);
   });

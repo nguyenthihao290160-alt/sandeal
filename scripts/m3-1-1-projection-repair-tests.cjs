@@ -158,6 +158,7 @@ async function main() {
     const waiting = await maintenance.ensureJobHealthProjectionMaintenanceRequest(invalidView, now + 2_003);
     assert.equal(first.status, 'REQUESTED');
     assert.equal(waiting.status, 'REUSED_ACTIVE_REQUEST');
+    await maintenance.materializeJobHealthProjectionMaintenanceRequest(now + 2_003);
     await adapter.runTransaction('automation-job-projection-maintenance-v1', items => items.map(item => ({
       ...item,
       status: 'RUNNING',
@@ -263,7 +264,7 @@ async function main() {
     const originalRunTransaction = adapter.runTransaction;
     let failOnce = true;
     adapter.runTransaction = async function injectedRunTransaction(collection, fn) {
-      if (collection === 'automation-job-list-projections-v2' && failOnce) {
+      if (collection.startsWith('automation-job-list-projections-v2-generation-') && failOnce) {
         failOnce = false;
         throw new Error('TEST_ATOMIC_REPLACEMENT_FAILURE');
       }

@@ -56,6 +56,102 @@ export const AUTOMATION_JOB_HEALTH_SUMMARY_SCHEMA_VERSION = 2;
 export const AUTOMATION_JOB_PROJECTION_MANIFEST_SCHEMA_VERSION = 2;
 export const AUTOMATION_JOB_PROJECTION_VERSION = 'automation-job-projection-v3';
 export const AUTOMATION_JOB_PROJECTION_NAME = 'automation-job-health';
+export const AUTOMATION_JOB_PROJECTION_SOURCE_SCHEMA_VERSION = 1;
+
+export type AutomationJobProjectionStorageSlot = 'LEGACY' | 'A' | 'B';
+
+export interface AutomationJobProjectionStorageCollections {
+  list: string;
+  status: string;
+  summary: string;
+}
+
+export interface AutomationJobProjectionCandidateStorageRef {
+  slot: Exclude<AutomationJobProjectionStorageSlot, 'LEGACY'>;
+  repairFence: number;
+}
+
+const PROJECTION_STORAGE_COLLECTIONS: Readonly<Record<AutomationJobProjectionStorageSlot, AutomationJobProjectionStorageCollections>> = {
+  LEGACY: {
+    list: jobListProjectionCollection,
+    status: jobStatusProjectionCollection,
+    summary: healthSummaryCollection,
+  },
+  A: {
+    list: `${jobListProjectionCollection}-generation-a`,
+    status: `${jobStatusProjectionCollection}-generation-a`,
+    summary: `${healthSummaryCollection}-generation-a`,
+  },
+  B: {
+    list: `${jobListProjectionCollection}-generation-b`,
+    status: `${jobStatusProjectionCollection}-generation-b`,
+    summary: `${healthSummaryCollection}-generation-b`,
+  },
+};
+
+export function automationJobProjectionStorageCollections(
+  slot: AutomationJobProjectionStorageSlot,
+  repairFence?: number,
+): AutomationJobProjectionStorageCollections {
+  const base = PROJECTION_STORAGE_COLLECTIONS[slot];
+  if (slot === 'LEGACY' || !Number.isInteger(repairFence) || Number(repairFence) <= 0) {
+    return { ...base };
+  }
+  const suffix = `-repair-${Math.floor(Number(repairFence))}`;
+  return {
+    list: `${base.list}${suffix}`,
+    status: `${base.status}${suffix}`,
+    summary: `${base.summary}${suffix}`,
+  };
+}
+
+export type AutomationJobProjectionRepairPhase =
+  | 'SCHEDULED'
+  | 'CLAIMED'
+  | 'REBUILDING'
+  | 'CATCHING_UP'
+  | 'VALIDATING'
+  | 'PUBLISHING'
+  | 'COMPLETED'
+  | 'RETRY_WAIT'
+  | 'FAILED'
+  | 'SUPERSEDED';
+
+export interface AutomationJobProjectionSourceBoundary {
+  schemaVersion: typeof AUTOMATION_JOB_PROJECTION_SOURCE_SCHEMA_VERSION;
+  highWatermark: number;
+  sourceFingerprint: string | null;
+}
+
+export interface AutomationJobProjectionSyncOperation {
+  token: string;
+  sequence: number;
+  targetGeneration: number;
+  targetSlot: AutomationJobProjectionStorageSlot;
+  targetRepairFence?: number;
+  startedAt: string;
+}
+
+export interface AutomationJobProjectionRepairLease {
+  repairId: string;
+  rebuildToken: string;
+  repairFence: number;
+  ownerId: string;
+  ownerInstanceId: string;
+  workerFencingToken: number;
+  claimTokenHash: string;
+  attemptNumber: number;
+  phase: AutomationJobProjectionRepairPhase;
+  startedAt: string;
+  updatedAt: string;
+  targetGeneration: number;
+  targetSlot: Exclude<AutomationJobProjectionStorageSlot, 'LEGACY'>;
+  startBoundary: AutomationJobProjectionSourceBoundary;
+  candidateBoundary: AutomationJobProjectionSourceBoundary | null;
+  catchUpPasses: number;
+  catchUpPending: boolean;
+  lastFailureReason: string | null;
+}
 
 export function getAutomationJobProjectionLimit(): number {
   return Math.min(
@@ -191,6 +287,20 @@ export interface AutomationJobProjectionManifest {
   mutationDuringRebuild: boolean;
   inFlightSyncTokens: string[];
   syncFailureCountSinceRebuild: number;
+  /** Additive M3.1.2 protocol fields; absence means a valid M3.1/M3.1.1 legacy generation. */
+  repairProtocolVersion?: 2;
+  activeGeneration?: number;
+  activeSlot?: AutomationJobProjectionStorageSlot;
+  activeStorageRepairFence?: number;
+  nextMutationSequence?: number;
+  sourceHighWatermark?: number;
+  sourceFingerprint?: string | null;
+  inFlightSyncOperations?: AutomationJobProjectionSyncOperation[];
+  repairFence?: number;
+  activeRepair?: AutomationJobProjectionRepairLease;
+  lastSuccessfulRepairAt?: string | null;
+  legacyMirrorPending?: boolean;
+  staleCandidateStorage?: AutomationJobProjectionCandidateStorageRef[];
   updatedAt: string;
 }
 
@@ -260,6 +370,18 @@ export interface AutomationJobHealthView extends AutomationJobHealthSummary {
   staleRunningCount: number;
   stuckPendingCount: number;
   oldestPendingAgeMs: number | null;
+  activeProjectionGeneration: number | null;
+  activeProjectionSlot: AutomationJobProjectionStorageSlot | null;
+  currentSourceBoundary: AutomationJobProjectionSourceBoundary | null;
+  lastSuccessfulRepairAt: string | null;
+  activeRepairId: string | null;
+  repairPhase: AutomationJobProjectionRepairPhase | null;
+  repairAttemptNumber: number | null;
+  lastRepairFailureReason: string | null;
+  nextRepairRetryAt: string | null;
+  catchUpPending: boolean;
+  previousValidProjectionServing: boolean;
+  legacyMirrorPending: boolean;
 }
 
 export interface BoundedAutomationJobProjectionRead {
@@ -383,10 +505,12 @@ export function automationJobProjectionContentFingerprint(items: unknown[]): str
     const {
       heartbeatAt: _heartbeatAt,
       leaseExpiresAt: _leaseExpiresAt,
+      projectionSourceVersion: _projectionSourceVersion,
       ...stable
     } = item as Record<string, unknown>;
     void _heartbeatAt;
     void _leaseExpiresAt;
+    void _projectionSourceVersion;
     return stable;
   });
   return deterministicProjectionFingerprint(
@@ -616,7 +740,163 @@ function emptyProjectionManifest(now = Date.now()): AutomationJobProjectionManif
     mutationDuringRebuild: false,
     inFlightSyncTokens: [],
     syncFailureCountSinceRebuild: 0,
+    repairProtocolVersion: 2,
+    activeGeneration: 0,
+    activeSlot: 'LEGACY',
+    activeStorageRepairFence: 0,
+    nextMutationSequence: 0,
+    sourceHighWatermark: 0,
+    sourceFingerprint: null,
+    inFlightSyncOperations: [],
+    repairFence: 0,
+    lastSuccessfulRepairAt: null,
+    legacyMirrorPending: false,
+    staleCandidateStorage: [],
     updatedAt: measuredAt,
+  };
+}
+
+function validStorageSlot(value: unknown): value is AutomationJobProjectionStorageSlot {
+  return value === 'LEGACY' || value === 'A' || value === 'B';
+}
+
+function validCandidateStorageRef(value: unknown): value is AutomationJobProjectionCandidateStorageRef {
+  if (!value || typeof value !== 'object') return false;
+  const ref = value as Partial<AutomationJobProjectionCandidateStorageRef>;
+  return (ref.slot === 'A' || ref.slot === 'B')
+    && Number.isInteger(ref.repairFence)
+    && Number(ref.repairFence) > 0;
+}
+
+function appendStaleCandidateStorage(
+  current: AutomationJobProjectionCandidateStorageRef[] | undefined,
+  candidate: AutomationJobProjectionCandidateStorageRef | null,
+): AutomationJobProjectionCandidateStorageRef[] {
+  const refs = candidate ? [...(current || []), candidate] : [...(current || [])];
+  const unique = new Map(refs.map(ref => [`${ref.slot}:${ref.repairFence}`, ref]));
+  if (unique.size > 64) throw new Error('JOB_PROJECTION_CANDIDATE_CLEANUP_CAPACITY_EXCEEDED');
+  return [...unique.values()];
+}
+
+function validSourceBoundary(value: unknown): value is AutomationJobProjectionSourceBoundary {
+  if (!value || typeof value !== 'object') return false;
+  const boundary = value as Partial<AutomationJobProjectionSourceBoundary>;
+  return boundary.schemaVersion === AUTOMATION_JOB_PROJECTION_SOURCE_SCHEMA_VERSION
+    && Number.isInteger(boundary.highWatermark)
+    && Number(boundary.highWatermark) >= 0
+    && (boundary.sourceFingerprint === null
+      || (typeof boundary.sourceFingerprint === 'string' && /^[a-f0-9]{64}$/.test(boundary.sourceFingerprint)));
+}
+
+function validSyncOperation(value: unknown): value is AutomationJobProjectionSyncOperation {
+  if (!value || typeof value !== 'object') return false;
+  const operation = value as Partial<AutomationJobProjectionSyncOperation>;
+  return typeof operation.token === 'string'
+    && operation.token.length > 0
+    && operation.token.length <= 100
+    && Number.isInteger(operation.sequence)
+    && Number(operation.sequence) > 0
+    && Number.isInteger(operation.targetGeneration)
+    && Number(operation.targetGeneration) >= 0
+    && validStorageSlot(operation.targetSlot)
+    && (operation.targetRepairFence === undefined
+      || (Number.isInteger(operation.targetRepairFence) && Number(operation.targetRepairFence) >= 0))
+    && timestamp(operation.startedAt) !== null;
+}
+
+function validRepairLease(value: unknown): value is AutomationJobProjectionRepairLease {
+  if (!value || typeof value !== 'object') return false;
+  const repair = value as Partial<AutomationJobProjectionRepairLease>;
+  return typeof repair.repairId === 'string'
+    && repair.repairId.length > 0
+    && repair.repairId.length <= 160
+    && typeof repair.rebuildToken === 'string'
+    && repair.rebuildToken.length > 0
+    && repair.rebuildToken.length <= 100
+    && Number.isInteger(repair.repairFence)
+    && Number(repair.repairFence) > 0
+    && typeof repair.ownerId === 'string'
+    && repair.ownerId.length > 0
+    && typeof repair.ownerInstanceId === 'string'
+    && repair.ownerInstanceId.length > 0
+    && Number.isInteger(repair.workerFencingToken)
+    && Number(repair.workerFencingToken) >= 0
+    && typeof repair.claimTokenHash === 'string'
+    && /^[a-f0-9]{64}$/.test(repair.claimTokenHash)
+    && Number.isInteger(repair.attemptNumber)
+    && Number(repair.attemptNumber) > 0
+    && [
+      'SCHEDULED', 'CLAIMED', 'REBUILDING', 'CATCHING_UP', 'VALIDATING',
+      'PUBLISHING', 'COMPLETED', 'RETRY_WAIT', 'FAILED', 'SUPERSEDED',
+    ].includes(String(repair.phase))
+    && timestamp(repair.startedAt) !== null
+    && timestamp(repair.updatedAt) !== null
+    && Number.isInteger(repair.targetGeneration)
+    && Number(repair.targetGeneration) > 0
+    && (repair.targetSlot === 'A' || repair.targetSlot === 'B')
+    && validSourceBoundary(repair.startBoundary)
+    && (repair.candidateBoundary === null || validSourceBoundary(repair.candidateBoundary))
+    && Number.isInteger(repair.catchUpPasses)
+    && Number(repair.catchUpPasses) >= 0
+    && typeof repair.catchUpPending === 'boolean'
+    && (repair.lastFailureReason === null || typeof repair.lastFailureReason === 'string');
+}
+
+function projectionProtocolFieldsValid(manifest: Partial<AutomationJobProjectionManifest>): boolean {
+  if (manifest.repairProtocolVersion === undefined) return true;
+  return manifest.repairProtocolVersion === 2
+    && Number.isInteger(manifest.activeGeneration)
+    && Number(manifest.activeGeneration) >= 0
+    && validStorageSlot(manifest.activeSlot)
+    && (manifest.activeStorageRepairFence === undefined
+      || (Number.isInteger(manifest.activeStorageRepairFence)
+        && Number(manifest.activeStorageRepairFence) >= 0))
+    && Number.isInteger(manifest.nextMutationSequence)
+    && Number(manifest.nextMutationSequence) >= 0
+    && Number.isInteger(manifest.sourceHighWatermark)
+    && Number(manifest.sourceHighWatermark) >= 0
+    && Number(manifest.sourceHighWatermark) <= Number(manifest.nextMutationSequence)
+    && (manifest.sourceFingerprint === null
+      || (typeof manifest.sourceFingerprint === 'string' && /^[a-f0-9]{64}$/.test(manifest.sourceFingerprint)))
+    && Array.isArray(manifest.inFlightSyncOperations)
+    && manifest.inFlightSyncOperations.every(validSyncOperation)
+    && Number.isInteger(manifest.repairFence)
+    && Number(manifest.repairFence) >= 0
+    && (manifest.activeRepair === undefined || validRepairLease(manifest.activeRepair))
+    && (manifest.lastSuccessfulRepairAt === null || timestamp(manifest.lastSuccessfulRepairAt) !== null)
+    && typeof manifest.legacyMirrorPending === 'boolean'
+    && (manifest.staleCandidateStorage === undefined
+      || (Array.isArray(manifest.staleCandidateStorage)
+        && manifest.staleCandidateStorage.length <= 64
+        && manifest.staleCandidateStorage.every(validCandidateStorageRef)));
+}
+
+function withProjectionProtocol(
+  manifest: AutomationJobProjectionManifest,
+): AutomationJobProjectionManifest {
+  if (manifest.repairProtocolVersion === 2) return manifest;
+  const operations = manifest.inFlightSyncTokens.map((token, index) => ({
+    token,
+    sequence: index + 1,
+    targetGeneration: 0,
+    targetSlot: 'LEGACY' as const,
+    targetRepairFence: 0,
+    startedAt: manifest.updatedAt,
+  }));
+  return {
+    ...manifest,
+    repairProtocolVersion: 2,
+    activeGeneration: 0,
+    activeSlot: 'LEGACY',
+    activeStorageRepairFence: 0,
+    nextMutationSequence: operations.length,
+    sourceHighWatermark: 0,
+    sourceFingerprint: null,
+    inFlightSyncOperations: operations,
+    repairFence: 0,
+    lastSuccessfulRepairAt: manifest.rebuiltAt,
+    legacyMirrorPending: false,
+    staleCandidateStorage: [],
   };
 }
 
@@ -736,7 +1016,8 @@ function isProjectionManifest(value: unknown): value is AutomationJobProjectionM
       activeJobCount: manifest.activeJobCount,
       retainedJobCount: manifest.retainedJobCount,
       sourceUpdatedAt: manifest.sourceUpdatedAt ?? null,
-    });
+    })
+    && projectionProtocolFieldsValid(manifest);
 }
 
 function manifestValidationReasonCodes(value: unknown): string[] {
@@ -852,7 +1133,11 @@ async function readProjectionManifest(): Promise<{
         ],
       };
     }
-    return { manifest: snapshot.items[0], collectionPresent: true, reasonCodes: [] };
+    return {
+      manifest: withProjectionProtocol(snapshot.items[0]),
+      collectionPresent: true,
+      reasonCodes: [],
+    };
   } catch {
     return { manifest: null, collectionPresent: false, reasonCodes: ['JOB_PROJECTION_MANIFEST_UNAVAILABLE'] };
   }
@@ -862,79 +1147,65 @@ export async function getAutomationJobProjectionManifestForMaintenance(): Promis
   return (await readProjectionManifest()).manifest;
 }
 
-export async function restoreAutomationJobProjectionManifestAfterFailedRebuild(
-  token: string,
-  previous: AutomationJobProjectionManifest,
-  expectedCurrentSourceRevision?: string,
-  now = Date.now(),
-): Promise<AutomationJobProjectionManifest> {
-  const measuredAt = new Date(now).toISOString();
-  let output = previous;
-  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
-    const current = isProjectionManifest(items[0]) ? items[0] : null;
-    const ownedInFlight = current?.rebuildToken === token;
-    const ownedCommitted = !current?.rebuildToken
-      && Boolean(expectedCurrentSourceRevision)
-      && current?.sourceRevision === expectedCurrentSourceRevision;
-    if (!ownedInFlight && !ownedCommitted) {
-      output = current || previous;
-      return undefined;
-    }
-    output = {
-      ...previous,
-      rebuildToken: undefined,
-      mutationDuringRebuild: false,
-      lastRebuildStatus: 'FAILED',
-      lastRebuildFailureAt: measuredAt,
-      updatedAt: measuredAt,
-    };
-    return [output];
-  });
-  return output;
+export async function getAutomationJobActiveProjectionStorage(): Promise<{
+  manifest: AutomationJobProjectionManifest | null;
+  collections: AutomationJobProjectionStorageCollections;
+}> {
+  const manifest = (await readProjectionManifest()).manifest;
+  const slot = manifest?.activeSlot || 'LEGACY';
+  return {
+    manifest,
+    collections: automationJobProjectionStorageCollections(slot, manifest?.activeStorageRepairFence),
+  };
 }
 
-export async function beginAutomationJobProjectionSync(now = Date.now()): Promise<string> {
+export interface AutomationJobProjectionMutationHandle extends AutomationJobProjectionSyncOperation {
+  /** Ephemeral versions assigned inside the authoritative JOBS transaction. */
+  jobSourceVersions?: Readonly<Record<string, number>>;
+}
+
+export async function beginAutomationJobProjectionMutation(
+  now = Date.now(),
+): Promise<AutomationJobProjectionMutationHandle> {
   const token = randomUUID();
   const measuredAt = new Date(now).toISOString();
+  let output: AutomationJobProjectionMutationHandle | undefined;
   await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
-    const current = isProjectionManifest(items[0]) ? items[0] : emptyProjectionManifest(now);
-    const tokens = [...new Set([...current.inFlightSyncTokens, token])].slice(-100);
-    const releaseId = getReleaseIdentity().releaseId;
-    const releaseMatches = current.releaseId === releaseId;
-    const baselineEstablished = current.baselineEstablished && releaseMatches;
-    const historyComplete = current.historyComplete && releaseMatches;
+    const current = isProjectionManifest(items[0])
+      ? withProjectionProtocol(items[0])
+      : emptyProjectionManifest(now);
+    const existingOperations = current.inFlightSyncOperations || [];
+    if (existingOperations.length >= 100) {
+      throw new Error('JOB_PROJECTION_MUTATION_CAPACITY_EXCEEDED');
+    }
+    const sequence = (current.nextMutationSequence || 0) + 1;
+    const operation: AutomationJobProjectionMutationHandle = {
+      token,
+      sequence,
+      targetGeneration: current.activeGeneration || 0,
+      targetSlot: current.activeSlot || 'LEGACY',
+      targetRepairFence: current.activeSlot === 'LEGACY'
+        ? 0
+        : current.activeStorageRepairFence || 0,
+      startedAt: measuredAt,
+    };
+    output = operation;
     return [{
       ...current,
-      projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
-      releaseId,
-      sourceRevision: projectionSourceRevision({
-        releaseId,
-        projectionFingerprint: current.projectionFingerprint,
-        durableJobCount: current.durableJobCount,
-        activeJobCount: current.activeJobCount,
-        retainedJobCount: current.retainedJobCount,
-        sourceUpdatedAt: current.sourceUpdatedAt,
-      }),
-      summaryRevision: null,
-      generatedAt: measuredAt,
-      baselineEstablished,
-      currentStateComplete: false,
-      historyComplete,
-      completeness: {
-        baselineEstablished,
-        currentStateComplete: false,
-        historyComplete,
-        truncated: current.truncated,
-      },
-      mutationDuringRebuild: current.mutationDuringRebuild || Boolean(current.rebuildToken),
-      inFlightSyncTokens: tokens,
-      syncFailureCountSinceRebuild: tokens.includes(token)
-        ? current.syncFailureCountSinceRebuild + (releaseMatches ? 0 : 1)
-        : current.syncFailureCountSinceRebuild + 1,
+      repairProtocolVersion: 2,
+      nextMutationSequence: sequence,
+      inFlightSyncOperations: [...existingOperations, operation],
+      inFlightSyncTokens: [...current.inFlightSyncTokens, token],
       updatedAt: measuredAt,
     }];
   });
-  return token;
+  if (!output) throw new Error('JOB_PROJECTION_MUTATION_RESERVATION_FAILED');
+  return output;
+}
+
+/** Compatibility entrypoint for legacy callers that only persist the token. */
+export async function beginAutomationJobProjectionSync(now = Date.now()): Promise<string> {
+  return (await beginAutomationJobProjectionMutation(now)).token;
 }
 
 export interface AutomationJobProjectionSyncResult {
@@ -952,20 +1223,92 @@ export interface AutomationJobProjectionSyncResult {
   currentStateTruncated: boolean;
   sourceUpdatedAt: string | null;
   retentionBoundary: AutomationJobProjectionRetentionBoundary | null;
+  sourceAffected?: boolean;
+  projectionChanged?: boolean;
+  insertedCount?: number;
+  removedCount?: number;
 }
 
-export async function finishAutomationJobProjectionSync(
-  token: string,
-  result: AutomationJobProjectionSyncResult,
+export async function abortAutomationJobProjectionMutation(
+  handleOrToken: AutomationJobProjectionMutationHandle | string,
   now = Date.now(),
 ): Promise<void> {
+  const token = typeof handleOrToken === 'string' ? handleOrToken : handleOrToken.token;
   const measuredAt = new Date(now).toISOString();
   await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
     if (!isProjectionManifest(items[0])) return undefined;
-    const current = items[0];
+    const current = withProjectionProtocol(items[0]);
     if (!current.inFlightSyncTokens.includes(token)) return undefined;
+    return [{
+      ...current,
+      inFlightSyncTokens: current.inFlightSyncTokens.filter(value => value !== token),
+      inFlightSyncOperations: (current.inFlightSyncOperations || [])
+        .filter(operation => operation.token !== token),
+      updatedAt: measuredAt,
+    }];
+  });
+}
+
+export async function finishAutomationJobProjectionSync(
+  handleOrToken: AutomationJobProjectionMutationHandle | string,
+  result: AutomationJobProjectionSyncResult,
+  now = Date.now(),
+): Promise<void> {
+  const token = typeof handleOrToken === 'string' ? handleOrToken : handleOrToken.token;
+  const measuredAt = new Date(now).toISOString();
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    if (!isProjectionManifest(items[0])) throw new Error('JOB_PROJECTION_MUTATION_MANIFEST_INVALID');
+    const current = withProjectionProtocol(items[0]);
+    if (!current.inFlightSyncTokens.includes(token)) {
+      throw new Error('JOB_PROJECTION_MUTATION_SUPERSEDED');
+    }
+    const operation = (current.inFlightSyncOperations || [])
+      .find(candidate => candidate.token === token);
+    if (
+      operation
+      && (operation.targetGeneration !== current.activeGeneration
+        || operation.targetSlot !== current.activeSlot)
+    ) {
+      throw new Error('JOB_PROJECTION_MUTATION_GENERATION_SUPERSEDED');
+    }
     const inFlightSyncTokens = current.inFlightSyncTokens.filter(value => value !== token);
+    const inFlightSyncOperations = (current.inFlightSyncOperations || [])
+      .filter(value => value.token !== token);
+    const sourceAffected = result.sourceAffected !== false;
+    const operationSequence = operation?.sequence
+      || (typeof handleOrToken === 'string' ? current.nextMutationSequence || 0 : handleOrToken.sequence);
+    const sourceHighWatermark = sourceAffected
+      ? Math.max(current.sourceHighWatermark || 0, operationSequence)
+      : current.sourceHighWatermark || 0;
     const syncFailureCountSinceRebuild = current.syncFailureCountSinceRebuild + (result.success ? 0 : 1);
+    if (!sourceAffected && !result.projectionChanged && result.success) {
+      return [{
+        ...current,
+        inFlightSyncTokens,
+        inFlightSyncOperations,
+        updatedAt: measuredAt,
+      }];
+    }
+    if (!result.success) {
+      return [{
+        ...current,
+        sourceHighWatermark,
+        sourceFingerprint: sourceAffected ? null : current.sourceFingerprint || null,
+        summaryRevision: null,
+        baselineEstablished: false,
+        currentStateComplete: false,
+        completeness: {
+          ...current.completeness,
+          baselineEstablished: false,
+          currentStateComplete: false,
+        },
+        mutationDuringRebuild: current.mutationDuringRebuild || Boolean(current.activeRepair),
+        inFlightSyncTokens,
+        inFlightSyncOperations,
+        syncFailureCountSinceRebuild,
+        updatedAt: measuredAt,
+      }];
+    }
     const sameProjectionCount = result.listProjectionCount === result.statusProjectionCount;
     const sameProjectionIdentity = result.listProjectionFingerprint === result.statusProjectionFingerprint;
     const baselineEstablished = current.baselineEstablished
@@ -981,12 +1324,15 @@ export async function finishAutomationJobProjectionSync(
       && result.listProjectionCount < getAutomationJobProjectionLimit();
     const currentStateComplete = baselineEstablished
       && inFlightSyncTokens.length === 0
-      && !current.rebuildToken
-      && !current.mutationDuringRebuild
       && result.activeJobCount <= getAutomationJobProjectionLimit();
     const releaseId = getReleaseIdentity().releaseId;
     const combinedFingerprint = projectionFingerprint(result);
-    const durableJobCount = current.durableJobCount + (result.success && result.inserted ? 1 : 0);
+    const durableJobCount = Math.max(
+      0,
+      current.durableJobCount
+        + (sourceAffected ? result.insertedCount ?? (result.inserted ? 1 : 0) : 0)
+        - (sourceAffected ? result.removedCount || 0 : 0),
+    );
     const retainedJobCount = Math.min(result.listProjectionCount, result.statusProjectionCount);
     const sourceUpdatedAt = newestTimestamp([
       current.sourceUpdatedAt || undefined,
@@ -1013,6 +1359,8 @@ export async function finishAutomationJobProjectionSync(
       releaseId,
       sourceRevision,
       summaryRevision: null,
+      sourceHighWatermark,
+      sourceFingerprint: null,
       projectionFingerprint: combinedFingerprint,
       generatedAt: measuredAt,
       observedRange: updatedRange,
@@ -1048,26 +1396,256 @@ export async function finishAutomationJobProjectionSync(
       retentionBoundary: result.retentionBoundary || current.retentionBoundary,
       sourceUpdatedAt,
       inFlightSyncTokens,
+      inFlightSyncOperations,
+      mutationDuringRebuild: current.mutationDuringRebuild || Boolean(current.activeRepair),
       syncFailureCountSinceRebuild,
       updatedAt: measuredAt,
     }];
   });
 }
 
-export async function beginAutomationJobProjectionRebuild(now = Date.now()): Promise<string> {
+/** Mark a committed source write fail-closed when its read-model delta was not applied. */
+export async function invalidateAutomationJobProjectionMutation(
+  handle: AutomationJobProjectionMutationHandle,
+  now = Date.now(),
+): Promise<void> {
+  const emptyFingerprint = automationJobProjectionFingerprint([]);
+  const emptyContentFingerprint = automationJobProjectionContentFingerprint([]);
+  await finishAutomationJobProjectionSync(handle, {
+    success: false,
+    inserted: false,
+    insertedCount: 0,
+    sourceAffected: true,
+    projectionChanged: false,
+    listProjectionCount: 0,
+    statusProjectionCount: 0,
+    listProjectionFingerprint: emptyFingerprint,
+    statusProjectionFingerprint: emptyFingerprint,
+    listProjectionContentFingerprint: emptyContentFingerprint,
+    statusProjectionContentFingerprint: emptyContentFingerprint,
+    activeJobCount: 0,
+    retainedTerminalCount: 0,
+    retentionLimitReached: false,
+    currentStateTruncated: false,
+    sourceUpdatedAt: null,
+    retentionBoundary: null,
+  }, now);
+}
+
+const ACTIVE_REPAIR_MAX_AGE_MS = 30 * 60_000;
+const STALE_SYNC_OPERATION_AGE_MS = 2 * 60_000;
+
+export interface AutomationJobProjectionRepairOwnerInput {
+  repairId: string;
+  ownerId: string;
+  ownerInstanceId: string;
+  workerFencingToken: number;
+  claimToken: string;
+  attemptNumber: number;
+  supersede?: boolean;
+}
+
+export interface AutomationJobProjectionRepairContext {
+  repairId: string;
+  rebuildToken: string;
+  repairFence: number;
+  targetGeneration: number;
+  targetSlot: Exclude<AutomationJobProjectionStorageSlot, 'LEGACY'>;
+  startBoundary: AutomationJobProjectionSourceBoundary;
+  ownerId: string;
+  ownerInstanceId: string;
+  workerFencingToken: number;
+  claimTokenHash: string;
+  attemptNumber: number;
+  startedAt: string;
+}
+
+function repairContext(repair: AutomationJobProjectionRepairLease): AutomationJobProjectionRepairContext {
+  return {
+    repairId: repair.repairId,
+    rebuildToken: repair.rebuildToken,
+    repairFence: repair.repairFence,
+    targetGeneration: repair.targetGeneration,
+    targetSlot: repair.targetSlot,
+    startBoundary: repair.startBoundary,
+    ownerId: repair.ownerId,
+    ownerInstanceId: repair.ownerInstanceId,
+    workerFencingToken: repair.workerFencingToken,
+    claimTokenHash: repair.claimTokenHash,
+    attemptNumber: repair.attemptNumber,
+    startedAt: repair.startedAt,
+  };
+}
+
+function repairMatches(
+  repair: AutomationJobProjectionRepairLease | undefined,
+  context: AutomationJobProjectionRepairContext,
+): repair is AutomationJobProjectionRepairLease {
+  return Boolean(
+    repair
+    && repair.repairId === context.repairId
+    && repair.rebuildToken === context.rebuildToken
+    && repair.repairFence === context.repairFence
+    && repair.ownerId === context.ownerId
+    && repair.ownerInstanceId === context.ownerInstanceId
+    && repair.workerFencingToken === context.workerFencingToken
+    && repair.claimTokenHash === context.claimTokenHash
+    && repair.targetGeneration === context.targetGeneration
+    && repair.targetSlot === context.targetSlot,
+  );
+}
+
+export async function beginAutomationJobProjectionRebuild(
+  owner: AutomationJobProjectionRepairOwnerInput,
+  now = Date.now(),
+): Promise<AutomationJobProjectionRepairContext> {
   const token = randomUUID();
   const measuredAt = new Date(now).toISOString();
+  let output: AutomationJobProjectionRepairContext | undefined;
   await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
-    const current = isProjectionManifest(items[0]) ? items[0] : emptyProjectionManifest(now);
+    const current = isProjectionManifest(items[0])
+      ? withProjectionProtocol(items[0])
+      : emptyProjectionManifest(now);
+    const existing = current.activeRepair;
+    if (existing?.repairId === owner.repairId
+      && existing.ownerId === owner.ownerId
+      && existing.ownerInstanceId === owner.ownerInstanceId
+      && existing.workerFencingToken === owner.workerFencingToken
+      && existing.claimTokenHash === createHash('sha256').update(owner.claimToken).digest('hex')
+      && !['FAILED', 'SUPERSEDED', 'COMPLETED'].includes(existing.phase)) {
+      output = repairContext(existing);
+      return undefined;
+    }
+    const existingAge = now - (timestamp(existing?.updatedAt) ?? Number.NEGATIVE_INFINITY);
+    const existingAuthoritative = existing
+      && !['FAILED', 'SUPERSEDED', 'COMPLETED'].includes(existing.phase)
+      && existingAge <= ACTIVE_REPAIR_MAX_AGE_MS;
+    if (existingAuthoritative && !owner.supersede) {
+      throw new Error('JOB_PROJECTION_REPAIR_ALREADY_ACTIVE');
+    }
+    const supersededCandidate = existing
+      && !(current.activeSlot === existing.targetSlot
+        && current.activeStorageRepairFence === existing.repairFence)
+      ? { slot: existing.targetSlot, repairFence: existing.repairFence }
+      : null;
+
+    const operations = current.inFlightSyncOperations || [];
+    const liveOperations = operations.filter(operation => (
+      now - (timestamp(operation.startedAt) ?? 0) <= STALE_SYNC_OPERATION_AGE_MS
+    ));
+    const staleOperations = operations.filter(operation => !liveOperations.includes(operation));
+    const conservativeHighWatermark = staleOperations.reduce(
+      (maximum, operation) => Math.max(maximum, operation.sequence),
+      current.sourceHighWatermark || 0,
+    );
+    const activeSlot = current.activeSlot || 'LEGACY';
+    const targetSlot: Exclude<AutomationJobProjectionStorageSlot, 'LEGACY'> = activeSlot === 'A' ? 'B' : 'A';
+    const repairFence = (current.repairFence || 0) + 1;
+    const startBoundary: AutomationJobProjectionSourceBoundary = {
+      schemaVersion: AUTOMATION_JOB_PROJECTION_SOURCE_SCHEMA_VERSION,
+      highWatermark: conservativeHighWatermark,
+      sourceFingerprint: current.sourceFingerprint || null,
+    };
+    const repair: AutomationJobProjectionRepairLease = {
+      repairId: owner.repairId.slice(0, 160),
+      rebuildToken: token,
+      repairFence,
+      ownerId: owner.ownerId.slice(0, 160),
+      ownerInstanceId: owner.ownerInstanceId.slice(0, 160),
+      workerFencingToken: Math.max(0, Math.floor(owner.workerFencingToken)),
+      claimTokenHash: createHash('sha256').update(owner.claimToken).digest('hex'),
+      attemptNumber: Math.max(1, Math.floor(owner.attemptNumber)),
+      phase: 'CLAIMED',
+      startedAt: measuredAt,
+      updatedAt: measuredAt,
+      targetGeneration: (current.activeGeneration || 0) + 1,
+      targetSlot,
+      startBoundary,
+      candidateBoundary: null,
+      catchUpPasses: 0,
+      catchUpPending: liveOperations.length > 0,
+      lastFailureReason: null,
+    };
+    output = repairContext(repair);
     return [{
       ...current,
+      repairProtocolVersion: 2,
+      repairFence,
+      activeRepair: repair,
       rebuildToken: token,
-      mutationDuringRebuild: current.inFlightSyncTokens.length > 0,
-      generatedAt: measuredAt,
+      mutationDuringRebuild: liveOperations.length > 0,
+      sourceHighWatermark: conservativeHighWatermark,
+      sourceFingerprint: staleOperations.length ? null : current.sourceFingerprint || null,
+      inFlightSyncOperations: liveOperations,
+      inFlightSyncTokens: liveOperations.map(operation => operation.token),
+      staleCandidateStorage: appendStaleCandidateStorage(
+        current.staleCandidateStorage,
+        supersededCandidate,
+      ),
       updatedAt: measuredAt,
     }];
   });
-  return token;
+  if (!output) throw new Error('JOB_PROJECTION_REPAIR_CLAIM_FAILED');
+  return output;
+}
+
+const REPAIR_PHASE_TRANSITIONS: Readonly<Record<AutomationJobProjectionRepairPhase, readonly AutomationJobProjectionRepairPhase[]>> = {
+  SCHEDULED: ['CLAIMED', 'SUPERSEDED', 'FAILED'],
+  CLAIMED: ['REBUILDING', 'SUPERSEDED', 'FAILED'],
+  REBUILDING: ['CATCHING_UP', 'VALIDATING', 'SUPERSEDED', 'FAILED'],
+  CATCHING_UP: ['CATCHING_UP', 'VALIDATING', 'RETRY_WAIT', 'SUPERSEDED', 'FAILED'],
+  VALIDATING: ['PUBLISHING', 'RETRY_WAIT', 'SUPERSEDED', 'FAILED'],
+  PUBLISHING: ['COMPLETED', 'RETRY_WAIT', 'SUPERSEDED', 'FAILED'],
+  RETRY_WAIT: ['CATCHING_UP', 'VALIDATING', 'SUPERSEDED', 'FAILED'],
+  COMPLETED: [],
+  FAILED: [],
+  SUPERSEDED: [],
+};
+
+export async function transitionAutomationJobProjectionRepair(
+  context: AutomationJobProjectionRepairContext,
+  phase: AutomationJobProjectionRepairPhase,
+  input: {
+    candidateBoundary?: AutomationJobProjectionSourceBoundary | null;
+    catchUpPasses?: number;
+    catchUpPending?: boolean;
+    lastFailureReason?: string | null;
+  } = {},
+  now = Date.now(),
+): Promise<AutomationJobProjectionRepairLease> {
+  const measuredAt = new Date(now).toISOString();
+  let output: AutomationJobProjectionRepairLease | undefined;
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    if (!isProjectionManifest(items[0])) throw new Error('JOB_PROJECTION_REPAIR_MANIFEST_INVALID');
+    const current = withProjectionProtocol(items[0]);
+    if (!repairMatches(current.activeRepair, context)) {
+      throw new Error('JOB_PROJECTION_REPAIR_FENCING_REJECTED');
+    }
+    if (!REPAIR_PHASE_TRANSITIONS[current.activeRepair.phase].includes(phase)) {
+      throw new Error(`JOB_PROJECTION_REPAIR_INVALID_TRANSITION:${current.activeRepair.phase}:${phase}`);
+    }
+    output = {
+      ...current.activeRepair,
+      phase,
+      candidateBoundary: input.candidateBoundary === undefined
+        ? current.activeRepair.candidateBoundary
+        : input.candidateBoundary,
+      catchUpPasses: input.catchUpPasses ?? current.activeRepair.catchUpPasses,
+      catchUpPending: input.catchUpPending ?? current.activeRepair.catchUpPending,
+      lastFailureReason: input.lastFailureReason === undefined
+        ? current.activeRepair.lastFailureReason
+        : input.lastFailureReason,
+      updatedAt: measuredAt,
+    };
+    return [{
+      ...current,
+      activeRepair: output,
+      mutationDuringRebuild: output.catchUpPending,
+      updatedAt: measuredAt,
+    }];
+  });
+  if (!output) throw new Error('JOB_PROJECTION_REPAIR_TRANSITION_FAILED');
+  return output;
 }
 
 export interface AutomationJobProjectionRebuildResult {
@@ -1085,41 +1663,41 @@ export interface AutomationJobProjectionRebuildResult {
   sourceUpdatedAt: string | null;
   retentionBoundary: AutomationJobProjectionRetentionBoundary | null;
   observedRange?: AutomationJobProjectionObservedRange;
+  summaryRevision: string;
+  sourceBoundary: AutomationJobProjectionSourceBoundary;
 }
 
 export async function finishAutomationJobProjectionRebuild(
-  token: string,
-  result: AutomationJobProjectionRebuildResult | null,
+  context: AutomationJobProjectionRepairContext,
+  result: AutomationJobProjectionRebuildResult,
   now = Date.now(),
 ): Promise<AutomationJobProjectionManifest> {
   const measuredAt = new Date(now).toISOString();
   let output = emptyProjectionManifest(now);
   await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
-    const current = isProjectionManifest(items[0]) ? items[0] : emptyProjectionManifest(now);
-    if (current.rebuildToken !== token) {
-      output = current;
-      return undefined;
+    const current = isProjectionManifest(items[0])
+      ? withProjectionProtocol(items[0])
+      : emptyProjectionManifest(now);
+    if (!repairMatches(current.activeRepair, context) || current.rebuildToken !== context.rebuildToken) {
+      throw new Error('JOB_PROJECTION_REPAIR_FENCING_REJECTED');
     }
-    const concurrentMutation = current.mutationDuringRebuild || current.inFlightSyncTokens.length > 0;
+    if (!['VALIDATING', 'PUBLISHING'].includes(current.activeRepair.phase)) {
+      throw new Error(`JOB_PROJECTION_REPAIR_INVALID_TRANSITION:${current.activeRepair.phase}:PUBLISHING`);
+    }
+    const concurrentMutation = current.inFlightSyncTokens.length > 0
+      || current.sourceHighWatermark !== result.sourceBoundary.highWatermark;
     const validResult = Boolean(
-      result
-      && result.listProjectionCount === result.statusProjectionCount
+      result.listProjectionCount === result.statusProjectionCount
       && result.retainedJobCount === result.listProjectionCount
       && result.listProjectionFingerprint === result.statusProjectionFingerprint
+      && /^[a-f0-9]{64}$/.test(result.summaryRevision)
+      && validSourceBoundary(result.sourceBoundary)
+      && result.sourceBoundary.sourceFingerprint !== null
+      && current.activeRepair.candidateBoundary?.highWatermark === result.sourceBoundary.highWatermark
+      && current.activeRepair.candidateBoundary.sourceFingerprint === result.sourceBoundary.sourceFingerprint
     );
-    if (!validResult || concurrentMutation || !result) {
-      output = {
-        ...current,
-        rebuildToken: undefined,
-        mutationDuringRebuild: false,
-        lastRebuildStatus: 'FAILED',
-        lastRebuildFailureAt: measuredAt,
-        syncFailureCountSinceRebuild: current.syncFailureCountSinceRebuild,
-        generatedAt: measuredAt,
-        updatedAt: measuredAt,
-      };
-      return [output];
-    }
+    if (!validResult) throw new Error('JOB_PROJECTION_REBUILD_CANDIDATE_INVALID');
+    if (concurrentMutation) throw new Error('JOB_PROJECTION_REPAIR_BOUNDARY_CHANGED');
     const atCapacity = Boolean(result && result.retainedJobCount >= getAutomationJobProjectionLimit());
     const baselineEstablished = true;
     const currentStateComplete = Number(result.activeJobCount || 0) <= getAutomationJobProjectionLimit();
@@ -1141,12 +1719,19 @@ export async function finishAutomationJobProjectionRebuild(
       earliestUpdatedAt: result.retentionBoundary?.oldestRetainedAt || null,
       latestUpdatedAt: result.sourceUpdatedAt,
     };
+    const previousCandidateStorage = (current.activeSlot === 'A' || current.activeSlot === 'B')
+      && Number(current.activeStorageRepairFence) > 0
+      ? {
+          slot: current.activeSlot,
+          repairFence: Number(current.activeStorageRepairFence),
+        }
+      : null;
     output = {
       ...current,
       projectionVersion: AUTOMATION_JOB_PROJECTION_VERSION,
       releaseId,
       sourceRevision,
-      summaryRevision: null,
+      summaryRevision: result.summaryRevision,
       projectionFingerprint: combinedFingerprint,
       generatedAt: measuredAt,
       observedRange: rebuiltObservedRange,
@@ -1187,11 +1772,155 @@ export async function finishAutomationJobProjectionRebuild(
       rebuildToken: undefined,
       mutationDuringRebuild: false,
       syncFailureCountSinceRebuild: 0,
+      activeGeneration: context.targetGeneration,
+      activeSlot: context.targetSlot,
+      activeStorageRepairFence: context.repairFence,
+      sourceHighWatermark: result.sourceBoundary.highWatermark,
+      sourceFingerprint: result.sourceBoundary.sourceFingerprint,
+      activeRepair: {
+        ...current.activeRepair,
+        phase: 'PUBLISHING',
+        candidateBoundary: result.sourceBoundary,
+        catchUpPending: false,
+        updatedAt: measuredAt,
+      },
+      legacyMirrorPending: true,
+      staleCandidateStorage: appendStaleCandidateStorage(
+        current.staleCandidateStorage,
+        previousCandidateStorage,
+      ),
       updatedAt: measuredAt,
     };
     return [output];
   });
   return output;
+}
+
+export async function completeAutomationJobProjectionRepair(
+  context: AutomationJobProjectionRepairContext,
+  input: {
+    legacyMirrored: boolean;
+    expectedSourceRevision?: string;
+    expectedSummaryRevision?: string;
+    expectedHighWatermark?: number;
+  },
+  now = Date.now(),
+): Promise<AutomationJobProjectionManifest> {
+  const measuredAt = new Date(now).toISOString();
+  let output = emptyProjectionManifest(now);
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    if (!isProjectionManifest(items[0])) throw new Error('JOB_PROJECTION_REPAIR_MANIFEST_INVALID');
+    const current = withProjectionProtocol(items[0]);
+    if (!repairMatches(current.activeRepair, context)) {
+      throw new Error('JOB_PROJECTION_REPAIR_FENCING_REJECTED');
+    }
+    if (current.activeRepair.phase !== 'PUBLISHING') {
+      throw new Error(`JOB_PROJECTION_REPAIR_INVALID_TRANSITION:${current.activeRepair.phase}:COMPLETED`);
+    }
+    if (input.legacyMirrored && (
+      current.inFlightSyncTokens.length > 0
+      || current.sourceRevision !== input.expectedSourceRevision
+      || current.summaryRevision !== input.expectedSummaryRevision
+      || current.sourceHighWatermark !== input.expectedHighWatermark
+    )) {
+      throw new Error('JOB_PROJECTION_LEGACY_MIRROR_BOUNDARY_CHANGED');
+    }
+    const mirroredCandidateStorage = input.legacyMirrored
+      ? { slot: context.targetSlot, repairFence: context.repairFence }
+      : null;
+    output = {
+      ...current,
+      activeSlot: input.legacyMirrored ? 'LEGACY' : current.activeSlot,
+      activeRepair: undefined,
+      rebuildToken: undefined,
+      mutationDuringRebuild: false,
+      lastSuccessfulRepairAt: measuredAt,
+      legacyMirrorPending: !input.legacyMirrored,
+      staleCandidateStorage: appendStaleCandidateStorage(
+        current.staleCandidateStorage,
+        mirroredCandidateStorage,
+      ),
+      updatedAt: measuredAt,
+    };
+    return [output];
+  });
+  return output;
+}
+
+export async function failAutomationJobProjectionRepair(
+  context: AutomationJobProjectionRepairContext,
+  reasonCode: string,
+  now = Date.now(),
+): Promise<AutomationJobProjectionManifest> {
+  const measuredAt = new Date(now).toISOString();
+  let output = emptyProjectionManifest(now);
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    if (!isProjectionManifest(items[0])) return undefined;
+    const current = withProjectionProtocol(items[0]);
+    if (!repairMatches(current.activeRepair, context)) {
+      const failedCandidateStorage = current.activeSlot === context.targetSlot
+        && current.activeStorageRepairFence === context.repairFence
+        ? null
+        : { slot: context.targetSlot, repairFence: context.repairFence };
+      output = failedCandidateStorage
+        ? {
+            ...current,
+            staleCandidateStorage: appendStaleCandidateStorage(
+              current.staleCandidateStorage,
+              failedCandidateStorage,
+            ),
+            updatedAt: measuredAt,
+          }
+        : current;
+      return failedCandidateStorage ? [output] : undefined;
+    }
+    const safeReason = reasonCode.replace(/[^A-Z0-9_:-]/gi, '_').toUpperCase().slice(0, 120);
+    const failedCandidateStorage = current.activeSlot === context.targetSlot
+      && current.activeStorageRepairFence === context.repairFence
+      ? null
+      : { slot: context.targetSlot, repairFence: context.repairFence };
+    output = {
+      ...current,
+      rebuildToken: undefined,
+      mutationDuringRebuild: false,
+      lastRebuildStatus: current.activeGeneration === context.targetGeneration ? 'SUCCEEDED' : 'FAILED',
+      lastRebuildFailureAt: measuredAt,
+      activeRepair: {
+        ...current.activeRepair,
+        phase: 'FAILED',
+        catchUpPending: false,
+        lastFailureReason: safeReason,
+        updatedAt: measuredAt,
+      },
+      staleCandidateStorage: appendStaleCandidateStorage(
+        current.staleCandidateStorage,
+        failedCandidateStorage,
+      ),
+      updatedAt: measuredAt,
+    };
+    return [output];
+  });
+  return output;
+}
+
+export async function acknowledgeAutomationJobProjectionCandidateCleanup(
+  cleaned: AutomationJobProjectionCandidateStorageRef[],
+  now = Date.now(),
+): Promise<void> {
+  if (!cleaned.length) return;
+  const keys = new Set(cleaned.map(ref => `${ref.slot}:${ref.repairFence}`));
+  const measuredAt = new Date(now).toISOString();
+  await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
+    if (!isProjectionManifest(items[0])) return undefined;
+    const current = withProjectionProtocol(items[0]);
+    const retained = (current.staleCandidateStorage || []).filter(ref => {
+      const isActive = current.activeSlot === ref.slot
+        && current.activeStorageRepairFence === ref.repairFence;
+      return isActive || !keys.has(`${ref.slot}:${ref.repairFence}`);
+    });
+    if (retained.length === (current.staleCandidateStorage || []).length) return undefined;
+    return [{ ...current, staleCandidateStorage: retained, updatedAt: measuredAt }];
+  });
 }
 
 function isProjection(value: unknown): value is AutomationJobListProjection {
@@ -1720,15 +2449,21 @@ function isHealthSummary(value: unknown): value is AutomationJobHealthSummary {
     })();
 }
 
+export function validateAutomationJobHealthSummary(value: unknown): value is AutomationJobHealthSummary {
+  return isHealthSummary(value);
+}
+
 export async function readBoundedAutomationJobProjections(): Promise<BoundedAutomationJobProjectionRead> {
   try {
-    const [snapshot, manifestRead] = await Promise.all([
-      readBoundedCollectionSnapshot<AutomationJobListProjection>(jobListProjectionCollection, {
-        maximumItems: getAutomationJobProjectionLimit(),
-        maximumBytes: PROJECTION_MAXIMUM_BYTES,
-      }),
-      readProjectionManifest(),
-    ]);
+    const manifestRead = await readProjectionManifest();
+    const collections = automationJobProjectionStorageCollections(
+      manifestRead.manifest?.activeSlot || 'LEGACY',
+      manifestRead.manifest?.activeStorageRepairFence,
+    );
+    const snapshot = await readBoundedCollectionSnapshot<AutomationJobListProjection>(collections.list, {
+      maximumItems: getAutomationJobProjectionLimit(),
+      maximumBytes: PROJECTION_MAXIMUM_BYTES,
+    });
     const raw = snapshot.items;
     const items: AutomationJobListProjection[] = [];
     let invalidProjectionCount = 0;
@@ -1790,13 +2525,15 @@ export async function readBoundedAutomationJobProjections(): Promise<BoundedAuto
 
 export async function readBoundedAutomationJobStatuses(): Promise<BoundedAutomationJobStatusRead> {
   try {
-    const [snapshot, manifestRead] = await Promise.all([
-      readBoundedCollectionSnapshot<AutomationJobStatusProjection>(jobStatusProjectionCollection, {
-        maximumItems: getAutomationJobProjectionLimit(),
-        maximumBytes: PROJECTION_MAXIMUM_BYTES,
-      }),
-      readProjectionManifest(),
-    ]);
+    const manifestRead = await readProjectionManifest();
+    const collections = automationJobProjectionStorageCollections(
+      manifestRead.manifest?.activeSlot || 'LEGACY',
+      manifestRead.manifest?.activeStorageRepairFence,
+    );
+    const snapshot = await readBoundedCollectionSnapshot<AutomationJobStatusProjection>(collections.status, {
+      maximumItems: getAutomationJobProjectionLimit(),
+      maximumBytes: PROJECTION_MAXIMUM_BYTES,
+    });
     const raw = snapshot.items;
     const items: AutomationJobStatusProjection[] = [];
     let invalidCount = 0;
@@ -1868,8 +2605,16 @@ export async function refreshAutomationJobHealthSummary(now = Date.now()): Promi
   if (projections.availability === 'UNAVAILABLE') {
     throw new Error(projections.reasonCodes[0] || 'JOB_PROJECTION_UNAVAILABLE');
   }
+  const active = await getAutomationJobActiveProjectionStorage();
+  if (
+    !active.manifest
+    || active.manifest.sourceRevision !== projections.sourceRevision
+    || active.manifest.projectionFingerprint !== projections.projectionFingerprint
+  ) {
+    throw new Error('JOB_HEALTH_SUMMARY_SOURCE_REVISION_CHANGED');
+  }
   let output: AutomationJobHealthSummary | undefined;
-  await runTransaction<AutomationJobHealthSummary>(healthSummaryCollection, items => {
+  await runTransaction<AutomationJobHealthSummary>(active.collections.summary, items => {
     const previous = isHealthSummary(items[0]) ? items[0] : undefined;
     const candidate = buildAutomationJobHealthSummary(projections.items, {
       now,
@@ -1916,12 +2661,14 @@ export async function refreshAutomationJobHealthSummary(now = Date.now()): Promi
   let linked = false;
   await runTransaction<AutomationJobProjectionManifest>(projectionManifestCollection, items => {
     if (!isProjectionManifest(items[0])) return undefined;
-    const current = items[0];
+    const current = withProjectionProtocol(items[0]);
     if (
       current.sourceRevision !== output!.sourceRevision
       || current.projectionFingerprint !== output!.projectionFingerprint
       || current.rebuildToken
       || current.inFlightSyncTokens.length > 0
+      || current.activeGeneration !== active.manifest!.activeGeneration
+      || current.activeSlot !== active.manifest!.activeSlot
     ) {
       return undefined;
     }
@@ -1944,24 +2691,33 @@ function healthView(
     availability: AutomationJobHealthView['availability'];
     source: AutomationJobHealthView['source'];
     reasonCodes: string[];
+    manifest?: AutomationJobProjectionManifest | null;
     previousValidProjectionAvailable?: boolean;
     previousValidProjectionGeneratedAt?: string | null;
     projectionStatus?: AutomationJobHealthView['projectionStatus'];
   },
 ): AutomationJobHealthView {
   const hasActiveJobs = ALL_STATUSES.some(status => ACTIVE_STATUSES.has(status) && summary.statusCounts[status] > 0);
+  const staleRunningCount = summary.runningJobs.filter(job => {
+    const lease = timestamp(job.leaseExpiresAt);
+    const heartbeat = timestamp(job.heartbeatAt);
+    return lease === null
+      || lease <= input.now
+      || heartbeat === null
+      || heartbeat > input.now + 60_000
+      || input.now - heartbeat > ACTIVE_SUMMARY_FRESHNESS_MS;
+  }).length;
   const freshnessTimestamp = hasActiveJobs
-    ? timestamp(summary.sourceUpdatedAt)
+    ? Math.max(
+        timestamp(summary.sourceUpdatedAt) ?? Number.NEGATIVE_INFINITY,
+        ...summary.runningJobs.map(job => timestamp(job.heartbeatAt) ?? Number.NEGATIVE_INFINITY),
+      )
     : timestamp(summary.updatedAt);
   const summaryAge = freshnessTimestamp === null ? Number.POSITIVE_INFINITY : input.now - freshnessTimestamp;
   const stale = !Number.isFinite(summaryAge)
     || summaryAge < -60_000
-    || summaryAge > (hasActiveJobs ? ACTIVE_SUMMARY_FRESHNESS_MS : IDLE_SUMMARY_FRESHNESS_MS);
-  const staleRunningCount = summary.runningJobs.filter(job => {
-    const lease = timestamp(job.leaseExpiresAt);
-    const heartbeat = timestamp(job.heartbeatAt);
-    return lease === null || lease <= input.now || (heartbeat !== null && input.now - heartbeat > ACTIVE_SUMMARY_FRESHNESS_MS);
-  }).length;
+    || summaryAge > (hasActiveJobs ? ACTIVE_SUMMARY_FRESHNESS_MS : IDLE_SUMMARY_FRESHNESS_MS)
+    || staleRunningCount > 0;
   const stuckPendingCount = summary.pendingJobs.filter(job => {
     const eligibleAt = timestamp(job.runnableAt) ?? timestamp(job.createdAt);
     return eligibleAt !== null && eligibleAt <= input.now && input.now - eligibleAt > STUCK_PENDING_MS;
@@ -1986,6 +2742,8 @@ function healthView(
     ? 'STALE'
     : requestedProjectionStatus;
   const projectionUsable = projectionStatus === 'VALID' || projectionStatus === 'STALE';
+  const protocolManifest = input.manifest ? withProjectionProtocol(input.manifest) : null;
+  const activeRepair = protocolManifest?.activeRepair;
   return {
     ...summary,
     availability: input.availability === 'AVAILABLE' && reasonCodes.length ? 'DEGRADED' : input.availability,
@@ -2009,6 +2767,29 @@ function healthView(
     oldestPendingAgeMs: oldestPending === null || oldestPending > input.now
       ? null
       : input.now - oldestPending,
+    activeProjectionGeneration: protocolManifest?.activeGeneration ?? null,
+    activeProjectionSlot: protocolManifest?.activeSlot || null,
+    currentSourceBoundary: protocolManifest
+      ? {
+          schemaVersion: AUTOMATION_JOB_PROJECTION_SOURCE_SCHEMA_VERSION,
+          highWatermark: protocolManifest.sourceHighWatermark || 0,
+          sourceFingerprint: protocolManifest.sourceFingerprint || null,
+        }
+      : null,
+    lastSuccessfulRepairAt: protocolManifest?.lastSuccessfulRepairAt || null,
+    activeRepairId: activeRepair?.repairId || null,
+    repairPhase: activeRepair?.phase || null,
+    repairAttemptNumber: activeRepair?.attemptNumber || null,
+    lastRepairFailureReason: activeRepair?.lastFailureReason || null,
+    nextRepairRetryAt: null,
+    catchUpPending: activeRepair?.catchUpPending === true,
+    previousValidProjectionServing: input.source === 'previous_valid_summary'
+      || Boolean(
+        activeRepair
+        && (activeRepair.phase === 'FAILED' || activeRepair.phase === 'SUPERSEDED')
+        && protocolManifest?.activeGeneration !== activeRepair.targetGeneration,
+      ),
+    legacyMirrorPending: protocolManifest?.legacyMirrorPending === true,
   };
 }
 
@@ -2044,12 +2825,16 @@ function summaryMatchesManifest(
 export async function getAutomationJobHealthView(now = Date.now()): Promise<AutomationJobHealthView> {
   let stored: AutomationJobHealthSummary[] = [];
   let storedReason: string | undefined;
-  const [summaryRead, manifestRead, projectionRead] = await Promise.all([
-    readBoundedCollectionSnapshot<AutomationJobHealthSummary>(healthSummaryCollection, {
+  const manifestRead = await readProjectionManifest();
+  const collections = automationJobProjectionStorageCollections(
+    manifestRead.manifest?.activeSlot || 'LEGACY',
+    manifestRead.manifest?.activeStorageRepairFence,
+  );
+  const [summaryRead, projectionRead] = await Promise.all([
+    readBoundedCollectionSnapshot<AutomationJobHealthSummary>(collections.summary, {
       maximumItems: 1,
       maximumBytes: SUMMARY_MAXIMUM_BYTES,
     }).then(snapshot => ({ snapshot })).catch((error: unknown) => ({ error })),
-    readProjectionManifest(),
     readBoundedAutomationJobProjections(),
   ]);
   if ('snapshot' in summaryRead) {
@@ -2088,6 +2873,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
         availability: 'AVAILABLE',
         source: 'summary',
         reasonCodes: [],
+        manifest: manifestRead.manifest,
         previousValidProjectionAvailable: true,
         previousValidProjectionGeneratedAt: summary.generatedAt,
         projectionStatus: 'VALID',
@@ -2098,6 +2884,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
       now,
       availability: 'DEGRADED',
       source: 'previous_valid_summary',
+      manifest: manifestRead.manifest,
       previousValidProjectionAvailable: true,
       previousValidProjectionGeneratedAt: summary.generatedAt,
       projectionStatus: rebuildRunning ? 'REBUILD_RUNNING' : 'INVALID',
@@ -2143,6 +2930,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
       now,
       availability: 'DEGRADED',
       source: 'bounded_projection_fallback',
+      manifest: manifestRead.manifest,
       previousValidProjectionAvailable: false,
       previousValidProjectionGeneratedAt: null,
       projectionStatus: 'INVALID',
@@ -2158,6 +2946,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
     now,
     availability: 'UNAVAILABLE',
     source: 'empty_fallback',
+    manifest: manifestRead.manifest,
     previousValidProjectionAvailable: false,
     previousValidProjectionGeneratedAt: null,
     projectionStatus: 'UNKNOWN',
@@ -2174,6 +2963,8 @@ export function applyAutomationJobProjectionMaintenanceState(
   maintenance: {
     repairState: 'IDLE' | 'SCHEDULED' | 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED' | 'EXHAUSTED';
     outcomeReasonCode?: string | null;
+    nextRetryAt?: string | null;
+    lastFailureReason?: string | null;
   } | null | undefined,
 ): AutomationJobHealthView {
   if (!maintenance || view.projectionStatus === 'VALID' || view.projectionStatus === 'STALE') return view;
@@ -2187,6 +2978,10 @@ export function applyAutomationJobProjectionMaintenanceState(
   return {
     ...view,
     projectionStatus,
+    nextRepairRetryAt: maintenance.nextRetryAt || view.nextRepairRetryAt,
+    lastRepairFailureReason: maintenance.lastFailureReason
+      || maintenance.outcomeReasonCode
+      || view.lastRepairFailureReason,
     reasonCodes: [...new Set([
       ...view.reasonCodes,
       ...(maintenance.outcomeReasonCode ? [maintenance.outcomeReasonCode] : []),
