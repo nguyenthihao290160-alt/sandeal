@@ -10,6 +10,7 @@ import {
 } from './canaryController';
 import type { RuntimeHealthSnapshot } from './runtimeGuardian';
 import { getFeatureRolloutState, type FeatureRolloutMode } from './featureRollout';
+import { isCriticalAutomationJob } from './executionPolicy';
 import { readBoundedAutomationJobStatuses } from './jobHealthSummary';
 import {
   advanceRuntimeReasonRecoveryState,
@@ -42,6 +43,19 @@ export const DEFAULT_RUNTIME_FRESHNESS_MS = 2 * 60_000;
 
 type MetricStatus = 'PASS' | 'BREACH' | 'NO_DATA' | 'NOT_APPLICABLE';
 type EvaluationStatus = 'PASS' | 'BREACH' | 'INSUFFICIENT_DATA';
+
+export type AutomationPickupPriorityClass = 'CRITICAL' | 'NORMAL' | 'UNCLASSIFIED';
+
+export interface AutomationPickupPriorityLatency {
+  sampleCount: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+}
+
+export interface AutomationPickupLatencyByPriorityClass {
+  current: Record<AutomationPickupPriorityClass, AutomationPickupPriorityLatency>;
+  historical: Record<AutomationPickupPriorityClass, AutomationPickupPriorityLatency>;
+}
 
 export interface SloMetric {
   key:
@@ -163,6 +177,7 @@ export interface AutomationSloMeasurement {
   pickupLatencyCurrentSampleCount: number;
   pickupLatencyExcludedLegacyCount: number;
   pickupLatencyInsufficientTimestampCount: number;
+  pickupLatencyByPriorityClass: AutomationPickupLatencyByPriorityClass;
   pickupLatencyMeasurementSemantics: {
     historical: 'LEGACY_CREATED_AT';
     current: 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE';
@@ -422,6 +437,58 @@ export function deriveExplicitPickupLatencyObservation(
     runnableReason: source.runnableReason,
     retryAttempt: source.runnableReason === 'RETRY_ELIGIBLE_AT',
   };
+}
+
+function fixedPriorityClass(type: AutomationJob['type']): AutomationPickupPriorityClass {
+  if (type === 'RUNTIME_GUARDIAN' || type === 'POST_PUBLISH_MONITOR') return 'CRITICAL';
+  // A legacy reconcile record does not retain its maintenance payload. Do not
+  // guess whether it was a projection repair; surface it as incomplete data.
+  if (type === 'RECONCILE_AUTOMATION') return 'UNCLASSIFIED';
+  return 'NORMAL';
+}
+
+/**
+ * Classify immutable claim telemetry without re-reading durable job history.
+ * New attempts carry a claim-time class; older attempts are only classified
+ * where their job type is unambiguous.
+ */
+export function classifyAutomationPickupPriority(
+  input: Pick<AutomationJobAttempt, 'jobType' | 'priorityClass'>
+    | Pick<AutomationJob, 'type' | 'payload' | 'executionCritical'>,
+): AutomationPickupPriorityClass {
+  if ('jobType' in input) {
+    if (input.priorityClass === 'CRITICAL' || input.priorityClass === 'NORMAL') return input.priorityClass;
+    return fixedPriorityClass(input.jobType);
+  }
+  if (typeof input.executionCritical === 'boolean') {
+    return input.executionCritical ? 'CRITICAL' : 'NORMAL';
+  }
+  return isCriticalAutomationJob(input) ? 'CRITICAL' : fixedPriorityClass(input.type);
+}
+
+function summarizePickupPriority(
+  records: Array<{ observation: PickupLatencyObservation; priorityClass: AutomationPickupPriorityClass }>,
+  priorityClass: AutomationPickupPriorityClass,
+): AutomationPickupPriorityLatency {
+  const values = records
+    .filter(record => record.priorityClass === priorityClass)
+    .map(record => record.observation.latencyMs);
+  return {
+    sampleCount: values.length,
+    p50Ms: p50(values),
+    p95Ms: p95(values),
+  };
+}
+
+function pickupPriorityBreakdown(
+  current: Array<{ observation: PickupLatencyObservation; priorityClass: AutomationPickupPriorityClass }>,
+  historical: Array<{ observation: PickupLatencyObservation; priorityClass: AutomationPickupPriorityClass }>,
+): AutomationPickupLatencyByPriorityClass {
+  const classes: AutomationPickupPriorityClass[] = ['CRITICAL', 'NORMAL', 'UNCLASSIFIED'];
+  const summarize = (records: typeof current) => Object.fromEntries(
+    classes.map(priorityClass => [priorityClass, summarizePickupPriority(records, priorityClass)]),
+  ) as Record<AutomationPickupPriorityClass, AutomationPickupPriorityLatency>;
+  return { current: summarize(current), historical: summarize(historical) };
 }
 
 function booleanMetric(key: SloMetric['key'], value: boolean | null, target: string): SloMetric {
@@ -777,6 +844,7 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       rolloutCohort: attempt.rolloutCohort || '',
       observedId: attempt.id,
       boundaryAt: attempt.createdAt,
+      priorityClass: classifyAutomationPickupPriority(attempt),
     }] : [];
   });
   const explicitJobRecords = allJobs.flatMap(job => {
@@ -788,6 +856,7 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       rolloutCohort: job.rolloutCohort || '',
       observedId: `${job.id}:attempt:${job.attemptCount}`,
       boundaryAt: job.createdAt,
+      priorityClass: classifyAutomationPickupPriority(job),
     }] : [];
   });
   const explicitPickupRecords = [...explicitAttemptRecords, ...explicitJobRecords];
@@ -811,7 +880,14 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
   const currentPickupRecords = explicitPickupRecords.filter(record =>
     record.releaseId === releaseIdentity
     && record.rolloutCohort === currentRolloutCohort);
+  const historicalPickupRecords = explicitPickupRecords.filter(record =>
+    record.releaseId !== releaseIdentity
+    || record.rolloutCohort !== currentRolloutCohort);
   const currentPickupLatencies = currentPickupRecords.map(record => record.observation.latencyMs);
+  const pickupLatencyByPriorityClass = pickupPriorityBreakdown(
+    currentPickupRecords,
+    historicalPickupRecords,
+  );
   const pickupExcludedLegacyCount = explicitPickupRecords.length - currentPickupRecords.length;
   const pickupInsufficientTimestampCount = [
     ...allAttempts.filter(attempt =>
@@ -1282,6 +1358,7 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
       currentSampleCount: currentPickupRecords.length,
       excludedLegacyCount: pickupExcludedLegacyCount,
       insufficientTimestampCount: pickupInsufficientTimestampCount,
+      byPriorityClass: pickupLatencyByPriorityClass,
       rolloutBoundary: {
         cohort: currentRolloutCohort,
         startedAt: currentRolloutBoundaryAt,
@@ -1401,6 +1478,7 @@ export async function measureAutomationSlo(options: MeasureAutomationSloOptions 
     pickupLatencyCurrentSampleCount: currentPickupRecords.length,
     pickupLatencyExcludedLegacyCount: pickupExcludedLegacyCount,
     pickupLatencyInsufficientTimestampCount: pickupInsufficientTimestampCount,
+    pickupLatencyByPriorityClass,
     pickupLatencyMeasurementSemantics: {
       historical: 'LEGACY_CREATED_AT',
       current: 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE',

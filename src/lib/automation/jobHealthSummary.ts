@@ -372,9 +372,22 @@ export interface AutomationJobHealthView extends AutomationJobHealthSummary {
   oldestPendingAgeMs: number | null;
   activeProjectionGeneration: number | null;
   activeProjectionSlot: AutomationJobProjectionStorageSlot | null;
+  /** The authoritative serving generation, derived from the promoted manifest pointer. */
+  currentServingProjectionValid: boolean;
+  currentServingProjectionFingerprint: string | null;
+  currentServingProjectionSourceRevision: string | null;
+  pendingProjectionGeneration: number | null;
+  pendingProjectionSlot: Exclude<AutomationJobProjectionStorageSlot, 'LEGACY'> | null;
   currentSourceBoundary: AutomationJobProjectionSourceBoundary | null;
   lastSuccessfulRepairAt: string | null;
   activeRepairId: string | null;
+  repairOwnerId: string | null;
+  repairOwnerInstanceId: string | null;
+  repairFencingToken: number | null;
+  repairWorkerFencingToken: number | null;
+  repairStartedAt: string | null;
+  /** Last fenced repair-progress update. It is not a substitute for the Worker job heartbeat. */
+  repairLastHeartbeatAt: string | null;
   repairPhase: AutomationJobProjectionRepairPhase | null;
   repairAttemptNumber: number | null;
   lastRepairFailureReason: string | null;
@@ -2769,6 +2782,11 @@ function healthView(
       : input.now - oldestPending,
     activeProjectionGeneration: protocolManifest?.activeGeneration ?? null,
     activeProjectionSlot: protocolManifest?.activeSlot || null,
+    currentServingProjectionValid: projectionStatus === 'VALID' || projectionStatus === 'STALE',
+    currentServingProjectionFingerprint: protocolManifest?.projectionFingerprint || null,
+    currentServingProjectionSourceRevision: protocolManifest?.sourceRevision || null,
+    pendingProjectionGeneration: activeRepair?.targetGeneration ?? null,
+    pendingProjectionSlot: activeRepair?.targetSlot || null,
     currentSourceBoundary: protocolManifest
       ? {
           schemaVersion: AUTOMATION_JOB_PROJECTION_SOURCE_SCHEMA_VERSION,
@@ -2778,6 +2796,12 @@ function healthView(
       : null,
     lastSuccessfulRepairAt: protocolManifest?.lastSuccessfulRepairAt || null,
     activeRepairId: activeRepair?.repairId || null,
+    repairOwnerId: activeRepair?.ownerId || null,
+    repairOwnerInstanceId: activeRepair?.ownerInstanceId || null,
+    repairFencingToken: activeRepair?.repairFence ?? null,
+    repairWorkerFencingToken: activeRepair?.workerFencingToken ?? null,
+    repairStartedAt: activeRepair?.startedAt || null,
+    repairLastHeartbeatAt: activeRepair?.updatedAt || null,
     repairPhase: activeRepair?.phase || null,
     repairAttemptNumber: activeRepair?.attemptNumber || null,
     lastRepairFailureReason: activeRepair?.lastFailureReason || null,

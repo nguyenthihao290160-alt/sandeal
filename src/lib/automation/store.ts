@@ -62,7 +62,10 @@ import {
 } from './jobHealthSummary';
 import {
   getAutomationExecutionDescriptor,
+  isAutomationJobEligibleForClaimLane,
+  isCriticalAutomationJob,
   selectCompatibleWorkerJobs,
+  type AutomationWorkerClaimLane,
 } from './executionPolicy';
 import type {
   AiUsageRecord,
@@ -2532,6 +2535,7 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
   const inputHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   const operationId = typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim().slice(0, 160) : generateId();
   const correlationId = typeof input.correlationId === 'string' && input.correlationId.trim() ? input.correlationId.trim().slice(0, 160) : operationId;
+  const execution = getAutomationExecutionDescriptor({ type: input.type, payload, operationId });
   const source = typeof payload.source === 'string' ? payload.source.slice(0, 100) : undefined;
   const trigger = typeof payload.trigger === 'string' ? payload.trigger.slice(0, 100) : undefined;
   const releaseId = getReleaseIdentity().releaseId;
@@ -2553,6 +2557,7 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
     checkpoint: { version: 1, completedSteps: [], pendingSteps: executionPlan.map(step => step.id), outputs: {}, executionModes: [], inputHash, updatedAt: now },
     approvalStatus, approvalReason: input.approvalReason, approvalExpiresAt: approvalStatus === 'PENDING' ? new Date(nowMs + 24 * 60 * 60_000).toISOString() : undefined,
     riskLevel: risk, dryRun: input.dryRun === true, attemptCount: 0,
+    executionCritical: execution.critical,
     maxAttempts: jobPolicy.retryPolicy.maxAttempts,
     queuedAt: now,
     scheduledAt: input.scheduledAt && Number.isFinite(Date.parse(input.scheduledAt)) ? input.scheduledAt : now,
@@ -3233,7 +3238,8 @@ export async function claimAutomationJobs(
     maximumInFlight?: number;
     criticalReservedCapacity?: number;
     enforceExecutionCompatibility?: boolean;
-    claimLane?: 'ANY' | 'RUNTIME_GUARDIAN' | 'NON_GUARDIAN';
+    claimLane?: AutomationWorkerClaimLane;
+    preferCritical?: boolean;
   } = {},
 ): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
@@ -3331,11 +3337,13 @@ export async function claimAutomationJobs(
     const maximumInFlight = Number.isInteger(options.maximumInFlight)
       ? Math.max(1, Number(options.maximumInFlight))
       : undefined;
-    const reservedGuardianCapacity = maximumInFlight && maximumInFlight > 1
+    const reservedCriticalCapacity = maximumInFlight && maximumInFlight > 1
       ? Math.max(0, Math.min(maximumInFlight - 1, Math.floor(Number(options.criticalReservedCapacity) || 0)))
       : 0;
     const activeGuardianJobs = activeJobs.filter(item => item.type === 'RUNTIME_GUARDIAN').length;
     const activeNonGuardianJobs = activeJobs.length - activeGuardianJobs;
+    const activeCriticalJobs = activeJobs.filter(item => isCriticalAutomationJob(item)).length;
+    const activeNormalJobs = activeJobs.length - activeCriticalJobs;
     const totalAvailableCapacity = maximumInFlight === undefined
       ? limit
       : Math.max(0, maximumInFlight - activeJobs.length);
@@ -3343,20 +3351,37 @@ export async function claimAutomationJobs(
       ? limit
       : Math.max(
           0,
-          (reservedGuardianCapacity || maximumInFlight) - activeGuardianJobs,
+          (reservedCriticalCapacity || maximumInFlight) - activeGuardianJobs,
         );
     const nonGuardianCapacity = maximumInFlight === undefined
       ? limit
       : Math.max(
           0,
-          maximumInFlight - reservedGuardianCapacity - activeNonGuardianJobs,
+          maximumInFlight - reservedCriticalCapacity - activeNonGuardianJobs,
+        );
+    const criticalCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(
+          0,
+          (reservedCriticalCapacity || maximumInFlight) - activeCriticalJobs,
+        );
+    const normalCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(
+          0,
+          maximumInFlight - reservedCriticalCapacity - activeNormalJobs,
         );
     const claimLane = options.claimLane || 'ANY';
+    const allCriticalLane = claimLane === 'CRITICAL' || claimLane === 'NON_CRITICAL';
     const laneAvailableCapacity = claimLane === 'RUNTIME_GUARDIAN'
       ? guardianCapacity
       : claimLane === 'NON_GUARDIAN'
         ? nonGuardianCapacity
-        : guardianCapacity + nonGuardianCapacity;
+        : claimLane === 'CRITICAL'
+          ? criticalCapacity
+          : claimLane === 'NON_CRITICAL'
+            ? normalCapacity
+            : guardianCapacity + nonGuardianCapacity;
     const availableCapacity = Math.max(
       0,
       Math.min(limit, totalAvailableCapacity, laneAvailableCapacity),
@@ -3364,8 +3389,7 @@ export async function claimAutomationJobs(
     poolAvailableSlots = availableCapacity;
     const eligible = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
       && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
-      && (claimLane !== 'RUNTIME_GUARDIAN' || item.type === 'RUNTIME_GUARDIAN')
-      && (claimLane !== 'NON_GUARDIAN' || item.type !== 'RUNTIME_GUARDIAN'));
+      && isAutomationJobEligibleForClaimLane(item, claimLane));
     const due = options.enforceExecutionCompatibility
       ? selectCompatibleWorkerJobs(
           eligible,
@@ -3374,10 +3398,16 @@ export async function claimAutomationJobs(
           nowMs,
           selectFairRunnableJobs,
           options.criticalReservedCapacity,
-          {
-            runtimeGuardian: claimLane === 'NON_GUARDIAN' ? 0 : guardianCapacity,
-            nonGuardian: claimLane === 'RUNTIME_GUARDIAN' ? 0 : nonGuardianCapacity,
-          },
+          allCriticalLane
+            ? {
+                critical: claimLane === 'NON_CRITICAL' ? 0 : criticalCapacity,
+                normal: claimLane === 'CRITICAL' ? 0 : normalCapacity,
+              }
+            : {
+                runtimeGuardian: claimLane === 'NON_GUARDIAN' ? 0 : guardianCapacity,
+                nonGuardian: claimLane === 'RUNTIME_GUARDIAN' ? 0 : nonGuardianCapacity,
+              },
+          options.preferCritical === true,
         )
       : selectFairRunnableJobs(eligible, availableCapacity, nowMs);
     if (!due.length) {
@@ -3440,6 +3470,8 @@ export async function claimAutomationJobs(
             releaseId: job.releaseId || getReleaseIdentity().releaseId,
             rolloutCohort: job.rolloutCohort
               || `SLO_RUNNABLE_AT_V2:${getFeatureRolloutState('SLO_RUNNABLE_AT_V2').mode}`,
+            priorityClass: isCriticalAutomationJob(job) ? 'CRITICAL' : 'NORMAL',
+            priority: job.priority,
           });
           existingIds.add(id);
         }

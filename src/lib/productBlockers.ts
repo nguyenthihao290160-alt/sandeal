@@ -87,3 +87,54 @@ export function canonicalizeProductBlockers(
 export function canonicalBlockerCodes(values: Array<string | Partial<CanonicalProductBlocker>> | undefined): string[] {
   return [...new Set(canonicalizeProductBlockers(values).map(blocker => blocker.code))];
 }
+
+/**
+ * These blockers are authoritative until an explicit workflow supplies
+ * applicable superseding evidence. A generic health/reprocess observation is
+ * not such evidence, so it must not clear or downgrade them.
+ */
+export function isFailClosedProductBlocker(
+  blocker: Pick<CanonicalProductBlocker, 'code' | 'source' | 'message'>,
+): boolean {
+  const code = normalizeBlockerCode(blocker.code);
+  const source = String(blocker.source || '');
+  const message = String(blocker.message || '');
+  const explicitAuthority = `${code}_${source}`;
+  const explicitCode = /(?:^|_)(?:manual|operator|human|unknown|policy|compliance|legal|permanent|confirmed_broken|prohibited|waiting_external|awaiting_external|external_evidence|requires_external|manual_review|operator_review|human_review|review_required|requires_review|blocked_by_policy|(?:stale|partial|contradictory|insufficient|missing|unavailable)_evidence|evidence_(?:stale|partial|contradictory|insufficient|missing|unavailable))(?:_|$)/i;
+  const explicitMessage = /(?:manual|operator|human|(?:unknown|stale|partial|contradictory|insufficient|missing|unavailable) evidence|policy|compliance|legal hold|permanent failure|confirmed broken|waiting for external|awaiting external|external evidence|requires (?:manual|operator|human) review|review required)/i;
+  return explicitCode.test(explicitAuthority) || explicitMessage.test(message);
+}
+
+type ProductBlockerState = {
+  currentBlockers?: Array<string | Partial<CanonicalProductBlocker>>;
+  publicBlockReasons?: string[];
+  publicBlockReason?: string;
+};
+
+/**
+ * Reconcile a newly calculated blocker set without allowing an automated
+ * observation to erase persisted manual, unknown, policy, permanent, or
+ * waiting-for-external-evidence blockers. Recalculated health blockers are
+ * intentionally allowed to be superseded by the caller's current evidence.
+ */
+export function preserveFailClosedProductBlockers(
+  previous: ProductBlockerState,
+  next: Array<string | Partial<CanonicalProductBlocker>> | undefined,
+  checkedAt = new Date().toISOString(),
+): CanonicalProductBlocker[] {
+  const persisted = previous.currentBlockers?.length
+    ? previous.currentBlockers
+    : [
+        ...(previous.publicBlockReasons || []),
+        ...(previous.publicBlockReason ? [previous.publicBlockReason] : []),
+      ];
+  const retained = canonicalizeProductBlockers(persisted, checkedAt)
+    .filter(isFailClosedProductBlocker)
+    .map(blocker => blocker.source === 'CURRENT_RULES'
+      ? { ...blocker, source: 'PERSISTED_FAIL_CLOSED' }
+      : blocker);
+  const retainedKeys = new Set(retained.map(canonicalBlockerKey));
+  const recalculated = canonicalizeProductBlockers(next, checkedAt)
+    .filter(blocker => !retainedKeys.has(canonicalBlockerKey(blocker)));
+  return canonicalizeProductBlockers([...recalculated, ...retained], checkedAt);
+}

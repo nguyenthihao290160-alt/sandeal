@@ -180,7 +180,7 @@ async function main() {
   async function enqueue(productId, outcome, suffix, payload = {}) {
     return store.createAutomationJob({
       type: 'POST_PUBLISH_MONITOR',
-      payload: { productId, healthOutcome: outcome, publicPageStatus: 200, sequence: 0, ...payload },
+      payload: { productId, healthOutcome: outcome, publicPageStatus: 200, publicPageIdentity: 'expected', sequence: 0, ...payload },
       idempotencyKey: `post-monitor-${suffix}`,
       operationId: `post-monitor-operation-${suffix}`,
       requestedBy: 'autopilot-worker',
@@ -378,7 +378,7 @@ async function main() {
     };
     const queued = await store.createAutomationJob({
       type: 'POST_PUBLISH_MONITOR',
-      payload: { productId: seeded.id, publicPageStatus: 200, sequence: 0 },
+      payload: { productId: seeded.id, publicPageStatus: 200, publicPageIdentity: 'expected', sequence: 0 },
       idempotencyKey: 'post-monitor-fallback-validation',
       operationId: 'post-monitor-operation-fallback-validation',
       requestedBy: 'autopilot-worker',

@@ -107,7 +107,11 @@ type Health = {
       status: string;
       configured: boolean;
       ready: boolean;
+      credentialsPresent: boolean | null;
+      credentialFormatValid: boolean | null;
+      readinessProbeStatus: 'NOT_RUN' | 'PASSED' | 'FAILED' | 'RATE_LIMITED' | 'UNAVAILABLE' | 'DISABLED' | null;
       reasonCode: string;
+      checkedAt: string | null;
     };
     accessTradeReadinessReason: string;
     aiReadiness: {
@@ -137,6 +141,12 @@ type Health = {
     phase: string | null;
     repairId: string | null;
     lastFailureReason: string | null;
+    historical?: {
+      status: 'SUCCEEDED' | 'FAILED' | 'EXHAUSTED';
+      completedAt: string | null;
+      outcomeReasonCode: string | null;
+      lastFailureReason: string | null;
+    } | null;
   } | null;
   operational: {
     currentActiveReasons: string[];
@@ -200,6 +210,10 @@ type Health = {
       currentPickupSampleCount: number;
       excludedLegacyPickupCount: number;
       insufficientPickupTimestampCount: number;
+      pickupLatencyByPriorityClass: {
+        current: Record<string, { sampleCount: number; p50Ms: number | null; p95Ms: number | null }>;
+        historical: Record<string, { sampleCount: number; p50Ms: number | null; p95Ms: number | null }>;
+      };
       pickupMeasurementSemantics: { historical: string; current: string };
       pickupRolloutBoundary: { cohort: string; startedAt: string | null };
       pickupReleaseBoundary: { releaseId: string; startedAt: string | null };
@@ -225,6 +239,34 @@ type Health = {
       disabledReason: string | null;
       activationControl: string;
       capacityExceeded: boolean;
+      priorityScheduling: {
+        configuredMode: string;
+        effectiveMode: string;
+        effectiveModeSource: string;
+        implementationActive: boolean;
+        rolloutCohort: string;
+        disabledReason: string | null;
+        activationControl: string;
+        laneMode: 'RUNTIME_GUARDIAN_ONLY' | 'ALL_CRITICAL';
+      };
+      priorityMetrics: {
+        source: string;
+        status: 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE';
+        currentStateComplete: boolean;
+        waitingDefinition: string;
+        waitingCriticalJobs: number | null;
+        waitingNormalJobs: number | null;
+        runningCriticalJobs: number | null;
+        runningNormalJobs: number | null;
+        observedWaitingCriticalJobs: number;
+        observedWaitingNormalJobs: number;
+        observedRunningCriticalJobs: number;
+        observedRunningNormalJobs: number;
+        unclassifiedWaitingJobs: number;
+        unclassifiedRunningJobs: number;
+        oldestUnclaimedRunnableJob: { id: string; type: string; runnableAt: string; ageMs: number } | null;
+        reasonCodes: string[];
+      };
     };
     release: {
       embeddedReleaseId: string;
@@ -245,8 +287,13 @@ type Health = {
     };
     featureRollouts: Array<{
       feature: string;
+      configuredValue: string | null;
       mode: string;
       defaultMode: string;
+      effectiveMode: string;
+      effectiveModeSource: string;
+      rolloutCohort: string;
+      inactiveReason: string | null;
       configured: boolean;
       valid: boolean;
       reasonCode?: string;
@@ -262,6 +309,11 @@ type Health = {
     previousValidProjectionGeneratedAt: string | null;
     activeProjectionGeneration: number | null;
     activeProjectionSlot: 'LEGACY' | 'A' | 'B' | null;
+    currentServingProjectionValid: boolean;
+    currentServingProjectionFingerprint: string | null;
+    currentServingProjectionSourceRevision: string | null;
+    pendingProjectionGeneration: number | null;
+    pendingProjectionSlot: 'A' | 'B' | null;
     currentSourceBoundary: {
       schemaVersion: number;
       highWatermark: number;
@@ -269,6 +321,12 @@ type Health = {
     } | null;
     lastSuccessfulRepairAt: string | null;
     activeRepairId: string | null;
+    repairOwnerId: string | null;
+    repairOwnerInstanceId: string | null;
+    repairFencingToken: number | null;
+    repairWorkerFencingToken: number | null;
+    repairStartedAt: string | null;
+    repairLastHeartbeatAt: string | null;
     repairPhase: string | null;
     repairAttemptNumber: number | null;
     lastRepairFailureReason: string | null;
@@ -341,6 +399,26 @@ const PROJECTION_REPAIR_LABELS: Record<NonNullable<Health['projectionMaintenance
   EXHAUSTED: 'Đã hết số lần thử',
 };
 
+function projectionRepairRetryMessage(
+  code: string | undefined,
+  status: string | undefined,
+) {
+  if (code === 'JOB_HEALTH_PROJECTION_REBUILD_REQUESTED') {
+    return '\u0110\u00e3 x\u1ebfp l\u1ecbch s\u1eeda ph\u00e9p chi\u1ebfu Job Health trong n\u1ec1n.';
+  }
+  if (code === 'JOB_HEALTH_PROJECTION_REBUILD_REUSED') {
+    return 'Y\u00eau c\u1ea7u s\u1eeda t\u01b0\u01a1ng \u0111\u01b0\u01a1ng \u0111ang t\u1ed3n t\u1ea1i; kh\u00f4ng t\u1ea1o th\u00eam job.';
+  }
+  if (code === 'JOB_HEALTH_PROJECTION_REBUILD_BACKOFF') {
+    return 'L\u1ea7n s\u1eeda tr\u01b0\u1edbc \u0111ang trong th\u1eddi gian ch\u1edd; th\u1eddi \u0111i\u1ec3m th\u1eed l\u1ea1i \u0111\u01b0\u1ee3c hi\u1ec3n th\u1ecb b\u00ean d\u01b0\u1edbi.';
+  }
+  if (code === 'JOB_HEALTH_PROJECTION_REBUILD_EXHAUSTED') {
+    return '\u0110\u00e3 h\u1ebft s\u1ed1 l\u1ea7n th\u1eed an to\u00e0n; kh\u00f4ng t\u1ea1o th\u00eam job.';
+  }
+  if (status === 'NOT_REQUIRED') return 'Ph\u00e9p chi\u1ebfu hi\u1ec7n kh\u00f4ng c\u1ea7n x\u1ebfp l\u1ecbch s\u1eeda.';
+  return 'Ch\u01b0a th\u1ec3 x\u1ebfp l\u1ecbch s\u1eeda; tr\u1ea1ng th\u00e1i hi\u1ec7n t\u1ea1i v\u1eabn \u0111\u01b0\u1ee3c gi\u1eef nguy\u00ean.';
+}
+
 function diagnosticCount(value: number | null | undefined) {
   return value === null || value === undefined ? 'Không xác định' : value.toLocaleString('vi-VN');
 }
@@ -366,7 +444,9 @@ function duration(value: number | null) {
 export default function SystemHealthPage() {
   const [refreshState, setRefreshState] = useState(() => initialAppHealthRefreshState<Health>());
   const [loading, setLoading] = useState(true);
+  const [repairLoading, setRepairLoading] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
+  const repairRequestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
   const health = refreshState.snapshot;
   const error = refreshState.message;
@@ -423,11 +503,46 @@ export default function SystemHealthPage() {
       if (!controller.signal.aborted && sequence === requestSequenceRef.current) setLoading(false);
     }
   }, []);
+  const scheduleProjectionRepair = useCallback(async () => {
+    if (requestRef.current || repairRequestRef.current) return;
+    const controller = new AbortController();
+    repairRequestRef.current = controller;
+    setRepairLoading(true);
+    try {
+      const body = await requestClientJson<{ ok: boolean; code?: string; message?: string; data?: Health }>('/api/automation/health', {
+        method: 'POST',
+        cache: 'no-store',
+        signal: controller.signal,
+        timeoutMs: 20_000,
+        maximumResponseBytes: 512 * 1024,
+      });
+      if (!body.ok || !body.data) throw new Error(body.message || 'Kh\u00f4ng th\u1ec3 x\u1ebfp l\u1ecbch s\u1eeda ph\u00e9p chi\u1ebfu Job Health.');
+      if (controller.signal.aborted) return;
+      const staleProjection = body.data.jobReadModel?.stale === true
+        || body.data.components.historySummary?.stale === true;
+      setRefreshState(current => appHealthRefreshSucceeded(current, body.data!, {
+        receivedAt: new Date().toISOString(),
+        stale: staleProjection,
+        message: projectionRepairRetryMessage(body.code, body.data?.projectionMaintenance?.status),
+      }));
+    } catch (cause) {
+      if (!controller.signal.aborted) {
+        setRefreshState(current => appHealthRefreshFailed(
+          current,
+          appHealthRequestFailureMessage(cause),
+        ));
+      }
+    } finally {
+      if (repairRequestRef.current === controller) repairRequestRef.current = null;
+      if (!controller.signal.aborted) setRepairLoading(false);
+    }
+  }, []);
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
     return () => {
       window.clearTimeout(timer);
       requestRef.current?.abort(new DOMException('Health page unmounted', 'AbortError'));
+      repairRequestRef.current?.abort(new DOMException('Health page unmounted', 'AbortError'));
     };
   }, [load]);
 
@@ -439,24 +554,37 @@ export default function SystemHealthPage() {
   const operational = health?.operational;
   const recovery = operational?.recovery;
   const slo = operational?.slo;
+  const pickupByPriority = slo?.pickupLatencyByPriorityClass;
+  const workerPriority = operational?.workerPool.priorityMetrics;
+  const priorityScheduling = operational?.workerPool.priorityScheduling;
   const productFlow = health?.productFlow;
   const componentIssues = Object.entries(health?.components || {})
     .filter(([, component]) => component.status !== 'available');
+  const projectionRepairCanBeScheduled = health?.projectionMaintenance?.status === 'NEEDS_REPAIR';
 
   return (
-    <main className={styles.page} aria-busy={loading}>
+    <main className={styles.page} aria-busy={loading || repairLoading}>
       <header className={styles.header}>
         <div>
           <h1>Sức khỏe hệ thống</h1>
           <p>Tách riêng vận hành, Đăng an toàn, AI và dừng khẩn cấp để trạng thái của một chức năng không bị hiểu nhầm là toàn hệ thống đã dừng.</p>
         </div>
-        <button className={styles.button} onClick={() => void load()} disabled={loading}>
+        <button className={styles.button} onClick={() => void load()} disabled={loading || repairLoading}>
           <DashboardIcon name="refresh" size={16} />{loading ? 'Đang kiểm tra' : 'Làm mới'}
+        </button>
+        <button
+          className={styles.button}
+          onClick={() => void scheduleProjectionRepair()}
+          disabled={loading || repairLoading || !projectionRepairCanBeScheduled}
+          title="Chỉ xếp lịch sửa phép chiếu Job Health khi trạng thái hiện tại cần sửa; không xuất bản hay thay đổi dữ liệu sản phẩm."
+        >
+          <DashboardIcon name="refresh" size={16} />{repairLoading ? 'Đang xếp lịch sửa' : 'Thử lại: xếp lịch sửa Job Health'}
         </button>
       </header>
 
       {loading && !health && <div className={styles.notice} role="status" aria-live="polite">Đang kiểm tra tình trạng hệ thống...</div>}
       {loading && health && <div className={styles.notice} role="status" aria-live="polite">Đang làm mới; bản chụp hiện tại vẫn được hiển thị.</div>}
+      {repairLoading && <div className={styles.notice} role="status" aria-live="polite">Đang yêu cầu Worker xếp lịch sửa phép chiếu Job Health; không có dữ liệu sản phẩm nào được xuất bản.</div>}
       {error && (
         <div
           className={`${styles.notice} ${health && refreshState.stale ? styles.warning : styles.errorBox}`}
@@ -468,7 +596,7 @@ export default function SystemHealthPage() {
             : health?.partial
               ? 'Sức khỏe một phần.'
               : 'Không thể xác minh tình trạng hệ thống.'}</strong> {error}{' '}
-          <button className={styles.button} onClick={() => void load()} disabled={loading}>Thử lại</button>
+          <button className={styles.button} onClick={() => void load()} disabled={loading || repairLoading}>Thử lại làm mới</button>
         </div>
       )}
 
@@ -594,6 +722,20 @@ export default function SystemHealthPage() {
                   </strong>
                 </div>
                 <div className={styles.healthRow}>
+                  <span>Pickup theo lớp hiện tại (critical / normal / chưa phân loại)</span>
+                  <strong>
+                    {duration(pickupByPriority?.current.CRITICAL?.p95Ms ?? null)} / {duration(pickupByPriority?.current.NORMAL?.p95Ms ?? null)} / {duration(pickupByPriority?.current.UNCLASSIFIED?.p95Ms ?? null)}
+                    {' · '}{pickupByPriority?.current.CRITICAL?.sampleCount ?? 0} / {pickupByPriority?.current.NORMAL?.sampleCount ?? 0} / {pickupByPriority?.current.UNCLASSIFIED?.sampleCount ?? 0} mẫu P95
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>Pickup theo lớp lịch sử (critical / normal / chưa phân loại)</span>
+                  <strong>
+                    {duration(pickupByPriority?.historical.CRITICAL?.p95Ms ?? null)} / {duration(pickupByPriority?.historical.NORMAL?.p95Ms ?? null)} / {duration(pickupByPriority?.historical.UNCLASSIFIED?.p95Ms ?? null)}
+                    {' · '}{pickupByPriority?.historical.CRITICAL?.sampleCount ?? 0} / {pickupByPriority?.historical.NORMAL?.sampleCount ?? 0} / {pickupByPriority?.historical.UNCLASSIFIED?.sampleCount ?? 0} mẫu P95
+                  </strong>
+                </div>
+                <div className={styles.healthRow}>
                   <span>Pickup lịch sử P50 / P95</span>
                   <strong>
                     {duration(slo?.historicalPickupLatencyP50Ms ?? null)} / {duration(slo?.historicalPickupLatencyP95Ms ?? null)}
@@ -651,6 +793,11 @@ export default function SystemHealthPage() {
                 <div className={styles.healthRow}><span>Slot còn trống</span><strong>{operational?.workerPool.availableSlots || 0}</strong></div>
                 <div className={styles.healthRow}><span>Critical / normal đang chạy</span><strong>{operational?.workerPool.activeCriticalSlots || 0} / {operational?.workerPool.activeNormalSlots || 0}</strong></div>
                 <div className={styles.healthRow}><span>Critical dự phòng / normal còn trống</span><strong>{operational?.workerPool.criticalReservedCapacity || 0} / {operational?.workerPool.normalAvailableSlots || 0}</strong></div>
+                <div className={styles.healthRow}><span>Ưu tiên critical: cấu hình / hiệu lực / làn</span><strong>{priorityScheduling?.configuredMode || 'OFF'} / {priorityScheduling?.effectiveMode || 'OFF'} / {priorityScheduling?.laneMode || 'RUNTIME_GUARDIAN_ONLY'}</strong></div>
+                <div className={styles.healthRow}><span>Critical / normal đang chờ claim</span><strong>{diagnosticCount(workerPriority?.waitingCriticalJobs)} / {diagnosticCount(workerPriority?.waitingNormalJobs)} · {workerPriority?.status || 'UNAVAILABLE'}</strong></div>
+                <div className={styles.healthRow}><span>Critical / normal đang chạy (bằng chứng job)</span><strong>{diagnosticCount(workerPriority?.runningCriticalJobs)} / {diagnosticCount(workerPriority?.runningNormalJobs)}</strong></div>
+                <div className={styles.healthRow}><span>Job runnable chưa claim lâu nhất</span><strong>{workerPriority?.oldestUnclaimedRunnableJob ? `${workerPriority.oldestUnclaimedRunnableJob.type} · ${duration(workerPriority.oldestUnclaimedRunnableJob.ageMs)}` : 'Không có hoặc chưa đủ dữ liệu'}</strong></div>
+                <div className={styles.healthRow}><span>Ưu tiên critical: cohort / lý do chưa hoạt động</span><strong>{priorityScheduling?.rolloutCohort || 'WORKER_CRITICAL_SCHEDULING_V3:OFF'} · {priorityScheduling?.disabledReason || 'Không có'}</strong></div>
                 <div className={styles.healthRow}><span>Rollout cohort</span><strong>{operational?.workerPool.rolloutCohort || 'WORKER_POOL:OFF'}</strong></div>
                 <div className={styles.healthRow}><span>Lý do chưa hoạt động</span><strong>{operational?.workerPool.disabledReason || 'Không có'}</strong></div>
               </div>
@@ -658,7 +805,7 @@ export default function SystemHealthPage() {
           </div>
 
           <section className={styles.panel}>
-            <div className={styles.panelHeader}><h2><DashboardIcon name="warning" size={19} />Lý do vận hành</h2></div>
+            <div className={styles.panelHeader}><h2><DashboardIcon name="warning" size={19} />Lý do hiện tại</h2></div>
             <div className={styles.healthList}>
               <div className={styles.healthRow}>
                 <span>Runtime hiện tại có thẩm quyền</span>
@@ -681,7 +828,7 @@ export default function SystemHealthPage() {
                 <span>Bảo trì Job Health</span>
                 <strong>
                   {health.projectionMaintenance
-                    ? `${PROJECTION_REPAIR_LABELS[health.projectionMaintenance.repairState]} · ${health.projectionMaintenance.phase || 'IDLE'} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}${health.projectionMaintenance.nextRetryAt ? ` · thử lại ${when(health.projectionMaintenance.nextRetryAt)}` : ''}${health.projectionMaintenance.lastFailureReason ? ` · lỗi ${health.projectionMaintenance.lastFailureReason}` : ''}`
+                    ? `${health.projectionMaintenance.status === 'NEEDS_REPAIR' ? 'Cần xếp lịch sửa rõ ràng' : PROJECTION_REPAIR_LABELS[health.projectionMaintenance.repairState]} · ${health.projectionMaintenance.phase || 'IDLE'} · ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts} · trùng bị chặn ${health.projectionMaintenance.duplicateRequestsSuppressed}${health.projectionMaintenance.nextRetryAt ? ` · thử lại ${when(health.projectionMaintenance.nextRetryAt)}` : ''}${health.projectionMaintenance.lastFailureReason ? ` · lỗi ${health.projectionMaintenance.lastFailureReason}` : ''}`
                     : 'Chưa có'}
                 </strong>
               </div>
@@ -689,7 +836,7 @@ export default function SystemHealthPage() {
                 <span>Projection generation / boundary</span>
                 <strong>
                   {health.jobReadModel
-                    ? `${health.jobReadModel.activeProjectionGeneration ?? 'unknown'}:${health.jobReadModel.activeProjectionSlot || 'unknown'} · hwm ${health.jobReadModel.currentSourceBoundary?.highWatermark ?? 'unknown'} · ${health.jobReadModel.currentSourceBoundary?.sourceFingerprint?.slice(0, 12) || 'fingerprint pending'}`
+                    ? `${health.jobReadModel.activeProjectionGeneration ?? 'unknown'}:${health.jobReadModel.activeProjectionSlot || 'unknown'} · ${health.jobReadModel.currentServingProjectionValid ? 'serving valid' : 'serving not valid'} · hwm ${health.jobReadModel.currentSourceBoundary?.highWatermark ?? 'unknown'} · ${health.jobReadModel.currentServingProjectionSourceRevision?.slice(0, 12) || 'source revision pending'} · ${health.jobReadModel.currentServingProjectionFingerprint?.slice(0, 12) || 'fingerprint pending'}`
                     : 'Unavailable'}
                 </strong>
               </div>
@@ -697,10 +844,20 @@ export default function SystemHealthPage() {
                 <span>Projection repair serving state</span>
                 <strong>
                   {health.jobReadModel
-                    ? `${health.jobReadModel.repairPhase || 'IDLE'} · ${health.jobReadModel.activeRepairId || 'no active repair'} · previous valid ${health.jobReadModel.previousValidProjectionServing ? 'serving' : 'not serving'} · mirror ${health.jobReadModel.legacyMirrorPending ? 'pending' : 'settled'}`
+                    ? `${health.jobReadModel.repairPhase || 'IDLE'} · ${health.jobReadModel.activeRepairId || 'no active repair'} · pending ${health.jobReadModel.pendingProjectionGeneration ?? 'none'}:${health.jobReadModel.pendingProjectionSlot || '-'} · owner ${health.jobReadModel.repairOwnerId || '-'} · fence ${health.jobReadModel.repairFencingToken ?? '-'} / worker ${health.jobReadModel.repairWorkerFencingToken ?? '-'} · started ${when(health.jobReadModel.repairStartedAt)} · progress ${when(health.jobReadModel.repairLastHeartbeatAt)} · previous valid ${health.jobReadModel.previousValidProjectionServing ? 'serving' : 'not serving'} · mirror ${health.jobReadModel.legacyMirrorPending ? 'pending' : 'settled'}`
                     : 'Unavailable'}
                 </strong>
               </div>
+              {health.projectionMaintenance?.historical && (
+                <div className={styles.healthRow}>
+                  <span>Lịch sử bảo trì Job Health</span>
+                  <strong>
+                    {health.projectionMaintenance.historical.status}
+                    {health.projectionMaintenance.historical.completedAt ? ` · ${when(health.projectionMaintenance.historical.completedAt)}` : ''}
+                    {health.projectionMaintenance.historical.lastFailureReason ? ` · ${health.projectionMaintenance.historical.lastFailureReason}` : ''}
+                  </strong>
+                </div>
+              )}
             </div>
           </section>
 
@@ -752,6 +909,16 @@ export default function SystemHealthPage() {
                 <div className={styles.healthRow}>
                   <span>Source AccessTrade</span>
                   <strong>{productFlow.sourceReadiness.status} · {productFlow.accessTradeReadinessReason}</strong>
+                </div>
+                <div className={styles.healthRow}>
+                  <span>AccessTrade: cấu hình / credential / probe</span>
+                  <strong>
+                    {productFlow.sourceReadiness.configured ? 'configured' : 'not configured'}
+                    {' / '}{productFlow.sourceReadiness.credentialsPresent === null ? 'unknown' : productFlow.sourceReadiness.credentialsPresent ? 'present' : 'missing'}
+                    {' / '}{productFlow.sourceReadiness.credentialFormatValid === null ? 'format unknown' : productFlow.sourceReadiness.credentialFormatValid ? 'format valid' : 'format invalid'}
+                    {' / '}{productFlow.sourceReadiness.readinessProbeStatus || 'NOT_RUN'}
+                    {productFlow.sourceReadiness.checkedAt ? ` · ${when(productFlow.sourceReadiness.checkedAt)}` : ''}
+                  </strong>
                 </div>
                 <div className={styles.healthRow}>
                   <span>AI (tách riêng)</span>
@@ -807,7 +974,7 @@ export default function SystemHealthPage() {
                 <dt>BOOTSTRAP</dt><dd>Chưa có đủ telemetry ban đầu để đánh giá.</dd>
                 <dt>RECOVERY</dt><dd>Đang đánh giá phục hồi bằng các metric thực sự áp dụng.</dd>
                 <dt>HALF_OPEN</dt><dd>Chỉ permit canary được giới hạn mới có thể thử đường publish bình thường.</dd>
-                <dt>Rollout</dt><dd>{operational?.featureRollouts.map(item => `${item.feature}=${item.mode}${item.valid ? '' : ' (INVALID)'}`).join(', ') || 'Không có'}</dd>
+                <dt>Rollout</dt><dd>{operational?.featureRollouts.map(item => `${item.feature}: configured=${item.configuredValue ?? 'SAFE_DEFAULT'}, effective=${item.effectiveMode} (${item.effectiveModeSource}), cohort=${item.rolloutCohort}${item.inactiveReason ? `, inactive=${item.inactiveReason}` : ''}`).join(' · ') || 'Không có'}</dd>
                 <dt>Release mismatch</dt><dd>{operational?.release.mismatchReasons.join(', ') || 'Không có'}</dd>
                 <dt>Hàng đợi chờ</dt><dd>{(health.queue.PENDING || 0) + (health.queue.RETRY_SCHEDULED || 0)}</dd>
               </dl>

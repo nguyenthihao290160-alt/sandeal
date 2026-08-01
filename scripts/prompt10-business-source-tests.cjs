@@ -72,11 +72,22 @@ async function main() {
       configured: async () => false,
       healthProbe: async () => { probes += 1; return true; },
     });
-    assert.deepEqual(await notConfigured.healthCheck({ probe: true }), { status: 'not_configured', configured: false, ready: false });
+    const absentHealth = await notConfigured.healthCheck({ probe: true });
+    assert.equal(absentHealth.status, 'not_configured');
+    assert.equal(absentHealth.configured, false);
+    assert.equal(absentHealth.ready, false);
+    assert.equal(absentHealth.readinessProbeStatus, 'NOT_RUN');
     assert.equal(probes, 0);
     const configured = platform.createAccessTradeSourceAdapter({ configured: async () => true });
-    assert.deepEqual(await configured.healthCheck(), { status: 'configured', configured: true, ready: false, reason: 'live_probe_not_run' });
-    assert.equal((await configured.healthCheck({ probe: true })).status, 'adapter_unavailable');
+    const configuredHealth = await configured.healthCheck();
+    assert.equal(configuredHealth.status, 'configured');
+    assert.equal(configuredHealth.configured, true);
+    assert.equal(configuredHealth.ready, false);
+    assert.equal(configuredHealth.reason, 'live_probe_not_run');
+    assert.equal(configuredHealth.readinessProbeStatus, 'NOT_RUN');
+    const unavailableHealth = await configured.healthCheck({ probe: true });
+    assert.equal(unavailableHealth.status, 'adapter_unavailable');
+    assert.equal(unavailableHealth.readinessProbeStatus, 'DISABLED');
     const ready = platform.createAccessTradeSourceAdapter({ configured: async () => true, healthProbe: async () => true });
     const health = await ready.healthCheck({ probe: true });
     assert.equal(health.status, 'ready'); assert.equal(health.configured, true); assert.equal(health.ready, true);

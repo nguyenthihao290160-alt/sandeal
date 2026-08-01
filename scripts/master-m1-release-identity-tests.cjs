@@ -191,6 +191,13 @@ async function main() {
     assert.ok(deploy.indexOf('npm run build') < deploy.indexOf('pm2 restart'));
     assert.ok(deploy.indexOf('guarded-release-verify.cjs health') < deploy.lastIndexOf('pm2 save'));
     assert.ok(rollback.indexOf('guarded-release-verify.cjs health') < rollback.lastIndexOf('pm2 save'));
+    assert.match(deploy, /SANDEAL_DEPLOY_DEFER_PM2_SAVE/);
+    assert.match(deploy, /unset SANDEAL_DEPLOY_DEFER_PM2_SAVE/);
+    assert.match(deploy, /GUARDED_DEPLOYMENT_VERIFIED_PENDING_PM2_SAVE/);
+    assert.match(deploy, /must be true or false/);
+    const verifier = fs.readFileSync('scripts/guarded-release-verify.cjs', 'utf8');
+    assert.match(verifier, /GUARDED_RELEASE_LEASE_PID_MISMATCH/);
+    assert.match(verifier, /pm2Pid: expectedPid/);
     assert.equal(rollback.includes('npm run build'), false);
   });
 

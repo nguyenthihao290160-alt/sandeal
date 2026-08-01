@@ -5,6 +5,7 @@ EXPECTED_ROOT="/var/www/sandeal-git"
 LOCAL_HEALTH_URL="${SANDEAL_LOCAL_HEALTH_URL:-http://127.0.0.1:3000/api/health/live}"
 PUBLIC_HEALTH_URL="${SANDEAL_PUBLIC_HEALTH_URL:-https://sandeal.tech/api/health/live}"
 RECENT_LOG_LINES="${SANDEAL_DEPLOY_LOG_LINES:-50}"
+DEFER_PM2_SAVE="${SANDEAL_DEPLOY_DEFER_PM2_SAVE:-false}"
 
 fail() {
   printf 'GUARDED_DEPLOYMENT_FAILED: %s\n' "$1" >&2
@@ -12,6 +13,12 @@ fail() {
 }
 
 trap 'fail "The deployment stopped before verification completed. PM2 saved state was not changed."' ERR
+
+[[ "$DEFER_PM2_SAVE" == "true" || "$DEFER_PM2_SAVE" == "false" ]] \
+  || fail "SANDEAL_DEPLOY_DEFER_PM2_SAVE must be true or false."
+# This controls only this guarded shell invocation. Do not copy it into the
+# PM2 application environment via --update-env.
+unset SANDEAL_DEPLOY_DEFER_PM2_SAVE
 
 CURRENT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "The current directory is not a Git repository."
 CURRENT_ROOT="$(cd "$CURRENT_ROOT" && pwd -P)"
@@ -64,6 +71,12 @@ node scripts/guarded-release-verify.cjs health "$RELEASE" "$LOCAL_HEALTH_URL" "$
 pm2 logs sandeal sandeal-worker sandeal-scheduler --nostream --raw --lines "$RECENT_LOG_LINES" 2>&1 \
   | node scripts/redact-operational-output.cjs
 
-pm2 save
-trap - ERR
-printf 'GUARDED_DEPLOYMENT_VERIFIED: %s\n' "$RELEASE"
+if [[ "$DEFER_PM2_SAVE" == "true" ]]; then
+  trap - ERR
+  printf 'GUARDED_DEPLOYMENT_VERIFIED_PENDING_PM2_SAVE: %s\n' "$RELEASE"
+  printf 'Run pm2 save only after the separately documented browser and production verification is complete.\n'
+else
+  pm2 save
+  trap - ERR
+  printf 'GUARDED_DEPLOYMENT_VERIFIED: %s\n' "$RELEASE"
+fi

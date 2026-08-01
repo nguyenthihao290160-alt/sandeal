@@ -186,6 +186,7 @@ async function main() {
     const started = performance.now();
     const response = await healthService.buildAutomationHealthResponse({
       now,
+      scheduleProjectionMaintenance: true,
       budgets: { maintenanceMs: 100 },
       dependencies: {
         getGeminiReadiness: async () => ({

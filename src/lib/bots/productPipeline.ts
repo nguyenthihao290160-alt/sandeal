@@ -22,6 +22,7 @@ import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
 import { scoreCandidateReadiness } from './candidateReadiness';
 import { isDomainCircuitOpen, recordDomainHealth } from './domainCircuitBreaker';
 import { evaluateSafePublish } from '../safePublish';
+import { canonicalBlockerCodes, preserveFailClosedProductBlockers } from '../productBlockers';
 import { classifyRecord } from '../autonomous/recordClassification';
 import { calculateProductConfidences } from '../autonomous/confidenceEngine';
 import { captureProductEvidence, validateClaimsAgainstEvidence, type EvidenceFact } from '../autonomous/evidenceGraph';
@@ -747,12 +748,12 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
 
   const fixture = process.env.NODE_ENV === 'test' ? payload.isolatedHealthFixture : undefined;
   const fixtureLink = fixture === 'healthy'
-    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture' }
+    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', statusCode: 200, finalUrl: payload.canonicalProductUrl || payload.originalUrl }
     : fixture === 'confirmed_broken'
       ? { status: 'broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
       : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
   const fixtureImage: ImageCheckResult = fixture === 'healthy'
-    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', contentType: 'image/jpeg' }
+    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', statusCode: 200, contentType: 'image/jpeg', finalUrl: payload.imageUrl }
     : fixture === 'confirmed_broken'
       ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
       : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
@@ -770,12 +771,36 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
       if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
     }
   }
-  const statuses = [productHealth.status, affiliateHealth.status, imageHealth.status];
+  const requiresAccessTradeProvenance = item.source === 'accesstrade';
+  const canonicalProvenanceValid = !requiresAccessTradeProvenance || (
+    payload.canonicalUrlSource === 'provider_api'
+    && payload.canonicalUrlProvider === 'accesstrade'
+    && payload.canonicalUrlSourceEndpoint === 'datafeed'
+    && Boolean(payload.canonicalUrlSourceField)
+    && (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(payload.canonicalUrlSourceField || '')
+    && !isAccessTradeTrackingUrl(productHealth.finalUrl || payload.canonicalProductUrl || payload.originalUrl)
+  );
+  const affiliateProvenanceValid = !requiresAccessTradeProvenance || (
+    payload.affiliateUrlSource === 'provider_api'
+    && payload.affiliateUrlProvider === 'accesstrade'
+    && payload.affiliateUrlSourceEndpoint === 'datafeed'
+    && Boolean(payload.affiliateUrlSourceField)
+    && (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(payload.affiliateUrlSourceField || '')
+  );
+  const canonicalVerified = productHealth.ok && canonicalProvenanceValid;
+  const affiliateVerified = affiliateHealth.ok && affiliateProvenanceValid;
+  const imageVerified = imageHealth.ok && imageHealth.statusCode === 200
+    && String(imageHealth.contentType || '').toLowerCase().startsWith('image/');
+  const statuses = [
+    canonicalVerified ? productHealth.status : canonicalProvenanceValid ? productHealth.status : 'canonical_provenance_required',
+    affiliateVerified ? affiliateHealth.status : affiliateProvenanceValid ? affiliateHealth.status : 'affiliate_provenance_required',
+    imageVerified ? imageHealth.status : imageHealth.status === 'ok' ? 'image_verification_required' : imageHealth.status,
+  ];
   await recordCandidateHealthQuality({
     item,
-    productHealthy: productHealth.ok,
-    affiliateHealthy: affiliateHealth.ok,
-    imageHealthy: imageHealth.ok,
+    productHealthy: canonicalVerified,
+    affiliateHealthy: affiliateVerified,
+    imageHealthy: imageVerified,
     imageChecks,
     statuses,
     externalRequests: fixture ? 0 : 2 + imageChecks,
@@ -783,13 +808,13 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   await recordDomainHealth(payload.originalUrl, productHealth.status);
   await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status);
   await recordDomainHealth(imageUrl, imageHealth.status);
-  const healthy = productHealth.ok && affiliateHealth.ok && imageHealth.ok;
+  const healthy = canonicalVerified && affiliateVerified && imageVerified;
   const confirmedBroken = statuses.some(status => ['broken', 'image_broken', 'invalid_image', 'not_found', 'too_small', 'too_large', 'dark_image_suspected', 'placeholder'].includes(status));
   const healthPatch: Partial<Product> = {
     imageUrl,
-    linkHealthStatus: productHealth.status === 'ok' ? 'ok' : productHealth.status,
-    productHealthStatus: productHealth.status,
-    affiliateHealthStatus: affiliateHealth.status,
+    linkHealthStatus: canonicalVerified ? productHealth.status === 'ok' ? 'ok' : productHealth.status : 'unknown',
+    productHealthStatus: canonicalVerified ? productHealth.status : 'unknown',
+    affiliateHealthStatus: affiliateVerified ? affiliateHealth.status : 'not_allowed',
     imageHealthStatus: imageHealth.status === 'ok' ? 'ok' : imageHealth.status,
     imageValidationState: productImageValidationState(imageHealth, imageHealth.ok && imageUrl !== primaryImageUrl),
     imageWidth: imageHealth.width,
@@ -798,6 +823,25 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     linkLastCheckedAt: now,
     affiliateLastCheckedAt: now,
     imageLastCheckedAt: now,
+    canonicalUrlVerifiedAt: canonicalVerified ? now : undefined,
+    canonicalUrlStatus: canonicalVerified ? 'verified' : 'unverified',
+    productUrlHttpStatus: productHealth.statusCode,
+    productUrlFinalUrl: productHealth.finalUrl,
+    productUrlHealthReason: canonicalProvenanceValid ? productHealth.reason : 'Canonical URL requires valid AccessTrade provenance.',
+    productUrlErrorCode: canonicalProvenanceValid
+      ? ('errorCode' in productHealth ? productHealth.errorCode : undefined)
+      : 'CANONICAL_PROVENANCE_REQUIRED',
+    affiliateUrlVerifiedAt: affiliateVerified ? now : undefined,
+    affiliateUrlStatus: affiliateVerified ? 'verified' : 'unverified',
+    affiliateUrlHttpStatus: affiliateHealth.statusCode,
+    affiliateUrlFinalUrl: affiliateHealth.finalUrl,
+    affiliateUrlHealthReason: affiliateProvenanceValid ? affiliateHealth.reason : 'Affiliate URL requires valid AccessTrade provenance.',
+    affiliateUrlErrorCode: affiliateProvenanceValid
+      ? ('errorCode' in affiliateHealth ? affiliateHealth.errorCode : undefined)
+      : 'AFFILIATE_PROVENANCE_REQUIRED',
+    imageUrlHttpStatus: imageHealth.statusCode,
+    imageUrlFinalUrl: imageHealth.finalUrl || imageUrl,
+    imageUrlHealthReason: imageHealth.reason,
     imageContentType: imageHealth.contentType,
     sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses, item.attempts)).toISOString(),
     sourceHealthReason: healthy ? undefined : statuses.join(','),
@@ -904,20 +948,41 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   if (evidence.coverage < 0.8) readinessReasons.push('evidence_coverage_low');
   if (!selectedOffer.bestOffer) readinessReasons.push('healthy_offer_missing');
   if (!['FRESH', 'AGING'].includes(priceTruth.state)) readinessReasons.push('price_truth_unsafe');
-  const ready = readinessReasons.length === 0;
+  // Evaluate the newly observed evidence independently, but do not let that
+  // internal calculation erase a persisted manual/unknown/policy blocker.
+  const strictReadiness = evaluateSafePublish({
+    ...withReview,
+    autoPublishEligible: true,
+    publicBlocked: false,
+    publicBlockReason: undefined,
+    publicBlockReasons: [],
+    currentBlockers: [],
+    quarantineReasons: [],
+  });
+  const persistedFailClosedBlockers = preserveFailClosedProductBlockers(withReview, [], now);
+  readinessReasons.push(...strictReadiness.reasons, ...canonicalBlockerCodes(persistedFailClosedBlockers));
+  const uniqueReadinessReasons = [...new Set(readinessReasons)];
+  const ready = uniqueReadinessReasons.length === 0;
+  const reconciledBlockers = preserveFailClosedProductBlockers(withReview, uniqueReadinessReasons, now);
   product = (await saveCanonicalProduct(product.id, {
     confidences,
     claimValidationStatus: linked.validation.status,
     autoPublishEligible: ready,
     needsVerification: !ready,
     publicHidden: true,
+    publicBlocked: !ready,
     publicDecision: ready ? 'ready_for_publish' : 'quarantined',
-    publicBlockReasons: readinessReasons,
-    quarantineReasons: ready ? [] : readinessReasons,
+    publicBlockReason: ready ? undefined : uniqueReadinessReasons.join(','),
+    publicBlockReasons: canonicalBlockerCodes(reconciledBlockers),
+    // Recompute current evidence blockers, while retaining persisted blockers
+    // that require an explicit applicable superseding workflow.
+    currentBlockers: reconciledBlockers,
+    blockersCheckedAt: now,
+    quarantineReasons: ready ? [] : canonicalBlockerCodes(reconciledBlockers),
     nextAutomaticAction: ready ? 'AUTO_SAFE_PUBLISH' : 'RECHECK_QUARANTINED_PRODUCT',
     nextRetryAt: ready ? undefined : new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
   })) || withReview;
-  product = await transitionCandidateLifecycle(product, ready ? 'READY_FOR_PUBLISH' : 'QUARANTINED', item, workerId, ready ? 'ready-for-publish' : 'readiness-quarantine', readinessReasons);
+  product = await transitionCandidateLifecycle(product, ready ? 'READY_FOR_PUBLISH' : 'QUARANTINED', item, workerId, ready ? 'ready-for-publish' : 'readiness-quarantine', uniqueReadinessReasons);
   if (ready) counters.seoReady += 1; else { counters.seoBlocked += 1; counters.needsReview += 1; counters.noindex += 1; }
 
   const publishSettings = await getAutomationSettings();
@@ -937,8 +1002,8 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   }
   counters.reviewed += 1;
   if (canonical.created) counters.created += 1; else if (canonical.unchanged) counters.unchanged += 1; else counters.updated += 1;
-  await finishCandidate(item.id, { status: 'completed', delayReason: ready ? undefined : readinessReasons.join(',') });
-  return { status: 'completed', terminal: true, reason: ready ? undefined : readinessReasons.join(','), productId: product.id };
+  await finishCandidate(item.id, { status: 'completed', delayReason: ready ? undefined : uniqueReadinessReasons.join(',') });
+  return { status: 'completed', terminal: true, reason: ready ? undefined : uniqueReadinessReasons.join(','), productId: product.id };
 }
 
 async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): Promise<CandidateReviewOutcome> {
@@ -1211,16 +1276,29 @@ export async function recheckPublishedProducts(limit: number, deadlineMs: number
         || ['broken', 'not_found'].includes(affiliateHealth.status)
         || ['image_broken', 'invalid_image'].includes(imageHealth.status);
       const preservePublishedHealth = !healthy && !confirmedBroken;
+      const persistedFailClosedBlockers = preserveFailClosedProductBlockers(product, [], new Date().toISOString());
+      const persistedCodes = canonicalBlockerCodes(persistedFailClosedBlockers);
+      const protectedState = persistedCodes.length > 0;
       const saved = await saveCanonicalProduct(product.id, {
         linkHealthStatus: preservePublishedHealth ? product.linkHealthStatus : productHealth.status === 'ok' ? 'ok' : productHealth.status as Product['linkHealthStatus'],
         affiliateHealthStatus: preservePublishedHealth ? product.affiliateHealthStatus : affiliateHealth.status === 'ok' ? 'ok' : affiliateHealth.status as Product['affiliateHealthStatus'],
         imageHealthStatus: preservePublishedHealth ? product.imageHealthStatus : imageHealth.status === 'ok' ? 'ok' : imageHealth.status as Product['imageHealthStatus'],
         linkLastCheckedAt: new Date().toISOString(), affiliateLastCheckedAt: new Date().toISOString(), imageLastCheckedAt: new Date().toISOString(),
-        publicBlockReason: healthy || preservePublishedHealth ? '' : statuses.join(','),
-        publicBlockReasons: healthy || preservePublishedHealth ? [] : statuses,
+        publicBlocked: protectedState ? true : undefined,
+        publicBlockReason: protectedState ? persistedCodes.join(',') : healthy || preservePublishedHealth ? '' : statuses.join(','),
+        publicBlockReasons: protectedState ? persistedCodes : healthy || preservePublishedHealth ? [] : statuses,
+        currentBlockers: protectedState ? persistedFailClosedBlockers : [],
+        ...(protectedState ? {
+          status: 'needs_review' as const,
+          publicHidden: true,
+          needsVerification: true,
+          autoPublished: false,
+          publicDecision: 'blocked',
+          nextAutomaticAction: 'WAITING_MANUAL_REVIEW',
+        } : {}),
         sourceHealthCooldownUntil: healthy ? undefined : new Date(Date.now() + cooldownFor(statuses)).toISOString(),
         sourceHealthReason: healthy ? undefined : statuses.join(','),
-      }, { evaluate: !preservePublishedHealth });
+      });
       counters.reviewed++;
       if (saved?.status === 'published') counters.published++; else counters.needsReview++;
     }

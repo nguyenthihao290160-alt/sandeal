@@ -5,6 +5,7 @@ import {
   type CurrentReasonReconciliation,
 } from './currentReasonReconciler';
 import {
+  getWorkerCriticalSchedulingRolloutState,
   getWorkerPoolRolloutState,
   listFeatureRolloutStates,
   type FeatureRolloutMode,
@@ -74,6 +75,7 @@ export interface AutomationOperationalHealth {
     currentPickupSampleCount: number;
     excludedLegacyPickupCount: number;
     insufficientPickupTimestampCount: number;
+    pickupLatencyByPriorityClass: AutomationSloMeasurement['pickupLatencyByPriorityClass'];
     pickupMeasurementSemantics: AutomationSloMeasurement['pickupLatencyMeasurementSemantics'];
     pickupRolloutBoundary: AutomationSloMeasurement['pickupLatencyRolloutBoundary'];
     pickupReleaseBoundary: AutomationSloMeasurement['pickupLatencyReleaseBoundary'];
@@ -98,8 +100,21 @@ export interface AutomationOperationalHealth {
     rolloutCohort: string;
     disabledReason: WorkerPoolRolloutState['disabledReason'];
     activationControl: WorkerPoolRolloutState['activationControl'];
-    ordinaryFairness: 'BOUNDED_NORMAL_LANE_WITH_RESERVED_GUARDIAN_CAPACITY';
+    ordinaryFairness:
+      | 'BOUNDED_NORMAL_LANE_WITH_RESERVED_GUARDIAN_CAPACITY'
+      | 'BOUNDED_NORMAL_LANE_WITH_RESERVED_CRITICAL_CAPACITY';
     capacityExceeded: boolean;
+    priorityScheduling: {
+      configuredMode: FeatureRolloutMode;
+      effectiveMode: FeatureRolloutMode;
+      effectiveModeSource: ReturnType<typeof getWorkerCriticalSchedulingRolloutState>['effectiveModeSource'];
+      implementationActive: boolean;
+      rolloutCohort: string;
+      disabledReason: ReturnType<typeof getWorkerCriticalSchedulingRolloutState>['disabledReason'];
+      activationControl: ReturnType<typeof getWorkerCriticalSchedulingRolloutState>['activationControl'];
+      laneMode: 'RUNTIME_GUARDIAN_ONLY' | 'ALL_CRITICAL';
+    };
+    priorityMetrics: BoundedWorkerPriorityMetrics;
   };
   release: {
     embeddedReleaseId: string;
@@ -136,6 +151,116 @@ export interface AutomationOperationalHealthInputs {
 
 function uniqueReasons(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => Boolean(value)))].sort();
+}
+
+type SummaryPriorityClass = 'CRITICAL' | 'NORMAL' | 'UNCLASSIFIED';
+type AutomationHealthJobReference = AutomationJobHealthView['pendingJobs'][number];
+
+export interface BoundedWorkerPriorityMetrics {
+  source: 'job-health-summary-v3';
+  status: 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE';
+  currentStateComplete: boolean;
+  waitingDefinition: 'UNCLAIMED_PENDING_OR_RETRY_SCHEDULED';
+  waitingCriticalJobs: number | null;
+  waitingNormalJobs: number | null;
+  runningCriticalJobs: number | null;
+  runningNormalJobs: number | null;
+  observedWaitingCriticalJobs: number;
+  observedWaitingNormalJobs: number;
+  observedRunningCriticalJobs: number;
+  observedRunningNormalJobs: number;
+  unclassifiedWaitingJobs: number;
+  unclassifiedRunningJobs: number;
+  oldestUnclaimedRunnableJob: {
+    id: string;
+    type: string;
+    runnableAt: string;
+    ageMs: number;
+  } | null;
+  reasonCodes: string[];
+}
+
+function summaryPriorityClass(job: AutomationHealthJobReference): SummaryPriorityClass {
+  if (typeof job.executionCritical === 'boolean') return job.executionCritical ? 'CRITICAL' : 'NORMAL';
+  if (job.type === 'RECONCILE_AUTOMATION') return 'UNCLASSIFIED';
+  return isCriticalAutomationJob(job.type) ? 'CRITICAL' : 'NORMAL';
+}
+
+function priorityCounts(jobs: AutomationHealthJobReference[]) {
+  const counts = { critical: 0, normal: 0, unclassified: 0 };
+  for (const job of jobs) {
+    const priority = summaryPriorityClass(job);
+    if (priority === 'CRITICAL') counts.critical += 1;
+    else if (priority === 'NORMAL') counts.normal += 1;
+    else counts.unclassified += 1;
+  }
+  return counts;
+}
+
+function emptyPickupPriorityBreakdown(): AutomationSloMeasurement['pickupLatencyByPriorityClass'] {
+  const empty = () => ({ sampleCount: 0, p50Ms: null, p95Ms: null });
+  return {
+    current: { CRITICAL: empty(), NORMAL: empty(), UNCLASSIFIED: empty() },
+    historical: { CRITICAL: empty(), NORMAL: empty(), UNCLASSIFIED: empty() },
+  };
+}
+
+/**
+ * Derives operational queue metrics solely from the bounded current-state job
+ * summary. It intentionally returns PARTIAL instead of pretending that a
+ * capped or legacy reference list is a complete queue scan.
+ */
+export function buildBoundedWorkerPriorityMetrics(
+  summary: AutomationJobHealthView,
+  now = Date.now(),
+): BoundedWorkerPriorityMetrics {
+  const waiting = summary.pendingJobs;
+  const running = summary.runningJobs;
+  const expectedWaiting = (summary.statusCounts.PENDING || 0) + (summary.statusCounts.RETRY_SCHEDULED || 0);
+  const expectedRunning = summary.statusCounts.RUNNING || 0;
+  const waitingCounts = priorityCounts(waiting);
+  const runningCounts = priorityCounts(running);
+  const earliestRunnable = waiting
+    .map(job => ({
+      job,
+      runnableAt: Date.parse(job.runnableAt || job.createdAt),
+    }))
+    .filter((item): item is { job: AutomationHealthJobReference; runnableAt: number } =>
+      Number.isFinite(item.runnableAt) && item.runnableAt <= now)
+    .sort((left, right) => left.runnableAt - right.runnableAt)[0];
+  const reasons = [
+    ...(!summary.currentStateComplete ? ['JOB_HEALTH_CURRENT_STATE_INCOMPLETE'] : []),
+    ...(waiting.length !== expectedWaiting ? ['WORKER_PRIORITY_WAITING_REFERENCE_TRUNCATED'] : []),
+    ...(running.length !== expectedRunning ? ['WORKER_PRIORITY_RUNNING_REFERENCE_TRUNCATED'] : []),
+    ...(waitingCounts.unclassified || runningCounts.unclassified ? ['WORKER_PRIORITY_CLASSIFICATION_INCOMPLETE'] : []),
+  ];
+  const status: BoundedWorkerPriorityMetrics['status'] = !summary.currentStateComplete
+    ? 'UNAVAILABLE'
+    : reasons.length ? 'PARTIAL' : 'COMPLETE';
+  const complete = status === 'COMPLETE';
+  return {
+    source: 'job-health-summary-v3',
+    status,
+    currentStateComplete: summary.currentStateComplete,
+    waitingDefinition: 'UNCLAIMED_PENDING_OR_RETRY_SCHEDULED',
+    waitingCriticalJobs: complete ? waitingCounts.critical : null,
+    waitingNormalJobs: complete ? waitingCounts.normal : null,
+    runningCriticalJobs: complete ? runningCounts.critical : null,
+    runningNormalJobs: complete ? runningCounts.normal : null,
+    observedWaitingCriticalJobs: waitingCounts.critical,
+    observedWaitingNormalJobs: waitingCounts.normal,
+    observedRunningCriticalJobs: runningCounts.critical,
+    observedRunningNormalJobs: runningCounts.normal,
+    unclassifiedWaitingJobs: waitingCounts.unclassified,
+    unclassifiedRunningJobs: runningCounts.unclassified,
+    oldestUnclaimedRunnableJob: earliestRunnable ? {
+      id: earliestRunnable.job.id,
+      type: earliestRunnable.job.type,
+      runnableAt: new Date(earliestRunnable.runnableAt).toISOString(),
+      ageMs: Math.max(0, now - earliestRunnable.runnableAt),
+    } : null,
+    reasonCodes: reasons,
+  };
 }
 
 function latestByIssuedAt<T extends { issuedAt: string }>(items: T[]): T | undefined {
@@ -276,6 +401,8 @@ export async function buildAutomationOperationalHealth(
   const activeSlots = runningJobs.length;
   const latestPermit = canaryHealth.latestPermit;
   const workerPoolRollout = getWorkerPoolRolloutState();
+  const criticalSchedulingRollout = getWorkerCriticalSchedulingRolloutState();
+  const priorityMetrics = buildBoundedWorkerPriorityMetrics(summary, now);
   const criticalReservedCapacity = maximumSlots > 1 ? 1 : 0;
   const normalCapacity = Math.max(0, maximumSlots - criticalReservedCapacity);
   const activeNormalSlots = Math.max(0, activeSlots - activeCriticalSlots);
@@ -323,6 +450,7 @@ export async function buildAutomationOperationalHealth(
       currentPickupSampleCount: latestSlo.pickupLatencyCurrentSampleCount ?? 0,
       excludedLegacyPickupCount: latestSlo.pickupLatencyExcludedLegacyCount ?? 0,
       insufficientPickupTimestampCount: latestSlo.pickupLatencyInsufficientTimestampCount ?? 0,
+      pickupLatencyByPriorityClass: latestSlo.pickupLatencyByPriorityClass || emptyPickupPriorityBreakdown(),
       pickupMeasurementSemantics: latestSlo.pickupLatencyMeasurementSemantics || {
         historical: 'LEGACY_CREATED_AT',
         current: 'EXPLICIT_RUNNABLE_AT_CURRENT_RELEASE',
@@ -356,8 +484,23 @@ export async function buildAutomationOperationalHealth(
       rolloutCohort: workerPoolRollout.rolloutCohort,
       disabledReason: workerPoolRollout.disabledReason,
       activationControl: workerPoolRollout.activationControl,
-      ordinaryFairness: 'BOUNDED_NORMAL_LANE_WITH_RESERVED_GUARDIAN_CAPACITY',
+      ordinaryFairness: criticalSchedulingRollout.implementationActive
+        ? 'BOUNDED_NORMAL_LANE_WITH_RESERVED_CRITICAL_CAPACITY'
+        : 'BOUNDED_NORMAL_LANE_WITH_RESERVED_GUARDIAN_CAPACITY',
       capacityExceeded: activeSlots > maximumSlots,
+      priorityScheduling: {
+        configuredMode: criticalSchedulingRollout.configuredMode,
+        effectiveMode: criticalSchedulingRollout.effectiveMode,
+        effectiveModeSource: criticalSchedulingRollout.effectiveModeSource,
+        implementationActive: criticalSchedulingRollout.implementationActive,
+        rolloutCohort: criticalSchedulingRollout.rolloutCohort,
+        disabledReason: criticalSchedulingRollout.disabledReason,
+        activationControl: criticalSchedulingRollout.activationControl,
+        laneMode: criticalSchedulingRollout.implementationActive
+          ? 'ALL_CRITICAL'
+          : 'RUNTIME_GUARDIAN_ONLY',
+      },
+      priorityMetrics,
     },
     release: {
       embeddedReleaseId: release.embeddedBuildId,

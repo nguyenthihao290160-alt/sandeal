@@ -95,9 +95,14 @@ function sharedDataDirectory(processes) {
 
 async function verifyRuntime(processes, release) {
   const processResult = verifyPm2Processes(processes, release, true);
+  const processByRole = {
+    WORKER: processResult.selected.find(processItem => processItem.name === 'sandeal-worker'),
+    SCHEDULER: processResult.selected.find(processItem => processItem.name === 'sandeal-scheduler'),
+  };
   process.env.SANDEAL_DATA_DIR = sharedDataDirectory(processes);
   require('./register-typescript.cjs');
   const { listRuntimeRoleLeases } = require('../src/lib/automation/runtimeRoles.ts');
+  const { DEFAULT_ROLE_HEARTBEAT_FRESHNESS_MS } = require('../src/lib/automation/currentReasonReconciler.ts');
   const leases = await listRuntimeRoleLeases();
   const now = Date.now();
   const leaseSummary = [];
@@ -108,17 +113,37 @@ async function verifyRuntime(processes, release) {
     if (Date.parse(lease.expiresAt || lease.leaseExpiresAt || '') <= now) {
       fail('GUARDED_RELEASE_LEASE_STALE', role);
     }
+    const heartbeatAt = Date.parse(lease.heartbeatAt || '');
+    if (!Number.isFinite(heartbeatAt)) {
+      fail('GUARDED_RELEASE_LEASE_HEARTBEAT_INVALID', role);
+    }
+    const heartbeatAgeMs = Math.max(0, now - heartbeatAt);
+    if (heartbeatAgeMs > DEFAULT_ROLE_HEARTBEAT_FRESHNESS_MS) {
+      fail('GUARDED_RELEASE_LEASE_HEARTBEAT_STALE', role);
+    }
     if (String(lease.releaseId || '').toLowerCase() !== release) {
       fail('GUARDED_RELEASE_LEASE_IDENTITY_MISMATCH', role);
     }
     if (!Number.isInteger(lease.fencingToken) || lease.fencingToken <= 0) {
       fail('GUARDED_RELEASE_LEASE_FENCE_INVALID', role);
     }
+    const expectedProcess = processByRole[role];
+    const expectedPid = Number(expectedProcess?.pid || 0);
+    const leasePid = Number(lease.pid || 0);
+    if (!Number.isInteger(leasePid) || leasePid <= 0) {
+      fail('GUARDED_RELEASE_LEASE_PID_INVALID', role);
+    }
+    if (!Number.isInteger(expectedPid) || expectedPid <= 0 || leasePid !== expectedPid) {
+      fail('GUARDED_RELEASE_LEASE_PID_MISMATCH', `${role}:${leasePid}:${expectedPid}`);
+    }
     leaseSummary.push({
       role,
       status: lease.status,
+      pid: leasePid,
+      pm2Pid: expectedPid,
       releaseId: lease.releaseId,
       heartbeatAt: lease.heartbeatAt,
+      heartbeatAgeMs,
       expiresAt: lease.expiresAt,
       fencingToken: lease.fencingToken,
     });

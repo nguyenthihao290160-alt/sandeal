@@ -500,12 +500,82 @@ interface AccessTradeRawItem {
 
 // ---- Public functions ----
 
-export async function isAccessTradeConfigured(): Promise<boolean> {
-  const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
-  if (vaultKey && vaultKey.length > 5) return true;
+export type AccessTradeCredentialSource = 'TOKEN_VAULT' | 'ENVIRONMENT' | 'NONE';
 
-  const { accessTradeApiKey } = getServerConfig();
-  return Boolean(accessTradeApiKey && accessTradeApiKey.length > 5);
+export interface AccessTradeCredentialReadiness {
+  configured: boolean;
+  credentialsPresent: boolean;
+  credentialFormatValid: boolean;
+  source: AccessTradeCredentialSource;
+  reason: 'NOT_CONFIGURED' | 'CREDENTIAL_FORMAT_INVALID' | 'CONFIGURED';
+}
+
+interface ResolvedAccessTradeCredential {
+  readiness: AccessTradeCredentialReadiness;
+  value: string | null;
+}
+
+function locallyValidAccessTradeCredential(value: string | null | undefined): boolean {
+  const candidate = String(value || '');
+  // This is intentionally only a local configuration check. It cannot claim
+  // that AccessTrade accepted the credential; that requires a separate probe.
+  return candidate.trim() === candidate
+    && candidate.length > 5
+    && !/[\u0000-\u001F\u007F\s]/.test(candidate);
+}
+
+async function resolveAccessTradeCredential(): Promise<ResolvedAccessTradeCredential> {
+  const vaultValue = await getRawPrimaryCredentialValue('accesstrade');
+  const environmentValue = getServerConfig().accessTradeApiKey || null;
+  const sources: Array<{ source: Exclude<AccessTradeCredentialSource, 'NONE'>; value: string | null }> = [
+    { source: 'TOKEN_VAULT', value: vaultValue },
+    { source: 'ENVIRONMENT', value: environmentValue },
+  ];
+  const usable = sources.find(candidate => locallyValidAccessTradeCredential(candidate.value));
+  if (usable) {
+    return {
+      readiness: {
+        configured: true,
+        credentialsPresent: true,
+        credentialFormatValid: true,
+        source: usable.source,
+        reason: 'CONFIGURED',
+      },
+      value: usable.value,
+    };
+  }
+  const present = sources.find(candidate => Boolean(candidate.value));
+  if (present) {
+    return {
+      readiness: {
+        configured: false,
+        credentialsPresent: true,
+        credentialFormatValid: false,
+        source: present.source,
+        reason: 'CREDENTIAL_FORMAT_INVALID',
+      },
+      value: null,
+    };
+  }
+  return {
+    readiness: {
+      configured: false,
+      credentialsPresent: false,
+      credentialFormatValid: false,
+      source: 'NONE',
+      reason: 'NOT_CONFIGURED',
+    },
+    value: null,
+  };
+}
+
+/** Returns only non-secret configuration state; never exposes the credential. */
+export async function getAccessTradeCredentialReadiness(): Promise<AccessTradeCredentialReadiness> {
+  return (await resolveAccessTradeCredential()).readiness;
+}
+
+export async function isAccessTradeConfigured(): Promise<boolean> {
+  return (await getAccessTradeCredentialReadiness()).configured;
 }
 
 export async function searchAccessTrade(
@@ -1811,11 +1881,7 @@ export function mapAccessTradeToProduct(
 // ---- AccessTrade fetchers ----
 
 async function getAccessTradeKey(): Promise<string | null> {
-  const vaultKey = await getRawPrimaryCredentialValue('accesstrade');
-  if (vaultKey && vaultKey.length > 5) return vaultKey;
-
-  const { accessTradeApiKey } = getServerConfig();
-  return accessTradeApiKey || null;
+  return (await resolveAccessTradeCredential()).value;
 }
 
 async function fetchAccessTradeDatafeeds(

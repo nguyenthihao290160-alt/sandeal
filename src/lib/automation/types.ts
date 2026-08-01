@@ -217,6 +217,9 @@ export interface AutomationJobAttempt {
   workerFencingToken?: number;
   releaseId?: string;
   rolloutCohort?: string;
+  /** Additive claim-time classification; legacy attempts remain readable. */
+  priorityClass?: 'CRITICAL' | 'NORMAL';
+  priority?: number;
 }
 
 /**

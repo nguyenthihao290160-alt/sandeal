@@ -61,7 +61,14 @@ export function evaluateReviewQuality(product: Partial<Product>, now = Date.now(
     .filter(claim => claim.claimType !== 'unknown');
   const evidenceClaims = [...factualClaims, ...review.inferredClaims]
     .filter(claim => claim.claimType === 'factual' || claim.claimType === 'inferred');
-  const factIds = new Set(review.keyFacts.map(fact => fact.id));
+  // Claims generated from a captured evidence graph carry durable evidence
+  // IDs, while editorial keyFacts retain their human-readable IDs. Treat both
+  // as known only for this quality assessment; durable publish still verifies
+  // that the referenced evidence records are current and valid.
+  const factIds = new Set([
+    ...review.keyFacts.map(fact => fact.id),
+    ...(product.evidenceFactIds || []),
+  ]);
   const unsupported = evidenceClaims.filter(claim => claim.evidenceFactIds.length === 0
     || claim.evidenceFactIds.some(factId => !factIds.has(factId)));
   const evidenceSources = review.evidenceSources.filter(source => source.name.trim() && source.fields.length > 0);

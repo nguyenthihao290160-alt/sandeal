@@ -1,10 +1,13 @@
 import {
   AccessTradeRequestError,
+  getAccessTradeCredentialReadiness,
   isAccessTradeConfigured,
   searchAccessTrade,
+  type AccessTradeCredentialReadiness,
   type AccessTradeResultType,
   type NormalizedAccessTradeItem,
 } from '@/lib/integrations/accesstrade';
+import { getFeatureRolloutState } from '@/lib/automation/featureRollout';
 
 export const SOURCE_ADAPTER_PLATFORM_VERSION = 'source-adapter-platform-v1';
 
@@ -31,6 +34,9 @@ export interface SourceHealth {
   status: SourceProviderStatus;
   configured: boolean;
   ready: boolean;
+  credentialsPresent?: boolean;
+  credentialFormatValid?: boolean;
+  readinessProbeStatus?: 'NOT_RUN' | 'PASSED' | 'FAILED' | 'RATE_LIMITED' | 'UNAVAILABLE' | 'DISABLED';
   checkedAt?: string;
   reason?: string;
 }
@@ -62,6 +68,7 @@ export interface ProductSourceAdapter<TSource = unknown, TNormalized = unknown> 
 
 export interface AccessTradeAdapterDependencies {
   configured?: () => Promise<boolean>;
+  credentialReadiness?: () => Promise<AccessTradeCredentialReadiness>;
   discover?: typeof searchAccessTrade;
   healthProbe?: () => Promise<boolean | SourceHealth>;
   getBudget?: () => Promise<SourceBudget>;
@@ -127,6 +134,9 @@ function normalizeHealth(value: SourceHealth, configured: boolean): SourceHealth
     status: configured ? (ready ? 'ready' : value.status === 'ready' ? 'last_check_failed' : value.status) : 'not_configured',
     configured,
     ready,
+    credentialsPresent: value.credentialsPresent,
+    credentialFormatValid: value.credentialFormatValid,
+    readinessProbeStatus: value.readinessProbeStatus,
     checkedAt: value.checkedAt && Number.isFinite(Date.parse(value.checkedAt)) ? new Date(value.checkedAt).toISOString() : undefined,
     reason: value.reason?.slice(0, 200),
   };
@@ -182,18 +192,70 @@ export function createAccessTradeSourceAdapter(dependencies: AccessTradeAdapterD
     isConfigured: configured,
     async healthCheck(options = {}) {
       const isConfigured = await configured();
-      if (!isConfigured) return { status: 'not_configured', configured: false, ready: false };
-      if (!options.probe) return { status: 'configured', configured: true, ready: false, reason: 'live_probe_not_run' };
-      if (!dependencies.healthProbe) return { status: 'adapter_unavailable', configured: true, ready: false, reason: 'health_probe_unavailable' };
+      // Dependency-injected adapters are deterministic test seams. The real
+      // adapter reads only non-secret credential readiness metadata.
+      const credential = dependencies.credentialReadiness
+        ? await dependencies.credentialReadiness()
+        : dependencies.configured
+          ? undefined
+          : await getAccessTradeCredentialReadiness();
+      const credentialFields = credential ? {
+        credentialsPresent: credential.credentialsPresent,
+        credentialFormatValid: credential.credentialFormatValid,
+      } : {};
+      if (!isConfigured) {
+        return {
+          status: credential?.credentialsPresent ? 'invalid_credential' : 'not_configured',
+          configured: false,
+          ready: false,
+          readinessProbeStatus: 'NOT_RUN',
+          reason: credential?.reason === 'CREDENTIAL_FORMAT_INVALID' ? 'credential_format_invalid' : undefined,
+          ...credentialFields,
+        };
+      }
+      if (!options.probe) {
+        return {
+          status: 'configured', configured: true, ready: false, reason: 'live_probe_not_run',
+          readinessProbeStatus: 'NOT_RUN', ...credentialFields,
+        };
+      }
+      if (!dependencies.healthProbe) {
+        const probeRollout = getFeatureRolloutState('ACCESSTRADE_LIVE_READINESS_PROBE');
+        return {
+          status: 'adapter_unavailable',
+          configured: true,
+          ready: false,
+          reason: probeRollout.mode === 'ACTIVE' ? 'health_probe_unavailable' : 'live_probe_rollout_disabled',
+          readinessProbeStatus: probeRollout.mode === 'ACTIVE' ? 'UNAVAILABLE' : 'DISABLED',
+          ...credentialFields,
+        };
+      }
       try {
         const probe = await dependencies.healthProbe();
         const checkedAt = new Date().toISOString();
         if (typeof probe === 'boolean') {
-          return { status: probe ? 'ready' : 'last_check_failed', configured: true, ready: probe, checkedAt };
+          return {
+            status: probe ? 'ready' : 'last_check_failed', configured: true, ready: probe, checkedAt,
+            readinessProbeStatus: probe ? 'PASSED' : 'FAILED', ...credentialFields,
+          };
         }
-        return normalizeHealth({ ...probe, checkedAt: probe.checkedAt || checkedAt }, true);
+        const normalized = normalizeHealth({ ...probe, checkedAt: probe.checkedAt || checkedAt }, true);
+        return {
+          ...normalized,
+          readinessProbeStatus: normalized.ready
+            ? 'PASSED'
+            : normalized.status === 'rate_limited'
+              ? 'RATE_LIMITED'
+              : 'FAILED',
+          ...credentialFields,
+        };
       } catch (error) {
-        return { status: this.classifyError(error), configured: true, ready: false, checkedAt: new Date().toISOString(), reason: 'health_probe_failed' };
+        const status = this.classifyError(error);
+        return {
+          status, configured: true, ready: false, checkedAt: new Date().toISOString(), reason: 'health_probe_failed',
+          readinessProbeStatus: status === 'rate_limited' ? 'RATE_LIMITED' : 'FAILED',
+          ...credentialFields,
+        };
       }
     },
     async discover(input) {

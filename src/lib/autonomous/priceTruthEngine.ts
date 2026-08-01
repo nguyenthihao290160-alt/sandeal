@@ -188,6 +188,12 @@ export function offerPriceObservations(offers: ProductOffer[]): PriceObservation
 }
 
 export function priceTruthProductPatch(result: PriceTruthResult): Partial<Product> {
+  // A source value becomes VERIFIED only after the price-truth evaluator has
+  // retained current, persisted evidence. This deliberately does not infer
+  // verification from a price value or source configuration alone.
+  const verified = result.state === 'FRESH'
+    && result.requiresCrossCheck === false
+    && result.evidenceFactIds.length > 0;
   return {
     priceTruthState: result.state,
     priceObservedAt: result.observedAt,
@@ -198,5 +204,6 @@ export function priceTruthProductPatch(result: PriceTruthResult): Partial<Produc
     priceTruthReasons: result.reasons,
     priceTruthRuleVersion: result.ruleVersion,
     priceTruthRequiresCrossCheck: result.requiresCrossCheck,
+    ...(verified ? { priceVerificationStatus: 'VERIFIED' as const } : {}),
   };
 }

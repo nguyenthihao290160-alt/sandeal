@@ -140,6 +140,9 @@ export interface ProductFlowDiagnostics {
     status: SourceHealth['status'];
     configured: boolean;
     ready: boolean;
+    credentialsPresent: boolean | null;
+    credentialFormatValid: boolean | null;
+    readinessProbeStatus: SourceHealth['readinessProbeStatus'] | null;
     reasonCode: string;
     checkedAt: string | null;
   };
@@ -210,10 +213,14 @@ function safeReasonCode(value: unknown, fallback: string): string {
 }
 
 function sourceReasonCode(health: SourceHealth): string {
+  if (health.status === 'invalid_credential' || health.credentialFormatValid === false) {
+    return 'ACCESS_TRADE_CREDENTIAL_FORMAT_INVALID';
+  }
   if (!health.configured || health.status === 'not_configured') return 'ACCESS_TRADE_NOT_CONFIGURED';
   if (health.ready && health.status === 'ready') return 'ACCESS_TRADE_READY';
   const reason = safeReasonCode(health.reason, '');
   if (reason === 'LIVE_PROBE_NOT_RUN') return 'ACCESS_TRADE_LIVE_PROBE_NOT_RUN';
+  if (reason === 'LIVE_PROBE_ROLLOUT_DISABLED') return 'ACCESS_TRADE_LIVE_PROBE_DISABLED';
   if (reason === 'HEALTH_PROBE_UNAVAILABLE') return 'ACCESS_TRADE_HEALTH_PROBE_UNAVAILABLE';
   if (reason === 'HEALTH_PROBE_FAILED') return 'ACCESS_TRADE_HEALTH_PROBE_FAILED';
   return `ACCESS_TRADE_${safeReasonCode(health.status, 'NOT_READY')}`;
@@ -570,6 +577,9 @@ export function deriveProductFlowDiagnostics(
       status: input.sourceHealth.status,
       configured: input.sourceHealth.configured,
       ready: input.sourceHealth.ready,
+      credentialsPresent: input.sourceHealth.credentialsPresent ?? null,
+      credentialFormatValid: input.sourceHealth.credentialFormatValid ?? null,
+      readinessProbeStatus: input.sourceHealth.readinessProbeStatus ?? null,
       reasonCode: sourceReason,
       checkedAt: input.sourceHealth.checkedAt || null,
     },

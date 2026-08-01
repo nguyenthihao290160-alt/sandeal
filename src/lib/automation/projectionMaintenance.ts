@@ -39,6 +39,8 @@ export interface JobHealthProjectionMaintenanceState {
   status: JobHealthProjectionMaintenanceStatus;
   phase: AutomationJobProjectionRepairPhase | null;
   repairId: string | null;
+  /** Monotonic request cycle; prevents a completed job's idempotency key from suppressing later recovery. */
+  requestGeneration: number;
   attemptCount: number;
   maximumAttempts: number;
   jobId: string | null;
@@ -60,11 +62,13 @@ export interface JobHealthProjectionMaintenanceState {
 export interface JobHealthProjectionMaintenanceView {
   status:
     | 'NOT_REQUIRED'
+    | 'NEEDS_REPAIR'
     | 'REQUESTED'
     | 'REUSED_ACTIVE_REQUEST'
     | 'BACKOFF'
     | 'EXHAUSTED';
   jobId: string | null;
+  requestGeneration: number;
   attemptCount: number;
   maximumAttempts: number;
   nextRetryAt: string | null;
@@ -83,6 +87,13 @@ export interface JobHealthProjectionMaintenanceView {
   phase: AutomationJobProjectionRepairPhase | null;
   repairId: string | null;
   lastFailureReason: string | null;
+  /** Terminal evidence from a non-current repair cycle. Never authorizes a current block. */
+  historical: {
+    status: 'SUCCEEDED' | 'FAILED' | 'EXHAUSTED';
+    completedAt: string | null;
+    outcomeReasonCode: string | null;
+    lastFailureReason: string | null;
+  } | null;
 }
 
 const REBUILD_REASON_PREFIXES = [
@@ -180,6 +191,7 @@ function normalizeMaintenanceState(value: unknown): JobHealthProjectionMaintenan
     status,
     phase: state.phase && validPhases.has(state.phase) ? state.phase : legacyPhase,
     repairId: state.repairId || state.jobId || null,
+    requestGeneration: Math.max(0, Math.floor(Number(state.requestGeneration) || 0)),
     attemptCount: Math.max(0, Math.floor(Number(state.attemptCount) || 0)),
     maximumAttempts: Math.max(1, Math.floor(Number(state.maximumAttempts) || MAXIMUM_ATTEMPTS)),
     jobId: state.jobId || null,
@@ -230,6 +242,7 @@ function emptyState(
     status: 'IDLE',
     phase: null,
     repairId: null,
+    requestGeneration: 0,
     attemptCount: 0,
     maximumAttempts: MAXIMUM_ATTEMPTS,
     jobId: null,
@@ -257,14 +270,28 @@ function repairState(
   return state.status;
 }
 
+function historicalView(
+  state: JobHealthProjectionMaintenanceState | null | undefined,
+): JobHealthProjectionMaintenanceView['historical'] {
+  if (!state || !['SUCCEEDED', 'FAILED', 'EXHAUSTED'].includes(state.status)) return null;
+  return {
+    status: state.status as 'SUCCEEDED' | 'FAILED' | 'EXHAUSTED',
+    completedAt: state.completedAt,
+    outcomeReasonCode: state.outcomeReasonCode,
+    lastFailureReason: state.lastFailureReason,
+  };
+}
+
 function publicView(
   status: JobHealthProjectionMaintenanceView['status'],
   state: JobHealthProjectionMaintenanceState | null,
   reasonCodes: string[],
+  historicalState?: JobHealthProjectionMaintenanceState | null,
 ): JobHealthProjectionMaintenanceView {
   return {
     status,
     jobId: state?.jobId || null,
+    requestGeneration: state?.requestGeneration || 0,
     attemptCount: state?.attemptCount || 0,
     maximumAttempts: state?.maximumAttempts || MAXIMUM_ATTEMPTS,
     nextRetryAt: state?.nextRetryAt || null,
@@ -283,6 +310,75 @@ function publicView(
     phase: state?.phase || null,
     repairId: state?.repairId || null,
     lastFailureReason: state?.lastFailureReason || null,
+    historical: historicalView(historicalState),
+  };
+}
+
+function maintenanceRequestAge(state: JobHealthProjectionMaintenanceState, now: number): number {
+  return now - Date.parse(
+    state.status === 'CLAIMED' ? state.updatedAt : state.requestedAt || state.updatedAt,
+  );
+}
+
+function maintenanceRequestIsActive(state: JobHealthProjectionMaintenanceState, now: number): boolean {
+  const requestAge = maintenanceRequestAge(state, now);
+  return state.status === 'RETRY_SCHEDULED'
+    || (
+      ['CLAIMED', 'REQUESTED', 'RUNNING'].includes(state.status)
+      && Number.isFinite(requestAge)
+      && requestAge <= (
+        state.status === 'CLAIMED' && !state.jobId
+          ? INCOMPLETE_CLAIM_MAX_AGE_MS
+          : ACTIVE_REQUEST_MAX_AGE_MS
+      )
+    );
+}
+
+/**
+ * The manifest is the fencing authority for a repair that has already begun.
+ * Its compact maintenance record is written by the Worker just after claim,
+ * so there is a short, valid interval where the manifest knows about the
+ * repair first. Represent that interval as RUNNING without writing a second
+ * request; otherwise App Health could falsely show IDLE/NEEDS_REPAIR beside an
+ * active generation and an explicit Retry could enqueue redundant work.
+ */
+function activeManifestRepairState(
+  view: AutomationJobHealthView,
+  incidentFingerprint: string,
+  releaseId: string,
+  reasons: string[],
+  now: number,
+  stored: JobHealthProjectionMaintenanceState | null = null,
+): JobHealthProjectionMaintenanceState | null {
+  const phase = view.repairPhase;
+  if (!view.activeRepairId
+    || !phase
+    || ['FAILED', 'SUPERSEDED', 'COMPLETED'].includes(phase)) return null;
+  const measuredAt = new Date(now).toISOString();
+  const matchesIncident = stored?.incidentFingerprint === incidentFingerprint
+    && stored.releaseId === releaseId;
+  return {
+    ...emptyState(incidentFingerprint, releaseId, reasons, now),
+    status: 'RUNNING',
+    phase,
+    repairId: view.activeRepairId,
+    requestGeneration: matchesIncident
+      ? stored.requestGeneration
+      : Math.max(0, view.pendingProjectionGeneration || 0),
+    attemptCount: Math.max(1, view.repairAttemptNumber || stored?.attemptCount || 0),
+    maximumAttempts: stored?.maximumAttempts || MAXIMUM_ATTEMPTS,
+    // A direct maintenance rebuild can use a repair ID that is not an
+    // Automation Job ID. Preserve a known matching job ID only.
+    jobId: matchesIncident && stored?.jobId === view.activeRepairId ? stored.jobId : null,
+    requestedAt: stored?.requestedAt || view.repairStartedAt || measuredAt,
+    startedAt: view.repairStartedAt || stored?.startedAt || measuredAt,
+    sourceRevision: stored?.sourceRevision || view.currentServingProjectionSourceRevision || null,
+    resultRevision: stored?.resultRevision || null,
+    resultFingerprint: stored?.resultFingerprint || null,
+    duplicateRequestsSuppressed: stored?.duplicateRequestsSuppressed || 0,
+    lastFailureReason: null,
+    outcomeReasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_RUNNING',
+    updatedAt: view.repairLastHeartbeatAt || measuredAt,
   };
 }
 
@@ -295,10 +391,67 @@ function throwIfAborted(signal?: AbortSignal): void {
 
 export async function getJobHealthProjectionMaintenanceState(): Promise<JobHealthProjectionMaintenanceState | null> {
   const snapshot = await readBoundedCollectionSnapshot<unknown>(MAINTENANCE_STATE_STORE, {
-    maximumItems: 1,
+    // The control store is expected to contain one record. Read a small bounded
+    // window so a malformed or legacy sibling cannot hide the authoritative one.
+    maximumItems: 10,
     maximumBytes: 128 * 1024,
   });
-  return normalizeMaintenanceState(snapshot.items[0]);
+  return snapshot.items
+    .map(normalizeMaintenanceState)
+    .find((item): item is JobHealthProjectionMaintenanceState => item !== null)
+    || null;
+}
+
+/**
+ * Read the maintenance state without creating a repair request. Interactive
+ * App Health GETs use this path so simply opening or refreshing the page is
+ * never an operational mutation.
+ */
+export async function observeJobHealthProjectionMaintenance(
+  view: AutomationJobHealthView,
+  now = Date.now(),
+): Promise<JobHealthProjectionMaintenanceView> {
+  const reasons = actionableReasons(view);
+  const stored = await getJobHealthProjectionMaintenanceState();
+  const releaseId = getReleaseIdentity().releaseId;
+  const fingerprint = incidentFingerprint(view, reasons, releaseId);
+  const activeManifestRepair = activeManifestRepairState(
+    view,
+    fingerprint,
+    releaseId,
+    reasons,
+    now,
+    stored,
+  );
+  if (activeManifestRepair) {
+    return publicView(
+      'REUSED_ACTIVE_REQUEST',
+      activeManifestRepair,
+      reasons,
+      stored?.status === 'SUCCEEDED' || stored?.status === 'FAILED' || stored?.status === 'EXHAUSTED'
+        ? stored
+        : null,
+    );
+  }
+  if (view.projectionStatus === 'VALID' || reasons.length === 0) {
+    return publicView('NOT_REQUIRED', null, reasons, stored);
+  }
+
+  const sameIncident = stored?.incidentFingerprint === fingerprint && stored.releaseId === releaseId;
+  if (!stored || !sameIncident) {
+    return publicView('NEEDS_REPAIR', emptyState(fingerprint, releaseId, reasons, now), reasons, stored);
+  }
+  if (maintenanceRequestIsActive(stored, now)) {
+    return publicView('REUSED_ACTIVE_REQUEST', stored, reasons);
+  }
+  const nextRetryAt = Date.parse(stored.nextRetryAt || '');
+  if (stored.status === 'FAILED' && Number.isFinite(nextRetryAt) && nextRetryAt > now) {
+    return publicView('BACKOFF', stored, reasons);
+  }
+  if (stored.status === 'EXHAUSTED') return publicView('EXHAUSTED', stored, reasons);
+  // A previous success cannot retain authority over a newly-invalid projection.
+  // A retry must be explicitly requested, but observation must expose that need.
+  return publicView('NEEDS_REPAIR', emptyState(fingerprint, releaseId, reasons, now), reasons, stored);
 }
 
 export async function ensureJobHealthProjectionMaintenanceRequest(
@@ -308,12 +461,16 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
 ): Promise<JobHealthProjectionMaintenanceView> {
   throwIfAborted(options.signal);
   const reasons = actionableReasons(view);
-  if (view.projectionStatus === 'VALID' || reasons.length === 0) {
-    return publicView('NOT_REQUIRED', await getJobHealthProjectionMaintenanceState(), reasons);
-  }
-
   const releaseId = getReleaseIdentity().releaseId;
   const fingerprint = incidentFingerprint(view, reasons, releaseId);
+  const activeManifestRepair = activeManifestRepairState(view, fingerprint, releaseId, reasons, now);
+  if (activeManifestRepair) {
+    return publicView('REUSED_ACTIVE_REQUEST', activeManifestRepair, reasons);
+  }
+  if (view.projectionStatus === 'VALID' || reasons.length === 0) {
+    return publicView('NOT_REQUIRED', null, reasons, await getJobHealthProjectionMaintenanceState());
+  }
+
   let requested = false;
   let resultStatus: JobHealthProjectionMaintenanceView['status'] = 'REUSED_ACTIVE_REQUEST';
   let state!: JobHealthProjectionMaintenanceState;
@@ -322,19 +479,7 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
   await runTransaction<JobHealthProjectionMaintenanceState>(MAINTENANCE_STATE_STORE, items => {
     const stored = normalizeMaintenanceState(items.find(item => item.id === RECORD_ID));
     const current = stored || emptyState(fingerprint, releaseId, reasons, now);
-    const requestAge = now - Date.parse(
-      current.status === 'CLAIMED' ? current.updatedAt : current.requestedAt || current.updatedAt,
-    );
-    const active = current.status === 'RETRY_SCHEDULED'
-      || (
-        ['CLAIMED', 'REQUESTED', 'RUNNING'].includes(current.status)
-        && Number.isFinite(requestAge)
-        && requestAge <= (
-          current.status === 'CLAIMED' && !current.jobId
-            ? INCOMPLETE_CLAIM_MAX_AGE_MS
-            : ACTIVE_REQUEST_MAX_AGE_MS
-        )
-      );
+    const active = maintenanceRequestIsActive(current, now);
     if (active) {
       state = {
         ...current,
@@ -367,32 +512,30 @@ export async function ensureJobHealthProjectionMaintenanceRequest(
       resultStatus = 'EXHAUSTED';
       return [state];
     }
-    if (sameIncident && current.status === 'SUCCEEDED') {
-      state = {
-        ...current,
-        duplicateRequestsSuppressed: current.duplicateRequestsSuppressed + 1,
-        updatedAt: measuredAt,
-      };
-      resultStatus = 'EXHAUSTED';
-      return [state];
-    }
+    // A completed repair is historical once the currently observed generation
+    // is invalid again. Start a fresh bounded cycle instead of letting a past
+    // success suppress recovery indefinitely.
+    const previousCycleSucceeded = sameIncident && current.status === 'SUCCEEDED';
 
-    const attemptCount = sameIncident ? current.attemptCount + 1 : 1;
+    const attemptCount = sameIncident && !previousCycleSucceeded ? current.attemptCount + 1 : 1;
     assertMaintenanceStatusTransition(current.status, 'REQUESTED', true);
     assertMaintenancePhaseTransition(
       current.phase,
       'SCHEDULED',
-      !sameIncident || current.status === 'IDLE' || current.status === 'SUCCEEDED',
+      !sameIncident || current.status === 'IDLE' || previousCycleSucceeded,
     );
     state = {
       ...emptyState(fingerprint, releaseId, reasons, now),
       status: 'REQUESTED',
       phase: 'SCHEDULED',
-      repairId: `repair-request:${fingerprint.slice(0, 32)}`,
+      requestGeneration: Math.max(0, current.requestGeneration) + 1,
+      repairId: `repair-request:${fingerprint.slice(0, 32)}:${Math.max(0, current.requestGeneration) + 1}`,
       attemptCount,
       jobId: null,
       requestedAt: measuredAt,
-      duplicateRequestsSuppressed: sameIncident ? current.duplicateRequestsSuppressed : 0,
+      duplicateRequestsSuppressed: sameIncident && !previousCycleSucceeded
+        ? current.duplicateRequestsSuppressed
+        : 0,
       updatedAt: measuredAt,
     };
     requested = true;
@@ -419,7 +562,7 @@ export async function materializeJobHealthProjectionMaintenanceRequest(
   if (!claimed) return getJobHealthProjectionMaintenanceState();
 
   const request = claimed as JobHealthProjectionMaintenanceState;
-  const key = `maintenance:${AUTOMATION_JOB_PROJECTION_NAME}:${request.incidentFingerprint.slice(0, 32)}`;
+  const key = `maintenance:${AUTOMATION_JOB_PROJECTION_NAME}:${request.incidentFingerprint.slice(0, 32)}:${request.requestGeneration}`;
   try {
     const created = await createAutomationJob({
       type: 'RECONCILE_AUTOMATION',

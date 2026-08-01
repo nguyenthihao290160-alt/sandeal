@@ -10,7 +10,10 @@ import {
   publicAutomationJobHealthView,
 } from './jobHealthSummary';
 import { buildProductFlowDiagnostics } from './productFlowDiagnostics';
-import { ensureJobHealthProjectionMaintenanceRequest } from './projectionMaintenance';
+import {
+  ensureJobHealthProjectionMaintenanceRequest,
+  observeJobHealthProjectionMaintenance,
+} from './projectionMaintenance';
 import { getLatestRuntimeHealth, providerHealth } from './runtimeGuardian';
 import { listRuntimeRoleLeases } from './runtimeRoles';
 import { DEFAULT_CONTROL, getAiUsage, getAutomationControl, getCircuit } from './store';
@@ -40,6 +43,7 @@ export interface AutomationHealthDependencies {
   getAccessTradeCredential: () => ReturnType<typeof getPrimaryCredential>;
   buildOperational: typeof buildAutomationOperationalHealth;
   buildProductFlow: typeof buildProductFlowDiagnostics;
+  observeProjectionMaintenance: typeof observeJobHealthProjectionMaintenance;
   ensureProjectionMaintenance: typeof ensureJobHealthProjectionMaintenanceRequest;
 }
 
@@ -55,6 +59,7 @@ const DEFAULT_DEPENDENCIES: AutomationHealthDependencies = {
   getAccessTradeCredential: () => getPrimaryCredential('accesstrade'),
   buildOperational: buildAutomationOperationalHealth,
   buildProductFlow: buildProductFlowDiagnostics,
+  observeProjectionMaintenance: observeJobHealthProjectionMaintenance,
   ensureProjectionMaintenance: ensureJobHealthProjectionMaintenanceRequest,
 };
 
@@ -253,6 +258,8 @@ export async function buildAutomationHealthResponse(
   options: {
     now?: number;
     signal?: AbortSignal;
+    /** Explicit operator retry only. The default GET path is strictly read-only. */
+    scheduleProjectionMaintenance?: boolean;
     dependencies?: Partial<AutomationHealthDependencies>;
     budgets?: {
       coreMs?: number;
@@ -270,6 +277,7 @@ export async function buildAutomationHealthResponse(
   const providerMs = Math.max(100, options.budgets?.providerMs ?? 1_500);
   const operationalMs = Math.max(100, options.budgets?.operationalMs ?? 1_200);
   const productFlowMs = Math.max(100, options.budgets?.productFlowMs ?? 1_800);
+  const maintenanceMs = Math.max(100, options.budgets?.maintenanceMs ?? 800);
 
   const geminiPromise = component('provider_gemini', providerMs, dependencies.getGeminiReadiness);
   const accessTradePromise = component('provider_accesstrade', providerMs, dependencies.getAccessTradeCredential);
@@ -374,11 +382,18 @@ export async function buildAutomationHealthResponse(
     ),
     component(
       'projection_maintenance',
-      null,
-      () => dependencies.ensureProjectionMaintenance(summary, now, { signal: options.signal }),
+      // Observation stays bounded. Explicit Retry scheduling is intentionally
+      // not raced with a timeout because a committed state transition must not
+      // be reported as abandoned after the client disconnects.
+      options.scheduleProjectionMaintenance ? null : maintenanceMs,
+      () => options.scheduleProjectionMaintenance
+        ? dependencies.ensureProjectionMaintenance(summary, now, { signal: options.signal })
+        : dependencies.observeProjectionMaintenance(summary, now),
       {
         classify: value => ({
-          status: ['FAILED', 'EXHAUSTED'].includes(value.repairState) ? 'degraded' : 'available',
+          status: value.status === 'NEEDS_REPAIR' || ['FAILED', 'EXHAUSTED'].includes(value.repairState)
+            ? 'degraded'
+            : 'available',
           stale: false,
           reasonCode: value.outcomeReasonCode
             || (value.repairState === 'IDLE' ? 'OK' : `JOB_HEALTH_PROJECTION_REBUILD_${value.repairState}`),

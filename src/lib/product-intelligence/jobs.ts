@@ -18,7 +18,10 @@ import {
   isAccessTradeTrackingUrl,
 } from '@/lib/integrations/accesstrade';
 import { eligibilityBlockerMessage, evaluateProductEligibility } from '@/lib/productEligibility';
-import { canonicalizeProductBlockers } from '@/lib/productBlockers';
+import {
+  isFailClosedProductBlocker,
+  preserveFailClosedProductBlockers,
+} from '@/lib/productBlockers';
 import { isPublicSafeProduct } from '@/lib/publicProductFilter';
 import { getDomainCircuitDecision, recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
@@ -817,15 +820,21 @@ async function recheckHealth(job: AutomationJob) {
 
       updates.eligibility = eligibility;
       updates.reviewQuality = eligibility.reviewQuality;
-      updates.currentBlockers = canonicalizeProductBlockers(blockers, new Date().toISOString()).map(blocker => ({
+      const blockersCheckedAt = new Date().toISOString();
+      const reconciledBlockers = preserveFailClosedProductBlockers(product, blockers, blockersCheckedAt);
+      updates.currentBlockers = reconciledBlockers.map(blocker => ({
         ...blocker,
-        source: 'PRODUCT_HEALTH_RULES',
-        message: eligibilityBlockerMessage(blocker.code),
+        source: isFailClosedProductBlocker(blocker) ? blocker.source : 'PRODUCT_HEALTH_RULES',
+        message: isFailClosedProductBlocker(blocker)
+          ? blocker.message
+          : eligibilityBlockerMessage(blocker.code),
       }));
-      updates.blockersCheckedAt = new Date().toISOString();
+      const failClosedBlockers = reconciledBlockers.filter(isFailClosedProductBlocker);
+      const failClosedCodes = failClosedBlockers.map(blocker => blocker.code);
+      updates.blockersCheckedAt = blockersCheckedAt;
       updates.publicBlockReasons = updates.currentBlockers.map(blocker => blocker.code);
-      updates.publicBlocked = publishUnsafe && !retainPublicAfterTransientFailure;
-      updates.publicBlockReason = healthReason;
+      updates.publicBlocked = failClosedCodes.length > 0 || (publishUnsafe && !retainPublicAfterTransientFailure);
+      updates.publicBlockReason = failClosedCodes.length > 0 ? failClosedCodes.join(',') : healthReason;
       if (publishUnsafe) {
         if (retainPublicAfterTransientFailure) {
           updates.publicHidden = false;
@@ -874,6 +883,29 @@ async function recheckHealth(job: AutomationJob) {
         updates.nextRetryAt = undefined;
       }
 
+      // A generic reprocess is never an applicable superseding workflow for
+      // an operator/manual, unknown, policy, permanent, or external-evidence
+      // blocker. Keep the serving state blocked even if this run happens to
+      // observe healthy transport for the other fields. Apply this after
+      // retry bookkeeping so a protected blocker cannot be downgraded to an
+      // automatic retry by a partial observation.
+      if (failClosedCodes.length > 0) {
+        updates.status = product.status === 'archived' ? 'archived' : 'needs_review';
+        updates.publicHidden = true;
+        updates.needsVerification = true;
+        updates.autoPublishEligible = false;
+        updates.autoPublished = false;
+        updates.publicDecision = product.status === 'archived' ? 'archived' : 'blocked';
+        updates.unpublishedReason = failClosedCodes.join(',');
+        updates.nextAutomaticAction = 'WAITING_MANUAL_REVIEW';
+        updates.nextRetryAt = undefined;
+        updates.quarantineReasons = [...new Set([...(product.quarantineReasons || []), ...failClosedCodes])];
+        if (product.status === 'published') {
+          updates.lifecycleState = 'QUARANTINED';
+          updates.lifecycleUpdatedAt = blockersCheckedAt;
+        }
+      }
+
       updates.lastReprocessOperationId = operationId;
       updates.lastReprocessedAt = new Date().toISOString();
       const beforeSignature = operationalHealthSignature(product);
@@ -882,8 +914,8 @@ async function recheckHealth(job: AutomationJob) {
       if (!persisted) throw new Error(`STORAGE_ERROR: product ${product.id} disappeared before health persistence`);
       await finishReprocessAudit(job, persisted, 'COMPLETED');
       if (operationalHealthSignature(persisted) === beforeSignature) unchanged += 1;
-      if (healthUnsafe) unhealthy += 1;
-      else healthy += 1;
+       if (healthUnsafe || failClosedCodes.length > 0) unhealthy += 1;
+       else healthy += 1;
       if (isThirtyShine) quarantined += 1;
       processed += 1;
     } catch (error) {

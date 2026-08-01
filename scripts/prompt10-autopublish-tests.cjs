@@ -557,6 +557,7 @@ async function main() {
       monitor.scheduledAt = new Date(0).toISOString();
       monitor.payload.healthOutcome = 'HEALTHY';
       monitor.payload.publicPageStatus = 200;
+      monitor.payload.publicPageIdentity = 'expected';
       return jobs;
     });
     const monitored = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);

@@ -22,6 +22,20 @@ export interface AutomationExecutionDescriptor extends AutomationExecutionPolicy
   resourceKeys: string[];
 }
 
+/**
+ * Claim lanes are deliberately narrower than general priority.  The legacy
+ * Guardian lanes remain supported while the V3 rollout can reserve capacity
+ * for every operationally-critical job.
+ */
+export type AutomationWorkerClaimLane =
+  | 'ANY'
+  | 'RUNTIME_GUARDIAN'
+  | 'NON_GUARDIAN'
+  | 'CRITICAL'
+  | 'NON_CRITICAL';
+
+export type AutomationPriorityClass = 'CRITICAL' | 'NORMAL';
+
 const CRITICAL_JOB_TYPES = new Set<AutomationJobType>([
   'RUNTIME_GUARDIAN',
   'POST_PUBLISH_MONITOR',
@@ -47,6 +61,11 @@ const CONTROL_JOB_TYPES = new Set<AutomationJobType>([
   'EVALUATE_ALERTS',
   'AGGREGATE_GROWTH_METRICS',
 ]);
+
+function isProjectionRepairJob(input: Pick<AutomationJob, 'type' | 'payload'>): boolean {
+  return input.type === 'RECONCILE_AUTOMATION'
+    && input.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD';
+}
 
 function policyForType(type: AutomationJobType): AutomationExecutionPolicy {
   if (type === 'BULK_PRODUCT_OPERATION' || type === 'RECONCILE_AUTOMATION') {
@@ -118,12 +137,14 @@ export function getAutomationExecutionDescriptor(
   job: Pick<AutomationJob, 'type' | 'payload' | 'operationId'>,
 ): AutomationExecutionDescriptor {
   if (
-    job.type === 'RECONCILE_AUTOMATION'
-    && job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD'
+    isProjectionRepairJob(job)
   ) {
     return {
       concurrencyClass: 'PROJECTION_MAINTENANCE',
-      critical: false,
+      // Repair heartbeat and promotion carry the serving projection's safety
+      // boundary. They must not sit behind long product or alert work once
+      // the guarded critical-lane rollout is enabled.
+      critical: true,
       exclusive: false,
       resourceScope: 'NONE',
       resourceKeys: ['projection:automation-job-health'],
@@ -164,12 +185,35 @@ export function automationJobsConflict(
   return rightDescriptor.resourceKeys.some(key => leftKeys.has(key));
 }
 
-export function isCriticalAutomationJob(type: AutomationJobType): boolean {
-  return CRITICAL_JOB_TYPES.has(type);
+export function isCriticalAutomationJob(
+  input: AutomationJobType | Pick<AutomationJob, 'type' | 'payload'>,
+  payload: Record<string, unknown> = {},
+): boolean {
+  const job = typeof input === 'string'
+    ? { type: input, payload }
+    : input;
+  return CRITICAL_JOB_TYPES.has(job.type) || isProjectionRepairJob(job);
 }
 
 export function isRuntimeGuardianJob(type: AutomationJobType): boolean {
   return type === 'RUNTIME_GUARDIAN';
+}
+
+export function automationPriorityClassForJob(
+  job: Pick<AutomationJob, 'type' | 'payload'>,
+): AutomationPriorityClass {
+  return isCriticalAutomationJob(job) ? 'CRITICAL' : 'NORMAL';
+}
+
+export function isAutomationJobEligibleForClaimLane(
+  job: Pick<AutomationJob, 'type' | 'payload'>,
+  lane: AutomationWorkerClaimLane,
+): boolean {
+  if (lane === 'ANY') return true;
+  if (lane === 'RUNTIME_GUARDIAN') return isRuntimeGuardianJob(job.type);
+  if (lane === 'NON_GUARDIAN') return !isRuntimeGuardianJob(job.type);
+  const critical = isCriticalAutomationJob(job);
+  return lane === 'CRITICAL' ? critical : !critical;
 }
 
 export function selectCompatibleWorkerJobs(
@@ -180,39 +224,68 @@ export function selectCompatibleWorkerJobs(
   fairSelector: (items: AutomationJob[], limit: number, nowMs: number) => AutomationJob[],
   criticalReservedCapacity = 1,
   laneCapacity?: {
-    runtimeGuardian: number;
-    nonGuardian: number;
+    /** V3 all-critical lane capacities. */
+    critical?: number;
+    normal?: number;
+    /** Legacy Guardian-only lane capacities. */
+    runtimeGuardian?: number;
+    nonGuardian?: number;
   },
+  /**
+   * Used only by the V3 guarded worker path when there is no separately
+   * reservable slot (for example, maxConcurrency=1). It makes a newly free
+   * shared slot pick critical work first without changing capacity.
+   */
+  preferCritical = false,
 ): AutomationJob[] {
   const maximum = Math.max(0, Math.min(10, Math.floor(limit)));
   if (!maximum) return [];
   const selected: AutomationJob[] = [];
   const compatible = (candidate: AutomationJob) =>
     [...activeJobs, ...selected].every(active => !automationJobsConflict(candidate, active));
-  const runtimeGuardianLimit = Math.min(
+  // Existing callers use the Guardian-only capacity shape.  Do not silently
+  // reinterpret that safe legacy lane as an all-critical lane; V3 opts in by
+  // passing the explicit critical/normal capacity shape.
+  const allCriticalCapacity = laneCapacity?.critical !== undefined
+    || laneCapacity?.normal !== undefined;
+  const reservedCritical = (candidate: AutomationJob) => (allCriticalCapacity || preferCritical)
+    ? isCriticalAutomationJob(candidate)
+    : isRuntimeGuardianJob(candidate.type);
+  const criticalLimit = Math.min(
     maximum,
-    laneCapacity
-      ? Math.max(0, Math.floor(laneCapacity.runtimeGuardian))
-      : Math.max(0, Math.floor(criticalReservedCapacity)),
+    preferCritical
+      ? maximum
+      : laneCapacity
+        ? Math.max(0, Math.floor(
+          (allCriticalCapacity ? laneCapacity.critical : laneCapacity.runtimeGuardian)
+          ?? criticalReservedCapacity,
+        ))
+        : Math.max(0, Math.floor(criticalReservedCapacity)),
   );
-  if (runtimeGuardianLimit > 0) {
-    const guardians = fairSelector(
-      candidates.filter(candidate => isRuntimeGuardianJob(candidate.type)),
-      runtimeGuardianLimit,
+  if (criticalLimit > 0) {
+    const critical = fairSelector(
+      candidates.filter(reservedCritical),
+      criticalLimit,
       nowMs,
     );
-    for (const candidate of guardians) {
+    for (const candidate of critical) {
       if (compatible(candidate)) selected.push(candidate);
     }
   }
   const selectedIds = new Set(selected.map(job => job.id));
-  let selectedGuardians = selected.filter(job => isRuntimeGuardianJob(job.type)).length;
-  let selectedNonGuardians = selected.length - selectedGuardians;
-  const guardianCapacity = laneCapacity
-    ? Math.max(0, Math.floor(laneCapacity.runtimeGuardian))
+  let selectedCritical = selected.filter(reservedCritical).length;
+  let selectedNormal = selected.length - selectedCritical;
+  const criticalCapacity = laneCapacity
+    ? Math.max(0, Math.floor(
+      (allCriticalCapacity ? laneCapacity.critical : laneCapacity.runtimeGuardian)
+      ?? maximum,
+    ))
     : maximum;
-  const nonGuardianCapacity = laneCapacity
-    ? Math.max(0, Math.floor(laneCapacity.nonGuardian))
+  const normalCapacity = laneCapacity
+    ? Math.max(0, Math.floor(
+      (allCriticalCapacity ? laneCapacity.normal : laneCapacity.nonGuardian)
+      ?? maximum,
+    ))
     : maximum;
   const remainder = fairSelector(
     candidates.filter(candidate => !selectedIds.has(candidate.id)),
@@ -221,12 +294,12 @@ export function selectCompatibleWorkerJobs(
   );
   for (const candidate of remainder) {
     if (selected.length >= maximum) break;
-    const guardian = isRuntimeGuardianJob(candidate.type);
-    if (guardian ? selectedGuardians >= guardianCapacity : selectedNonGuardians >= nonGuardianCapacity) continue;
+    const critical = reservedCritical(candidate);
+    if (critical ? selectedCritical >= criticalCapacity : selectedNormal >= normalCapacity) continue;
     if (!compatible(candidate)) continue;
     selected.push(candidate);
-    if (guardian) selectedGuardians += 1;
-    else selectedNonGuardians += 1;
+    if (critical) selectedCritical += 1;
+    else selectedNormal += 1;
   }
   return selected;
 }

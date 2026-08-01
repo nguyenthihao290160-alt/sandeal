@@ -41,6 +41,7 @@ import {
 } from './projectionMaintenance';
 import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
+import { isCriticalAutomationJob, type AutomationWorkerClaimLane } from './executionPolicy';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 
@@ -64,7 +65,8 @@ export interface WorkerBatchOptions {
   maximumInFlight?: number;
   criticalReservedCapacity?: number;
   enforceExecutionCompatibility?: boolean;
-  claimLane?: 'ANY' | 'RUNTIME_GUARDIAN' | 'NON_GUARDIAN';
+  claimLane?: AutomationWorkerClaimLane;
+  preferCritical?: boolean;
 }
 
 export interface ContinuousWorkerPoolResult extends WorkerRunResult {
@@ -74,6 +76,20 @@ export interface ContinuousWorkerPoolResult extends WorkerRunResult {
   claimAttempts: number;
   drained: boolean;
   stopRequested: boolean;
+  priorityScheduling: 'RUNTIME_GUARDIAN_ONLY' | 'ALL_CRITICAL';
+}
+
+/**
+ * Preserve claim order within each priority class while moving safety-critical
+ * work ahead of ordinary work in the legacy sequential batch path.
+ */
+export function orderAutomationWorkerBatch(claimed: AutomationJob[]): AutomationJob[] {
+  return claimed
+    .map((job, index) => ({ job, index }))
+    .sort((left, right) =>
+      Number(isCriticalAutomationJob(right.job)) - Number(isCriticalAutomationJob(left.job))
+      || left.index - right.index)
+    .map(item => item.job);
 }
 
 function hashValue(value: unknown): string {
@@ -857,10 +873,16 @@ export async function processAutomationBatch(
       }
     }
   };
-  if (claimed.every(job => job.type === 'PROCESS_CANDIDATE')) {
-    await Promise.all(claimed.map(processJob));
+  // The legacy bounded batch remains intentionally sequential for mixed
+  // storage-sensitive work.  Execute the critical subset first so a critical
+  // job already claimed alongside a long normal job never suffers local
+  // head-of-line blocking. New-arrival isolation is handled by the pooled V3
+  // critical lane below when that rollout is ACTIVE.
+  const orderedClaimed = orderAutomationWorkerBatch(claimed);
+  if (orderedClaimed.every(job => job.type === 'PROCESS_CANDIDATE')) {
+    await Promise.all(orderedClaimed.map(processJob));
   } else {
-    for (const job of claimed) await processJob(job);
+    for (const job of orderedClaimed) await processJob(job);
   }
   return result;
 }
@@ -892,6 +914,11 @@ export async function runContinuousWorkerPool(options: {
   drainTimeoutMs?: number;
   stopPollMs?: number;
   lanePollMs?: number;
+  /**
+   * Guardian-only reservation is the established rollout. ALL_CRITICAL is
+   * enabled only by the dedicated V3 feature control in the process entrypoint.
+   */
+  priorityScheduling?: 'RUNTIME_GUARDIAN_ONLY' | 'ALL_CRITICAL';
   runBatch?: (
     workerId: string,
     ownership: RuntimeRoleOwnership | undefined,
@@ -906,6 +933,9 @@ export async function runContinuousWorkerPool(options: {
   const drainTimeoutMs = boundedPoolValue(options.drainTimeoutMs, 12_000, 1_000, 60_000);
   const stopPollMs = boundedPoolValue(options.stopPollMs, 100, 10, 1_000);
   const lanePollMs = boundedPoolValue(options.lanePollMs, 2_000, 100, 10_000);
+  const priorityScheduling = options.priorityScheduling === 'ALL_CRITICAL'
+    ? 'ALL_CRITICAL'
+    : 'RUNTIME_GUARDIAN_ONLY';
   const aggregate: ContinuousWorkerPoolResult = {
     workerId: options.workerId,
     claimed: 0,
@@ -922,10 +952,11 @@ export async function runContinuousWorkerPool(options: {
     claimAttempts: 0,
     drained: true,
     stopRequested: false,
+    priorityScheduling,
   };
   const runBatch = options.runBatch || ((workerId, ownership, batchOptions) =>
     processAutomationBatch(workerId, 1, ownership, batchOptions));
-  type WorkerPoolLane = 'ANY' | 'RUNTIME_GUARDIAN' | 'NON_GUARDIAN';
+  type WorkerPoolLane = AutomationWorkerClaimLane;
   type ActiveWorkerSlot = {
     lane: WorkerPoolLane;
     promise: Promise<{
@@ -937,8 +968,14 @@ export async function runContinuousWorkerPool(options: {
   };
   const lanes: Array<{ lane: WorkerPoolLane; capacity: number }> = criticalReservedCapacity > 0
     ? [
-        { lane: 'RUNTIME_GUARDIAN', capacity: criticalReservedCapacity },
-        { lane: 'NON_GUARDIAN', capacity: maxConcurrency - criticalReservedCapacity },
+        {
+          lane: priorityScheduling === 'ALL_CRITICAL' ? 'CRITICAL' : 'RUNTIME_GUARDIAN',
+          capacity: criticalReservedCapacity,
+        },
+        {
+          lane: priorityScheduling === 'ALL_CRITICAL' ? 'NON_CRITICAL' : 'NON_GUARDIAN',
+          capacity: maxConcurrency - criticalReservedCapacity,
+        },
       ]
     : [{ lane: 'ANY', capacity: maxConcurrency }];
   const active = new Map<number, ActiveWorkerSlot>();
@@ -963,6 +1000,9 @@ export async function runContinuousWorkerPool(options: {
       criticalReservedCapacity,
       enforceExecutionCompatibility: true,
       claimLane: lane,
+      // At a single-slot concurrency there is no lane to reserve. The guarded
+      // V3 path still gives the next free slot to critical work if any waits.
+      preferCritical: priorityScheduling === 'ALL_CRITICAL',
     }).then(
       result => ({ slotId, lane, result }),
       error => ({ slotId, lane, error }),

@@ -574,7 +574,7 @@ async function main() {
     }));
   });
 
-  await test('worker rollout controls enable the continuous pool only for a valid ACTIVE mode', () => {
+  await test('worker rollout controls retain safe defaults and enable only valid ACTIVE lanes', () => {
     const rollout = require('../src/lib/automation/featureRollout.ts');
     assert.equal(rollout.isContinuousWorkerPoolEnabled({ WORKER_CONTINUOUS_POOL_V2: 'ACTIVE' }), true);
     assert.equal(rollout.isContinuousWorkerPoolEnabled({ WORKER_CONTINUOUS_POOL_V2: 'OFF' }), false);
@@ -582,14 +582,17 @@ async function main() {
     assert.equal(rollout.isContinuousWorkerPoolEnabled({ WORKER_CONTINUOUS_POOL_V2: 'OBSERVE' }), false);
     assert.equal(rollout.isContinuousWorkerPoolEnabled({ WORKER_CONTINUOUS_POOL_V2: 'CANARY' }), false);
     assert.equal(rollout.isContinuousWorkerPoolEnabled({ WORKER_CONTINUOUS_POOL_V2: 'not-a-mode' }), false);
+    assert.equal(rollout.isCriticalWorkerSchedulingEnabled({}), false);
+    assert.equal(rollout.isCriticalWorkerSchedulingEnabled({ WORKER_CRITICAL_SCHEDULING_V3: 'SHADOW' }), false);
+    assert.equal(rollout.isCriticalWorkerSchedulingEnabled({ WORKER_CRITICAL_SCHEDULING_V3: 'ACTIVE' }), true);
     const workerScript = fs.readFileSync(path.join(process.cwd(), 'scripts', 'automation-worker.cjs'), 'utf8');
     assert.match(workerScript, /isContinuousWorkerPoolEnabled\(\)/);
-    assert.match(workerScript, /continuousPoolActive[\s\S]*runContinuousWorkerPool[\s\S]*processAutomationBatch/);
+    assert.match(workerScript, /criticalSchedulingActive[\s\S]*continuousPoolActive[\s\S]*runContinuousWorkerPool[\s\S]*processAutomationBatch/);
     const workerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'lib', 'automation', 'worker.ts'), 'utf8');
     assert.match(workerSource, /claimAutomationJobs\(workerId, limit, 60_000, Date\.now\(\), ownership, options\)/);
     assert.match(
       workerSource,
-      /claimed\.every\(job => job\.type === 'PROCESS_CANDIDATE'\)[\s\S]*Promise\.all\(claimed\.map\(processJob\)\)[\s\S]*for \(const job of claimed\) await processJob\(job\)/,
+      /orderAutomationWorkerBatch[\s\S]*isCriticalAutomationJob[\s\S]*orderedClaimed = orderAutomationWorkerBatch\(claimed\)[\s\S]*orderedClaimed\.every\(job => job\.type === 'PROCESS_CANDIDATE'\)[\s\S]*Promise\.all\(orderedClaimed\.map\(processJob\)\)[\s\S]*for \(const job of orderedClaimed\) await processJob\(job\)/,
     );
     assert.doesNotMatch(workerSource, /const claimOptions: WorkerBatchOptions/);
   });

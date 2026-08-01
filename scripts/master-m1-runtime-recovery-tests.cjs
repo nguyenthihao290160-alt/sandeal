@@ -110,8 +110,25 @@ async function main() {
     assert.equal(states.find(item => item.feature === 'RECOVERY_CANARY').mode, 'OFF');
     assert.equal(states.find(item => item.feature === 'WORKER_CONTINUOUS_POOL_V2').mode, 'OFF');
     assert.equal(states.find(item => item.feature === 'SLO_RUNNABLE_AT_V2').mode, 'SHADOW');
+    assert.equal(states.find(item => item.feature === 'PRODUCT_RECHECK_V2').mode, 'SHADOW');
+    assert.equal(states.find(item => item.feature === 'PUBLICATION_EVIDENCE_V2').mode, 'SHADOW');
+    assert.equal(states.find(item => item.feature === 'ACCESSTRADE_LIVE_READINESS_PROBE').mode, 'OFF');
     assert.equal(states.find(item => item.feature === 'MONGO_BULK_WRITE').mode, 'OFF');
     assert.equal(states.every(item => item.valid), true);
+    const productRecheck = states.find(item => item.feature === 'PRODUCT_RECHECK_V2');
+    assert.deepEqual({
+      configuredValue: productRecheck.configuredValue,
+      effectiveMode: productRecheck.effectiveMode,
+      effectiveModeSource: productRecheck.effectiveModeSource,
+      rolloutCohort: productRecheck.rolloutCohort,
+      inactiveReason: productRecheck.inactiveReason,
+    }, {
+      configuredValue: null,
+      effectiveMode: 'SHADOW',
+      effectiveModeSource: 'SAFE_DEFAULT',
+      rolloutCohort: 'PRODUCT_RECHECK_V2:SHADOW',
+      inactiveReason: 'FEATURE_ROLLOUT_SHADOW_ONLY',
+    });
   });
 
   await test('malformed runtime-control journal is fail-closed and cannot be cleared as healthy', async () => {
@@ -178,8 +195,13 @@ async function main() {
     const state = rollout.getFeatureRolloutState('RECOVERY_CANARY', { RECOVERY_CANARY: 'unexpected-secret-like-value' });
     assert.deepEqual(state, {
       feature: 'RECOVERY_CANARY',
+      configuredValue: 'INVALID',
       mode: 'OFF',
       defaultMode: 'OFF',
+      effectiveMode: 'OFF',
+      effectiveModeSource: 'INVALID_CONFIGURATION_FALLBACK',
+      rolloutCohort: 'RECOVERY_CANARY:OFF',
+      inactiveReason: 'FEATURE_ROLLOUT_INVALID_VALUE',
       configured: true,
       valid: false,
       reasonCode: 'FEATURE_ROLLOUT_INVALID_VALUE',

@@ -16,10 +16,12 @@ import {
 } from '@/lib/autonomous/publishPolicy';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
 import { isReviewIndexable } from '@/lib/editorialReview';
+import { canonicalBlockerCodes, preserveFailClosedProductBlockers } from '@/lib/productBlockers';
 import { evaluateSafePublish } from '@/lib/safePublish';
 import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import type { LinkHealthStatus, Product, ProductLifecycleState, ProductOffer } from '@/lib/types';
+import { getFeatureRolloutState } from './featureRollout';
 import { createAutomationJob, getAutomationControl } from './store';
 import { finalizeRuntimeRecoveryCanaryPermit } from './runtimeRecoveryCanary';
 import type { AutomationJob } from './types';
@@ -34,12 +36,14 @@ const PERMANENT_IMAGE_STATUSES = new Set(['image_broken', 'invalid_image']);
 const PERMANENT_REASON = /(?:broken|not_found|image_broken|invalid_image)/;
 
 type MonitorOutcome = 'HEALTHY' | 'TEMPORARY_FAILURE' | 'CONFIRMED_BROKEN';
+type PublicPageIdentityStatus = 'EXPECTED_PRODUCT_CONFIRMED' | 'EXPECTED_PRODUCT_MISMATCH' | 'UNVERIFIED';
 
 interface MonitorStatuses {
   product: string;
   affiliate: string;
   image: string;
   publicPage: string;
+  publicPageIdentity: PublicPageIdentityStatus;
 }
 
 interface MonitorProbeResult {
@@ -152,18 +156,27 @@ async function probePublicPage(
   job: AutomationJob,
   product: Product,
   expectedPublic: boolean,
-): Promise<{ status: string; url: string; externalRequests: number }> {
+): Promise<{ status: string; identity: PublicPageIdentityStatus; url: string; externalRequests: number }> {
   const target = configuredPublicPageUrl(product);
-  if (!expectedPublic) return { status: 'not_applicable', url: target.url, externalRequests: 0 };
+  if (!expectedPublic) {
+    return { status: 'not_applicable', identity: 'UNVERIFIED', url: target.url, externalRequests: 0 };
+  }
   if (process.env.NODE_ENV === 'test' && job.payload.publicPageStatus !== undefined) {
     const fixture = Number(job.payload.publicPageStatus);
+    const expectedFixtureIdentity = job.payload.publicPageIdentity === 'expected';
+    const mismatchFixtureIdentity = job.payload.publicPageIdentity === 'mismatch';
     return {
       status: Number.isFinite(fixture) ? classifyPublicStatus(fixture) : String(job.payload.publicPageStatus || 'unverified'),
+      identity: expectedFixtureIdentity
+        ? 'EXPECTED_PRODUCT_CONFIRMED'
+        : mismatchFixtureIdentity
+          ? 'EXPECTED_PRODUCT_MISMATCH'
+          : 'UNVERIFIED',
       url: target.url,
       externalRequests: 0,
     };
   }
-  if (!target.configured) return { status: 'unverified', url: target.url, externalRequests: 0 };
+  if (!target.configured) return { status: 'unverified', identity: 'UNVERIFIED', url: target.url, externalRequests: 0 };
   try {
     if (target.loopback) {
       const response = await fetch(target.url, {
@@ -172,10 +185,23 @@ async function probePublicPage(
         headers: { Accept: 'text/html,application/xhtml+xml' },
         signal: AbortSignal.timeout(8_000),
       });
-      return { status: classifyPublicStatus(response.status), url: target.url, externalRequests: 1 };
+      const body = response.ok ? await readBoundedResponseText(response) : null;
+      return {
+        status: classifyPublicStatus(response.status),
+        identity: response.ok ? classifyPublicPageIdentity(product, body) : 'UNVERIFIED',
+        url: target.url,
+        externalRequests: 1,
+      };
     }
     const response = await fetchExternalSafely(target.url, { timeoutMs: 8_000, maxBytes: 64 * 1_024, maxRedirects: 3 });
-    return { status: classifyPublicStatus(response.response.status), url: response.finalUrl, externalRequests: 1 };
+    return {
+      status: classifyPublicStatus(response.response.status),
+      identity: response.response.ok
+        ? classifyPublicPageIdentity(product, new TextDecoder().decode(response.body))
+        : 'UNVERIFIED',
+      url: response.finalUrl,
+      externalRequests: 1,
+    };
   } catch (error) {
     const message = error instanceof Error ? `${error.name}:${error.message}`.toLowerCase() : String(error).toLowerCase();
     const status = message.includes('timeout') || message.includes('abort')
@@ -183,7 +209,7 @@ async function probePublicPage(
       : message.includes('dns')
         ? 'dns_error'
         : 'server_error';
-    return { status, url: target.url, externalRequests: 1 };
+    return { status, identity: 'UNVERIFIED', url: target.url, externalRequests: 1 };
   }
 }
 
@@ -235,13 +261,23 @@ async function probe(job: AutomationJob, product: Product, expectedPublic: boole
     affiliate: affiliateResolution.result.status,
     image: imageResolution.result.status,
     publicPage: publicPage.status,
+    publicPageIdentity: publicPage.identity,
   };
   const sourcePermanent = PERMANENT_LINK_STATUSES.has(statuses.product)
     || PERMANENT_LINK_STATUSES.has(statuses.affiliate)
     || PERMANENT_IMAGE_STATUSES.has(statuses.image);
   const publicPermanent = expectedPublic && PERMANENT_LINK_STATUSES.has(statuses.publicPage);
   const sourceHealthy = productResolution.result.ok && affiliateResolution.result.ok && imageResolution.result.ok;
-  const publicHealthy = !expectedPublic || HEALTHY_STATUSES.has(statuses.publicPage);
+  const publicationEvidenceMode = getFeatureRolloutState('PUBLICATION_EVIDENCE_V2').mode;
+  // A detected mismatch is never a healthy monitor result, including the
+  // legacy OFF rollback path. SHADOW additionally treats absent confirmation
+  // as partial/retryable, so it cannot inflate zero-touch or health SLOs.
+  const publicIdentityRequired = publicationEvidenceMode !== 'OFF'
+    || statuses.publicPageIdentity === 'EXPECTED_PRODUCT_MISMATCH';
+  const publicHealthy = !expectedPublic || (
+    HEALTHY_STATUSES.has(statuses.publicPage)
+    && (!publicIdentityRequired || statuses.publicPageIdentity === 'EXPECTED_PRODUCT_CONFIRMED')
+  );
   return {
     outcome: sourceHealthy && publicHealthy ? 'HEALTHY' : sourcePermanent || publicPermanent ? 'CONFIRMED_BROKEN' : 'TEMPORARY_FAILURE',
     statuses,
@@ -305,7 +341,12 @@ async function scheduleNextMonitor(
 }
 
 function healthReason(statuses: MonitorStatuses): string {
-  return [statuses.product, statuses.affiliate, statuses.image, `public:${statuses.publicPage}`].join(',');
+  return [
+    statuses.product,
+    statuses.affiliate,
+    statuses.image,
+    `public:${statuses.publicPage}:${statuses.publicPageIdentity}`,
+  ].join(',');
 }
 
 function productStatus(value: string): LinkHealthStatus {
@@ -387,7 +428,10 @@ function recoveryReadinessReasons(product: Product, evidenceValid: boolean, evid
     currentBlockers: [],
     quarantineReasons: [],
   });
-  const reasons = [...safe.reasons];
+  const reasons = [
+    ...safe.reasons,
+    ...canonicalBlockerCodes(preserveFailClosedProductBlockers(product, [], new Date().toISOString())),
+  ];
   if (!evidenceValid) reasons.push('persisted_evidence_unverified', ...evidenceReasons);
   if (product.recordType !== 'PRODUCT') reasons.push('record_type_not_product');
   if (product.riskLevel !== 'low') reasons.push('risk_not_low');
@@ -416,6 +460,59 @@ async function ensureRepublishChild(job: AutomationJob, product: Product): Promi
   return child.job.id;
 }
 
+function normalizePublicIdentity(value: unknown): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function classifyPublicPageIdentity(product: Product, body: string | null): PublicPageIdentityStatus {
+  if (body === null) return 'UNVERIFIED';
+  const documentText = normalizePublicIdentity(body);
+  if (!documentText) return 'UNVERIFIED';
+  const title = normalizePublicIdentity(product.title);
+  const sku = normalizePublicIdentity(product.sku);
+  if ((title.length >= 8 && documentText.includes(title))
+    || (sku.length >= 4 && documentText.includes(sku))) {
+    return 'EXPECTED_PRODUCT_CONFIRMED';
+  }
+  return 'EXPECTED_PRODUCT_MISMATCH';
+}
+
+async function readBoundedResponseText(response: Response, maximumBytes = 64 * 1_024): Promise<string | null> {
+  const declaredBytes = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declaredBytes) && declaredBytes > maximumBytes) return null;
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
+}
+
 async function hideUnhealthyRecoveryCanary(
   job: AutomationJob,
   workerId: string,
@@ -426,6 +523,8 @@ async function hideUnhealthyRecoveryCanary(
 ): Promise<{ product: Product; childJobId: string }> {
   const checkedAt = stableCheckedAt(job);
   const reasonCode = `RECOVERY_CANARY_MONITOR_${result.outcome}`;
+  const reconciledBlockers = preserveFailClosedProductBlockers(product, [reasonCode], checkedAt);
+  const blockerCodes = canonicalBlockerCodes(reconciledBlockers);
   let hidden = await transitionProduct(
     product.id,
     'HIDDEN',
@@ -444,8 +543,9 @@ async function hideUnhealthyRecoveryCanary(
     hiddenAt: checkedAt,
     hiddenReason: 'runtime_recovery_canary_monitor_failed',
     publicBlocked: true,
-    publicBlockReason: reasonCode,
-    publicBlockReasons: [reasonCode],
+    publicBlockReason: blockerCodes.join(','),
+    publicBlockReasons: blockerCodes,
+    currentBlockers: reconciledBlockers,
     blockersCheckedAt: checkedAt,
     quarantineReasons: [...new Set([...(hidden.quarantineReasons || []), reasonCode])],
     nextAutomaticAction: 'RECHECK_HIDDEN_PRODUCT',
@@ -491,6 +591,13 @@ async function hideConfirmedProduct(
   }
   const checkedAt = stableCheckedAt(job);
   const reason = healthReason(result.statuses);
+  const reconciledBlockers = preserveFailClosedProductBlockers(product, [
+    result.statuses.product,
+    result.statuses.affiliate,
+    result.statuses.image,
+    result.statuses.publicPage,
+  ], checkedAt);
+  const blockerCodes = canonicalBlockerCodes(reconciledBlockers);
   const saved = await saveCanonicalProduct(current.id, {
     linkHealthStatus: productStatus(result.statuses.product),
     affiliateHealthStatus: productStatus(result.statuses.affiliate),
@@ -503,8 +610,9 @@ async function hideConfirmedProduct(
     publicDecision: 'quarantined',
     hiddenAt: checkedAt,
     hiddenReason: 'confirmed_broken',
-    publicBlockReason: reason,
-    publicBlockReasons: [result.statuses.product, result.statuses.affiliate, result.statuses.image, result.statuses.publicPage],
+    publicBlockReason: blockerCodes.join(',') || reason,
+    publicBlockReasons: blockerCodes.length ? blockerCodes : [result.statuses.product, result.statuses.affiliate, result.statuses.image, result.statuses.publicPage],
+    currentBlockers: reconciledBlockers,
     quarantineReasons: [...new Set([...(current.quarantineReasons || []), 'confirmed_broken'])],
     consecutiveHealthFailures: Math.max(2, Number(current.consecutiveHealthFailures || 0)),
     sourceHealthReason: reason,
@@ -547,7 +655,13 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
   const recoveryFlow = ['HIDDEN', 'QUARANTINED'].includes(originState);
 
   if (product.lifecycleState === 'CONFIRMED_BROKEN') {
-    const fallbackStatuses: MonitorStatuses = { product: 'broken', affiliate: 'broken', image: 'image_broken', publicPage: 'not_found' };
+    const fallbackStatuses: MonitorStatuses = {
+      product: 'broken',
+      affiliate: 'broken',
+      image: 'image_broken',
+      publicPage: 'not_found',
+      publicPageIdentity: 'UNVERIFIED',
+    };
     const finalized = await hideConfirmedProduct(job, workerId, product, {
       outcome: 'CONFIRMED_BROKEN', statuses: fallbackStatuses, externalRequests: 0,
       selectedProductUrl: String(product.originalUrl || ''), selectedAffiliateUrl: String(product.affiliateUrl || ''),
@@ -583,18 +697,26 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
 
     if (recoveryFlow) {
       const evidence = await verifyAutonomousPublishEvidence(product, Date.parse(checkedAt));
+      const persistedFailClosedBlockers = preserveFailClosedProductBlockers(product, [], checkedAt);
+      const persistedFailClosedCodes = canonicalBlockerCodes(persistedFailClosedBlockers);
       const readinessReasons = recoveryReadinessReasons(product, evidence.valid, evidence.reasons);
       if (readinessReasons.length) {
+        const reconciledBlockers = preserveFailClosedProductBlockers(product, readinessReasons, checkedAt);
+        const blockerCodes = canonicalBlockerCodes(reconciledBlockers);
         product = await transitionProduct(productId, 'QUARANTINED', job, workerId, 'quarantined', readinessReasons);
         await saveCanonicalProduct(productId, {
           status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
           autoPublishEligible: false, publicDecision: 'quarantined', quarantineReasons: readinessReasons,
+          publicBlocked: true, publicBlockReason: blockerCodes.join(','), publicBlockReasons: blockerCodes,
+          currentBlockers: reconciledBlockers, blockersCheckedAt: checkedAt,
           nextAutomaticAction: 'RECHECK_QUARANTINED_PRODUCT',
         });
         const childJobId = await scheduleNextMonitor(job, productId, DAY, sequence + 1, '24h', 'quarantine-recheck', true);
         return {
           executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
-          outcome: 'HEALTHY', recovered: false, quarantined: true, readinessReasons, childJobId,
+          outcome: persistedFailClosedCodes.length ? 'TEMPORARY_FAILURE' : 'HEALTHY',
+          recovered: false, quarantined: true, readinessReasons,
+          blockedByPersistedBlockers: persistedFailClosedCodes.length > 0, childJobId,
           statuses: probeResult.statuses, rulesVersion: RULES_VERSION, evidenceCoverage: evidence.coverage,
           aiRequests: 0, externalRequests: probeResult.externalRequests,
         };
@@ -613,6 +735,23 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
         outcome: 'HEALTHY', recovered: true, childJobId, statuses: probeResult.statuses,
         rulesVersion: RULES_VERSION, evidenceCoverage: evidence.coverage,
         aiRequests: 0, externalRequests: probeResult.externalRequests,
+      };
+    }
+
+    const persistedFailClosedBlockers = preserveFailClosedProductBlockers(product, [], checkedAt);
+    if (persistedFailClosedBlockers.length) {
+      const blockerCodes = canonicalBlockerCodes(persistedFailClosedBlockers);
+      const blocked = await saveCanonicalProduct(productId, {
+        status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
+        publicDecision: 'blocked', publicBlocked: true, publicBlockReason: blockerCodes.join(','),
+        publicBlockReasons: blockerCodes, currentBlockers: persistedFailClosedBlockers,
+        blockersCheckedAt: checkedAt, nextAutomaticAction: 'WAITING_MANUAL_REVIEW', nextRetryAt: undefined,
+      });
+      return {
+        executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
+        outcome: 'TEMPORARY_FAILURE', recovered: false, blockedByPersistedBlockers: true,
+        readinessReasons: blockerCodes, statuses: probeResult.statuses, rulesVersion: RULES_VERSION,
+        aiRequests: 0, externalRequests: probeResult.externalRequests, productId: blocked?.id,
       };
     }
 

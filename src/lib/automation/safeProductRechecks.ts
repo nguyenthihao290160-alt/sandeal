@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { evaluateProductEligibility } from '@/lib/productEligibility';
 import type { Product } from '@/lib/types';
 import { createAutomationJob } from './store';
 
@@ -42,6 +43,41 @@ export interface SafeProductRecheckScheduleResult {
   manualInputRequired: number;
   notRequired: number;
   createdJobIds: string[];
+}
+
+export type ProductRecoveryBlockerClassification =
+  | 'RETRYABLE'
+  | 'RECHECK_SCHEDULED'
+  | 'WAITING_EXTERNAL'
+  | 'WAITING_MANUAL_REVIEW'
+  | 'BLOCKED_BY_POLICY'
+  | 'PERMANENT_FAILURE'
+  | 'RESOLVED';
+
+export interface PublicationReadinessDryRunProduct {
+  productId: string;
+  title: string;
+  eligibleForPublish: boolean;
+  eligibleForPublic: boolean;
+  readyForPublication: boolean;
+  runtimeSafetyOnly: boolean;
+  manualReviewRequired: boolean;
+  policyBlocked: boolean;
+  evidenceGeneration: string;
+  nextAutomaticAction: string;
+  blockers: Array<{ code: string; classification: ProductRecoveryBlockerClassification }>;
+}
+
+export interface PublicationReadinessDryRunResult {
+  generatedAt: string;
+  inspected: number;
+  bounded: boolean;
+  runtimePublishingBlocked: boolean;
+  readyCount: number;
+  manualReviewCount: number;
+  policyBlockedCount: number;
+  runtimeSafetyOnlyCount: number;
+  closestToReady: PublicationReadinessDryRunProduct[];
 }
 
 function safeTimestamp(value: string | undefined): string | null {
@@ -129,6 +165,82 @@ function requested(product: Product): boolean {
   return /recheck|retry|verify/i.test(String(product.nextAutomaticAction || ''))
     || product.lifecycleState === 'RETRY_SCHEDULED'
     || Boolean(product.nextRetryAt);
+}
+
+function blockerClassification(code: string, product: Product, now: number): ProductRecoveryBlockerClassification {
+  const normalized = code.toLowerCase();
+  if (/prohibited|permanent|confirmed_broken|not_product|invalid_product_kind|archived/.test(normalized)) {
+    return 'PERMANENT_FAILURE';
+  }
+  if (/policy|gemini|ai_|paid|compliance/.test(normalized)) return 'BLOCKED_BY_POLICY';
+  if (/manual|human_review|review_quality|review_|claim/.test(normalized)) return 'WAITING_MANUAL_REVIEW';
+  if (/affiliate|canonical|product_url|link|image|price|source|accesstrade|credential|timeout|dns|rate_limit|merchant/.test(normalized)) {
+    return 'WAITING_EXTERNAL';
+  }
+  const recheck = classifyProductRecheck(product, now);
+  if (recheck.disposition === 'RETRYABLE') return 'RECHECK_SCHEDULED';
+  if (recheck.disposition === 'NOT_DUE') return 'RECHECK_SCHEDULED';
+  return 'RETRYABLE';
+}
+
+/**
+ * Read-only readiness classification. It recalculates current eligibility and
+ * never schedules, publishes, edits, or clears product evidence.
+ */
+export function publicationReadinessDryRun(
+  products: readonly Product[],
+  options: {
+    now?: number;
+    limit?: number;
+    runtimePublishingBlocked?: boolean;
+  } = {},
+): PublicationReadinessDryRunResult {
+  const now = options.now ?? Date.now();
+  const limit = Math.max(1, Math.min(DEFAULT_RECHECK_LIMIT, Math.floor(options.limit || 10)));
+  const runtimePublishingBlocked = options.runtimePublishingBlocked === true;
+  const entries = products.map(product => {
+    const eligibility = evaluateProductEligibility(product, now);
+    const blockerCodes = [...new Set(eligibility.criticalBlockers)].sort();
+    const blockers = blockerCodes.map(code => ({
+      code,
+      classification: blockerClassification(code, product, now),
+    }));
+    const manualReviewRequired = blockers.some(blocker => blocker.classification === 'WAITING_MANUAL_REVIEW');
+    const policyBlocked = blockers.some(blocker => blocker.classification === 'BLOCKED_BY_POLICY');
+    const runtimeSafetyOnly = eligibility.eligibleForPublish && runtimePublishingBlocked;
+    return {
+      productId: product.id,
+      title: String(product.title || '').slice(0, 240),
+      eligibleForPublish: eligibility.eligibleForPublish,
+      eligibleForPublic: eligibility.eligibleForPublic,
+      readyForPublication: eligibility.eligibleForPublish && !runtimePublishingBlocked,
+      runtimeSafetyOnly,
+      manualReviewRequired,
+      policyBlocked,
+      evidenceGeneration: product.evidenceSnapshotHash || product.sourceHash || product.updatedAt || product.id,
+      nextAutomaticAction: String(product.nextAutomaticAction || eligibility.nextRequiredAction || 'NONE'),
+      blockers: blockers.length ? blockers : [{ code: 'RESOLVED', classification: 'RESOLVED' as const }],
+    } satisfies PublicationReadinessDryRunProduct;
+  }).sort((left, right) => {
+    const leftBlocking = left.blockers[0]?.classification === 'RESOLVED' ? 0 : left.blockers.length;
+    const rightBlocking = right.blockers[0]?.classification === 'RESOLVED' ? 0 : right.blockers.length;
+    return leftBlocking - rightBlocking || left.productId.localeCompare(right.productId);
+  });
+  const readyCount = entries.filter(entry => entry.readyForPublication).length;
+  const manualReviewCount = entries.filter(entry => entry.manualReviewRequired).length;
+  const policyBlockedCount = entries.filter(entry => entry.policyBlocked).length;
+  const runtimeSafetyOnlyCount = entries.filter(entry => entry.runtimeSafetyOnly).length;
+  return {
+    generatedAt: new Date(now).toISOString(),
+    inspected: products.length,
+    bounded: entries.length > limit,
+    runtimePublishingBlocked,
+    readyCount,
+    manualReviewCount,
+    policyBlockedCount,
+    runtimeSafetyOnlyCount,
+    closestToReady: entries.slice(0, limit),
+  };
 }
 
 export function classifyProductRecheck(product: Product, now = Date.now()): ProductRecheckDecision {

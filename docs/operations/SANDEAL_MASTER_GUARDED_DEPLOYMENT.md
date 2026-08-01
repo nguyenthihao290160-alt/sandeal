@@ -39,12 +39,24 @@ Optional non-secret controls are:
 export SANDEAL_LOCAL_HEALTH_URL='http://127.0.0.1:3000/api/health/live'
 export SANDEAL_PUBLIC_HEALTH_URL='https://sandeal.tech/api/health/live'
 export SANDEAL_DEPLOY_LOG_LINES='50'
+export SANDEAL_DEPLOY_DEFER_PM2_SAVE='true'
 ```
 
-The script must stop on any failed check. A failed run does not call
-`pm2 save`, so the last verified PM2 saved state remains unchanged. It does not
-delete or replace leases, jobs, journals, audits, snapshots, products, `.data`,
-or database records.
+`SANDEAL_DEPLOY_DEFER_PM2_SAVE=true` is an explicit operator-only option for a
+runbook that must complete browser/App Health/product checks before persisting
+the new PM2 process list. It emits `GUARDED_DEPLOYMENT_VERIFIED_PENDING_PM2_SAVE`
+after all script-local checks pass; the operator must run `pm2 save` only after
+the remaining approved checks pass. Omit it for the established default, which
+still saves only after the script's own verification.
+
+The deploy script consumes and unsets this deployment-only option before PM2
+is restarted with `--update-env`; it never becomes an application runtime
+environment variable.
+
+The script must stop on any failed check. A failed run does not call `pm2 save`,
+so the last verified PM2 saved state remains unchanged. It does not delete or
+replace leases, jobs, journals, audits, snapshots, products, `.data`, or database
+records.
 
 ## Non-destructive rollback
 
