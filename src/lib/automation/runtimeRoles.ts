@@ -44,6 +44,7 @@ export interface RuntimeRoleOwnership {
   ownerId: string;
   instanceId: string;
   fencingToken: number;
+  releaseId?: string;
 }
 
 export interface RuntimeRoleConflict {
@@ -180,7 +181,7 @@ export async function acquireRuntimeRole(input: {
     output = {
       acquired: true,
       lease: clone(lease),
-      ownership: { ownerId, instanceId, fencingToken },
+      ownership: { ownerId, instanceId, fencingToken, releaseId: lease.releaseId },
       event: takeover ? 'TAKEN_OVER' : sameInstance ? 'RENEWED' : 'ACQUIRED',
       staleLease: takeover ? existing : undefined,
     };
@@ -234,7 +235,43 @@ export async function releaseRuntimeRole(role: RuntimeRole, ownership: RuntimeRo
 
 export async function isRuntimeRoleOwner(role: RuntimeRole, ownership: RuntimeRoleOwnership, nowMs = Date.now()): Promise<boolean> {
   const lease = (await readCollection<RuntimeRoleLease>(ROLE_COLLECTION)).find(item => item.role === role);
-  return Boolean(lease && lease.status === 'ACTIVE' && Date.parse(expiryOf(lease)) > nowMs && ownsLease(lease, ownership));
+  return Boolean(lease
+    && lease.status === 'ACTIVE'
+    && Date.parse(expiryOf(lease)) > nowMs
+    && ownsLease(lease, ownership)
+    && (!ownership.releaseId || lease.releaseId === ownership.releaseId));
+}
+
+/**
+ * Linearize a final durable job mutation with the role lease. The role
+ * collection lock remains held only across storage mutations; callers must do
+ * all provider/network work before entering this helper.
+ */
+export async function withRuntimeRoleAuthority<T>(
+  role: RuntimeRole,
+  ownership: RuntimeRoleOwnership,
+  work: () => Promise<T>,
+  nowMs = Date.now(),
+): Promise<T> {
+  let authorized = false;
+  let output: T | undefined;
+  await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, async leases => {
+    const lease = leases.find(item => item.role === role);
+    if (!lease
+      || lease.status !== 'ACTIVE'
+      || Date.parse(expiryOf(lease)) <= nowMs
+      || !ownsLease(lease, ownership)
+      || (ownership.releaseId && lease.releaseId !== ownership.releaseId)) {
+      return undefined;
+    }
+    authorized = true;
+    output = await work();
+    // The callback intentionally returns undefined: the lease itself is not
+    // changed by an authority check, so no extra revision is written.
+    return undefined;
+  });
+  if (!authorized) throw new Error('WORKER_FENCING_REJECTED');
+  return output as T;
 }
 
 export async function listRuntimeRoleLeases(): Promise<RuntimeRoleLease[]> {

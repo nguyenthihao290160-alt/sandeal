@@ -8,7 +8,7 @@ import { executeAutoSafePublish } from './autoPublish';
 import { runAutonomousReconciler } from './reconciler';
 import { executePostPublishMonitor } from './postPublishMonitor';
 import { runRuntimeGuardian } from './runtimeGuardian';
-import { getProductById, getAllProducts, getPublicProducts, publishCanonicalProductTransaction } from '@/lib/storage/products';
+import { publishCanonicalProductTransaction } from '@/lib/storage/products';
 import { completeManualTask, createManualTask, getManualTask } from './manualTasks';
 import { routeProviderExecution } from './providerRouter';
 import { approvalStatusForPolicy, getAutomationPolicy } from './policyRegistry';
@@ -20,7 +20,7 @@ import {
   createAutomationJob,
   failAutomationJob,
   getAutomationControl,
-  getAutomationJob,
+  getAutomationJobAuthoritySnapshot,
   heartbeatAutomationJob,
   logAutomationJobEvent,
   productProcessingReservationKey,
@@ -43,7 +43,14 @@ import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import { commitProductProcessingCapacity, releaseProductProcessingCapacity } from './businessUsage';
 import { isCriticalAutomationJob, type AutomationWorkerClaimLane } from './executionPolicy';
 import type { AutomationCheckpoint, AutomationErrorCategory, AutomationExecutionDisclosure, AutomationJob, ActualExecutionMode } from './types';
+import type { Product } from '@/lib/types';
+import { normalizeCanonicalProduct } from '@/lib/canonicalProduct';
 import { recordSourceQualityObservation } from '@/lib/autonomous/sourceQuality';
+import { getStorageDiagnosticsSnapshot, scanCollection } from '@/lib/storage/adapter';
+import {
+  createAutomationExecutionBudget,
+  type AutomationExecutionBudget,
+} from './executionBudget';
 
 function assertUnhandledJobType(type: never): never {
   throw new Error(`UNSUPPORTED_JOB_TYPE:${String(type)}`);
@@ -60,6 +67,8 @@ export interface WorkerRunResult {
   waitingManual: number;
   waitingChildren: number;
 }
+
+let lastWorkerDiagnosticAt = 0;
 
 export interface WorkerBatchOptions {
   maximumInFlight?: number;
@@ -194,14 +203,21 @@ function projectionMaintenanceErrorCode(error: unknown): string {
 
 function claimMutationGuard(job: AutomationJob, ownership?: RuntimeRoleOwnership) {
   if (!job.claimToken) throw new Error('WORKER_FENCING_REJECTED');
-  return { claimToken: job.claimToken, ownership };
+  return {
+    claimToken: job.claimToken,
+    ownership,
+    attemptCount: job.attemptCount,
+    releaseId: job.releaseId,
+  };
 }
 
 async function dryRunPreview(job: AutomationJob): Promise<Record<string, unknown>> {
-  const products = await getAllProducts();
   const requestedLimit = Number(job.payload.limit);
   const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(50, Math.floor(requestedLimit))) : 10;
-  const selected = products.slice(0, limit);
+  const selected: Product[] = [];
+  await scanCollection<Partial<Product>>('products', raw => {
+    if (selected.length < limit) selected.push(normalizeCanonicalProduct(raw));
+  });
   const dashboard = buildDashboardProducts(selected, { sort: 'updated_desc', page: 1, pageSize: 50 });
   return {
     preview: true,
@@ -220,6 +236,32 @@ async function dryRunPreview(job: AutomationJob): Promise<Record<string, unknown
   };
 }
 
+async function readProductsByIdsBounded(ids: string[]): Promise<Product[]> {
+  const wanted = new Set(ids);
+  const found = new Map<string, Product>();
+  await scanCollection<Partial<Product>>('products', raw => {
+    const id = typeof raw.id === 'string' ? raw.id : '';
+    if (id && wanted.has(id)) {
+      found.set(id, normalizeCanonicalProduct(raw));
+      wanted.delete(id);
+    }
+  });
+  return ids.map(id => found.get(id)).filter((item): item is Product => Boolean(item));
+}
+
+async function countPublicProductsBounded(): Promise<number> {
+  let count = 0;
+  await scanCollection<Partial<Product>>('products', raw => {
+    const product = normalizeCanonicalProduct(raw);
+    if (product.status === 'published'
+      && product.publicHidden === false
+      && product.needsVerification === false
+      && product.publicBlocked !== true
+      && product.runtimeRecoveryCanaryObservationPending !== true) count += 1;
+  });
+  return count;
+}
+
 async function assertKillSwitchInactive(): Promise<void> {
   const control = await getAutomationControl();
   if (control.killSwitch) throw new Error('KILL_SWITCH_ACTIVE');
@@ -235,7 +277,7 @@ async function executeAutoPilotJob(
   if (!circuit.allowed) throw new Error('CIRCUIT_OPEN');
   try {
     const settings = await getAutomationSettings();
-    const operationMode = selectOperationMode((await getPublicProducts()).length);
+    const operationMode = selectOperationMode(await countPublicProductsBounded());
     const deadline = Date.now() + settings.maxRunDurationMs;
     const scan = await scanSourcesToQueue(operationMode, deadline, {
       runId: `automation-job:${job.id}:attempt:${job.attemptCount}`,
@@ -297,8 +339,14 @@ async function executeAutoPilotJob(
   }
 }
 
-async function executeLocalIntelligenceJob(job: AutomationJob): Promise<Record<string, unknown>> {
-  const output = await executeProductIntelligenceJob(job);
+async function executeLocalIntelligenceJob(
+  job: AutomationJob,
+  execution?: AutomationExecutionBudget,
+): Promise<Record<string, unknown>> {
+  const output = await executeProductIntelligenceJob(job, {
+    signal: execution?.signal,
+    deadline: execution?.deadline,
+  });
   const executionMode: ActualExecutionMode = job.dryRun
     ? 'SHADOW_MODE'
     : job.type === 'PREPARE_CONTENT_DRAFT'
@@ -345,7 +393,7 @@ async function executeEvidenceAnalysis(
     ? job.payload.productIds.map(value => String(value || '')).filter(Boolean).slice(0, 100)
     : typeof job.payload.productId === 'string' ? [job.payload.productId] : [];
   if (evidenceProductIds.length) {
-    const evidenceProducts = (await Promise.all(evidenceProductIds.map(getProductById))).filter(Boolean);
+    const evidenceProducts = await readProductsByIdsBounded(evidenceProductIds);
     const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
     if (evidenceProducts.some(product => product!.publicBlocked === true
       || !goodHealth.has(String(product!.linkHealthStatus || product!.productHealthStatus || ''))
@@ -495,14 +543,16 @@ async function executeJob(
   job: AutomationJob,
   workerId: string,
   ownership?: RuntimeRoleOwnership,
+  execution?: AutomationExecutionBudget,
 ): Promise<Record<string, unknown>> {
+  execution?.throwIfAborted();
   switch (job.type) {
     case 'PROCESS_CANDIDATE': {
       if (job.dryRun) return dryRunPreview(job);
       await assertKillSwitchInactive();
       const candidateId = typeof job.payload.candidateId === 'string' ? job.payload.candidateId : '';
       if (!candidateId) throw new Error('VALIDATION_CANDIDATE_ID_REQUIRED');
-      return { ...(await processCandidateFromDurableJob({ candidateId, jobId: job.id, operationId: job.operationId, workerId })) };
+      return { ...(await processCandidateFromDurableJob({ candidateId, jobId: job.id, operationId: job.operationId, workerId, signal: execution?.signal, deadline: execution?.deadline })) };
     }
     case 'AUTO_SAFE_PUBLISH':
       if (job.dryRun) return dryRunPreview(job);
@@ -535,7 +585,7 @@ async function executeJob(
             },
             authorizePublication: async () => {
               if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) return false;
-              const claimedRepair = await getAutomationJob(job.id);
+              const claimedRepair = await getAutomationJobAuthoritySnapshot(job.id);
               return Boolean(
                 claimedRepair
                 && claimedRepair.status === 'RUNNING'
@@ -544,7 +594,9 @@ async function executeJob(
                 && (!ownership || (
                   claimedRepair.workerInstanceId === ownership.instanceId
                   && claimedRepair.workerFencingToken === ownership.fencingToken
-                )),
+                ))
+                && claimedRepair.attemptCount === job.attemptCount
+                && (!job.releaseId || claimedRepair.releaseId === job.releaseId),
               );
             },
             onPhase: async ({ phase, lastFailureReason }) => {
@@ -559,6 +611,7 @@ async function executeJob(
             },
           },
         );
+        execution?.throwIfAborted();
         return {
           maintenanceTask: 'JOB_HEALTH_PROJECTION_REBUILD',
           retainedJobCount: manifest.retainedJobCount,
@@ -579,10 +632,10 @@ async function executeJob(
     case 'POST_PUBLISH_MONITOR':
       if (job.dryRun) return dryRunPreview(job);
       await assertKillSwitchInactive();
-      return executePostPublishMonitor(job, workerId);
+      return executePostPublishMonitor(job, workerId, { signal: execution?.signal, deadline: execution?.deadline });
     case 'RUNTIME_GUARDIAN':
       if (job.dryRun) return dryRunPreview(job);
-      return { ...(await runRuntimeGuardian({ apply: true })), executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'system', rulesVersion: 'runtime-guardian-v1', aiRequests: 0, externalRequests: 0 };
+      return { ...(await runRuntimeGuardian({ apply: true, signal: execution?.signal })), executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'system', rulesVersion: 'runtime-guardian-v1', aiRequests: 0, externalRequests: 0 };
     case 'IMPORT_PRODUCTS':
     case 'RECHECK_PRODUCT_HEALTH':
     case 'DETECT_DUPLICATES':
@@ -594,7 +647,7 @@ async function executeJob(
     case 'AGGREGATE_GROWTH_METRICS':
     case 'BULK_PRODUCT_OPERATION': {
       if (!job.dryRun) await assertKillSwitchInactive();
-      return executeLocalIntelligenceJob(job);
+      return executeLocalIntelligenceJob(job, execution);
     }
     case 'PRODUCT_SCAN':
       return executeAutoPilotJob(job, 'source_scan');
@@ -602,15 +655,16 @@ async function executeJob(
       return executeAutoPilotJob(job, 'full_safe_run');
     case 'HEALTH_CHECK': {
       if (job.dryRun) return dryRunPreview(job);
-      const products = await getAllProducts();
-      return { checkedAt: new Date().toISOString(), productCount: products.length, businessDataChanged: false };
+      let productCount = 0;
+      await scanCollection('products', () => { productCount += 1; });
+      return { checkedAt: new Date().toISOString(), productCount, businessDataChanged: false };
     }
     case 'SAFE_PUBLISH': {
       if (job.dryRun) return dryRunPreview(job);
       await assertKillSwitchInactive();
       if (job.approvalStatus !== 'APPROVED') throw new Error('APPROVAL_REQUIRED');
       const productId = typeof job.payload.productId === 'string' ? job.payload.productId : '';
-      const product = await getProductById(productId);
+      const product = (await readProductsByIdsBounded([productId]))[0];
       if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
       const published = await publishCanonicalProductTransaction(productId, { status: 'published' }, {
         jobId: job.id,
@@ -644,6 +698,8 @@ export async function processAutomationBatch(
   ownership?: RuntimeRoleOwnership,
   options: WorkerBatchOptions = {},
 ): Promise<WorkerRunResult> {
+  const cycleStartedAt = Date.now();
+  const storageBefore = getStorageDiagnosticsSnapshot();
   const result: WorkerRunResult = {
     workerId,
     claimed: 0,
@@ -687,13 +743,29 @@ export async function processAutomationBatch(
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
     let workerLeaseLost = false;
     let workerFencingRejected = false;
-    const heartbeat = setInterval(() => {
-      void heartbeatAutomationJob(job.id, workerId, 60_000, job.claimToken, ownership).then(updated => {
-        if (!updated) workerLeaseLost = true;
-      }).catch(() => { workerLeaseLost = true; });
-    }, 20_000);
+    const execution = createAutomationExecutionBudget(job.type);
+    let heartbeatBusy = false;
+    const heartbeatOnce = async (): Promise<void> => {
+      if (heartbeatBusy || execution.signal.aborted) return;
+      heartbeatBusy = true;
+      try {
+        const updated = await heartbeatAutomationJob(job.id, workerId, 60_000, job.claimToken, ownership);
+        if (!updated) {
+          workerLeaseLost = true;
+          execution.abort('WORKER_FENCING_REJECTED');
+        }
+      } catch {
+        workerLeaseLost = true;
+        execution.abort('WORKER_FENCING_REJECTED');
+      } finally {
+        heartbeatBusy = false;
+      }
+    };
+    const heartbeat = setInterval(() => { void heartbeatOnce(); }, 15_000);
+    heartbeat.unref?.();
     let businessExecutionStarted = false;
     try {
+      execution.throwIfAborted();
       assertWorkerPolicy(job);
       logAutomationJobEvent('job_handler_resolved', job, { workerId, reasonCode: `HANDLER_${job.type}` });
       logAutomationJobEvent('job_started', job, { workerId, reasonCode: job.requestedExecutionMode === 'LOCAL_ONLY' ? 'LOCAL_RULES_SELECTED' : 'HANDLER_STARTED' });
@@ -703,11 +775,24 @@ export async function processAutomationBatch(
         progress: { processed: 0, total: startedPlan.length || undefined, succeeded: 0, skipped: 0, failed: 0, updatedAt: new Date().toISOString() },
       }, claimMutationGuard(job, ownership));
       businessExecutionStarted = job.type === 'PROCESS_CANDIDATE';
-      const output = await executeJob(job, workerId, ownership);
+      const output = await executeJob(job, workerId, ownership, execution);
+      execution.throwIfAborted();
       if (workerLeaseLost || (ownership && !await isRuntimeRoleOwner('WORKER', ownership))) throw new Error('WORKER_FENCING_REJECTED');
-      const latest = await getAutomationJob(job.id);
+      const latest = await getAutomationJobAuthoritySnapshot(job.id);
+      // These states intentionally clear the claim as part of a fenced
+      // transition. They are observational exits, not permission to perform
+      // another durable mutation, so inspect them before comparing the old
+      // claim token with the now-cleared authority fields.
       if (latest?.status === 'CANCELLED') { result.skipped += 1; return; }
       if (latest?.status === 'WAITING_FOR_MANUAL_INPUT') { result.waitingManual += 1; return; }
+      if (!latest
+        || latest.claimedBy !== workerId
+        || latest.claimToken !== job.claimToken
+        || latest.attemptCount !== job.attemptCount
+        || (job.releaseId && latest.releaseId !== job.releaseId)
+        || (ownership && (latest.workerInstanceId !== ownership.instanceId || latest.workerFencingToken !== ownership.fencingToken))) {
+        throw new Error('WORKER_FENCING_REJECTED');
+      }
       const rawMode = output.executionMode;
       const executionMode: ActualExecutionMode = ['API', 'LOCAL_RULES', 'LOCAL_TEMPLATE', 'MANUAL_INPUT', 'SHADOW_MODE'].includes(String(rawMode))
         ? rawMode as ActualExecutionMode
@@ -727,7 +812,7 @@ export async function processAutomationBatch(
       const completedAt = new Date().toISOString();
       const reportedCompletedSteps = Array.isArray(output.completedSteps) ? output.completedSteps.filter((item): item is string => typeof item === 'string') : null;
       const reportedPendingSteps = Array.isArray(output.pendingSteps) ? output.pendingSteps.filter((item): item is string => typeof item === 'string') : null;
-      const completedPlan = (latest?.executionPlan || startedPlan).map(step => ({
+      const completedPlan = (job.executionPlan || startedPlan).map(step => ({
         ...step,
         status: reportedPendingSteps?.includes(step.id)
           ? 'PENDING' as const
@@ -737,8 +822,8 @@ export async function processAutomationBatch(
       }));
       const completedSteps = completedPlan.filter(step => step.status === 'COMPLETED').map(step => step.id);
       const pendingSteps = reportedPendingSteps
-        || (outcomeStatus === 'PARTIALLY_COMPLETED' && latest?.checkpoint?.pendingSteps.length
-          ? latest.checkpoint.pendingSteps
+        || (outcomeStatus === 'PARTIALLY_COMPLETED' && job.checkpoint?.pendingSteps.length
+          ? job.checkpoint.pendingSteps
           : []);
       const progressTotal = Math.max(1, completedSteps.length + pendingSteps.length);
       const progressPercentage = Math.floor((completedSteps.length / progressTotal) * 100);
@@ -752,13 +837,13 @@ export async function processAutomationBatch(
           completedSteps,
           pendingSteps,
           outputs: { resultHash: hashValue(output) },
-          executionModes: [...new Set([...(latest?.checkpoint?.executionModes || []), executionMode])],
-          providerStatus: latest?.checkpoint?.providerStatus,
-          inputHash: latest?.checkpoint?.inputHash || job.checkpoint?.inputHash || hashValue(job.payload),
+          executionModes: [...new Set([...(job.checkpoint?.executionModes || []), executionMode])],
+          providerStatus: job.checkpoint?.providerStatus,
+          inputHash: job.checkpoint?.inputHash || hashValue(job.payload),
           outputHash: hashValue(output),
           updatedAt: completedAt,
         },
-        disclosure: latest?.disclosure || disclosure(job, executionMode, {
+        disclosure: disclosure(job, executionMode, {
           status: outcomeStatus,
           provider: typeof output.provider === 'string' ? output.provider : undefined,
           rulesVersion: typeof output.rulesVersion === 'string' ? output.rulesVersion : undefined,
@@ -815,15 +900,17 @@ export async function processAutomationBatch(
         }
       } else result.skipped += 1;
     } catch (error) {
-      const latest = await getAutomationJob(job.id);
+      const latest = await getAutomationJobAuthoritySnapshot(job.id).catch(() => null);
       if (latest?.status === 'CANCELLED') {
         result.skipped += 1;
         return;
       }
       const projectionMaintenance = job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD';
       const code = projectionMaintenance ? projectionMaintenanceErrorCode(error) : errorCode(error);
-      if (code === 'WORKER_FENCING_REJECTED') {
+      if (code === 'WORKER_FENCING_REJECTED' || code === 'JOB_CANCELLED' || code === 'KILL_SWITCH_ACTIVE') {
         workerFencingRejected = true;
+        execution.abort(code === 'WORKER_FENCING_REJECTED' ? 'WORKER_FENCING_REJECTED' : code as 'JOB_CANCELLED' | 'KILL_SWITCH_ACTIVE');
+        logAutomationJobEvent('job_execution_cancelled', job, { workerId, reasonCode: code });
         logAutomationJobEvent('job_skipped', job, { workerId, reasonCode: code });
         result.skipped += 1;
         return;
@@ -858,6 +945,7 @@ export async function processAutomationBatch(
       result.failed += 1;
     } finally {
       clearInterval(heartbeat);
+      execution.dispose();
       if (job.type === 'PROCESS_CANDIDATE' && !workerFencingRejected) {
         if (businessExecutionStarted) await commitProductProcessingCapacity(productProcessingReservationKey(job), 1);
         else await releaseProductProcessingCapacity(productProcessingReservationKey(job));
@@ -883,6 +971,30 @@ export async function processAutomationBatch(
     await Promise.all(orderedClaimed.map(processJob));
   } else {
     for (const job of orderedClaimed) await processJob(job);
+  }
+  const now = Date.now();
+  if (now - lastWorkerDiagnosticAt >= 60_000 || result.claimed > 0) {
+    const storageAfter = getStorageDiagnosticsSnapshot();
+    lastWorkerDiagnosticAt = now;
+    const fullReadsByCollection: Record<string, number> = {};
+    for (const [collection, count] of Object.entries(storageAfter.fullCollectionReadsByCollection)) {
+      const delta = count - (storageBefore.fullCollectionReadsByCollection[collection] || 0);
+      if (delta > 0) fullReadsByCollection[collection] = delta;
+    }
+    console.info(JSON.stringify({
+      type: 'automation_worker_cycle',
+      workerId,
+      durationMs: Math.max(0, now - cycleStartedAt),
+      claimed: result.claimed,
+      criticalClaimed: result.criticalClaimed,
+      fullDurableCollectionReads: storageAfter.fullCollectionReadCount - storageBefore.fullCollectionReadCount,
+      fullDurableCollectionReadsByCollection: fullReadsByCollection,
+      scanCollectionReads: storageAfter.scanCollectionCount - storageBefore.scanCollectionCount,
+      boundedReads: storageAfter.boundedReadCount - storageBefore.boundedReadCount,
+      maximumLockHoldMs: storageAfter.maximumLockHoldMs,
+      rssBytes: process.memoryUsage().rss,
+      heapUsedBytes: process.memoryUsage().heapUsed,
+    }));
   }
   return result;
 }

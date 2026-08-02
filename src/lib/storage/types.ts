@@ -4,6 +4,25 @@ export type StorageTransaction<T> = (
   items: T[]
 ) => Promise<T[] | undefined> | T[] | undefined;
 
+/**
+ * Mutate a collection one item at a time while the adapter owns its atomic
+ * write boundary. The visitor must return true when it changed the item.
+ * Implementations may retain only the current item and bounded bookkeeping.
+ */
+export type StorageStreamingTransaction<T> = (
+  item: T,
+  index: number,
+) => Promise<boolean | void> | boolean | void;
+
+export interface StorageStreamingTransactionOptions<T> {
+  /** Optional bounded first pass executed under the same atomic boundary. */
+  prepare?: StorageStreamingTransaction<T>;
+  /** Runs after prepare and before the mutating pass, still under the boundary. */
+  beforeMutation?: () => Promise<void> | void;
+  /** Append bounded new records after the existing source has been transformed. */
+  appendItems?: () => T[] | undefined;
+}
+
 export interface StoragePageOptions {
   page: number;
   pageSize: number;
@@ -48,6 +67,17 @@ export interface StorageBoundedCollectionMetadata {
 export interface StorageBoundedCollectionResult<T> {
   items: T[];
   metadata: StorageBoundedCollectionMetadata;
+}
+
+/**
+ * Iterate a collection without materialising the durable array in memory.
+ * The visitor is deliberately sequential: callers can keep a bounded
+ * accumulator and preserve the same collection order on file and Mongo.
+ */
+export interface StorageScanResult {
+  itemCount: number;
+  observedBytes: number;
+  queryCount: number;
 }
 
 export interface StorageHealth {
@@ -112,6 +142,10 @@ export interface StorageAdapter {
   getDataDir(): string;
   ensureDataDir(): Promise<void>;
   readCollection<T>(collection: string): Promise<T[]>;
+  scanCollection<T>(
+    collection: string,
+    visitor: (item: T, index: number) => Promise<void> | void,
+  ): Promise<StorageScanResult>;
   /**
    * Read a deliberately compact read model. Implementations must reject the
    * read before parsing when the configured byte bound can be checked.
@@ -128,6 +162,11 @@ export interface StorageAdapter {
   writeCollection<T>(collection: string, data: T[]): Promise<void>;
   backupCollection?(collection: string, label: string): Promise<string>;
   runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void>;
+  runStreamingTransaction<T>(
+    collection: string,
+    fn: StorageStreamingTransaction<T>,
+    options?: StorageStreamingTransactionOptions<T>,
+  ): Promise<{ changed: boolean; itemCount: number }>;
   bulkMutateCollection?<T extends { id: string }>(
     collection: string,
     mutations: StorageBulkMutation<T>[],

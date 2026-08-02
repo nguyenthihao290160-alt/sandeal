@@ -31,6 +31,7 @@ export interface AccessTradeSearchParams {
   diagnosticReason?: AccessTradeRejectionReason;
   diagnosticPage?: number;
   diagnosticPageSize?: number;
+  signal?: AbortSignal;
 }
 
 export type AccessTradePublicDecision =
@@ -1909,7 +1910,7 @@ async function fetchAccessTradeDatafeeds(
     // The official datafeeds contract has no keyword query parameter. Search
     // is performed locally over bounded pages so an ignored provider parameter
     // cannot silently turn the first page into a false empty result.
-    const result = await fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed');
+    const result = await fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed', params.signal);
     combined.push(result);
     if (!result.ok) break;
 
@@ -1996,7 +1997,7 @@ async function fetchAccessTradeOffers(
     url.searchParams.set('category', params.category);
   }
 
-  return fetchAccessTradeEndpoint(apiKey, url, 'offers', 'offer_feed');
+  return fetchAccessTradeEndpoint(apiKey, url, 'offers', 'offer_feed', params.signal);
 }
 
 async function fetchAccessTradeEndpoint(
@@ -2004,6 +2005,7 @@ async function fetchAccessTradeEndpoint(
     url: URL,
     endpoint: AccessTradeEndpointKind,
     sourceKind: string,
+    signal?: AbortSignal,
 ): Promise<AccessTradeFetchResult> {
   const MAX_RETRIES = 1;
   const TIMEOUT_MS = 15_000;
@@ -2026,10 +2028,13 @@ async function fetchAccessTradeEndpoint(
   }
   
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw signal.reason || new DOMException('AccessTrade request aborted', 'AbortError');
     const startedAt = Date.now();
     let response: Response | undefined;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const onAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
       response = await fetch(url.toString(), {
@@ -2043,11 +2048,24 @@ async function fetchAccessTradeEndpoint(
       });
     } catch (err) {
       clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) throw signal.reason || new DOMException('AccessTrade request aborted', 'AbortError');
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       if (attempt >= MAX_RETRIES) await recordDomainHealth(url.toString(), isTimeout ? 'timeout' : 'error');
       
       if (attempt < MAX_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, 250 + Math.floor(Math.random() * 500)));
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onRetryAbort);
+            resolve(undefined);
+          }, 250 + Math.floor(Math.random() * 500));
+          const onRetryAbort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onRetryAbort);
+            reject(signal?.reason || new DOMException('AccessTrade request aborted', 'AbortError'));
+          };
+          signal?.addEventListener('abort', onRetryAbort, { once: true });
+        });
         continue;
       }
       
@@ -2061,11 +2079,23 @@ async function fetchAccessTradeEndpoint(
       };
     } finally {
       clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', onAbort);
     }
 
     if (!response.ok) {
       if (attempt < MAX_RETRIES && response.status >= 500) {
-        await new Promise((resolve) => setTimeout(resolve, 250 + Math.floor(Math.random() * 500)));
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onRetryAbort);
+            resolve(undefined);
+          }, 250 + Math.floor(Math.random() * 500));
+          const onRetryAbort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onRetryAbort);
+            reject(signal?.reason || new DOMException('AccessTrade request aborted', 'AbortError'));
+          };
+          signal?.addEventListener('abort', onRetryAbort, { once: true });
+        });
         continue;
       }
       const resultType: AccessTradeResultType = response.status === 401 ? 'unauthorized'
@@ -2104,6 +2134,7 @@ async function fetchAccessTradeEndpoint(
         error: 'Dữ liệu trả về không phải JSON hợp lệ.',
       };
     }
+    if (signal?.aborted) throw signal.reason || new DOMException('AccessTrade request aborted', 'AbortError');
 
     const fetchedAt = new Date().toISOString();
     const extraction = extractAccessTradePayload(data);

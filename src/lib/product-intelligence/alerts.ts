@@ -2,6 +2,7 @@ import {
   generateId,
   readBoundedCollectionSnapshot,
   readCollection,
+  scanCollection,
   runTransaction,
 } from '@/lib/storage/adapter';
 import { getAllProducts } from '@/lib/storage/products';
@@ -12,6 +13,7 @@ import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import type { Product } from '@/lib/types';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
+import { throwIfExecutionAborted } from '@/lib/automation/executionBudget';
 import type { PriceSnapshot, ProductAlert, RecommendedAction } from './types';
 
 const ALERTS = 'product-alerts';
@@ -38,6 +40,9 @@ const PRODUCT_GROUP_EVIDENCE_ALERT_TYPES = new Set<ProductAlert['type']>([
 const VERIFIED_HEALTH_STATUSES = new Set(['ok', 'redirect_ok']);
 const FAILURE_ALERT_WINDOW_MS = 24 * 60 * 60_000;
 const AUTO_RESOLUTION_OBSERVATIONS_REQUIRED = 2;
+const ALERT_PRODUCT_LIMIT = 2_000;
+const ALERT_PRICE_HISTORY_PER_PRODUCT_LIMIT = 50;
+const ALERT_TRACKED_SOURCES = new Set<Product['source']>(['accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate']);
 const AUTO_RESOLUTION_MAX_OBSERVATION_GAP_MS = 10 * 60_000;
 const MAX_EVIDENCE_FUTURE_SKEW_MS = 60_000;
 const ALERT_READ_MAXIMUM_BYTES = 32 * 1024 * 1024;
@@ -396,13 +401,56 @@ function publicRecheckReasons(product: Product, now: number, priceObservedAt?: n
   return reasons;
 }
 
-export async function evaluateAlerts(operationId: string, now = Date.now()): Promise<AlertEvaluationResult> {
-  const [products, priceHistory, jobRead, control, settings, accessTrade, aiUsage, geminiCircuit, automationCircuit] = await Promise.all([
-    getAllProducts(), readCollection<PriceSnapshot>('price-history'),
+async function readBoundedAlertInputs(signal?: AbortSignal): Promise<{
+  products: Product[];
+  priceHistory: PriceSnapshot[];
+  latestSourceObservation: Map<Product['source'], number>;
+}> {
+  const products: Product[] = [];
+  const latestSourceObservation = new Map<Product['source'], number>();
+  await scanCollection<Product>('products', product => {
+    throwIfExecutionAborted(signal);
+    if (ALERT_TRACKED_SOURCES.has(product.source)) {
+      const observedAt = timestamp(product.lastSeenAt || product.updatedAt);
+      if (observedAt !== null) latestSourceObservation.set(product.source, Math.max(observedAt, latestSourceObservation.get(product.source) || 0));
+    }
+    // The alert algorithm intentionally evaluates the same bounded leading
+    // product window as the legacy path. The source scan does not retain the
+    // rest of the durable collection in process memory.
+    if (products.length < ALERT_PRODUCT_LIMIT) products.push(product);
+  });
+  const selectedProductIds = new Set(products.map(product => product.id));
+  const historyByProduct = new Map<string, PriceSnapshot[]>();
+  await scanCollection<PriceSnapshot>('price-history', snapshot => {
+    throwIfExecutionAborted(signal);
+    if (!selectedProductIds.has(snapshot.productId)) return;
+    const history = historyByProduct.get(snapshot.productId) || [];
+    history.push(snapshot);
+    history.sort((left, right) => Date.parse(right.capturedAt) - Date.parse(left.capturedAt));
+    if (history.length > ALERT_PRICE_HISTORY_PER_PRODUCT_LIMIT) history.pop();
+    historyByProduct.set(snapshot.productId, history);
+  });
+  return {
+    products,
+    priceHistory: [...historyByProduct.values()].flat(),
+    latestSourceObservation,
+  };
+}
+
+export async function evaluateAlerts(
+  operationId: string,
+  now = Date.now(),
+  options: { signal?: AbortSignal } = {},
+): Promise<AlertEvaluationResult> {
+  const alertInputs = await readBoundedAlertInputs(options.signal);
+  throwIfExecutionAborted(options.signal);
+  const { products, priceHistory, latestSourceObservation } = alertInputs;
+  const [jobRead, control, settings, accessTrade, aiUsage, geminiCircuit, automationCircuit] = await Promise.all([
     readBoundedAutomationJobStatuses(),
     getAutomationControl(), getAutomationSettings(),
     getPrimaryCredential('accesstrade'), getAiUsage(now), getCircuit('gemini'), getCircuit('autopilot'),
   ]);
+  throwIfExecutionAborted(options.signal);
   const jobs = jobRead.items;
   const jobEvidenceStatus = jobRead.evidenceClassification;
   const drafts: AlertDraft[] = [];
@@ -456,13 +504,6 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
     suggestedAction: 'Chờ cooldown hoặc xử lý lỗi provider trước khi probe lại.',
   }));
 
-  const trackedSources = new Set<Product['source']>(['accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate']);
-  const latestSourceObservation = new Map<Product['source'], number>();
-  for (const product of products) {
-    if (!trackedSources.has(product.source)) continue;
-    const observedAt = timestamp(product.lastSeenAt || product.updatedAt);
-    if (observedAt !== null) latestSourceObservation.set(product.source, Math.max(observedAt, latestSourceObservation.get(product.source) || 0));
-  }
   for (const [source, observedAt] of latestSourceObservation) {
     if (now - observedAt <= CONFIG.freshness.productDays * 86_400_000) continue;
     const ageDays = Math.max(1, Math.floor((now - observedAt) / 86_400_000));
@@ -482,8 +523,9 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
 
   const buildingPriceHistory: Product[] = [];
   const stalePriceProducts: Product[] = [];
-  const evaluatedProducts = products.slice(0, 2_000);
+  const evaluatedProducts = products.slice(0, ALERT_PRODUCT_LIMIT);
   for (const product of evaluatedProducts) {
+    throwIfExecutionAborted(options.signal);
     const productPriceHistory = priceHistoryByProduct.get(product.id) || [];
     const observedPriceTimes = [timestamp(product.lastSeenAt), timestamp(product.priceLastChangedAt),
       ...productPriceHistory.map(item => timestamp(item.capturedAt))].filter((value): value is number => value !== null);
@@ -587,6 +629,7 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
     priceHistoryByProduct,
     releaseId: resolutionReleaseId,
   };
+  throwIfExecutionAborted(options.signal);
   await runTransaction<StoredProductAlert>(ALERTS, items => {
     for (const draft of drafts) {
       const existing = items.find(item => item.deduplicationKey === draft.deduplicationKey);
@@ -680,6 +723,7 @@ export async function evaluateAlerts(operationId: string, now = Date.now()): Pro
     const retentionCutoff = now - CONFIG.retention.resolvedAlertDays * 86_400_000;
     return items.filter(item => !item.resolvedAt || Date.parse(item.resolvedAt) >= retentionCutoff).slice(-CONFIG.limits.alerts);
   });
+  throwIfExecutionAborted(options.signal);
   const active = (await listAlerts({ limit: CONFIG.limits.alerts })).filter(item => !['resolved', 'ignored'].includes(item.status)).length;
   return {
     active,

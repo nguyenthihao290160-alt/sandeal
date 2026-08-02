@@ -114,6 +114,7 @@ function mb(bytes) {
 
 async function main() {
   const adapter = require('../src/lib/storage/adapter.ts');
+  const { getStorageDiagnosticsSnapshot, resetStorageDiagnostics } = adapter;
   const health = require('../src/lib/automation/jobHealthSummary.ts');
   const healthService = require('../src/lib/automation/healthService.ts');
   const maintenance = require('../src/lib/automation/projectionMaintenance.ts');
@@ -155,6 +156,7 @@ async function main() {
       retainedCandidateRecords: 0,
     };
     const readsAtStart = fullJobReads;
+    const storageAtStart = getStorageDiagnosticsSnapshot();
     const manifest = await store.rebuildAutomationJobReadModelsFromDurable(null, now, {
       owner: owner(label),
       maximumCatchUpPasses: 3,
@@ -206,6 +208,9 @@ async function main() {
       catchUpPasses: timing.catchUpPasses,
       deltaJobCount: timing.deltaJobCount,
       retainedCandidateRecords: timing.retainedCandidateRecords,
+      scanCollectionReads: getStorageDiagnosticsSnapshot().scanCollectionCount - storageAtStart.scanCollectionCount,
+      fullAutomationJobReads: (getStorageDiagnosticsSnapshot().fullCollectionReadsByCollection['automation-jobs'] || 0)
+        - (storageAtStart.fullCollectionReadsByCollection['automation-jobs'] || 0),
     };
   }
 
@@ -246,13 +251,17 @@ async function main() {
     assert.ok(jobsFileBytes >= 55 * 1024 * 1024, `fixture=${mb(jobsFileBytes).toFixed(1)}MB`);
 
     fullJobReads = 0;
+    resetStorageDiagnostics();
     const base = await measuredRepair('base');
-    assert.equal(base.fullJobReads, 2);
+    assert.equal(base.fullJobReads, 0);
+    assert.ok(base.scanCollectionReads >= 1);
+    assert.equal(base.fullAutomationJobReads, 0);
     assert.equal(base.catchUpPasses, 1);
     assert.equal(base.manifest.durableJobCount, 13_000);
     assert.equal(base.manifest.currentStateComplete, true);
 
     fullJobReads = 0;
+    resetStorageDiagnostics();
     const relevantMutationStartedAt = { value: null };
     const relevantMutationEndedAt = { value: null };
     const relevant = await measuredRepair('relevant-write', {
@@ -271,7 +280,9 @@ async function main() {
         relevantMutationEndedAt.value = performance.now();
       },
     });
-    assert.equal(relevant.fullJobReads, 3);
+    assert.equal(relevant.fullJobReads, 0);
+    assert.ok(relevant.scanCollectionReads >= 1);
+    assert.equal(relevant.fullAutomationJobReads, 0);
     assert.ok(relevant.deltaJobCount >= 1);
     assert.equal(relevant.manifest.durableJobCount, 13_001);
     assert.equal(
@@ -281,6 +292,7 @@ async function main() {
 
     const heartbeatBoundary = relevant.manifest.sourceHighWatermark;
     fullJobReads = 0;
+    resetStorageDiagnostics();
     const heartbeatErrors = [];
     const originalConsoleError = console.error;
     console.error = value => heartbeatErrors.push(String(value));
@@ -317,7 +329,9 @@ async function main() {
     } finally {
       console.error = originalConsoleError;
     }
-    assert.equal(heartbeat.fullJobReads, 2);
+    assert.equal(heartbeat.fullJobReads, 0);
+    assert.ok(heartbeat.scanCollectionReads >= 1);
+    assert.equal(heartbeat.fullAutomationJobReads, 0);
     assert.equal(heartbeat.manifest.sourceHighWatermark, heartbeatBoundary);
     assert.ok(heartbeatWrites >= 7);
     assert.equal(
@@ -393,9 +407,9 @@ async function main() {
     console.log(`METRIC fixture jobs=13000 runtimeSnapshots=500 jobsFileMB=${mb(jobsFileBytes).toFixed(1)}`);
     console.log(`METRIC appHealth coldMs=${coldMs.toFixed(1)} warmMs=${warmMs.toFixed(1)} repeatedReads=5 durableJobReads=0 heapDeltaMB=${mb(interactiveMemoryAfter - interactiveMemoryBefore).toFixed(1)}`);
     console.log(`METRIC scheduling latencyMs=${schedulingMs.toFixed(1)} durableJobReads=0 jobEnqueuedInline=false repairId=${scheduled.repairId}`);
-    console.log(`METRIC baseRepair totalMs=${base.totalMs.toFixed(1)} baseMs=${base.baseMs.toFixed(1)} catchUpMs=${base.catchUpMs.toFixed(1)} promotionMs=${base.promotionMs.toFixed(1)} legacyMirrorMs=${base.legacyMirrorMs.toFixed(1)} fullJobReads=${base.fullJobReads} catchUpPasses=${base.catchUpPasses}`);
-    console.log(`METRIC relevantRepair totalMs=${relevant.totalMs.toFixed(1)} mutationMs=${relevantMutationMs.toFixed(1)} catchUpMs=${relevant.catchUpMs.toFixed(1)} promotionMs=${relevant.promotionMs.toFixed(1)} fullJobReads=${relevant.fullJobReads} deltaJobs=${relevant.deltaJobCount}`);
-    console.log(`METRIC heartbeatRepair totalMs=${heartbeat.totalMs.toFixed(1)} heartbeatWorkMs=${heartbeatWorkMs.toFixed(1)} heartbeatWrites=${heartbeatWrites} catchUpMs=${heartbeat.catchUpMs.toFixed(1)} promotionMs=${heartbeat.promotionMs.toFixed(1)} fullJobReads=${heartbeat.fullJobReads} sourceBoundaryMoved=false`);
+    console.log(`METRIC baseRepair totalMs=${base.totalMs.toFixed(1)} baseMs=${base.baseMs.toFixed(1)} catchUpMs=${base.catchUpMs.toFixed(1)} promotionMs=${base.promotionMs.toFixed(1)} legacyMirrorMs=${base.legacyMirrorMs.toFixed(1)} fullJobReads=${base.fullJobReads} fullAutomationJobReads=${base.fullAutomationJobReads} scanCollectionReads=${base.scanCollectionReads} catchUpPasses=${base.catchUpPasses}`);
+    console.log(`METRIC relevantRepair totalMs=${relevant.totalMs.toFixed(1)} mutationMs=${relevantMutationMs.toFixed(1)} catchUpMs=${relevant.catchUpMs.toFixed(1)} promotionMs=${relevant.promotionMs.toFixed(1)} fullJobReads=${relevant.fullJobReads} fullAutomationJobReads=${relevant.fullAutomationJobReads} scanCollectionReads=${relevant.scanCollectionReads} deltaJobs=${relevant.deltaJobCount}`);
+    console.log(`METRIC heartbeatRepair totalMs=${heartbeat.totalMs.toFixed(1)} heartbeatWorkMs=${heartbeatWorkMs.toFixed(1)} heartbeatWrites=${heartbeatWrites} catchUpMs=${heartbeat.catchUpMs.toFixed(1)} promotionMs=${heartbeat.promotionMs.toFixed(1)} fullJobReads=${heartbeat.fullJobReads} fullAutomationJobReads=${heartbeat.fullAutomationJobReads} scanCollectionReads=${heartbeat.scanCollectionReads} sourceBoundaryMoved=false`);
     console.log(`METRIC memory peakHeapMB=${mb(peakHeapBytes).toFixed(1)} peakRssMB=${mb(peakRssBytes).toFixed(1)} candidateCopiesPeakBound=2 candidateProjectionRecordsPeakBound=8000`);
     console.log('M3.1.2 projection performance: PASS');
   } finally {

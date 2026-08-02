@@ -435,6 +435,31 @@ async function main() {
     assert.equal(database.commits, 1);
   });
 
+  await test('streaming transaction visits every item and preserves fake-Mongo semantics', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    await adapter.writeCollection('products', [
+      { id: 'first', value: 0 },
+      { id: 'second', value: 0 },
+      { id: 'third', value: 0 },
+    ]);
+    const visited = [];
+    const result = await adapter.runStreamingTransaction('products', (item, index) => {
+      visited.push([item.id, index]);
+      if (item.id !== 'second') return false;
+      item.value = 1;
+      return true;
+    }, { appendItems: () => [{ id: 'appended', value: 4 }] });
+    assert.deepEqual(visited, [['first', 0], ['second', 1], ['third', 2]]);
+    assert.deepEqual(result, { changed: true, itemCount: 4 });
+    assert.deepEqual(await adapter.readCollection('products'), [
+      { id: 'first', value: 0 },
+      { id: 'second', value: 1 },
+      { id: 'third', value: 0 },
+      { id: 'appended', value: 4 },
+    ]);
+  });
+
   await test('fenced projection candidates use generic revisions and publish through one atomic manifest pointer', async () => {
     const database = new FakeDatabase();
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));

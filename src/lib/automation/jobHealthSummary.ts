@@ -1697,8 +1697,12 @@ export async function finishAutomationJobProjectionRebuild(
     if (!['VALIDATING', 'PUBLISHING'].includes(current.activeRepair.phase)) {
       throw new Error(`JOB_PROJECTION_REPAIR_INVALID_TRANSITION:${current.activeRepair.phase}:PUBLISHING`);
     }
-    const concurrentMutation = current.inFlightSyncTokens.length > 0
-      || current.sourceHighWatermark !== result.sourceBoundary.highWatermark;
+    // A repair publishes a captured high-watermark. Mutations that started
+    // after that capture are intentionally left for the next incremental sync;
+    // only an operation at or below the captured boundary can invalidate the
+    // candidate being promoted.
+    const concurrentMutation = (current.sourceHighWatermark || 0) < result.sourceBoundary.highWatermark
+      || (current.inFlightSyncOperations || []).some(operation => operation.sequence <= result.sourceBoundary.highWatermark);
     const validResult = Boolean(
       result.listProjectionCount === result.statusProjectionCount
       && result.retainedJobCount === result.listProjectionCount
@@ -1831,10 +1835,13 @@ export async function completeAutomationJobProjectionRepair(
       throw new Error(`JOB_PROJECTION_REPAIR_INVALID_TRANSITION:${current.activeRepair.phase}:COMPLETED`);
     }
     if (input.legacyMirrored && (
-      current.inFlightSyncTokens.length > 0
+      (input.expectedHighWatermark !== undefined
+        && (
+           (current.sourceHighWatermark || 0) < input.expectedHighWatermark
+          || (current.inFlightSyncOperations || []).some(operation => operation.sequence <= input.expectedHighWatermark!)
+        ))
       || current.sourceRevision !== input.expectedSourceRevision
       || current.summaryRevision !== input.expectedSummaryRevision
-      || current.sourceHighWatermark !== input.expectedHighWatermark
     )) {
       throw new Error('JOB_PROJECTION_LEGACY_MIRROR_BOUNDARY_CHANGED');
     }
@@ -2613,7 +2620,7 @@ export async function readBoundedAutomationJobStatuses(): Promise<BoundedAutomat
   }
 }
 
-export async function refreshAutomationJobHealthSummary(now = Date.now()): Promise<AutomationJobHealthSummary> {
+async function refreshAutomationJobHealthSummaryOnce(now = Date.now()): Promise<AutomationJobHealthSummary> {
   const projections = await readBoundedAutomationJobProjections();
   if (projections.availability === 'UNAVAILABLE') {
     throw new Error(projections.reasonCodes[0] || 'JOB_PROJECTION_UNAVAILABLE');
@@ -2695,6 +2702,83 @@ export async function refreshAutomationJobHealthSummary(now = Date.now()): Promi
   });
   if (!linked) throw new Error('JOB_HEALTH_SUMMARY_SOURCE_REVISION_CHANGED');
   return output;
+}
+
+let healthSummaryRefreshFlight: Promise<AutomationJobHealthSummary> | undefined;
+let healthSummaryRefreshBackoffUntil = 0;
+let healthSummaryRefreshFailureCount = 0;
+let healthSummaryRefreshDuplicateCount = 0;
+let lastHealthSummaryDiagnosticAt = 0;
+
+async function readLastValidHealthSummary(): Promise<AutomationJobHealthSummary | null> {
+  const active = await getAutomationJobActiveProjectionStorage();
+  const snapshot = await readBoundedCollectionSnapshot<AutomationJobHealthSummary>(
+    active.collections.summary,
+    { maximumItems: 1, maximumBytes: 512 * 1024 },
+  ).catch(() => null);
+  const summary = snapshot?.items[0];
+  return isHealthSummary(summary) ? summary : null;
+}
+
+function emitHealthSummaryDiagnostic(reasonCode: string): void {
+  const now = Date.now();
+  if (now - lastHealthSummaryDiagnosticAt < 60_000) return;
+  lastHealthSummaryDiagnosticAt = now;
+  console.info(JSON.stringify({
+    type: 'automation_job_health_summary_refresh_deferred',
+    reasonCode,
+    attempts: healthSummaryRefreshFailureCount,
+    backoffMs: Math.max(0, healthSummaryRefreshBackoffUntil - now),
+    skippedDuplicateCount: healthSummaryRefreshDuplicateCount,
+  }));
+}
+
+/**
+ * Summary refresh is a read-model write, not a repair trigger. Serialize it
+ * per process, retry a moving boundary a small bounded number of times, and
+ * keep serving the last coherent summary when a writer is still active.
+ */
+export async function refreshAutomationJobHealthSummary(now = Date.now()): Promise<AutomationJobHealthSummary> {
+  if (healthSummaryRefreshFlight) {
+    healthSummaryRefreshDuplicateCount += 1;
+    return healthSummaryRefreshFlight;
+  }
+  if (now < healthSummaryRefreshBackoffUntil) {
+    const previous = await readLastValidHealthSummary();
+    if (previous) {
+      emitHealthSummaryDiagnostic('JOB_HEALTH_SUMMARY_REFRESH_BACKOFF');
+      return previous;
+    }
+  }
+  const flight = (async (): Promise<AutomationJobHealthSummary> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const output = await refreshAutomationJobHealthSummaryOnce(now + attempt);
+        healthSummaryRefreshFailureCount = 0;
+        healthSummaryRefreshBackoffUntil = 0;
+        return output;
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof Error) || !error.message.includes('SOURCE_REVISION_CHANGED')) throw error;
+        healthSummaryRefreshFailureCount += 1;
+        await new Promise(resolve => setTimeout(resolve, [5, 25, 100][attempt]));
+      }
+    }
+    healthSummaryRefreshBackoffUntil = Date.now() + Math.min(60_000, 5_000 * Math.max(1, healthSummaryRefreshFailureCount));
+    const previous = await readLastValidHealthSummary();
+    if (previous) {
+      emitHealthSummaryDiagnostic('JOB_HEALTH_SUMMARY_SOURCE_REVISION_CHANGED');
+      return previous;
+    }
+    throw lastError instanceof Error ? lastError : new Error('JOB_HEALTH_SUMMARY_SOURCE_REVISION_CHANGED');
+  })();
+  healthSummaryRefreshFlight = flight;
+  try {
+    return await flight;
+  } finally {
+    if (healthSummaryRefreshFlight === flight) healthSummaryRefreshFlight = undefined;
+  }
 }
 
 function healthView(

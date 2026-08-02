@@ -73,15 +73,27 @@ async function waitForWorkerRole() {
     releaseId: role.lease.releaseId,
   }));
 
+  let roleHeartbeatBusy = false;
+  let roleHeartbeatFailures = 0;
   const roleHeartbeat = setInterval(() => {
+    if (roleHeartbeatBusy || stopping) return;
+    roleHeartbeatBusy = true;
     void heartbeatRuntimeRole('WORKER', ownership).then(renewed => {
-      if (!renewed) {
+      roleHeartbeatFailures = renewed ? 0 : roleHeartbeatFailures + 1;
+      if (!renewed || roleHeartbeatFailures >= 2) {
         roleLeaseLost = true;
         stopping = true;
-        console.error(JSON.stringify({ type: 'worker_role_lost', workerId: instanceId, reasonCode: 'WORKER_FENCING_REJECTED' }));
+        console.error(JSON.stringify({ type: 'worker_role_lost', workerId: instanceId, reasonCode: 'WORKER_FENCING_REJECTED', consecutiveFailures: roleHeartbeatFailures }));
       }
     }).catch(error => {
-      console.error(JSON.stringify({ type: 'worker_role_heartbeat_failed', workerId: instanceId, reasonCode: error instanceof Error ? error.message : 'UNKNOWN_ERROR' }));
+      roleHeartbeatFailures += 1;
+      console.error(JSON.stringify({ type: 'worker_role_heartbeat_failed', workerId: instanceId, reasonCode: error instanceof Error ? error.message : 'UNKNOWN_ERROR', consecutiveFailures: roleHeartbeatFailures }));
+      if (roleHeartbeatFailures >= 2) {
+        roleLeaseLost = true;
+        stopping = true;
+      }
+    }).finally(() => {
+      roleHeartbeatBusy = false;
     });
   }, 15_000);
   roleHeartbeat.unref();

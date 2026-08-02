@@ -23,6 +23,7 @@ import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import type { LinkHealthStatus, Product, ProductLifecycleState, ProductOffer } from '@/lib/types';
 import { getFeatureRolloutState } from './featureRollout';
 import { createAutomationJob, getAutomationControl } from './store';
+import { throwIfExecutionAborted } from './executionBudget';
 import { finalizeRuntimeRecoveryCanaryPermit } from './runtimeRecoveryCanary';
 import type { AutomationJob } from './types';
 
@@ -61,6 +62,11 @@ interface LinkCandidateResolution {
   selectedUrl: string;
   result: LinkCheckResult;
   attempts: number;
+}
+
+export interface PostPublishMonitorExecutionOptions {
+  signal?: AbortSignal;
+  deadline?: number;
 }
 
 function monitorKey(job: AutomationJob, phase: string): string {
@@ -102,11 +108,15 @@ function linkCheckOptions() {
   return { resolveDns: process.env.NODE_ENV !== 'test' };
 }
 
-async function resolveHealthyLinkCandidate(candidates: Array<string | undefined>): Promise<LinkCandidateResolution> {
+async function resolveHealthyLinkCandidate(
+  candidates: Array<string | undefined>,
+  options: PostPublishMonitorExecutionOptions = {},
+): Promise<LinkCandidateResolution> {
   const urls = [...new Set(candidates.map(value => String(value || '').trim()).filter(Boolean))];
   const checked: Array<{ url: string; result: LinkCheckResult }> = [];
   for (const url of urls) {
-    const result = await checkLinkHealth(url, linkCheckOptions());
+    throwIfExecutionAborted(options.signal);
+    const result = await checkLinkHealth(url, { ...linkCheckOptions(), signal: options.signal });
     checked.push({ url, result });
     if (result.ok) return { selectedUrl: url, result, attempts: checked.length };
   }
@@ -156,7 +166,9 @@ async function probePublicPage(
   job: AutomationJob,
   product: Product,
   expectedPublic: boolean,
+  options: PostPublishMonitorExecutionOptions = {},
 ): Promise<{ status: string; identity: PublicPageIdentityStatus; url: string; externalRequests: number }> {
+  throwIfExecutionAborted(options.signal);
   const target = configuredPublicPageUrl(product);
   if (!expectedPublic) {
     return { status: 'not_applicable', identity: 'UNVERIFIED', url: target.url, externalRequests: 0 };
@@ -183,9 +195,11 @@ async function probePublicPage(
         method: 'GET',
         redirect: 'manual',
         headers: { Accept: 'text/html,application/xhtml+xml' },
-        signal: AbortSignal.timeout(8_000),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(8_000)])
+          : AbortSignal.timeout(8_000),
       });
-      const body = response.ok ? await readBoundedResponseText(response) : null;
+      const body = response.ok ? await readBoundedResponseText(response, 64 * 1_024, options.signal) : null;
       return {
         status: classifyPublicStatus(response.status),
         identity: response.ok ? classifyPublicPageIdentity(product, body) : 'UNVERIFIED',
@@ -193,7 +207,7 @@ async function probePublicPage(
         externalRequests: 1,
       };
     }
-    const response = await fetchExternalSafely(target.url, { timeoutMs: 8_000, maxBytes: 64 * 1_024, maxRedirects: 3 });
+    const response = await fetchExternalSafely(target.url, { timeoutMs: 8_000, maxBytes: 64 * 1_024, maxRedirects: 3, signal: options.signal });
     return {
       status: classifyPublicStatus(response.response.status),
       identity: response.response.ok
@@ -213,7 +227,13 @@ async function probePublicPage(
   }
 }
 
-async function probe(job: AutomationJob, product: Product, expectedPublic: boolean): Promise<MonitorProbeResult> {
+async function probe(
+  job: AutomationJob,
+  product: Product,
+  expectedPublic: boolean,
+  options: PostPublishMonitorExecutionOptions = {},
+): Promise<MonitorProbeResult> {
+  throwIfExecutionAborted(options.signal);
   const fixture = fixtureOutcome(job);
   let productResolution: LinkCandidateResolution;
   let affiliateResolution: LinkCandidateResolution;
@@ -244,18 +264,18 @@ async function probe(job: AutomationJob, product: Product, expectedPublic: boole
     productResolution = await resolveHealthyLinkCandidate([
       product.originalUrl,
       product.identity?.canonicalUrl,
-    ]);
+    ], options);
     const offers = alternateOffers(product);
     affiliateResolution = await resolveHealthyLinkCandidate([
       product.affiliateUrl,
       ...offers.map(offer => offer.affiliateUrl),
-    ]);
+    ], options);
     selectedOfferId = offers.find(offer => offer.affiliateUrl === affiliateResolution.selectedUrl)?.id;
-    imageResolution = await resolveHealthyImageCandidate([product.imageUrl, ...(product.gallery || [])], linkCheckOptions());
+    imageResolution = await resolveHealthyImageCandidate([product.imageUrl, ...(product.gallery || [])], { ...linkCheckOptions(), signal: options.signal });
     sourceRequests = productResolution.attempts + affiliateResolution.attempts + imageResolution.attempts;
   }
 
-  const publicPage = await probePublicPage(job, product, expectedPublic);
+  const publicPage = await probePublicPage(job, product, expectedPublic, options);
   const statuses: MonitorStatuses = {
     product: productResolution.result.status,
     affiliate: affiliateResolution.result.status,
@@ -297,7 +317,9 @@ async function transitionProduct(
   workerId: string,
   phase: string,
   reasonCodes: string[],
+  options: PostPublishMonitorExecutionOptions = {},
 ): Promise<Product> {
+  throwIfExecutionAborted(options.signal);
   const result = await persistLifecycleTransition({
     productId,
     to,
@@ -307,6 +329,7 @@ async function transitionProduct(
     reasonCodes,
     now: stableCheckedAt(job),
   });
+  throwIfExecutionAborted(options.signal);
   return result.product;
 }
 
@@ -318,7 +341,9 @@ async function scheduleNextMonitor(
   interval: '15m' | '6h' | '24h' | 'periodic',
   reason: string,
   retry: boolean,
+  options: PostPublishMonitorExecutionOptions = {},
 ): Promise<string> {
+  throwIfExecutionAborted(options.signal);
   const scheduledAt = new Date(Date.parse(stableCheckedAt(job)) + delayMs).toISOString();
   const identity = stableToken(productId);
   const child = await createAutomationJob({
@@ -366,7 +391,9 @@ async function persistObservation(
   result: MonitorProbeResult,
   checkedAt: string,
   observationId: string,
+  options: PostPublishMonitorExecutionOptions = {},
 ): Promise<Product> {
+  throwIfExecutionAborted(options.signal);
   const observedProduct: Product = {
     ...product,
     originalUrl: result.selectedProductUrl,
@@ -389,6 +416,7 @@ async function persistObservation(
     publicPageUrl: result.publicPageUrl,
     publicPageStatus: result.statuses.publicPage,
   });
+  throwIfExecutionAborted(options.signal);
   let confidences = calculateProductConfidences(observedProduct, {
     evidenceCoverage: evidence.coverage,
     now: Date.parse(checkedAt),
@@ -396,6 +424,7 @@ async function persistObservation(
   if (!['ok', 'redirected', 'not_applicable'].includes(result.statuses.publicPage)) {
     confidences = { ...confidences, health: Math.min(confidences.health, 0.4), publish: Math.min(confidences.publish, 0.4) };
   }
+  throwIfExecutionAborted(options.signal);
   const saved = await saveCanonicalProduct(product.id, {
     originalUrl: result.selectedProductUrl,
     affiliateUrl: result.selectedAffiliateUrl,
@@ -413,6 +442,7 @@ async function persistObservation(
     evidenceSnapshotHash: evidence.snapshot.snapshotHash,
     confidences,
   }, { verifiedHealthUpdate: true });
+  throwIfExecutionAborted(options.signal);
   if (!saved) throw new Error('POST_PUBLISH_MONITOR_PRODUCT_WRITE_FAILED');
   return saved;
 }
@@ -442,7 +472,12 @@ function recoveryReadinessReasons(product: Product, evidenceValid: boolean, evid
   return [...new Set(reasons)];
 }
 
-async function ensureRepublishChild(job: AutomationJob, product: Product): Promise<string | undefined> {
+async function ensureRepublishChild(
+  job: AutomationJob,
+  product: Product,
+  options: PostPublishMonitorExecutionOptions = {},
+): Promise<string | undefined> {
+  throwIfExecutionAborted(options.signal);
   const control = await getAutomationControl();
   if (!['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode) || control.publishPaused || control.killSwitch) return undefined;
   const snapshot = readinessSnapshotHash(product);
@@ -456,6 +491,7 @@ async function ensureRepublishChild(job: AutomationJob, product: Product): Promi
     requestedBy: 'autopilot-worker',
     priority: 90,
   });
+  throwIfExecutionAborted(options.signal);
   await saveCanonicalProduct(product.id, { relatedJobId: child.job.id });
   return child.job.id;
 }
@@ -483,7 +519,7 @@ function classifyPublicPageIdentity(product: Product, body: string | null): Publ
   return 'EXPECTED_PRODUCT_MISMATCH';
 }
 
-async function readBoundedResponseText(response: Response, maximumBytes = 64 * 1_024): Promise<string | null> {
+async function readBoundedResponseText(response: Response, maximumBytes = 64 * 1_024, signal?: AbortSignal): Promise<string | null> {
   const declaredBytes = Number(response.headers.get('content-length') || 0);
   if (Number.isFinite(declaredBytes) && declaredBytes > maximumBytes) return null;
   if (!response.body) return '';
@@ -492,6 +528,7 @@ async function readBoundedResponseText(response: Response, maximumBytes = 64 * 1
   let total = 0;
   try {
     while (true) {
+      throwIfExecutionAborted(signal);
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
@@ -520,7 +557,9 @@ async function hideUnhealthyRecoveryCanary(
   result: MonitorProbeResult,
   permitId: string,
   publicationEffectKey: string | undefined,
+  options: PostPublishMonitorExecutionOptions = {},
 ): Promise<{ product: Product; childJobId: string }> {
+  throwIfExecutionAborted(options.signal);
   const checkedAt = stableCheckedAt(job);
   const reasonCode = `RECOVERY_CANARY_MONITOR_${result.outcome}`;
   const reconciledBlockers = preserveFailClosedProductBlockers(product, [reasonCode], checkedAt);
@@ -532,7 +571,9 @@ async function hideUnhealthyRecoveryCanary(
     workerId,
     'recovery-canary-hidden',
     [reasonCode],
+    options,
   );
+  throwIfExecutionAborted(options.signal);
   hidden = (await saveCanonicalProduct(product.id, {
     status: 'needs_review',
     publicHidden: true,
@@ -552,6 +593,7 @@ async function hideUnhealthyRecoveryCanary(
     runtimeRecoveryCanaryObservationPending: false,
     runtimeRecoveryCanaryObservationExpiresAt: undefined,
   })) || hidden;
+  throwIfExecutionAborted(options.signal);
   await finalizeRuntimeRecoveryCanaryPermit({
     permitId,
     productId: product.id,
@@ -560,6 +602,7 @@ async function hideUnhealthyRecoveryCanary(
     publicationEffectKey,
     preserveRuntimeBlock: true,
   });
+  throwIfExecutionAborted(options.signal);
   const childJobId = await scheduleNextMonitor(
     job,
     product.id,
@@ -568,6 +611,7 @@ async function hideUnhealthyRecoveryCanary(
     '24h',
     'recovery-canary-hidden-recheck',
     true,
+    options,
   );
   return { product: hidden, childJobId };
 }
@@ -577,17 +621,19 @@ async function hideConfirmedProduct(
   workerId: string,
   product: Product,
   result: MonitorProbeResult,
+  options: PostPublishMonitorExecutionOptions = {},
 ): Promise<{ product: Product; childJobId: string }> {
+  throwIfExecutionAborted(options.signal);
   let current = product;
   const existingHiddenEvent = await getLifecycleTransitionEvent(monitorKey(job, 'hidden'));
   if (current.lifecycleState === 'HIDDEN' && existingHiddenEvent) {
     // The durable transitions already completed before a worker crash. Rebuild
     // the same result and child key without attempting HIDDEN -> CONFIRMED_BROKEN.
   } else if (current.lifecycleState !== 'CONFIRMED_BROKEN') {
-    current = await transitionProduct(current.id, 'CONFIRMED_BROKEN', job, workerId, 'confirmed-broken', ['permanent_failure_confirmed']);
+    current = await transitionProduct(current.id, 'CONFIRMED_BROKEN', job, workerId, 'confirmed-broken', ['permanent_failure_confirmed'], options);
   }
   if (current.lifecycleState !== 'HIDDEN') {
-    current = await transitionProduct(current.id, 'HIDDEN', job, workerId, 'hidden', ['confirmed_broken_auto_hide']);
+    current = await transitionProduct(current.id, 'HIDDEN', job, workerId, 'hidden', ['confirmed_broken_auto_hide'], options);
   }
   const checkedAt = stableCheckedAt(job);
   const reason = healthReason(result.statuses);
@@ -598,6 +644,7 @@ async function hideConfirmedProduct(
     result.statuses.publicPage,
   ], checkedAt);
   const blockerCodes = canonicalBlockerCodes(reconciledBlockers);
+  throwIfExecutionAborted(options.signal);
   const saved = await saveCanonicalProduct(current.id, {
     linkHealthStatus: productStatus(result.statuses.product),
     affiliateHealthStatus: productStatus(result.statuses.affiliate),
@@ -618,17 +665,23 @@ async function hideConfirmedProduct(
     sourceHealthReason: reason,
     nextAutomaticAction: 'RECHECK_HIDDEN_PRODUCT',
   });
+  throwIfExecutionAborted(options.signal);
   if (!saved) throw new Error('POST_PUBLISH_MONITOR_HIDE_WRITE_FAILED');
   await recordSourceQualityObservation(saved.source, {
     idempotencyKey: `source-rollback:${saved.publicationEffectKey || saved.publishedAt || saved.id}`.slice(0, 200),
     observedAt: saved.hiddenAt || checkedAt,
     rolledBackProducts: 1,
   });
-  const childJobId = await scheduleNextMonitor(job, current.id, DAY, sequenceOf(job) + 1, '24h', 'hidden-recheck', true);
+  const childJobId = await scheduleNextMonitor(job, current.id, DAY, sequenceOf(job) + 1, '24h', 'hidden-recheck', true, options);
   return { product: saved, childJobId };
 }
 
-export async function executePostPublishMonitor(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
+export async function executePostPublishMonitor(
+  job: AutomationJob,
+  workerId: string,
+  execution: PostPublishMonitorExecutionOptions = {},
+): Promise<Record<string, unknown>> {
+  throwIfExecutionAborted(execution.signal);
   const productId = typeof job.payload.productId === 'string' ? job.payload.productId : '';
   if (!productId) throw new Error('VALIDATION_PRODUCT_ID_REQUIRED');
   if (!workerId || job.status !== 'RUNNING' || job.claimedBy !== workerId) throw new Error('POST_PUBLISH_MONITOR_DURABLE_CLAIM_REQUIRED');
@@ -666,7 +719,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
       outcome: 'CONFIRMED_BROKEN', statuses: fallbackStatuses, externalRequests: 0,
       selectedProductUrl: String(product.originalUrl || ''), selectedAffiliateUrl: String(product.affiliateUrl || ''),
       selectedImageUrl: String(product.imageUrl || ''), publicPageUrl: configuredPublicPageUrl(product).url,
-    });
+    }, execution);
     return {
       executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
       outcome: 'CONFIRMED_BROKEN', hidden: true, childJobId: finalized.childJobId,
@@ -675,15 +728,18 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
   }
 
   if (!startEvent && !terminalEvent && ['DEGRADED', 'HIDDEN', 'QUARANTINED', 'RETRY_SCHEDULED'].includes(String(product.lifecycleState))) {
-    product = await transitionProduct(productId, 'RECHECKING', job, workerId, 'rechecking', ['scheduled_health_recheck']);
+    product = await transitionProduct(productId, 'RECHECKING', job, workerId, 'rechecking', ['scheduled_health_recheck'], execution);
   }
 
   const priorPermanentFailure = PERMANENT_REASON.test(String(product.sourceHealthReason || ''));
-  const probeResult = await probe(job, product, startedPublic && !recoveryFlow);
-  product = await persistObservation(product, probeResult, checkedAt, job.id);
+  const probeResult = await probe(job, product, startedPublic && !recoveryFlow, execution);
+  throwIfExecutionAborted(execution.signal);
+  product = await persistObservation(product, probeResult, checkedAt, job.id, execution);
+  throwIfExecutionAborted(execution.signal);
   const reason = healthReason(probeResult.statuses);
 
   if (probeResult.outcome === 'HEALTHY') {
+    throwIfExecutionAborted(execution.signal);
     product = (await saveCanonicalProduct(productId, {
       linkHealthStatus: productStatus(probeResult.statuses.product),
       affiliateHealthStatus: productStatus(probeResult.statuses.affiliate),
@@ -703,7 +759,8 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
       if (readinessReasons.length) {
         const reconciledBlockers = preserveFailClosedProductBlockers(product, readinessReasons, checkedAt);
         const blockerCodes = canonicalBlockerCodes(reconciledBlockers);
-        product = await transitionProduct(productId, 'QUARANTINED', job, workerId, 'quarantined', readinessReasons);
+        product = await transitionProduct(productId, 'QUARANTINED', job, workerId, 'quarantined', readinessReasons, execution);
+        throwIfExecutionAborted(execution.signal);
         await saveCanonicalProduct(productId, {
           status: 'needs_review', publicHidden: true, needsVerification: true, autoPublished: false,
           autoPublishEligible: false, publicDecision: 'quarantined', quarantineReasons: readinessReasons,
@@ -711,7 +768,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
           currentBlockers: reconciledBlockers, blockersCheckedAt: checkedAt,
           nextAutomaticAction: 'RECHECK_QUARANTINED_PRODUCT',
         });
-        const childJobId = await scheduleNextMonitor(job, productId, DAY, sequence + 1, '24h', 'quarantine-recheck', true);
+        const childJobId = await scheduleNextMonitor(job, productId, DAY, sequence + 1, '24h', 'quarantine-recheck', true, execution);
         return {
           executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
           outcome: persistedFailClosedCodes.length ? 'TEMPORARY_FAILURE' : 'HEALTHY',
@@ -721,7 +778,8 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
           aiRequests: 0, externalRequests: probeResult.externalRequests,
         };
       }
-      product = await transitionProduct(productId, 'READY_FOR_PUBLISH', job, workerId, 'ready-for-publish', ['hidden_product_health_and_evidence_recovered']);
+      product = await transitionProduct(productId, 'READY_FOR_PUBLISH', job, workerId, 'ready-for-publish', ['hidden_product_health_and_evidence_recovered'], execution);
+      throwIfExecutionAborted(execution.signal);
       product = (await saveCanonicalProduct(productId, {
         status: 'needs_review', publicHidden: true, needsVerification: false, autoPublished: false,
         autoPublishEligible: true, publicDecision: 'ready_for_publish', hiddenReason: undefined,
@@ -729,7 +787,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
         currentBlockers: [], blockersCheckedAt: checkedAt, quarantineReasons: [],
         nextAutomaticAction: 'AUTO_SAFE_PUBLISH', nextRetryAt: undefined,
       })) || product;
-      const childJobId = await ensureRepublishChild(job, product);
+      const childJobId = await ensureRepublishChild(job, product, execution);
       return {
         executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
         outcome: 'HEALTHY', recovered: true, childJobId, statuses: probeResult.statuses,
@@ -756,8 +814,9 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
     }
 
     if (product.lifecycleState === 'RECHECKING' || await getLifecycleTransitionEvent(monitorKey(job, 'healthy-published'))) {
-      product = await transitionProduct(productId, 'PUBLISHED', job, workerId, 'healthy-published', ['post_publish_health_recovered']);
+      product = await transitionProduct(productId, 'PUBLISHED', job, workerId, 'healthy-published', ['post_publish_health_recovered'], execution);
     }
+    throwIfExecutionAborted(execution.signal);
     await saveCanonicalProduct(productId, {
       status: 'published', publicHidden: false, needsVerification: false, autoPublished: true,
       publicDecision: 'published', hiddenReason: undefined, publicBlockReason: undefined, publicBlockReasons: [],
@@ -771,6 +830,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
         reasonCode: 'RECOVERY_CANARY_MONITOR_HEALTHY',
         publicationEffectKey: recoveryCanaryPublicationEffectKey,
       });
+      throwIfExecutionAborted(execution.signal);
       await saveCanonicalProduct(productId, {
         runtimeRecoveryCanaryObservationPending: false,
         runtimeRecoveryCanaryObservationExpiresAt: undefined,
@@ -794,6 +854,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
       probeResult,
       recoveryCanaryPermitId,
       recoveryCanaryPublicationEffectKey,
+      execution,
     );
     return {
       executionStatus: 'COMPLETED_WITH_LOCAL_RULES',
@@ -814,6 +875,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
     ? Math.max(1, Number(product.consecutiveHealthFailures || 0))
     : Math.max(0, Number(product.consecutiveHealthFailures || 0)) + 1;
   const retainPublic = startedPublic && !recoveryFlow;
+  throwIfExecutionAborted(execution.signal);
   await saveCanonicalProduct(productId, {
     consecutiveHealthFailures: failures,
     sourceHealthReason: reason,
@@ -830,7 +892,7 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
     && !degradedEvent
     && !firstPublicFailure;
   if (probeResult.outcome === 'CONFIRMED_BROKEN' && repeatedPermanent) {
-    const hidden = await hideConfirmedProduct(job, workerId, product, probeResult);
+    const hidden = await hideConfirmedProduct(job, workerId, product, probeResult, execution);
     return {
       executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',
       outcome: 'CONFIRMED_BROKEN', hidden: true, childJobId: hidden.childJobId,
@@ -842,17 +904,17 @@ export async function executePostPublishMonitor(job: AutomationJob, workerId: st
   if (firstPublicFailure) {
     product = await transitionProduct(productId, 'DEGRADED', job, workerId, 'degraded', [
       probeResult.outcome === 'CONFIRMED_BROKEN' ? 'permanent_failure_requires_confirmation' : 'temporary_post_publish_failure',
-    ]);
+    ], execution);
   } else {
     product = await transitionProduct(productId, 'RETRY_SCHEDULED', job, workerId, 'retry-scheduled', [
       probeResult.outcome === 'CONFIRMED_BROKEN' ? 'permanent_failure_requires_confirmation' : 'temporary_health_failure',
-    ]);
+    ], execution);
   }
   const permanentConfirmation = probeResult.outcome === 'CONFIRMED_BROKEN';
   const delay = permanentConfirmation ? 15 * MINUTE : Math.min(6 * HOUR, 15 * MINUTE * 2 ** Math.min(4, failures - 1));
   const childJobId = await scheduleNextMonitor(
     job, productId, delay, sequence + 1, delay >= 6 * HOUR ? '6h' : '15m',
-    permanentConfirmation ? 'broken-confirmation' : 'temporary-retry', true,
+    permanentConfirmation ? 'broken-confirmation' : 'temporary-retry', true, execution,
   );
   return {
     executionStatus: 'COMPLETED_WITH_LOCAL_RULES', executionMode: 'LOCAL_RULES', provider: 'local',

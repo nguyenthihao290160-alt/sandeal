@@ -96,6 +96,7 @@ export interface HealthCheckRequestOptions {
   fetchImpl?: typeof fetch;
   resolveDns?: boolean;
   inspectImageBody?: boolean;
+  signal?: AbortSignal;
 }
 
 /** Try source candidates in order and retain a retryable verdict over a false permanent failure. */
@@ -269,6 +270,7 @@ async function fetchSafeRedirects(
       resolveDns,
       fetchImpl: options.fetchImpl || (fetchImpl === INITIAL_FETCH ? undefined : fetchImpl),
       allowPartialBody: method === 'GET' && imageRequest,
+      signal: options.signal,
     });
     return fetched.response;
   } catch (error) {

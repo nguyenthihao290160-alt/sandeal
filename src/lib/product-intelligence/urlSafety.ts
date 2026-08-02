@@ -68,15 +68,19 @@ async function requestPinnedPublicAddress(input: {
   timeoutMs: number;
   maximumBytes: number;
   allowPartialBody: boolean;
+  signal?: AbortSignal;
 }): Promise<Response> {
+  if (input.signal?.aborted) throw new DOMException('External request aborted', 'AbortError');
   const resolutionStartedAt = Date.now();
   const addresses = await resolvePublicDnsWithTimeout(input.url.hostname, input.timeoutMs);
+  if (input.signal?.aborted) throw new DOMException('External request aborted', 'AbortError');
   const transportTimeoutMs = Math.max(1, input.timeoutMs - (Date.now() - resolutionStartedAt));
   const pinned = addresses[0];
   const requestFunction = input.url.protocol === 'https:' ? requestHttps : requestHttp;
   return new Promise<Response>((resolve, reject) => {
     let settled = false;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => request.destroy(new DOMException('External request aborted', 'AbortError'));
     const clearDeadline = () => {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       deadlineTimer = undefined;
@@ -85,6 +89,7 @@ async function requestPinnedPublicAddress(input: {
       if (settled) return;
       settled = true;
       clearDeadline();
+      input.signal?.removeEventListener('abort', onAbort);
       reject(error);
     };
     const lookupPinned = (
@@ -130,6 +135,7 @@ async function requestPinnedPublicAddress(input: {
         Object.defineProperty(output, 'url', { value: input.url.toString() });
         settled = true;
         clearDeadline();
+        input.signal?.removeEventListener('abort', onAbort);
         resolve(output);
         return;
       }
@@ -149,6 +155,7 @@ async function requestPinnedPublicAddress(input: {
         const output = new Response(responseBody, { status, headers });
         Object.defineProperty(output, 'url', { value: input.url.toString() });
         clearDeadline();
+        input.signal?.removeEventListener('abort', onAbort);
         resolve(output);
       };
       response.on('data', (chunk: Buffer) => {
@@ -179,6 +186,7 @@ async function requestPinnedPublicAddress(input: {
       const error = new DOMException('External request timed out', 'TimeoutError');
       request.destroy(error);
     }, transportTimeoutMs);
+    input.signal?.addEventListener('abort', onAbort, { once: true });
     request.on('error', finishReject);
     request.end();
   });
@@ -195,6 +203,7 @@ export async function fetchExternalSafely(
     method?: 'GET' | 'HEAD';
     headers?: Record<string, string>;
     allowPartialBody?: boolean;
+    signal?: AbortSignal;
   } = {},
 ): Promise<{ response: Response; finalUrl: string; body: Uint8Array }> {
   const timeoutMs = Math.max(500, Math.min(options.timeoutMs || 8_000, 20_000));
@@ -211,6 +220,7 @@ export async function fetchExternalSafely(
   const visited = new Set<string>();
   const deadline = Date.now() + timeoutMs;
   for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
+    if (options.signal?.aborted) throw new DOMException('External request aborted', 'AbortError');
     const validated = validateExternalUrl(current);
     if (!validated.safe || !validated.normalizedUrl) throw new Error(validated.code || 'INVALID_URL');
     current = validated.normalizedUrl;
@@ -221,13 +231,23 @@ export async function fetchExternalSafely(
     if (remainingMs <= 0) throw new DOMException('External request timed out', 'TimeoutError');
     let response: Response;
     if (fetchImpl) {
-      if (options.resolveDns !== false) await assertPublicDns(parsed.hostname);
-      response = await fetchImpl(current, {
-        method,
-        redirect: 'manual',
-        headers,
-        signal: AbortSignal.timeout(remainingMs),
-      });
+      if (options.resolveDns !== false) await resolvePublicDnsWithTimeout(parsed.hostname, remainingMs);
+      if (options.signal?.aborted) throw new DOMException('External request aborted', 'AbortError');
+      const requestController = new AbortController();
+      const timeout = setTimeout(() => requestController.abort(), remainingMs);
+      const onAbort = () => requestController.abort(options.signal?.reason);
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        response = await fetchImpl(current, {
+          method,
+          redirect: 'manual',
+          headers,
+          signal: requestController.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+        options.signal?.removeEventListener('abort', onAbort);
+      }
     } else {
       response = await requestPinnedPublicAddress({
         url: parsed,
@@ -236,6 +256,7 @@ export async function fetchExternalSafely(
         timeoutMs: remainingMs,
         maximumBytes: maxBytes,
         allowPartialBody: options.allowPartialBody === true,
+        signal: options.signal,
       });
     }
     const contentEncoding = String(response.headers.get('content-encoding') || 'identity').trim().toLowerCase();
@@ -257,6 +278,10 @@ export async function fetchExternalSafely(
     const chunks: Uint8Array[] = [];
     let total = 0;
     while (true) {
+      if (options.signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw new DOMException('External request aborted', 'AbortError');
+      }
       const { done, value: chunk } = await reader.read();
       if (done) break;
       total += chunk.byteLength;

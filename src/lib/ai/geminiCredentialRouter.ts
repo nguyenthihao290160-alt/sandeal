@@ -41,6 +41,7 @@ export interface GeminiRequest {
   timeoutMs: number;
   inputTokenEstimate?: number;
   maxFailoverGroups?: number;
+  signal?: AbortSignal;
 }
 
 export interface GeminiRequestResult {
@@ -197,12 +198,36 @@ export async function listAvailableGeminiModels(now = Date.now()): Promise<strin
   return [...models];
 }
 
-const completed = new Map<string, GeminiRequestResult>();
+const completed = new Map<string, { result: GeminiRequestResult; storedAt: number }>();
+const COMPLETED_CACHE_LIMIT = 128;
+const COMPLETED_CACHE_TTL_MS = 10 * 60_000;
 let activeRequests = 0;
 
-async function withConcurrency<T>(work: () => Promise<T>): Promise<T> {
+async function withConcurrency<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   while (activeRequests >= 2) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (signal?.aborted) throw signal.reason || new DOMException('Gemini request aborted', 'AbortError');
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(signal?.reason || new DOMException('Gemini request aborted', 'AbortError'));
+      };
+      const timer = setTimeout(finish, 5);
+      timer.unref?.();
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
   activeRequests += 1;
   try {
@@ -227,8 +252,10 @@ export async function executeGeminiRequest(
   request: GeminiRequest,
   fetchImpl: typeof fetch = fetch,
 ): Promise<GeminiRequestResult> {
+  if (request.signal?.aborted) throw request.signal.reason || new DOMException('Gemini request aborted', 'AbortError');
   const cached = completed.get(request.idempotencyKey);
-  if (cached) return cached;
+  if (cached && Date.now() - cached.storedAt <= COMPLETED_CACHE_TTL_MS) return cached.result;
+  if (cached) completed.delete(request.idempotencyKey);
 
   const selections = await selectGeminiCredentials(request.modelId);
   const attemptedGroups = new Set<string>();
@@ -255,7 +282,9 @@ export async function executeGeminiRequest(
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), Math.max(500, request.timeoutMs));
+    const onAbort = () => controller.abort(request.signal?.reason);
+    request.signal?.addEventListener('abort', onAbort, { once: true });
     try {
       const response = await withConcurrency(() => fetchImpl(
         `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.modelId)}:generateContent`,
@@ -265,9 +294,11 @@ export async function executeGeminiRequest(
           body: JSON.stringify(request.body),
           signal: controller.signal,
         },
-      ));
+      ), request.signal);
+      if (request.signal?.aborted) throw request.signal.reason || new DOMException('Gemini request aborted', 'AbortError');
       if (response.ok) {
         const data = await response.json();
+        if (request.signal?.aborted) throw request.signal.reason || new DOMException('Gemini request aborted', 'AbortError');
         const result: GeminiRequestResult = {
           ok: true,
           status: response.status,
@@ -291,7 +322,12 @@ export async function executeGeminiRequest(
           request.inputTokenEstimate || 0,
           0,
         );
-        completed.set(request.idempotencyKey, result);
+        completed.set(request.idempotencyKey, { result, storedAt: Date.now() });
+        while (completed.size > COMPLETED_CACHE_LIMIT) {
+          const oldest = completed.keys().next().value;
+          if (!oldest) break;
+          completed.delete(oldest);
+        }
         return result;
       }
 
@@ -327,6 +363,7 @@ export async function executeGeminiRequest(
         };
       }
     } catch (error) {
+      if (request.signal?.aborted) throw request.signal.reason || new DOMException('Gemini request aborted', 'AbortError');
       const diagnostic = classifyGeminiProviderException(error);
       const cooldownUntil = await markCredential(
         selection.credentialId,
@@ -345,6 +382,7 @@ export async function executeGeminiRequest(
       }, 'DEGRADED');
     } finally {
       clearTimeout(timeout);
+      request.signal?.removeEventListener('abort', onAbort);
       key = '';
     }
   }

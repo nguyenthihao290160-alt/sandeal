@@ -132,6 +132,8 @@ export interface AutomationJob {
   schemaVersion: number;
   /** Per-job projection input version; legacy records bootstrap from zero. */
   projectionSourceVersion?: number;
+  /** Global projection mutation sequence used as a repair high-watermark. */
+  projectionSourceSequence?: number;
   policyVersion: string;
   handlerVersion: string;
   id: string;

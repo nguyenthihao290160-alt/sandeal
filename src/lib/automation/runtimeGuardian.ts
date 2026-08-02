@@ -6,6 +6,7 @@ import { getAutomationJobHealthView } from './jobHealthSummary';
 import { DEFAULT_CONTROL, getAutomationControl, updateAutomationControl } from './store';
 import { listRecentRuntimeRoleConflicts, listRuntimeRoleLeases } from './runtimeRoles';
 import { applyAutomationErrorBudget } from './sloErrorBudget';
+import { throwIfExecutionAborted } from './executionBudget';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import type { RuntimeRoleLease } from './runtimeRoles';
 
@@ -184,12 +185,14 @@ export function providerHealth(input: { configured: boolean; adapterAvailable: b
 
 export async function runRuntimeGuardian(options: {
   apply?: boolean;
+  signal?: AbortSignal;
   now?: number;
   webAlive?: boolean;
   publicRouteHealthy?: boolean;
   schedulerEnabled?: boolean;
   providers?: Record<string, ProviderHealthStatus>;
 } = {}): Promise<RuntimeHealthSnapshot> {
+  throwIfExecutionAborted(options.signal);
   const now = options.now ?? Date.now();
   const checkedAt = new Date(now).toISOString();
   const storage = await inspectStorage(now);
@@ -200,6 +203,7 @@ export async function runRuntimeGuardian(options: {
     listRecentRuntimeRoleConflicts(now - 2 * 60_000).catch(() => []),
     readCollection<RuntimeHealthSnapshot>(HEALTH_COLLECTION).catch(() => []),
   ]);
+  throwIfExecutionAborted(options.signal);
   const release = getReleaseIdentity();
   let buildAvailable = false;
   let artifactBuildId: string | null = null;
@@ -305,8 +309,10 @@ export async function runRuntimeGuardian(options: {
     recommendation: { pausePublish: !publishSafe, pauseIngestion: false, effectiveMode: !publishSafe ? 'SHADOW' : undefined },
     checkedAt,
   };
+  throwIfExecutionAborted(options.signal);
   await runTransaction<RuntimeHealthSnapshot>(HEALTH_COLLECTION, items => [...items.filter(item => item.id !== snapshot.id).slice(-499), snapshot]);
   if (options.apply !== false) {
+    throwIfExecutionAborted(options.signal);
     await updateAutomationControl({ guardianHeartbeatAt: checkedAt }, 'runtime-guardian');
     // The guardian snapshot is the durable runtime input for the SLO controller.
     // That controller measures persisted telemetry and owns ladder degradation;

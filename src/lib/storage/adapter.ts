@@ -11,8 +11,12 @@ import type {
   StorageCapabilities,
   StoragePage,
   StoragePageOptions,
+  StorageScanResult,
+  StorageStreamingTransaction,
+  StorageStreamingTransactionOptions,
   StorageTransaction,
 } from './types';
+export { getStorageDiagnosticsSnapshot, resetStorageDiagnostics } from './diagnostics';
 
 export function getDataDir(): string {
   return getStorageAdapter().getDataDir();
@@ -42,6 +46,13 @@ export function bulkMutateCollection<T extends { id: string }>(
 
 export function readCollection<T>(collection: string): Promise<T[]> {
   return getStorageAdapter().readCollection<T>(collection);
+}
+
+export function scanCollection<T>(
+  collection: string,
+  visitor: (item: T, index: number) => Promise<void> | void,
+): Promise<StorageScanResult> {
+  return getStorageAdapter().scanCollection<T>(collection, visitor);
 }
 
 export async function readBoundedCollection<T>(
@@ -80,6 +91,14 @@ export function runTransaction<T>(
   fn: StorageTransaction<T>
 ): Promise<void> {
   return getStorageAdapter().runTransaction(collection, fn);
+}
+
+export function runStreamingTransaction<T>(
+  collection: string,
+  fn: StorageStreamingTransaction<T>,
+  options?: StorageStreamingTransactionOptions<T>,
+): Promise<{ changed: boolean; itemCount: number }> {
+  return getStorageAdapter().runStreamingTransaction(collection, fn, options);
 }
 
 export async function findById<T extends { id: string }>(collection: string, id: string): Promise<T | null> {

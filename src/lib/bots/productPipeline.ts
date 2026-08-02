@@ -11,11 +11,12 @@ import {
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
 import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
-import { readCollection, runTransaction, writeCollection } from '../storage/adapter';
+import { readCollection, runTransaction, scanCollection, writeCollection } from '../storage/adapter';
 import { createAutomationJob, getAutomationControl } from '../automation/store';
 import { completeJournalEffect } from '../automation/operationJournal';
 import { checkImageHealth, checkLinkHealth, productImageValidationState, type ImageCheckResult, type LinkCheckResult } from './productHealthCheck';
 import type { Product, ProductLifecycleState, ProductOffer, ReviewContent } from '../types';
+import { normalizeCanonicalProduct } from '../canonicalProduct';
 import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
 import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
 import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
@@ -40,9 +41,48 @@ import {
   reserveProductProcessingCapacity,
   type DailyBusinessUsage,
 } from '../automation/businessUsage';
+import { throwIfExecutionAborted } from '../automation/executionBudget';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const RUNTIME_COLLECTION = 'pipeline-runtime';
+const MAX_PRODUCT_COMPARISON_ITEMS = 2_000;
+
+async function findProductForSource(source: string, sourceId: string, signal?: AbortSignal): Promise<Product | undefined> {
+  let found: Product | undefined;
+  await scanCollection<Partial<Product>>('products', (raw) => {
+    throwIfExecutionAborted(signal);
+    if (found || raw.source !== source || (raw.sourceId !== sourceId && raw.externalId !== sourceId)) return;
+    found = normalizeCanonicalProduct(raw);
+  });
+  return found;
+}
+
+async function findProductById(id: string, signal?: AbortSignal): Promise<Product | undefined> {
+  let found: Product | undefined;
+  await scanCollection<Partial<Product>>('products', raw => {
+    throwIfExecutionAborted(signal);
+    if (!found && raw.id === id) found = normalizeCanonicalProduct(raw);
+  });
+  return found;
+}
+
+async function readBoundedProductComparison(excludeId: string, signal?: AbortSignal): Promise<{
+  items: Product[];
+  truncated: boolean;
+}> {
+  const items: Product[] = [];
+  let truncated = false;
+  await scanCollection<Partial<Product>>('products', (raw) => {
+    throwIfExecutionAborted(signal);
+    if (raw.id === excludeId) return;
+    if (items.length >= MAX_PRODUCT_COMPARISON_ITEMS) {
+      truncated = true;
+      return;
+    }
+    items.push(normalizeCanonicalProduct(raw));
+  });
+  return { items, truncated };
+}
 
 export type OperationMode = 'bootstrap' | 'steady';
 export interface PipelineCounters {
@@ -134,20 +174,45 @@ function merchantFromUrl(value: string): string {
 const activeDomainChecks = new Map<string, number>();
 const domainWaiters = new Map<string, Array<() => void>>();
 
-async function withDomainConcurrency<T>(value: string, work: () => Promise<T>, limit = 2): Promise<T> {
+async function withDomainConcurrency<T>(value: string, work: () => Promise<T>, limit = 2, signal?: AbortSignal): Promise<T> {
+  throwIfExecutionAborted(signal);
   const domain = merchantFromUrl(value);
   if ((activeDomainChecks.get(domain) || 0) >= limit) {
-    await new Promise<void>(resolve => {
+    await new Promise<void>((resolve, reject) => {
       const waiters = domainWaiters.get(domain) || [];
-      waiters.push(resolve);
+      let waiting = true;
+      const release = () => {
+        if (!waiting) return;
+        waiting = false;
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        if (!waiting) return;
+        waiting = false;
+        const current = domainWaiters.get(domain);
+        if (current) {
+          const index = current.indexOf(release);
+          if (index >= 0) current.splice(index, 1);
+          if (!current.length) domainWaiters.delete(domain);
+        }
+        signal?.removeEventListener('abort', onAbort);
+        reject(signal?.reason || new DOMException('Domain concurrency wait aborted', 'AbortError'));
+      };
+      waiters.push(release);
       domainWaiters.set(domain, waiters);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   }
+  throwIfExecutionAborted(signal);
   activeDomainChecks.set(domain, (activeDomainChecks.get(domain) || 0) + 1);
   try {
     return await work();
   } finally {
-    activeDomainChecks.set(domain, Math.max(0, (activeDomainChecks.get(domain) || 1) - 1));
+    const remaining = Math.max(0, (activeDomainChecks.get(domain) || 1) - 1);
+    if (remaining) activeDomainChecks.set(domain, remaining);
+    else activeDomainChecks.delete(domain);
     const next = domainWaiters.get(domain)?.shift();
     if (next) next();
     if (!domainWaiters.get(domain)?.length) domainWaiters.delete(domain);
@@ -160,13 +225,13 @@ function isLoopbackSmokeUrl(value: string): boolean {
   catch { return false; }
 }
 
-function checkCandidateLink(url: string): Promise<LinkCheckResult> {
+function checkCandidateLink(url: string, signal?: AbortSignal): Promise<LinkCheckResult> {
   if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, finalUrl: url });
-  return withDomainConcurrency(url, () => checkLinkHealth(url));
+  return withDomainConcurrency(url, () => checkLinkHealth(url, { signal }), 2, signal);
 }
-function checkCandidateImage(url: string): Promise<ImageCheckResult> {
+function checkCandidateImage(url: string, signal?: AbortSignal): Promise<ImageCheckResult> {
   if (isLoopbackSmokeUrl(url)) return Promise.resolve({ status: 'ok' as const, ok: true, reason: 'loopback_smoke_fixture', statusCode: 200, contentType: 'image/png' });
-  return withDomainConcurrency(url, () => checkImageHealth(url));
+  return withDomainConcurrency(url, () => checkImageHealth(url, { signal }), 2, signal);
 }
 
 function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
@@ -579,7 +644,13 @@ function candidateRisk(payload: CandidatePayload): Product['riskLevel'] {
   return payload.verifiedSource ? 'low' : 'unknown';
 }
 
-async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: PipelineCounters, workerId: string): Promise<CandidateReviewOutcome> {
+async function reviewAutonomousCandidate(
+  item: CandidateQueueItem,
+  counters: PipelineCounters,
+  workerId: string,
+  execution: { signal?: AbortSignal; deadline?: number } = {},
+): Promise<CandidateReviewOutcome> {
+  throwIfExecutionAborted(execution.signal);
   const { payload } = item;
   const now = new Date().toISOString();
   const classification = classifyRecord({
@@ -588,8 +659,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     rawSourceKind: payload.rawSourceKind,
     sourceId: item.sourceId,
   });
-  const allBefore = await getAllProducts();
-  const existingForSource = allBefore.find(product => product.source === item.source && (product.sourceId === item.sourceId || product.externalId === item.sourceId));
+  const existingForSource = await findProductForSource(item.source, item.sourceId, execution.signal);
   const classifiedKind = kindForRecordType(classification.recordType);
   const mapped = mapAccessTradeToProduct({
     id: item.sourceId,
@@ -686,7 +756,8 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
       needsVerification: true,
       autoPublishEligible: false,
     })) || product;
-    const evidence = await captureProductEvidence(product, now);
+    const evidence = await captureProductEvidence(product, now, { signal: execution.signal });
+    throwIfExecutionAborted(execution.signal);
     await saveCanonicalProduct(product.id, {
       evidenceFactIds: evidence.facts.map(fact => fact.id),
       evidenceCoverage: evidence.coverage,
@@ -705,7 +776,26 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   if (product.lifecycleState === 'STAGED') product = await transitionCandidateLifecycle(product, 'CLASSIFIED', item, workerId, 'classified');
   if (product.lifecycleState === 'CLASSIFIED') product = await transitionCandidateLifecycle(product, 'NORMALIZED', item, workerId, 'normalized');
 
-  const otherProducts = (await getAllProducts()).filter(other => other.id !== product.id);
+  const identityComparison = await readBoundedProductComparison(product.id, execution.signal);
+  const otherProducts = identityComparison.items;
+  if (identityComparison.truncated) {
+    const reasons = ['PRODUCT_COMPARISON_INCOMPLETE'];
+    product = (await saveCanonicalProduct(product.id, {
+      duplicateStatus: 'UNRESOLVED',
+      publicHidden: true,
+      autoPublishEligible: false,
+      publicDecision: 'needs_review',
+      publicBlockReasons: reasons,
+      quarantineReasons: reasons,
+      nextAutomaticAction: 'RETRY_PRODUCT_COMPARISON',
+    })) || product;
+    await finishCandidate(item.id, { status: 'needs_review', delayReason: reasons.join(',') });
+    counters.reviewed += 1;
+    counters.needsReview += 1;
+    counters.noindex += 1;
+    if (canonical.created) counters.created += 1; else counters.updated += 1;
+    return { status: 'needs_review', terminal: true, reason: reasons.join(','), productId: product.id };
+  }
   const identity = deriveProductIdentity({ ...product, ...initialDraft });
   const closestIdentity = otherProducts
     .map(other => ({ product: other, confidence: identityMatchConfidence(identity, other.identity || deriveProductIdentity(other)) }))
@@ -757,16 +847,20 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     : fixture === 'confirmed_broken'
       ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
       : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
-  const productHealth = fixture ? fixtureLink : await checkCandidateLink(payload.originalUrl); counters.networkChecks += 1;
-  const affiliateHealth = fixture ? fixtureLink : await checkCandidateLink(payload.affiliateUrl); counters.networkChecks += 1;
+  const productHealth = fixture ? fixtureLink : await checkCandidateLink(payload.originalUrl, execution.signal); counters.networkChecks += 1;
+  throwIfExecutionAborted(execution.signal);
+  const affiliateHealth = fixture ? fixtureLink : await checkCandidateLink(payload.affiliateUrl, execution.signal); counters.networkChecks += 1;
+  throwIfExecutionAborted(execution.signal);
   let imageUrl = payload.imageUrl;
   const primaryImageUrl = imageUrl;
-  let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl); counters.networkChecks += 1;
+  let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl, execution.signal); counters.networkChecks += 1;
+  throwIfExecutionAborted(execution.signal);
   let imageChecks = 1;
   if (!imageHealth.ok) {
     for (const candidate of payload.imageCandidates || []) {
       if (candidate === imageUrl) continue;
-      const fallback = fixture ? fixtureImage : await checkCandidateImage(candidate); counters.networkChecks += 1;
+      const fallback = fixture ? fixtureImage : await checkCandidateImage(candidate, execution.signal); counters.networkChecks += 1;
+      throwIfExecutionAborted(execution.signal);
       imageChecks += 1;
       if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
     }
@@ -796,6 +890,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     affiliateVerified ? affiliateHealth.status : affiliateProvenanceValid ? affiliateHealth.status : 'affiliate_provenance_required',
     imageVerified ? imageHealth.status : imageHealth.status === 'ok' ? 'image_verification_required' : imageHealth.status,
   ];
+  throwIfExecutionAborted(execution.signal);
   await recordCandidateHealthQuality({
     item,
     productHealthy: canonicalVerified,
@@ -805,8 +900,11 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     statuses,
     externalRequests: fixture ? 0 : 2 + imageChecks,
   });
+  throwIfExecutionAborted(execution.signal);
   await recordDomainHealth(payload.originalUrl, productHealth.status);
+  throwIfExecutionAborted(execution.signal);
   await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status);
+  throwIfExecutionAborted(execution.signal);
   await recordDomainHealth(imageUrl, imageHealth.status);
   const healthy = canonicalVerified && affiliateVerified && imageVerified;
   const confirmedBroken = statuses.some(status => ['broken', 'image_broken', 'invalid_image', 'not_found', 'too_small', 'too_large', 'dark_image_suspected', 'placeholder'].includes(status));
@@ -847,7 +945,9 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     sourceHealthReason: healthy ? undefined : statuses.join(','),
     publicBlockReason: healthy ? '' : statuses.join(','),
   };
+  throwIfExecutionAborted(execution.signal);
   product = (await saveCanonicalProduct(product.id, healthPatch)) || product;
+  throwIfExecutionAborted(execution.signal);
   if (!healthy) {
     const retryExhausted = item.attempts >= 6;
     const reasons = [confirmedBroken ? 'confirmed_broken' : retryExhausted ? 'retry_budget_exhausted' : 'health_check_temporary_failure', ...statuses];
@@ -894,7 +994,9 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
     duplicateStatus: 'CLEAR',
     lastHealthyAt: now,
   })) || product;
-  const evidence = await captureProductEvidence(product, now);
+  throwIfExecutionAborted(execution.signal);
+  const evidence = await captureProductEvidence(product, now, { signal: execution.signal });
+  throwIfExecutionAborted(execution.signal);
   selectedOffer = selectBestPublicOffer(
     attachObservedPriceEvidence(product, selectedOffer.offers, observedOffer.id, evidence.facts),
     Date.parse(now),
@@ -911,11 +1013,15 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   })) || product;
   if (product.lifecycleState === 'VERIFYING') product = await transitionCandidateLifecycle(product, 'CONTENT_PREPARING', item, workerId, 'content-preparing');
 
-  const comparisonProducts = (await getAllProducts()).filter(other => other.id !== product.id);
+  const contentComparison = await readBoundedProductComparison(product.id, execution.signal);
+  const comparisonProducts = contentComparison.items;
   const localReview = generateEditorialReview(product, comparisonProducts);
   const factCount = localReview.keyFacts.length;
   const profile = { taskType: 'editorial_review' as const, riskLevel: product.riskLevel === 'high' ? 'high' as const : product.riskLevel === 'medium' ? 'medium' as const : 'low' as const, complexityScore: Math.max(31, Math.min(75, 30 + factCount * 5)), factCount, inputTokenEstimate: Math.ceil(JSON.stringify(product).length / 4), candidateLane: item.lane || 'NORMAL_LANE', priority: item.priority, previousFailures: Math.max(0, item.attempts - 1), requiredQuality: 80 };
-  const gemini = await generateGeminiEditorialReview(product, profile, await listAvailableGeminiModels(), () => localReview);
+  const gemini = contentComparison.truncated
+    ? null
+    : await generateGeminiEditorialReview(product, profile, await listAvailableGeminiModels(), () => localReview, { signal: execution.signal });
+  throwIfExecutionAborted(execution.signal);
   const generatedValidation = gemini ? validateReviewClaims(gemini.review, product) : null;
   const duplicateGenerated = gemini ? comparisonProducts.some(other => other.reviewContent && textSimilarity(`${gemini.review.reviewTitle} ${gemini.review.reviewSummary} ${gemini.review.reviewVerdict}`, `${other.reviewContent.reviewTitle} ${other.reviewContent.reviewSummary} ${other.reviewContent.reviewVerdict}`) >= 0.8) : false;
   const useGemini = Boolean(gemini && generatedValidation?.valid && !duplicateGenerated);
@@ -939,6 +1045,7 @@ async function reviewAutonomousCandidate(item: CandidateQueueItem, counters: Pip
   })) || product;
   const confidences = calculateProductConfidences(withReview, { classificationConfidence: classification.confidence, evidenceCoverage: evidence.coverage, now: Date.parse(now) });
   const readinessReasons: string[] = [];
+  if (contentComparison.truncated) readinessReasons.push('PRODUCT_COMPARISON_INCOMPLETE');
   if (!isReviewIndexable(withReview)) readinessReasons.push('review_not_indexable');
   if (!linked.validation.valid) readinessReasons.push('claim_evidence_unverified');
   if (confidences.publish < 0.85) readinessReasons.push('publish_confidence_low');
@@ -1114,11 +1221,11 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
     if (canonical.product.reviewContent?.reviewStatus === 'stale') counters.reviewStale++;
     let finalProduct = canonical.product;
     if (shouldRegenerateReview(canonical.product)) {
-      const otherProducts = (await getAllProducts()).filter((product) => product.id !== canonical.product.id);
+      const otherProducts = (await readBoundedProductComparison(canonical.product.id)).items;
       const localReview = generateEditorialReview(canonical.product, otherProducts);
       const factCount = localReview.keyFacts.length;
       const profile = { taskType: 'editorial_review' as const, riskLevel: canonical.product.riskLevel === 'high' ? 'high' as const : canonical.product.riskLevel === 'medium' ? 'medium' as const : 'low' as const, complexityScore: Math.max(31, Math.min(75, 30 + factCount * 5)), factCount, inputTokenEstimate: Math.ceil(JSON.stringify(canonical.product).length / 4), candidateLane: item.lane || 'NORMAL_LANE', priority: item.priority, previousFailures: Math.max(0, item.attempts - 1), requiredQuality: 80 };
-      const gemini = await generateGeminiEditorialReview(canonical.product, profile, await listAvailableGeminiModels(), () => localReview);
+       const gemini = await generateGeminiEditorialReview(canonical.product, profile, await listAvailableGeminiModels(), () => localReview);
       const generatedValidation = gemini ? validateReviewClaims(gemini.review, canonical.product) : null;
       const duplicateGenerated = gemini ? otherProducts.some((other) => other.reviewContent && textSimilarity(`${gemini.review.reviewTitle} ${gemini.review.reviewSummary} ${gemini.review.reviewVerdict}`, `${other.reviewContent.reviewTitle} ${other.reviewContent.reviewSummary} ${other.reviewContent.reviewVerdict}`) >= 0.8) : false;
       const useGemini = Boolean(gemini && generatedValidation?.valid && !duplicateGenerated);
@@ -1179,6 +1286,7 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
       return { status, terminal: status !== 'delayed', nextRetryAt, reason };
     }
   } catch (error) {
+    if (error instanceof Error && error.name === 'AutomationExecutionAborted') throw error;
     counters.failed++;
     const status: CandidateQueueStatus = item.attempts >= 3 ? 'failed' : 'delayed';
     const reason = error instanceof Error ? error.message : 'review_error';
@@ -1193,18 +1301,22 @@ export async function processCandidateFromDurableJob(input: {
   jobId: string;
   operationId: string;
   workerId: string;
+  signal?: AbortSignal;
+  deadline?: number;
 }): Promise<PipelineCounters & { candidateStatus: string; productId?: string }> {
+  throwIfExecutionAborted(input.signal);
   const existing = await getCandidateById(input.candidateId);
   if (!existing) throw new Error('CANDIDATE_NOT_FOUND');
   if (existing.durableJobId !== input.jobId) throw new Error('CANDIDATE_JOB_MISMATCH');
   const item = await claimCandidateForDurableJob(input.candidateId, input.jobId);
   if (!item) throw new Error('CANDIDATE_CLAIM_CONFLICT');
   const counters = emptyCounters();
-  const outcome = await reviewAutonomousCandidate(item, counters, input.workerId);
+  const outcome = await reviewAutonomousCandidate(item, counters, input.workerId, input);
+  throwIfExecutionAborted(input.signal);
   const finalCandidate = await getCandidateById(input.candidateId);
   const product = outcome.productId
-    ? (await getAllProducts()).find(entry => entry.id === outcome.productId)
-    : (await getAllProducts()).find(entry => entry.source === item.source && (entry.sourceId === item.sourceId || entry.externalId === item.sourceId));
+    ? await findProductById(outcome.productId, input.signal)
+    : await findProductForSource(item.source, item.sourceId, input.signal);
   if (outcome.terminal) await recordKeywordCandidateOutcome(item, product);
   if (!outcome.terminal && outcome.nextRetryAt) throw new CandidateRetryScheduledError(outcome.nextRetryAt, outcome.status, outcome.reason);
   if (outcome.status === 'failed') throw new Error(`CANDIDATE_TERMINAL_FAILURE:${outcome.reason || 'review_failed'}`);

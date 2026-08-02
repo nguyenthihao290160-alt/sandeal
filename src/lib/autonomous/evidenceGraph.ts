@@ -263,6 +263,7 @@ export async function verifyEvidenceSnapshot(
 export async function captureProductEvidence(
   product: Product,
   now = new Date().toISOString(),
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ facts: EvidenceFact[]; coverage: number; snapshotHash: string; snapshot: EvidenceSnapshot }> {
   const nowMs = validTimestamp(now);
   const expiry = new Date(nowMs + 24 * 60 * 60_000).toISOString();
@@ -296,6 +297,7 @@ export async function captureProductEvidence(
   ];
   const facts: EvidenceFact[] = [];
   for (const item of definitions.filter(definition => definition.value !== undefined && definition.value !== '')) {
+    if (options.signal?.aborted) throw options.signal.reason || new DOMException('Evidence capture aborted', 'AbortError');
     const captured = await captureEvidenceFact({
       productId: product.id,
       field: item.field,
@@ -310,6 +312,7 @@ export async function captureProductEvidence(
       expiresAt: expiry,
       ruleVersion: EVIDENCE_RULE_VERSION,
     }, { capturedAt: now });
+    if (options.signal?.aborted) throw options.signal.reason || new DOMException('Evidence capture aborted', 'AbortError');
     facts.push(captured.fact);
   }
   const required = ['title', 'recordType', 'price', 'currency', 'originalUrl', 'affiliateUrl', 'imageUrl'];

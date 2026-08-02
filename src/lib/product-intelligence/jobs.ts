@@ -1,9 +1,11 @@
 import type { AutomationJob } from '@/lib/automation/types';
-import { getAutomationControl, getAutomationJob } from '@/lib/automation/store';
+import { getAutomationControl, getAutomationJobAuthoritySnapshot } from '@/lib/automation/store';
 import { isRuntimeRoleOwner } from '@/lib/automation/runtimeRoles';
+import { throwIfExecutionAborted } from '@/lib/automation/executionBudget';
 import type { Product, ProductFieldProvenance } from '@/lib/types';
-import { getAllProducts, getProductById, saveCanonicalProduct } from '@/lib/storage/products';
-import { runTransaction } from '@/lib/storage/adapter';
+import { saveCanonicalProduct } from '@/lib/storage/products';
+import { readCollectionPage, runTransaction, scanCollection } from '@/lib/storage/adapter';
+import { normalizeCanonicalProduct } from '@/lib/canonicalProduct';
 import {
   checkLinkHealth,
   productImageValidationState,
@@ -54,6 +56,11 @@ export interface ProductReprocessAudit {
   completedAt?: string;
 }
 
+export interface ProductIntelligenceExecutionOptions {
+  signal?: AbortSignal;
+  deadline?: number;
+}
+
 function stringValue(value: unknown, maximum = 160): string {
   return typeof value === 'string' ? value.trim().slice(0, maximum) : '';
 }
@@ -97,16 +104,91 @@ export function selectDeterministicProductBatch(
   return Array.from({ length: limit }, (_, index) => ordered[(start + index) % ordered.length]);
 }
 
-async function selectedProducts(payload: Record<string, unknown>): Promise<Product[]> {
-  const ids = productIds(payload);
-  const products = ids.length ? (await Promise.all(ids.map(getProductById))).filter((item): item is Product => Boolean(item)) : await getAllProducts();
-  return selectDeterministicProductBatch(products, payload);
+const PRODUCT_COLLECTION = 'products';
+const PRODUCT_WINDOW_PAGE_SIZE = Math.min(CONFIG.limits.batchProducts, 100);
+
+async function readProductsByIds(ids: string[], signal?: AbortSignal): Promise<Product[]> {
+  const wanted = new Set(ids);
+  const found = new Map<string, Product>();
+  await scanCollection<Partial<Product>>(PRODUCT_COLLECTION, raw => {
+    throwIfExecutionAborted(signal);
+    const id = typeof raw.id === 'string' ? raw.id : '';
+    if (id && wanted.has(id)) {
+      found.set(id, normalizeCanonicalProduct(raw));
+      wanted.delete(id);
+    }
+  });
+  return ids.map(id => found.get(id)).filter((item): item is Product => Boolean(item));
 }
 
-async function assertJobMayContinue(job: AutomationJob): Promise<void> {
-  const [control, latest] = await Promise.all([getAutomationControl(), getAutomationJob(job.id)]);
+async function selectedProducts(payload: Record<string, unknown>, signal?: AbortSignal): Promise<Product[]> {
+  const ids = productIds(payload);
+  if (ids.length) return selectDeterministicProductBatch(await readProductsByIds(ids, signal), payload);
+
+  // Scheduled jobs use a bounded source-order window. The file adapter scans
+  // the JSON array incrementally and retains only one page; Mongo uses the
+  // equivalent bounded query. This keeps the cursor deterministic across
+  // cycles without materializing the complete product collection.
+  throwIfExecutionAborted(signal);
+  const requestedLimit = Math.min(payloadLimit(payload), PRODUCT_WINDOW_PAGE_SIZE);
+  const firstPage = await readCollectionPage<Partial<Product>>(PRODUCT_COLLECTION, {
+    page: 1,
+    pageSize: requestedLimit,
+  });
+  const totalItems = firstPage.totalItems;
+  if (!totalItems) return [];
+  const limit = Math.min(requestedLimit, totalItems);
+  const hasExplicitCursor = payload.cursor !== undefined && payload.cursor !== null && payload.cursor !== '';
+  const cursorSource = hasExplicitCursor ? payload.cursor : payload.scheduleBucket;
+  const baseCursor = stableCursor(cursorSource);
+  const start = hasExplicitCursor
+    ? baseCursor % totalItems
+    : ((baseCursor % totalItems) * limit) % totalItems;
+  const pages = new Map<number, Product[]>();
+  pages.set(1, firstPage.items.map(item => normalizeCanonicalProduct(item)));
+  const loadPage = async (page: number): Promise<Product[]> => {
+    const cached = pages.get(page);
+    if (cached) return cached;
+    throwIfExecutionAborted(signal);
+    const result = await readCollectionPage<Partial<Product>>(PRODUCT_COLLECTION, {
+      page,
+      pageSize: limit,
+    });
+    const normalized = result.items.map(item => normalizeCanonicalProduct(item));
+    pages.set(page, normalized);
+    return normalized;
+  };
+
+  const selected: Product[] = [];
+  for (let offset = 0; offset < limit; offset += 1) {
+    throwIfExecutionAborted(signal);
+    const absoluteIndex = (start + offset) % totalItems;
+    const page = Math.floor(absoluteIndex / limit) + 1;
+    const pageItems = await loadPage(page);
+    const item = pageItems[absoluteIndex % limit];
+    if (!item) throw new Error('PRODUCT_SELECTION_SOURCE_CHANGED');
+    selected.push(item);
+  }
+  return selected;
+}
+
+async function assertJobMayContinue(job: AutomationJob, options: ProductIntelligenceExecutionOptions = {}): Promise<void> {
+  throwIfExecutionAborted(options.signal);
+  const [control, latest] = await Promise.all([getAutomationControl(), getAutomationJobAuthoritySnapshot(job.id)]);
   if (control.killSwitch) throw new Error('KILL_SWITCH_ACTIVE');
-  if (latest?.status === 'CANCELLED') throw new Error('JOB_CANCELLED');
+  // The exported intelligence runner is also used by the bounded operator
+  // reprocess/test path, which supplies an ephemeral RUNNING record rather
+  // than a claimed durable worker job. Durable Worker executions always carry
+  // a claim token and take the fenced branch below.
+  if (!job.claimToken) return;
+  if (!latest) throw new Error('JOB_AUTHORITY_UNAVAILABLE');
+  if (latest.status === 'CANCELLED') throw new Error('JOB_CANCELLED');
+  if (latest.status !== 'RUNNING'
+    || latest.claimToken !== job.claimToken
+    || latest.attemptCount !== job.attemptCount
+    || (job.releaseId && latest.releaseId !== job.releaseId)) {
+    throw new Error('WORKER_FENCING_REJECTED');
+  }
   if (job.workerInstanceId && job.workerFencingToken) {
     const owner = await isRuntimeRoleOwner('WORKER', {
       ownerId: job.workerOwnerId || '',
@@ -124,14 +206,15 @@ function isJobStop(error: unknown): boolean {
     || message === 'WORKER_FENCING_REJECTED';
 }
 
-async function scoreProducts(job: AutomationJob) {
-  const products = await selectedProducts(job.payload);
+async function scoreProducts(job: AutomationJob, execution: ProductIntelligenceExecutionOptions = {}) {
+  const products = await selectedProducts(job.payload, execution.signal);
   if (job.dryRun) return { preview: true, inspected: products.length, businessDataChanged: false, externalSideEffect: false };
   let updated = 0;
   for (const product of products) {
-    await assertJobMayContinue(job);
+    await assertJobMayContinue(job, execution);
     const history = await getPriceStatistics(product.id);
     const scores = calculateProductScores(product, history);
+    throwIfExecutionAborted(execution.signal);
     await saveCanonicalProduct(product.id, {
       qualityScore: scores.quality.score,
       qualityBand: scores.quality.band,
@@ -163,7 +246,12 @@ interface ResilientLinkResult {
   circuitSkipped: boolean;
 }
 
-async function checkLinkWithDomainCircuit(url: string, now = Date.now()): Promise<ResilientLinkResult> {
+async function checkLinkWithDomainCircuit(
+  url: string,
+  now = Date.now(),
+  options: ProductIntelligenceExecutionOptions = {},
+): Promise<ResilientLinkResult> {
+  throwIfExecutionAborted(options.signal);
   const decision = await getDomainCircuitDecision(url, now);
   if (!decision.allowed && decision.reason === 'circuit_open') {
     return {
@@ -178,7 +266,7 @@ async function checkLinkWithDomainCircuit(url: string, now = Date.now()): Promis
     };
   }
 
-  const result = await checkLinkHealth(url);
+  const result = await checkLinkHealth(url, { signal: options.signal });
   const state = await recordDomainHealth(url, result.status, now, { retryAfter: result.retryAfter });
   return {
     result,
@@ -196,6 +284,7 @@ interface ResilientImageResult {
 async function resolveImagesWithDomainCircuits(
   candidates: Array<string | undefined>,
   now = Date.now(),
+  options: ProductIntelligenceExecutionOptions = {},
 ): Promise<ResilientImageResult> {
   const urls = [...new Set(candidates.map(value => String(value || '').trim()).filter(Boolean))];
   const allowed: string[] = [];
@@ -203,6 +292,7 @@ async function resolveImagesWithDomainCircuits(
   let circuitSkipped = 0;
 
   for (const url of urls) {
+    throwIfExecutionAborted(options.signal);
     const decision = await getDomainCircuitDecision(url, now);
     if (!decision.allowed && decision.reason === 'circuit_open') {
       circuitSkipped += 1;
@@ -229,7 +319,7 @@ async function resolveImagesWithDomainCircuits(
     };
   }
 
-  const resolution = await resolveHealthyImageCandidate(allowed);
+  const resolution = await resolveHealthyImageCandidate(allowed, { signal: options.signal });
   const retryTimes = [...skippedRetryTimes];
   for (const checked of resolution.checked) {
     const state = await recordDomainHealth(checked.url, checked.result.status, now);
@@ -489,9 +579,9 @@ export function shouldRetainPublicAfterTransientHealthCheck(input: {
       /product_url|canonical_url|affiliate|image|health|cooldown/i.test(reason));
 }
 
-async function recheckHealth(job: AutomationJob) {
+async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceExecutionOptions = {}) {
   const startedAt = Date.now();
-  const products = await selectedProducts(job.payload);
+  const products = await selectedProducts(job.payload, execution.signal);
   const requestedTarget = stringValue(job.payload.healthTarget, 20);
   const narrowedTarget = new Set(['link', 'affiliate', 'image']).has(requestedTarget);
   const checkLinks = !narrowedTarget || requestedTarget === 'link';
@@ -549,10 +639,11 @@ async function recheckHealth(job: AutomationJob) {
   });
 
   for (const product of products) {
+    throwIfExecutionAborted(execution.signal);
     const updates: Partial<Product> = {};
     const wasPublicSafe = isPublicSafeProduct(product);
     try {
-      await assertJobMayContinue(job);
+      await assertJobMayContinue(job, execution);
       const operationId = job.operationId || job.id;
       if (product.lastReprocessOperationId === operationId) {
         await startReprocessAudit(job, product);
@@ -590,7 +681,7 @@ async function recheckHealth(job: AutomationJob) {
       const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
       const canonicalSupport = accessTradeCanonicalSupport(product);
       if (checkLinks && canonicalUrl) {
-        const checkedLink = await checkLinkWithDomainCircuit(canonicalUrl);
+        const checkedLink = await checkLinkWithDomainCircuit(canonicalUrl, Date.now(), execution);
         const linkResult = checkedLink.result;
         const canonicalDestinationSupported = !isAccessTradeTrackingUrl(linkResult.finalUrl || canonicalUrl);
         const canonicalDomainAllowed = canonicalFinalDomainAllowed(product, canonicalUrl, linkResult.finalUrl);
@@ -629,7 +720,7 @@ async function recheckHealth(job: AutomationJob) {
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
         else externalRequests += 1;
-        await assertJobMayContinue(job);
+        await assertJobMayContinue(job, execution);
       } else if (checkLinks) {
         const invalidSourceUrl = normalizationIssues.has('INVALID_CANONICAL_URL')
           || product.fieldProvenance?.canonicalProductUrl?.verificationStatus === 'INVALID';
@@ -652,7 +743,7 @@ async function recheckHealth(job: AutomationJob) {
 
       const support = accessTradeAffiliateSupport(product);
       if (checkAffiliate && product.affiliateUrl && support.supported) {
-        const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl);
+        const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl, Date.now(), execution);
         const linkResult = checkedLink.result;
         const finalDomainAllowed = affiliateFinalDomainAllowed(product, linkResult.finalUrl || product.affiliateUrl);
         affiliateUrlHealthy = linkResult.ok && finalDomainAllowed;
@@ -682,7 +773,7 @@ async function recheckHealth(job: AutomationJob) {
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
         else externalRequests += 1;
-        await assertJobMayContinue(job);
+        await assertJobMayContinue(job, execution);
       } else if (checkAffiliate && product.affiliateUrl && !support.supported) {
         affiliateUrlHealthy = false;
         updates.quarantinedAffiliateUrl = {
@@ -746,7 +837,7 @@ async function recheckHealth(job: AutomationJob) {
           product.imageUrl,
           ...rawCandidates,
           ...(product.gallery || []),
-        ]);
+        ], Date.now(), execution);
         const imageResult = checkedImages.resolution.result;
         const fallbackUsed = Boolean(checkedImages.resolution.selectedUrl && checkedImages.resolution.selectedUrl !== product.imageUrl);
         updates.imageHealthStatus = (imageResult.ok ? 'ok' : imageResult.status) as Product['imageHealthStatus'];
@@ -775,7 +866,7 @@ async function recheckHealth(job: AutomationJob) {
         }
         circuitSkipped += checkedImages.circuitSkipped;
         externalRequests += checkedImages.resolution.attempts;
-        await assertJobMayContinue(job);
+        await assertJobMayContinue(job, execution);
       } else if (checkImages) {
         const invalidSourceImage = normalizationIssues.has('INVALID_IMAGE_URL')
           || product.fieldProvenance?.imageUrl?.verificationStatus === 'INVALID';
@@ -909,7 +1000,8 @@ async function recheckHealth(job: AutomationJob) {
       updates.lastReprocessOperationId = operationId;
       updates.lastReprocessedAt = new Date().toISOString();
       const beforeSignature = operationalHealthSignature(product);
-      await assertJobMayContinue(job);
+      await assertJobMayContinue(job, execution);
+      throwIfExecutionAborted(execution.signal);
       const persisted = await saveCanonicalProduct(product.id, updates, { verifiedHealthUpdate: true });
       if (!persisted) throw new Error(`STORAGE_ERROR: product ${product.id} disappeared before health persistence`);
       await finishReprocessAudit(job, persisted, 'COMPLETED');
@@ -920,7 +1012,7 @@ async function recheckHealth(job: AutomationJob) {
       processed += 1;
     } catch (error) {
       if (isJobStop(error)) throw error;
-      const latest = await getProductById(product.id).catch(() => null);
+      const latest = await readProductsByIds([product.id], execution.signal).then(items => items[0] || null).catch(() => null);
       await finishReprocessAudit(job, latest || product, 'FAILED', error).catch(() => undefined);
       failed += 1;
       persistenceErrors.push(`${product.id}:${error instanceof Error ? error.message : String(error)}`.slice(0, 500));
@@ -931,17 +1023,18 @@ async function recheckHealth(job: AutomationJob) {
   return resultSnapshot();
 }
 
-async function capturePrices(job: AutomationJob) {
-  const products = await selectedProducts(job.payload);
+async function capturePrices(job: AutomationJob, execution: ProductIntelligenceExecutionOptions = {}) {
+  const products = await selectedProducts(job.payload, execution.signal);
   if (job.dryRun) return { preview: true, inspected: products.length, eligible: products.filter(item => Number(item.price || item.salePrice || 0) > 0).length, businessDataChanged: false };
   let created = 0; let unchanged = 0;
   for (const product of products) {
-    await assertJobMayContinue(job);
+    await assertJobMayContinue(job, execution);
     const result = await capturePriceSnapshot(product, job.operationId, { forceCheckpoint: job.payload.forceCheckpoint === true });
     if (result.created) {
       created += 1;
       if (result.priceChanged && result.snapshot) {
-        await assertJobMayContinue(job);
+        await assertJobMayContinue(job, execution);
+        throwIfExecutionAborted(execution.signal);
         await saveCanonicalProduct(product.id, { priceLastChangedAt: result.snapshot.capturedAt });
       }
     } else unchanged += 1;
@@ -949,32 +1042,33 @@ async function capturePrices(job: AutomationJob) {
   return { inspected: products.length, created, unchanged, businessDataChanged: created > 0 };
 }
 
-async function prepareDrafts(job: AutomationJob) {
-  const products = await selectedProducts(job.payload);
+async function prepareDrafts(job: AutomationJob, execution: ProductIntelligenceExecutionOptions = {}) {
+  const products = await selectedProducts(job.payload, execution.signal);
   if (job.dryRun) return { preview: true, inspected: products.length, localTemplate: true, aiRequests: 0, businessDataChanged: false };
   const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
   let created = 0; let blockedByUrlHealth = 0;
   for (const product of products) {
-    await assertJobMayContinue(job);
+    await assertJobMayContinue(job, execution);
     if (product.publicBlocked === true
       || !goodHealth.has(String(product.linkHealthStatus || product.productHealthStatus || ''))
       || !goodHealth.has(String(product.affiliateHealthStatus || ''))) {
       blockedByUrlHealth += 1;
       continue;
     }
+    throwIfExecutionAborted(execution.signal);
     await createLocalContentDraft(product.id, job.requestedBy);
     created += 1;
   }
   return { inspected: products.length, created, blockedByUrlHealth, provider: 'local', aiRequests: 0, businessDataChanged: created > 0 };
 }
 
-async function editorialChecks(job: AutomationJob) {
+async function editorialChecks(job: AutomationJob, execution: ProductIntelligenceExecutionOptions = {}) {
   const requested = stringValue(job.payload.draftId);
   const drafts = requested ? (await listContentDrafts()).filter(item => item.id === requested) : (await listContentDrafts()).slice(0, CONFIG.limits.batchProducts);
   if (job.dryRun) return { preview: true, drafts: drafts.length, businessDataChanged: false };
   const results = [];
   for (const draft of drafts) {
-    await assertJobMayContinue(job);
+    await assertJobMayContinue(job, execution);
     results.push({ draftId: draft.id, result: await editorialCheckDraft(draft.id) });
   }
   return { checked: results.length, ready: results.filter(item => item.result.status === 'READY').length, blocked: results.filter(item => item.result.status === 'BLOCKED').length, businessDataChanged: results.length > 0 };
@@ -985,7 +1079,7 @@ export async function previewBulkOperation(payload: Record<string, unknown>) {
   const allowed = new Set(['recheck_link', 'recheck_image', 'rescore', 'price_snapshot', 'content_draft', 'assign_category', 'add_tag', 'archive', 'export_csv', 'merge_duplicates']);
   if (!allowed.has(action)) throw new Error('INVALID_BULK_ACTION');
   const ids = productIds(payload); if (!ids.length && action !== 'merge_duplicates') throw new Error('PRODUCT_IDS_REQUIRED');
-  const products = (await Promise.all(ids.map(getProductById))).filter((item): item is Product => Boolean(item));
+  const products = await readProductsByIds(ids);
   return {
     action,
     requested: ids.length,
@@ -998,17 +1092,17 @@ export async function previewBulkOperation(payload: Record<string, unknown>) {
   };
 }
 
-async function bulkOperation(job: AutomationJob) {
+async function bulkOperation(job: AutomationJob, execution: ProductIntelligenceExecutionOptions = {}) {
   const preview = await previewBulkOperation(job.payload);
   if (job.dryRun) return { preview: true, ...preview };
   const action = preview.action;
   if (action === 'merge_duplicates') {
-    await assertJobMayContinue(job);
+    await assertJobMayContinue(job, execution);
     const groupId = stringValue(job.payload.groupId); const primaryId = stringValue(job.payload.primaryId);
     if (!groupId || !primaryId) throw new Error('MERGE_INPUT_REQUIRED');
     return { ...(await applyDuplicateMerge(groupId, primaryId, job.operationId)), businessDataChanged: true };
   }
-  const products = (await Promise.all(preview.valid.map(getProductById))).filter((item): item is Product => Boolean(item));
+  const products = await readProductsByIds(preview.valid, execution.signal);
   if (action === 'recheck_link' || action === 'recheck_image') return recheckHealth({
     ...job,
     payload: {
@@ -1016,10 +1110,10 @@ async function bulkOperation(job: AutomationJob) {
       limit: job.payload.limit,
       healthTarget: action === 'recheck_link' ? 'link' : 'image',
     },
-  });
-  if (action === 'rescore') return scoreProducts({ ...job, payload: { productIds: preview.valid } });
-  if (action === 'price_snapshot') return capturePrices({ ...job, payload: { productIds: preview.valid } });
-  if (action === 'content_draft') return prepareDrafts({ ...job, payload: { productIds: preview.valid } });
+  }, execution);
+  if (action === 'rescore') return scoreProducts({ ...job, payload: { productIds: preview.valid } }, execution);
+  if (action === 'price_snapshot') return capturePrices({ ...job, payload: { productIds: preview.valid } }, execution);
+  if (action === 'content_draft') return prepareDrafts({ ...job, payload: { productIds: preview.valid } }, execution);
   if (action === 'export_csv') {
     const header = 'id,title,platform,category,price,salePrice,qualityScore,opportunityScore,dealScore';
     const rows = products.map(item => [item.id, item.title, item.platform, item.category, item.price, item.salePrice, item.qualityScore, item.opportunityScore, item.dealScore].map(escapeCsvCell).join(','));
@@ -1027,21 +1121,27 @@ async function bulkOperation(job: AutomationJob) {
   }
   let changed = 0;
   for (const product of products) {
-    await assertJobMayContinue(job);
+    await assertJobMayContinue(job, execution);
     if (action === 'assign_category') {
       const category = stringValue(job.payload.category, 120); if (!category) throw new Error('CATEGORY_REQUIRED');
+      throwIfExecutionAborted(execution.signal);
       await saveCanonicalProduct(product.id, { category }); changed += 1;
     } else if (action === 'add_tag') {
       const tag = stringValue(job.payload.tag, 80); if (!tag) throw new Error('TAG_REQUIRED');
+      throwIfExecutionAborted(execution.signal);
       await saveCanonicalProduct(product.id, { tags: [...new Set([...(product.tags || []), tag])].slice(0, 50) }); changed += 1;
     } else if (action === 'archive') {
+      throwIfExecutionAborted(execution.signal);
       await saveCanonicalProduct(product.id, { status: 'archived', publicHidden: true, archivedReason: 'bulk_archived', autoPublished: false }); changed += 1;
     }
   }
   return { action, changed, businessDataChanged: changed > 0 };
 }
 
-export async function executeProductIntelligenceJob(job: AutomationJob): Promise<Record<string, unknown>> {
+export async function executeProductIntelligenceJob(
+  job: AutomationJob,
+  execution: ProductIntelligenceExecutionOptions = {},
+): Promise<Record<string, unknown>> {
   if (!JOB_TYPES.has(job.type)) throw new Error('UNSUPPORTED_PRODUCT_INTELLIGENCE_JOB');
   if (job.type === 'IMPORT_PRODUCTS') {
     const previewId = stringValue(job.payload.previewId);
@@ -1049,18 +1149,21 @@ export async function executeProductIntelligenceJob(job: AutomationJob): Promise
     const batch = await getImportBatch(previewId); if (!batch) throw new Error('IMPORT_PREVIEW_EXPIRED');
     if (job.dryRun) return { preview: true, rows: batch.rows.length, publicSideEffect: false, businessDataChanged: false };
     await assertJobMayContinue(job);
-    return applyImportBatch(previewId, job.operationId, {
+     throwIfExecutionAborted(execution.signal);
+     return applyImportBatch(previewId, job.operationId, {
       parentJobId: job.id,
       requestedBy: job.requestedBy,
       approvedSource: job.payload.approvedSource === true && job.payload.ownerConfirmed === true,
     });
   }
   if (job.type === 'RECHECK_PRODUCT_HEALTH') {
-    const result = await recheckHealth(job);
+    const result = await recheckHealth(job, execution);
     const incidentId = stringValue(job.payload.incidentId);
     if (!incidentId || job.dryRun) return result;
     const before = (await getAlertIncident(incidentId))?.affectedCount || 0;
-    await evaluateAlerts(job.operationId);
+    throwIfExecutionAborted(execution.signal);
+    await evaluateAlerts(job.operationId, Date.now(), execution);
+    throwIfExecutionAborted(execution.signal);
     await synchronizeAlertIncidents();
     const checked = await recordServerIncidentRecheck({
       incidentId, checker: 'product-health-remediation', checkerVersion: 'prompt12-v1', affectedCountBefore: before,
@@ -1069,27 +1172,32 @@ export async function executeProductIntelligenceJob(job: AutomationJob): Promise
     return { ...result, incidentRecheck: { incidentId, status: checked.status, evidenceStatus: checked.evidenceStatus, affectedCount: checked.affectedCount } };
   }
   if (job.type === 'DETECT_DUPLICATES') {
-    const products = await selectedProducts(job.payload);
-    if (!job.dryRun) await assertJobMayContinue(job);
+    const products = await selectedProducts(job.payload, execution.signal);
+    if (!job.dryRun) await assertJobMayContinue(job, execution);
     const result = await detectDuplicateGroups(products, job.operationId, { dryRun: job.dryRun });
     return { groups: result.groups.length, compared: result.compared, lowConfidencePairs: result.lowConfidencePairs, businessDataChanged: result.changed };
   }
-  if (job.type === 'SCORE_PRODUCTS') return scoreProducts(job);
-  if (job.type === 'CAPTURE_PRICE_HISTORY') return capturePrices(job);
-  if (job.type === 'PREPARE_CONTENT_DRAFT') return prepareDrafts(job);
-  if (job.type === 'EDITORIAL_CHECK') return editorialChecks(job);
+  if (job.type === 'SCORE_PRODUCTS') return scoreProducts(job, execution);
+  if (job.type === 'CAPTURE_PRICE_HISTORY') return capturePrices(job, execution);
+  if (job.type === 'PREPARE_CONTENT_DRAFT') return prepareDrafts(job, execution);
+  if (job.type === 'EDITORIAL_CHECK') return editorialChecks(job, execution);
   if (job.type === 'EVALUATE_ALERTS') {
     if (job.dryRun) return { preview: true, businessDataChanged: false };
-    await assertJobMayContinue(job);
-    const alertResult = await evaluateAlerts(job.operationId);
+    await assertJobMayContinue(job, execution);
+    throwIfExecutionAborted(execution.signal);
+    const alertResult = await evaluateAlerts(job.operationId, Date.now(), execution);
+    throwIfExecutionAborted(execution.signal);
     const incidentResult = await synchronizeAlertIncidents();
+    throwIfExecutionAborted(execution.signal);
     return { ...alertResult, incidents: incidentResult, businessDataChanged: true };
   }
   if (job.type === 'AGGREGATE_GROWTH_METRICS') {
     if (job.dryRun) return { preview: true, businessDataChanged: false };
-    await assertJobMayContinue(job);
-    return { ...(await aggregateGrowthMetrics()), businessDataChanged: true };
+    await assertJobMayContinue(job, execution);
+    const result = await aggregateGrowthMetrics();
+    throwIfExecutionAborted(execution.signal);
+    return { ...result, businessDataChanged: true };
   }
-  if (job.type === 'BULK_PRODUCT_OPERATION') return bulkOperation(job);
+  if (job.type === 'BULK_PRODUCT_OPERATION') return bulkOperation(job, execution);
   throw new Error('UNSUPPORTED_PRODUCT_INTELLIGENCE_JOB');
 }

@@ -138,10 +138,14 @@ export interface RuntimeControlSchedulerTickResult {
 
 export interface OwnedSchedulerCycleResult {
   status: 'completed' | 'role_lost';
+  /** True when a timer fired while the previous cycle was still running. */
+  skippedOverlap?: boolean;
   guardian?: RuntimeControlSchedulerTickResult;
   automation?: SchedulerTickResult;
   intelligence?: ProductIntelligenceSchedulerTickResult;
 }
+
+let ownedSchedulerFlight: Promise<OwnedSchedulerCycleResult> | undefined;
 
 /**
  * Runtime scheduler entrypoint. Every durable enqueue is preceded by a
@@ -151,13 +155,32 @@ export async function runOwnedSchedulerCycle(
   ownership: RuntimeRoleOwnership,
   now = Date.now(),
 ): Promise<OwnedSchedulerCycleResult> {
-  if (!await heartbeatRuntimeRole('SCHEDULER', ownership, undefined, now)) return { status: 'role_lost' };
-  const guardian = await runRuntimeControlSchedulerTick(now);
-  if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian };
-  const automation = await runAutomationSchedulerTick(now);
-  if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, automation };
-  const intelligence = await runProductIntelligenceSchedulerTick(now);
-  return { status: 'completed', guardian, automation, intelligence };
+  if (ownedSchedulerFlight) return { status: 'completed', skippedOverlap: true };
+  const flight = (async (): Promise<OwnedSchedulerCycleResult> => {
+    const startedAt = Date.now();
+    if (!await heartbeatRuntimeRole('SCHEDULER', ownership, undefined, now)) return { status: 'role_lost' };
+    const guardian = await runRuntimeControlSchedulerTick(now);
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian };
+    const automation = await runAutomationSchedulerTick(now);
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, automation };
+    const intelligence = await runProductIntelligenceSchedulerTick(now);
+    console.info(JSON.stringify({
+      type: 'automation_scheduler_cycle',
+      durationMs: Math.max(0, Date.now() - startedAt),
+      guardian: guardian.status,
+      automation: automation.status,
+      intelligence: intelligence.status,
+      scheduled: (automation.status === 'scheduled' ? 1 : 0) + intelligence.scheduled,
+      duplicateCount: intelligence.duplicates + (automation.status === 'duplicate' ? 1 : 0),
+    }));
+    return { status: 'completed', guardian, automation, intelligence };
+  })();
+  ownedSchedulerFlight = flight;
+  try {
+    return await flight;
+  } finally {
+    if (ownedSchedulerFlight === flight) ownedSchedulerFlight = undefined;
+  }
 }
 
 export async function runRuntimeControlSchedulerTick(now = Date.now()): Promise<RuntimeControlSchedulerTickResult> {

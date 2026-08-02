@@ -17,6 +17,7 @@ import {
 import type { MongoStorageConfig } from './storageConfig';
 import { applyStorageBulkMutations } from './bulkMutation';
 import { isStorageError, storageError, storageErrorCode } from './storageErrors';
+import { recordBoundedRead, recordFullCollectionRead, recordScanCollection } from './diagnostics';
 import {
   STORAGE_MAX_BOUNDED_BYTES,
   STORAGE_MAX_BOUNDED_ITEMS,
@@ -29,12 +30,47 @@ import type {
   StorageBoundedCollectionOptions,
   StorageBoundedCollectionResult,
   StoragePageOptions,
+  StorageScanResult,
+  StorageStreamingTransaction,
+  StorageStreamingTransactionOptions,
   StorageTransaction,
 } from './types';
 
 const TRANSACTION_ATTEMPTS = 2;
 const COMMIT_ATTEMPTS = 2;
+const STREAMING_INSERT_BATCH_SIZE = 250;
 const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]*$/;
+
+interface MongoCursorCompat<T> {
+  toArray(): Promise<T[]>;
+  close?: () => Promise<void>;
+  batchSize?: (size: number) => MongoCursorCompat<T>;
+  [Symbol.asyncIterator]?: () => AsyncIterator<T>;
+}
+
+function configureMongoCursor<T>(cursor: MongoCursorCompat<T>, batchSize?: number): MongoCursorCompat<T> {
+  if (batchSize !== undefined) cursor.batchSize?.(batchSize);
+  return cursor;
+}
+
+async function closeMongoCursor<T>(cursor: MongoCursorCompat<T>): Promise<void> {
+  await cursor.close?.().catch(() => undefined);
+}
+
+async function* iterateMongoCursor<T>(cursor: MongoCursorCompat<T>): AsyncGenerator<T> {
+  const iterator = cursor[Symbol.asyncIterator]?.();
+  if (iterator) {
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+  // The fake adapter used by deterministic tests exposes only toArray(). Real
+  // Mongo cursors take the streaming branch above, so this fallback is test
+  // compatibility rather than a production materialization path.
+  for (const item of await cursor.toArray()) yield item;
+}
 
 function boundedCollectionError(code: string, collection: string): Error {
   const error = new Error(`${code}:${collection}`) as Error & { code?: string };
@@ -262,6 +298,7 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   async readCollection<T>(collection: string): Promise<T[]> {
+    recordFullCollectionRead(collection);
     const safeCollection = validateCollectionName(collection);
     const db = await this.database();
     const session = await this.session();
@@ -395,6 +432,190 @@ export class MongoStorageAdapter implements StorageAdapter {
     }
   }
 
+  async runStreamingTransaction<T>(
+    collection: string,
+    fn: StorageStreamingTransaction<T>,
+    options: StorageStreamingTransactionOptions<T> = {},
+  ): Promise<{ changed: boolean; itemCount: number }> {
+    const safeCollection = validateCollectionName(collection);
+    const db = await this.database();
+    const session = await this.session();
+    let changed = false;
+    let itemCount = 0;
+    let callbackFailed = false;
+    let callbackError: unknown;
+    try {
+      session.startTransaction();
+      await assertMongoSchema(db, session);
+      const metadataCollection = db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION);
+      const metadata = await metadataCollection.findOne({ _id: safeCollection, kind: 'collection' }, { session });
+      const expectedRevision = metadata?.revision || 0;
+      const nextRevision = expectedRevision + 1;
+      const dataCollection = db.collection<MongoStoredItem>(safeCollection);
+      const staged: MongoStoredItem[] = [];
+      let serializedBytes = 2;
+
+      const flush = async (): Promise<void> => {
+        if (!staged.length) return;
+        await dataCollection.insertMany(staged.splice(0, staged.length), { session, ordered: true });
+      };
+      const stage = (item: T): void => {
+        const serialized = serializeMongoItems([item], nextRevision)[0];
+        if (!serialized) throw storageError('INVALID_STORAGE_PAYLOAD');
+        const encoded = JSON.stringify(serialized.item);
+        if (encoded === undefined) throw storageError('INVALID_STORAGE_PAYLOAD');
+        staged.push({ ...serialized, order: itemCount });
+        serializedBytes += Buffer.byteLength(encoded, 'utf8') + (itemCount > 0 ? 1 : 0);
+        itemCount += 1;
+      };
+      const visitSource = async (visitor: StorageStreamingTransaction<T>): Promise<void> => {
+        if (!metadata) return;
+        const cursor = configureMongoCursor(
+          dataCollection.find({ revision: expectedRevision }, { session }).sort({ order: 1 }),
+          STREAMING_INSERT_BATCH_SIZE,
+        );
+        try {
+          for await (const document of iterateMongoCursor(cursor)) {
+            const item = deserializeMongoItems<T>([document])[0];
+            try {
+              const itemChanged = await visitor(item, itemCount);
+              if (itemChanged === true) changed = true;
+            } catch (error) {
+              callbackFailed = true;
+              callbackError = error;
+              throw error;
+            }
+            stage(item);
+            if (staged.length >= STREAMING_INSERT_BATCH_SIZE) await flush();
+          }
+        } finally {
+          await closeMongoCursor(cursor);
+        }
+      };
+
+      if (options.prepare && metadata) {
+        const cursor = configureMongoCursor(
+          dataCollection.find({ revision: expectedRevision }, { session }).sort({ order: 1 }),
+          STREAMING_INSERT_BATCH_SIZE,
+        );
+        try {
+          let index = 0;
+          for await (const document of iterateMongoCursor(cursor)) {
+            try {
+              await options.prepare(deserializeMongoItems<T>([document])[0], index);
+            } catch (error) {
+              callbackFailed = true;
+              callbackError = error;
+              throw error;
+            }
+            index += 1;
+          }
+        } finally {
+          await closeMongoCursor(cursor);
+        }
+      }
+      try {
+        await options.beforeMutation?.();
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
+        throw error;
+      }
+      await visitSource(fn);
+      for (const item of options.appendItems?.() || []) {
+        changed = true;
+        stage(item);
+        if (staged.length >= STREAMING_INSERT_BATCH_SIZE) await flush();
+      }
+      if (!changed) {
+        await abortIfActive(session);
+        return { changed: false, itemCount };
+      }
+      await flush();
+      const updatedAt = new Date().toISOString();
+      if (expectedRevision === 0) {
+        try {
+          await metadataCollection.insertOne({
+            _id: safeCollection,
+            kind: 'collection',
+            revision: nextRevision,
+            itemCount,
+            serializedBytes,
+            updatedAt,
+          }, { session });
+        } catch (error) {
+          if (isDuplicateKeyError(error)) throw storageError('MONGO_TRANSACTION_CONFLICT', error);
+          throw error;
+        }
+      } else {
+        const result = await metadataCollection.updateOne(
+          { _id: safeCollection, kind: 'collection', revision: expectedRevision },
+          { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
+          { session },
+        );
+        if (result.matchedCount !== 1) throw storageError('MONGO_TRANSACTION_CONFLICT');
+      }
+      await dataCollection.deleteMany({ revision: { $ne: nextRevision } }, { session });
+      await commitWithBoundedRetry(session);
+      return { changed: true, itemCount };
+    } catch (error) {
+      await abortIfActive(session);
+      if (callbackFailed) throw callbackError;
+      if (isStorageError(error)) throw error;
+      // Do not replay an arbitrary async visitor after a transient Mongo
+      // transaction failure. The caller can retry the durable operation with
+      // its normal fencing/idempotency rules.
+      throw storageError('MONGO_TRANSACTION_FAILED', error);
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async scanCollection<T>(
+    collection: string,
+    visitor: (item: T, index: number) => Promise<void> | void,
+  ): Promise<StorageScanResult> {
+    recordScanCollection();
+    const safeCollection = validateCollectionName(collection);
+    const db = await this.database();
+    const session = await this.session();
+    try {
+      session.startTransaction();
+      await assertMongoSchema(db, session);
+      const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
+        .findOne({ _id: safeCollection, kind: 'collection' }, { session });
+      if (!metadata) {
+        await commitWithBoundedRetry(session);
+        return { itemCount: 0, observedBytes: 0, queryCount: 2 };
+      }
+      const cursor = db.collection<MongoStoredItem>(safeCollection)
+        .find({ revision: metadata.revision }, { session })
+        .sort({ order: 1 });
+      let index = 0;
+      try {
+        for await (const document of iterateMongoCursor(cursor)) {
+          const normalized = normalizeCollectionPayload([document.item])[0] as T;
+          await visitor(normalized, index);
+          index += 1;
+        }
+      } finally {
+        await closeMongoCursor(cursor);
+      }
+      await commitWithBoundedRetry(session);
+      return {
+        itemCount: index,
+        observedBytes: Number(metadata.serializedBytes || 0),
+        queryCount: 3,
+      };
+    } catch (error) {
+      await abortIfActive(session);
+      if (isStorageError(error)) throw error;
+      throw storageError('MONGO_OPERATION_FAILED', error);
+    } finally {
+      await session.endSession();
+    }
+  }
+
   async readBoundedCollection<T>(
     collection: string,
     options: StorageBoundedCollectionOptions,
@@ -406,6 +627,7 @@ export class MongoStorageAdapter implements StorageAdapter {
     collection: string,
     options: StorageBoundedCollectionOptions,
   ): Promise<StorageBoundedCollectionResult<T>> {
+    recordBoundedRead();
     const safeCollection = validateCollectionName(collection);
     const { maximumItems, maximumBytes } = validateBoundedCollectionOptions(safeCollection, options);
     const db = await this.database();

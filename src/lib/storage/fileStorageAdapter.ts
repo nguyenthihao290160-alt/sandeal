@@ -1,11 +1,13 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { constants as fsConstants } from 'fs';
+import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
 import { applyStorageBulkMutations } from './bulkMutation';
 import { storageErrorCode } from './storageErrors';
+import { recordBoundedRead, recordFullCollectionRead, recordLockAcquisition, recordLockHold, recordScanCollection } from './diagnostics';
 import {
   STORAGE_MAX_BOUNDED_BYTES,
   STORAGE_MAX_BOUNDED_ITEMS,
@@ -18,6 +20,9 @@ import type {
   StorageBoundedCollectionOptions,
   StorageBoundedCollectionResult,
   StoragePageOptions,
+  StorageScanResult,
+  StorageStreamingTransaction,
+  StorageStreamingTransactionOptions,
   StorageTransaction,
 } from './types';
 
@@ -196,6 +201,7 @@ async function acquireCollectionFileLock(collection: string): Promise<() => Prom
 }
 
 async function readCollectionUnlocked<T>(collection: string): Promise<T[]> {
+  recordFullCollectionRead(collection);
   await ensureDataDir();
   const filePath = getFilePath(collection);
   let originalError: unknown;
@@ -222,6 +228,213 @@ async function readCollectionUnlocked<T>(collection: string): Promise<T[]> {
 
 async function readCollection<T>(collection: string): Promise<T[]> {
   return readCollectionUnlocked<T>(collection);
+}
+
+/**
+ * Stream one JSON-array member at a time. Durable SanDeal collections are
+ * arrays of JSON objects; tracking string/nesting state avoids retaining the
+ * raw file or parsed collection while keeping crash recovery fail-closed.
+ */
+async function* iterateJsonArrayMemberTexts(filePath: string): AsyncGenerator<string> {
+  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  let started = false;
+  let closed = false;
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let itemText = '';
+  let primitive = false;
+  let hasItem = false;
+  let afterComma = false;
+  const takeItem = (): string => {
+    const text = itemText.trim();
+    if (!text) throw new Error('collection_item_empty');
+    itemText = '';
+    primitive = false;
+    depth = 0;
+    inString = false;
+    escaped = false;
+    return text;
+  };
+
+  for await (const chunk of stream) {
+    const text = String(chunk);
+    for (let offset = 0; offset < text.length; offset += 1) {
+      const character = text[offset];
+      if (!started) {
+        if (/\s/.test(character)) continue;
+        if (character !== '[') throw new Error('collection_root_must_be_array');
+        started = true;
+        continue;
+      }
+      if (closed) {
+        if (/\s/.test(character)) continue;
+        throw new Error('collection_trailing_data');
+      }
+      if (!itemText) {
+        if (/\s/.test(character)) continue;
+        if (character === ',') {
+          if (!hasItem || afterComma) throw new Error('collection_delimiter_invalid');
+          afterComma = true;
+          continue;
+        }
+        if (character === ']') {
+          if (afterComma) throw new Error('collection_trailing_delimiter');
+          closed = true;
+          continue;
+        }
+        itemText = character;
+        hasItem = true;
+        afterComma = false;
+        if (character === '{' || character === '[') depth = 1;
+        else primitive = true;
+        inString = character === '"';
+        escaped = false;
+        continue;
+      }
+
+      if (primitive) {
+        if (!inString && (character === ',' || character === ']')) {
+          yield takeItem();
+          if (character === ']') closed = true;
+          else afterComma = true;
+          continue;
+        }
+        itemText += character;
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === '\\') escaped = true;
+          else if (character === '"') inString = false;
+        } else if (character === '"') inString = true;
+        continue;
+      }
+
+      itemText += character;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+      } else if (character === '{' || character === '[') {
+        depth += 1;
+      } else if (character === '}' || character === ']') {
+        depth -= 1;
+        if (depth < 0) throw new Error('collection_item_nesting_invalid');
+        if (depth === 0) {
+          yield takeItem();
+          // The delimiter belongs to the item when it closes an object/array;
+          // the outer closing bracket is processed by the empty-item branch.
+        }
+      }
+    }
+  }
+  if (!started || !closed || itemText.trim() || inString || depth !== 0) {
+    throw new Error('collection_json_incomplete');
+  }
+}
+
+async function scanJsonArrayFile<T>(
+  filePath: string,
+  visitor: (item: T, index: number) => Promise<void> | void,
+): Promise<number> {
+  let itemIndex = 0;
+  for await (const raw of iterateJsonArrayMemberTexts(filePath)) {
+    const item = JSON.parse(raw) as T;
+    await visitor(item, itemIndex);
+    itemIndex += 1;
+  }
+  return itemIndex;
+}
+
+async function transformJsonArrayFile<T>(
+  filePath: string,
+  collection: string,
+  visitor: StorageStreamingTransaction<T>,
+  options: StorageStreamingTransactionOptions<T> = {},
+): Promise<{ changed: boolean; itemCount: number }> {
+  const tmpPath = `${getFilePath(collection)}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let changed = false;
+  let itemCount = 0;
+  try {
+    handle = await fs.open(tmpPath, 'wx');
+    await handle.writeFile('[', 'utf8');
+    let first = true;
+    for await (const raw of iterateJsonArrayMemberTexts(filePath)) {
+      const item = JSON.parse(raw) as T;
+      const itemChanged = await visitor(item, itemCount);
+      changed ||= itemChanged === true;
+      const encoded = JSON.stringify(item);
+      if (encoded === undefined) throw new Error('collection_item_unserializable');
+      if (!first) await handle.writeFile(',', 'utf8');
+      await handle.writeFile(encoded, 'utf8');
+      first = false;
+      itemCount += 1;
+    }
+    for (const item of options.appendItems?.() || []) {
+      const encoded = JSON.stringify(item);
+      if (encoded === undefined) throw new Error('collection_item_unserializable');
+      if (!first) await handle.writeFile(',', 'utf8');
+      await handle.writeFile(encoded, 'utf8');
+      first = false;
+      itemCount += 1;
+      changed = true;
+    }
+    await handle.writeFile(']', 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    if (!changed) {
+      await fs.unlink(tmpPath).catch(() => undefined);
+      return { changed: false, itemCount };
+    }
+    const stat = await fs.stat(tmpPath);
+    if (stat.size < 2) throw new Error('atomic_streaming_write_validation_failed');
+    if (!isTransientProjectionCandidateCollection(collection)) await refreshBackup(getFilePath(collection));
+    await renameAtomicWithRetry(tmpPath, getFilePath(collection));
+    await syncDirectory(path.dirname(getFilePath(collection)));
+    return { changed: true, itemCount };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(tmpPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function scanCollection<T>(
+  collection: string,
+  visitor: (item: T, index: number) => Promise<void> | void,
+): Promise<StorageScanResult> {
+  recordScanCollection();
+  await ensureDataDir();
+  const primary = getFilePath(collection);
+  const paths = [primary, `${primary}.bak`, `${primary}.bak.2`];
+  let originalError: unknown;
+  for (const filePath of paths) {
+    const stat = await fs.stat(filePath).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!stat) continue;
+    try {
+      const itemCount = await scanJsonArrayFile<T>(filePath, visitor);
+      return { itemCount, observedBytes: stat.size, queryCount: 1 };
+    } catch (error) {
+      originalError = error;
+      // A visitor may already have observed earlier members. Falling back to a
+      // backup after a partial primary scan would replay those side effects and
+      // make a repair non-deterministic. Full collection reads retain their
+      // existing backup recovery path; streaming scans fail closed instead.
+      break;
+    }
+  }
+  if (originalError) {
+    throw new Error(`Cannot scan collection ${collection}: ${originalError instanceof Error ? originalError.message : 'invalid_json'}`);
+  }
+  return { itemCount: 0, observedBytes: 0, queryCount: 1 };
 }
 
 function boundedCollectionError(code: string, collection: string): Error {
@@ -261,6 +474,7 @@ async function readBoundedCollectionSnapshot<T>(
   collection: string,
   options: StorageBoundedCollectionOptions,
 ): Promise<StorageBoundedCollectionResult<T>> {
+  recordBoundedRead();
   const { maximumItems, maximumBytes } = validateBoundedCollectionOptions(collection, options);
   await ensureDataDir();
   const filePath = getFilePath(collection);
@@ -346,33 +560,73 @@ function validatePageOptions(options: StoragePageOptions): void {
 
 async function readCollectionPage<T>(collection: string, options: StoragePageOptions) {
   validatePageOptions(options);
-  let items = (await readCollectionUnlocked<T>(collection))
-    .map((item, order) => ({ item, order }));
-  for (const [field, expected] of Object.entries(options.filters || {})) {
-    items = items.filter(({ item }) => (
+  await ensureDataDir();
+  const primary = getFilePath(collection);
+  const stat = await fs.stat(primary).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  });
+  const sourcePath = stat ? primary : (
+    await fs.stat(`${primary}.bak`).then(() => `${primary}.bak`).catch(async error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return fs.stat(`${primary}.bak.2`).then(() => `${primary}.bak.2`).catch(error2 => {
+        if ((error2 as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error2;
+      });
+    })
+  );
+  if (!sourcePath) return { items: [] as T[], totalItems: 0, queryCount: 1 };
+
+  const pageStart = (options.page - 1) * options.pageSize;
+  const retainedLimit = options.sort
+    ? Math.min(STORAGE_MAX_PAGE_SIZE, pageStart + options.pageSize)
+    : options.pageSize;
+  const matches: Array<{ item: T; order: number }> = [];
+  let totalItems = 0;
+  await scanJsonArrayFile<T>(sourcePath, (item, order) => {
+    const matchesFilters = Object.entries(options.filters || {}).every(([field, expected]) => (
       item !== null
       && typeof item === 'object'
-      && String((item as Record<string, unknown>)[field] ?? '') === expected
+      && String((item as unknown as Record<string, unknown>)[field] ?? '') === expected
     ));
-  }
+    if (!matchesFilters) return;
+    totalItems += 1;
+    if (!options.sort) {
+      if (totalItems > pageStart && matches.length < options.pageSize) matches.push({ item, order });
+      return;
+    }
+    matches.push({ item, order });
+    if (matches.length > retainedLimit) {
+      const { field, direction } = options.sort;
+      const multiplier = direction === 'desc' ? -1 : 1;
+      matches.sort((left, right) => {
+        const leftValue = left.item !== null && typeof left.item === 'object'
+          ? String((left.item as unknown as Record<string, unknown>)[field] ?? '')
+          : '';
+        const rightValue = right.item !== null && typeof right.item === 'object'
+          ? String((right.item as unknown as Record<string, unknown>)[field] ?? '')
+          : '';
+        return (leftValue.localeCompare(rightValue) * multiplier) || left.order - right.order;
+      });
+      matches.pop();
+    }
+  });
   if (options.sort) {
     const { field, direction } = options.sort;
     const multiplier = direction === 'desc' ? -1 : 1;
-    items.sort((left, right) => {
+    matches.sort((left, right) => {
       const leftValue = left.item !== null && typeof left.item === 'object'
-        ? String((left.item as Record<string, unknown>)[field] ?? '')
+        ? String((left.item as unknown as Record<string, unknown>)[field] ?? '')
         : '';
       const rightValue = right.item !== null && typeof right.item === 'object'
-        ? String((right.item as Record<string, unknown>)[field] ?? '')
+        ? String((right.item as unknown as Record<string, unknown>)[field] ?? '')
         : '';
-      const compared = leftValue.localeCompare(rightValue) * multiplier;
-      return compared || left.order - right.order;
+      return (leftValue.localeCompare(rightValue) * multiplier) || left.order - right.order;
     });
   }
-  const totalItems = items.length;
   const start = (options.page - 1) * options.pageSize;
   return {
-    items: items.slice(start, start + options.pageSize).map(({ item }) => item),
+    items: matches.slice(start, start + options.pageSize).map(({ item }) => item),
     totalItems,
     queryCount: 1,
   };
@@ -466,11 +720,15 @@ async function withCollectionLock<T>(collection: string, work: () => Promise<T>)
   const tail = previous.catch(() => undefined).then(() => current);
   collectionLocks.set(collection, tail);
   let releaseFileLock: (() => Promise<void>) | undefined;
+  let lockStartedAt = 0;
   try {
     await previous.catch(() => undefined);
     releaseFileLock = await acquireCollectionFileLock(collection);
+    lockStartedAt = Date.now();
+    recordLockAcquisition();
     return await work();
   } finally {
+    if (lockStartedAt) recordLockHold(Date.now() - lockStartedAt);
     if (releaseFileLock) await releaseFileLock();
     release();
     if (collectionLocks.get(collection) === tail) collectionLocks.delete(collection);
@@ -513,6 +771,43 @@ async function runTransaction<T>(collection: string, fn: StorageTransaction<T>):
     const items = await readCollectionUnlocked<T>(collection);
     const updated = await fn(items);
     if (updated !== undefined) await writeCollectionUnlocked(collection, updated);
+  });
+}
+
+async function runStreamingTransaction<T>(
+  collection: string,
+  fn: StorageStreamingTransaction<T>,
+  options: StorageStreamingTransactionOptions<T> = {},
+): Promise<{ changed: boolean; itemCount: number }> {
+  return withCollectionLock(collection, async () => {
+    await ensureDataDir();
+    const filePath = getFilePath(collection);
+    const source = [filePath, `${filePath}.bak`, `${filePath}.bak.2`];
+    let sourcePath: string | undefined;
+    for (const candidate of source) {
+      const stat = await fs.stat(candidate).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      });
+      if (stat) {
+        sourcePath = candidate;
+        break;
+      }
+    }
+    if (!sourcePath) {
+      await options.beforeMutation?.();
+      const appended = options.appendItems?.() || [];
+      if (!appended.length) return { changed: false, itemCount: 0 };
+      await writeCollectionUnlocked(collection, appended);
+      return { changed: true, itemCount: appended.length };
+    }
+    if (options.prepare) {
+      await scanJsonArrayFile<T>(sourcePath, async (item, index) => {
+        await options.prepare?.(item, index);
+      });
+    }
+    await options.beforeMutation?.();
+    return transformJsonArrayFile<T>(sourcePath, collection, fn, options);
   });
 }
 
@@ -580,12 +875,14 @@ export const fileStorageAdapter: StorageAdapter = {
   getDataDir,
   ensureDataDir,
   readCollection,
+  scanCollection,
   readBoundedCollection,
   readBoundedCollectionSnapshot,
   readCollectionPage,
   writeCollection,
   backupCollection,
   runTransaction,
+  runStreamingTransaction,
   bulkMutateCollection,
   checkHealth,
 };
