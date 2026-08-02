@@ -15,9 +15,11 @@ const workerId = `worker:${hostname}`;
 const instanceId = `${workerId}:${process.pid}:${crypto.randomUUID()}`;
 const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 1000)).toISOString();
 const once = process.argv.includes('--once');
+const ROLE_HEARTBEAT_TIMEOUT_MS = 5_000;
 let stopping = false;
 let roleLeaseLost = false;
 let forcedShutdown = false;
+let activeRoleHeartbeat;
 function requestShutdown(signal) {
   if (stopping) return;
   stopping = true;
@@ -33,6 +35,22 @@ process.on('SIGINT', () => requestShutdown('SIGINT'));
 process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+function boundedRoleHeartbeat(ownership) {
+  if (activeRoleHeartbeat) return Promise.reject(new Error('ROLE_HEARTBEAT_IN_FLIGHT'));
+  const operation = Promise.resolve().then(() => heartbeatRuntimeRole('WORKER', ownership));
+  activeRoleHeartbeat = operation;
+  void operation.then(() => undefined, () => undefined).finally(() => {
+    if (activeRoleHeartbeat === operation) activeRoleHeartbeat = undefined;
+  });
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('ROLE_HEARTBEAT_TIMEOUT')), ROLE_HEARTBEAT_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  return Promise.race([operation, timeout])
+    .finally(() => clearTimeout(timer));
+}
 
 async function waitForWorkerRole() {
   let lastConflictLogAt = 0;
@@ -76,9 +94,9 @@ async function waitForWorkerRole() {
   let roleHeartbeatBusy = false;
   let roleHeartbeatFailures = 0;
   const roleHeartbeat = setInterval(() => {
-    if (roleHeartbeatBusy || stopping) return;
+    if (roleHeartbeatBusy || activeRoleHeartbeat || stopping) return;
     roleHeartbeatBusy = true;
-    void heartbeatRuntimeRole('WORKER', ownership).then(renewed => {
+    void boundedRoleHeartbeat(ownership).then(renewed => {
       roleHeartbeatFailures = renewed ? 0 : roleHeartbeatFailures + 1;
       if (!renewed || roleHeartbeatFailures >= 2) {
         roleLeaseLost = true;

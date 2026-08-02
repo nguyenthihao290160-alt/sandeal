@@ -61,6 +61,7 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'runtime-recovery-canary-permits',
   'runtime-recovery-state',
   'runtime-role-conflicts',
+  'runtime-role-fencing',
   'runtime-role-leases',
   'saved-views',
   'scheduler-state',

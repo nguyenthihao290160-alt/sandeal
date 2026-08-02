@@ -7,7 +7,16 @@ import path from 'path';
 
 import { applyStorageBulkMutations } from './bulkMutation';
 import { storageErrorCode } from './storageErrors';
-import { recordBoundedRead, recordFullCollectionRead, recordLockAcquisition, recordLockHold, recordScanCollection } from './diagnostics';
+import {
+  recordBoundedRead,
+  recordFileLockHeartbeat,
+  recordFullCollectionRead,
+  recordLockAcquisition,
+  recordLockHold,
+  recordLockWait,
+  recordScanCollection,
+  recordStaleLockRecovery,
+} from './diagnostics';
 import {
   STORAGE_MAX_BOUNDED_BYTES,
   STORAGE_MAX_BOUNDED_ITEMS,
@@ -97,14 +106,19 @@ async function recoverStaleLock(lockPath: string, metadata: FileLockMetadata | n
   const stat = await fs.stat(lockPath).catch(() => null);
   if (!stat) return true;
   const now = Date.now();
-  const sameHostOwnerAlive = metadata?.hostname === hostname && processIsAlive(Number(metadata.pid));
+  const sameHost = metadata?.hostname === hostname;
+  const sameHostOwnerAlive = sameHost && processIsAlive(Number(metadata?.pid));
   if (sameHostOwnerAlive) return false;
+  const sameHostOwnerGone = sameHost && Number.isInteger(Number(metadata?.pid)) && Number(metadata?.pid) > 0;
 
   const expiry = Date.parse(metadata?.expiresAt || '');
   const expired = Number.isFinite(expiry)
     ? expiry <= now
     : now - stat.mtimeMs >= FILE_LOCK_LEASE_MS;
-  if (!expired) return false;
+  // A conclusively dead same-host owner cannot release its lock, even when
+  // the lease timestamp has not caught up. A live owner is never stolen;
+  // hosts whose PID cannot be verified still require lease expiry.
+  if (!sameHostOwnerGone && !expired) return false;
 
   const recoveryToken = metadata?.token || `unknown-${Math.floor(stat.mtimeMs)}`;
   const stalePath = `${lockPath}.stale.${recoveryToken.slice(0, 36)}`;
@@ -119,6 +133,7 @@ async function recoverStaleLock(lockPath: string, metadata: FileLockMetadata | n
       ownerHost: metadata?.hostname,
       recoveredAt: new Date(now).toISOString(),
     }));
+    recordStaleLockRecovery(metadata ? 'LOCK_OWNER_GONE_OR_LEASE_EXPIRED' : 'LOCK_METADATA_INVALID_AND_LEASE_EXPIRED');
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -153,31 +168,45 @@ async function acquireCollectionFileLock(collection: string): Promise<() => Prom
       await handle.close();
       handle = undefined;
       await cleanupStaleTempFiles(collection);
+      recordLockWait(Date.now() - startedAt);
 
-      let heartbeatInFlight: Promise<void> = Promise.resolve();
+      let heartbeatInFlight: Promise<void> | undefined;
       const renewLock = async (): Promise<void> => {
-        const current = await readLockMetadata(lockPath);
-        if (current?.token !== token) return;
-        const heartbeatAt = Date.now();
-        await fs.writeFile(lockPath, JSON.stringify({
-          ...current,
-          heartbeatAt: new Date(heartbeatAt).toISOString(),
-          expiresAt: new Date(heartbeatAt + FILE_LOCK_LEASE_MS).toISOString(),
-        }), 'utf8');
+        const startedAt = Date.now();
+        try {
+          const current = await readLockMetadata(lockPath);
+          if (current?.token !== token) {
+            recordFileLockHeartbeat(Date.now() - startedAt, false);
+            return;
+          }
+          const heartbeatAt = Date.now();
+          await fs.writeFile(lockPath, JSON.stringify({
+            ...current,
+            heartbeatAt: new Date(heartbeatAt).toISOString(),
+            expiresAt: new Date(heartbeatAt + FILE_LOCK_LEASE_MS).toISOString(),
+          }), 'utf8');
+          recordFileLockHeartbeat(Date.now() - startedAt, true);
+        } catch (error) {
+          recordFileLockHeartbeat(Date.now() - startedAt, false);
+          throw error;
+        }
       };
       const heartbeat = setInterval(() => {
-        // Track renewal work so release cannot unlink the lock and then have an
-        // already-running timer callback recreate it with writeFile.
-        heartbeatInFlight = heartbeatInFlight
+        // Track one renewal so release cannot unlink the lock and then have an
+        // already-running timer callback recreate it with writeFile. Skipping
+        // a tick also prevents an unbounded promise queue during I/O pressure.
+        if (heartbeatInFlight) return;
+        heartbeatInFlight = renewLock()
           .catch(() => undefined)
-          .then(renewLock)
-          .catch(() => undefined);
+          .finally(() => {
+            heartbeatInFlight = undefined;
+          });
       }, FILE_LOCK_HEARTBEAT_MS);
       heartbeat.unref();
 
       return async () => {
         clearInterval(heartbeat);
-        await heartbeatInFlight.catch(() => undefined);
+        await heartbeatInFlight?.catch(() => undefined);
         const current = await readLockMetadata(lockPath);
         if (current?.token === token) await fs.unlink(lockPath).catch(() => undefined);
       };
@@ -195,6 +224,7 @@ async function acquireCollectionFileLock(collection: string): Promise<() => Prom
     }
   }
 
+  recordLockWait(Date.now() - startedAt);
   const error = new Error(`Storage lock timeout: ${collection}`) as Error & { code?: string };
   error.code = 'STORAGE_LOCK_TIMEOUT';
   throw error;
@@ -394,9 +424,74 @@ async function transformJsonArrayFile<T>(
     const stat = await fs.stat(tmpPath);
     if (stat.size < 2) throw new Error('atomic_streaming_write_validation_failed');
     if (!isTransientProjectionCandidateCollection(collection)) await refreshBackup(getFilePath(collection));
+    // Revalidate fencing after all preparatory I/O and immediately before the
+    // atomic replacement. A long backup copy must not widen the stale-writer
+    // window after the authority check.
+    await options.beforeCommit?.();
     await renameAtomicWithRetry(tmpPath, getFilePath(collection));
     await syncDirectory(path.dirname(getFilePath(collection)));
     return { changed: true, itemCount };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(tmpPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Append to a validated JSON array without parsing or reserializing its
+ * existing members. The copied temporary file is still fsynced and atomically
+ * promoted, so a crash leaves either the old file or the complete new file.
+ */
+async function appendJsonArrayFile<T>(
+  sourcePath: string,
+  collection: string,
+  appended: T[],
+  sourceItemCount: number,
+  beforeCommit?: () => Promise<void> | void,
+): Promise<{ changed: boolean; itemCount: number }> {
+  if (!appended.length) return { changed: false, itemCount: sourceItemCount };
+  const targetPath = getFilePath(collection);
+  const tmpPath = `${targetPath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    await fs.copyFile(sourcePath, tmpPath);
+    const sourceStat = await fs.stat(sourcePath);
+    const tailLength = Math.min(4_096, sourceStat.size);
+    handle = await fs.open(tmpPath, 'r+');
+    const tail = Buffer.alloc(tailLength);
+    if (tailLength > 0) await handle.read(tail, 0, tailLength, sourceStat.size - tailLength);
+    let closingBracket = -1;
+    for (let index = tail.length - 1; index >= 0; index -= 1) {
+      const byte = tail[index];
+      if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) {
+        // Locate the ASCII array terminator in byte space. Using a decoded
+        // string here would turn UTF-8 character offsets into invalid file
+        // positions for Vietnamese or other multibyte durable fields.
+        closingBracket = byte === 0x5d ? index : -1;
+        break;
+      }
+    }
+    if (closingBracket < 0) throw new Error('atomic_append_source_not_json_array');
+    const closingOffset = sourceStat.size - tailLength + closingBracket;
+    const encoded = JSON.stringify(appended);
+    if (!encoded || encoded[0] !== '[' || encoded[encoded.length - 1] !== ']') {
+      throw new Error('collection_item_unserializable');
+    }
+    const inner = encoded.slice(1, -1);
+    const suffix = `${sourceItemCount > 0 ? ',' : ''}${inner}]`;
+    await handle.truncate(closingOffset);
+    await handle.write(suffix, closingOffset, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await refreshBackup(targetPath);
+    // Keep the final authority check adjacent to the atomic rename; backup
+    // maintenance can otherwise leave a large stale-writer window.
+    await beforeCommit?.();
+    await renameAtomicWithRetry(tmpPath, targetPath);
+    await syncDirectory(path.dirname(targetPath));
+    return { changed: true, itemCount: sourceItemCount + appended.length };
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await fs.unlink(tmpPath).catch(() => undefined);
@@ -798,15 +893,26 @@ async function runStreamingTransaction<T>(
       await options.beforeMutation?.();
       const appended = options.appendItems?.() || [];
       if (!appended.length) return { changed: false, itemCount: 0 };
+      await options.beforeCommit?.();
       await writeCollectionUnlocked(collection, appended);
       return { changed: true, itemCount: appended.length };
     }
+    let preparedItemCount = 0;
     if (options.prepare) {
-      await scanJsonArrayFile<T>(sourcePath, async (item, index) => {
+      preparedItemCount = await scanJsonArrayFile<T>(sourcePath, async (item, index) => {
         await options.prepare?.(item, index);
       });
     }
     await options.beforeMutation?.();
+    if (options.appendOnly) {
+      return appendJsonArrayFile(
+        sourcePath,
+        collection,
+        options.appendItems?.() || [],
+        preparedItemCount,
+        options.beforeCommit,
+      );
+    }
     return transformJsonArrayFile<T>(sourcePath, collection, fn, options);
   });
 }

@@ -1,5 +1,92 @@
 # AI Work Handoff
 
+## Current handoff: SanDeal M3.1.5
+
+### Task and reconstructed starting state
+
+- Task: file-storage lock convergence, independent role heartbeats, and Worker/Scheduler stability.
+- Repository: `C:\duan\sandeal`; branch `master`; initial HEAD `ce9296ffff763f336305721e62a240fd58f6a01c`.
+- Initial `git status --short`, `git diff --stat`, `git diff`, `git diff --cached`, and untracked-file inspection were clean. The current working tree contains only the uncommitted M3.1.5 work recorded below.
+- The current M3.1.3 production runbook and M3.1.4 implementation/tests were read before editing. No VPS, PM2, production storage, provider credential, deployment, commit, push, or production-data operation was performed.
+
+### Confirmed production root cause
+
+| Component | Confirmed behavior | Risk | Smallest safe correction |
+| --- | --- | --- | --- |
+| Role authority | The prior authority wrapper held the role-lease collection lock across job mutations. | Role heartbeat waited behind file work and the role expired/fenced. | Add a separate short-lived role fence with its own heartbeat; keep the role lease heartbeat independent. |
+| File `automation-jobs` | Each enqueue could scan and rewrite the complete JSON collection while holding the lock. | Scheduler contention, long lock ownership, and memory/CPU pressure. | Use bounded planning plus an atomic append-only file path; batch scheduler intelligence enqueues. |
+| Control reads | Control updates performed an explicit read and then a transactional read/write. | Repeated durable reads and lock acquisition in one cycle. | Use the transaction snapshot as the authoritative update input and a bounded cycle-scoped control read model. |
+| Stale lock recovery | A dead same-host PID waited for lease expiry even when it could not release the lock. | Recovery latency extended contention. | Recover only a conclusively dead same-host PID immediately; never steal a live PID; unknown hosts still require expiry. |
+| Handler failures | Lock/fence timeout codes could be routed through provider/terminal failure handling. | Infrastructure contention could consume business attempts or be mislabeled. | Classify lock contention separately, defer with bounded jitter, preserve attempts, and pause fail-closed after the finite deferral budget. |
+
+### M3.1.5 implementation
+
+- `src/lib/automation/runtimeRoles.ts`: independent `runtime-role-fencing` records serialize role takeover and final fenced mutations without holding the role-lease lock during business work. Fence heartbeats stop after role ownership is no longer valid; release and takeover paths are finally-cleaned and release-aware.
+- `src/lib/automation/store.ts`, `src/lib/automation/types.ts`: batch enqueue, cycle-scoped control reads, final `beforeCommit` authority checks, bounded infrastructure-contention deferral, separate infrastructure retry accounting, and explicit storage/fencing diagnostics. A contention deferral does not increment `attemptCount`; five bounded deferrals pause the job for operator recovery rather than looping.
+- `src/lib/storage/fileStorageAdapter.ts`, `src/lib/storage/mongoStorageAdapter.ts`, `src/lib/storage/types.ts`: atomic before-commit hooks, append-only file promotion without full JSON reserialization, byte-correct UTF-8 closing-bracket offsets, lock-wait/heartbeat/recovery diagnostics, and semantic Mongo compatibility.
+- `src/lib/storage/diagnostics.ts`: bounded counters for reads by collection, lock wait/hold, stale recovery, file/job/role heartbeat latency, and fencing rejection.
+- `src/lib/automation/cycleReadModel.ts`, `src/lib/automation/worker.ts`, `src/lib/automation/scheduler.ts`: bounded cycle-local control reuse, scheduler batch enqueue, single-flight scheduler cycle, and structured bounded cycle diagnostics. No process-wide durable job snapshot is retained.
+- `scripts/automation-worker.cjs`, `scripts/automation-scheduler.cjs`, `src/lib/automation/executionBudget.ts`: bounded independent role-heartbeat calls, cleanup, role-loss shutdown behavior, and explicit infrastructure cancellation.
+- `src/lib/storage/mongoSchema.ts`: additive logical collection registration for the role-fence record.
+- `scripts/m3-1-5-file-runtime-stability-tests.cjs` and `scripts/m3-1-5-file-runtime-performance-tests.cjs`: deterministic safety tests and the sequential 13,000-job fixture.
+
+### Lock and authority model
+
+1. Role acquisition/takeover uses the small `runtime-role-fencing` record, then the short `runtime-role-leases` transaction.
+2. During work, the role lease is renewed independently by the process entrypoint; a final mutation also owns a renewable role fence and revalidates role owner, job claim, fencing token, and release identity immediately before promotion.
+3. The `automation-jobs` lock covers only bounded planning/streaming mutation and the atomic file/Mongo commit. Provider/network work, handler execution, projection sync, audit, logging, and sleeping occur after it is released.
+4. Projection, audit, and control follow-up writes occur after the job-source lock. No remote call is initiated under the primary jobs lock.
+
+File lock recovery requires the recorded host/PID and lease metadata. A live same-host PID is never stolen. A conclusively gone same-host PID may be recovered before expiry; an unverifiable/different-host owner requires lease expiry. All owned locks and timers are released in `finally` paths.
+
+### Retry, degraded operation, and safety rules
+
+- `STORAGE_LOCK_TIMEOUT`, `ROLE_FENCE_LOCK_TIMEOUT`, and `STORAGE_LOCK_CONTENTION` are infrastructure contention, not provider timeout or product failure. They use finite exponential backoff with jitter, retain audit evidence, and do not consume another business attempt.
+- Role fencing loss is explicit `WORKER_FENCING_REJECTED`; stale workers cannot complete, fail, reschedule, publish, or overwrite a job. A timed-out/fenced handler is aborted and late durable success is blocked.
+- Exhausted infrastructure deferrals become `PAUSED` with `STORAGE_ERROR:INFRASTRUCTURE_RETRY_BUDGET_EXHAUSTED`; they do not auto-loop. Existing terminal history, product blockers, Runtime Guardian, publication evidence, and fail-closed policy gates are unchanged.
+- Worker/Scheduler remain safe-default/off for experimental rollout flags. No publication was forced and no production product state was changed.
+
+### Local performance measurements
+
+The fixture was run sequentially in a temporary file store with 13,000 jobs and a 55.7 MB (`58,453,671` bytes) `automation-jobs` file. The supplied production observation is the only before measurement for the VPS baseline; it reported 136 complete durable reads, 30,697 ms maximum lock hold, and 397,348,864-byte RSS.
+
+| Operation | Measured result |
+| --- | ---: |
+| Job Health repair, cold / warm / incremental catch-up | 22,681 / 25,473 / 29,198 ms |
+| Scheduler cycle, cold / warm | 5,800 / 3,344 ms |
+| Worker cycle, cold | 20,842 ms |
+| Worker complete durable reads | 82; `automation-jobs` complete reads: 0 |
+| Scheduler `automation-jobs` complete reads | 0 |
+| Maximum Worker lock hold | 6,009 ms; Scheduler 1,692 ms; repair catch-up 1,692 ms |
+| Critical pickup latency in fixture | 38,048 ms |
+| Peak RSS / peak heap | 497.9 / 263.3 MB |
+| Four repeated-cycle heap delta after GC | -112,696 bytes |
+
+The local Worker read count is 39.7% below the supplied 136-read baseline, and the measured maximum Worker lock hold is 80.4% below the supplied 30,697 ms baseline. The fixture reported zero complete durable `automation-jobs` reads for repair, Scheduler, and Worker operations. Critical pickup was measured at 38.048 seconds in this local run; the fixture does not treat that as a pass/fail threshold, so the VPS rollout must explicitly verify the existing pickup SLO and stop if critical maintenance is delayed. These are deterministic local measurements, not a production performance claim.
+
+### Tests and validation status
+
+- `npm run test:m3.1.5`: 11 passed, 0 failed; `npm run test:m3.1.5:performance`: PASS, all acceptance assertions passed.
+- `npm run test:m3.1.4`: 12 passed, 0 failed; `npm run test:m3.1.3`: Gate A 7, Gate B 7, publication recovery 11, live health 3 passed.
+- `npm run test:m3.1.2:projection-repair`: 15 passed; `npm run test:m3.1.2:projection-performance`: PASS; M3.1.1 projection repair: 11 passed.
+- Storage: file 15, fake-Mongo 30, migration 39, acceptance 20 passed. The acceptance command explicitly reported `REAL_ISOLATED_MONGO_ACCEPTANCE: NOT_RUN`.
+- Runtime/product suites: Prompt 10 runtime 18, orchestration 12, job schema 10, self-healing 8, lifecycle 50, resilience 11, backup/recovery 7; automation 29; health/readiness 33; hardening 12; durable health 26 passed. `npm test` passed.
+- `npm run typecheck`: PASS; `npm run lint`: PASS with 0 errors and 12 pre-existing warnings; `npm run release:secret-scan`: PASS; `git diff --check`: PASS with only existing CRLF normalization warnings; `npm run build`: PASS with the existing broad Turbopack NFT filesystem-trace warning.
+- Intentionally skipped: real provider/AccessTrade/Gemini calls (user prohibition); real isolated Mongo acceptance (no explicit isolated non-production configuration, and production Mongo access is prohibited); VPS/PM2/deployment/production website verification (user prohibition).
+
+### Production rollout plan — document only, do not execute locally
+
+Worker first: keep Scheduler stopped; deploy the exact full release SHA through the guarded deployment script; verify immutable build/release identity; start Worker only; observe at least 15 minutes. Require unchanged PID, ACTIVE/fresh role lease, no storage-lock timeout, no `WORKER_FENCING_REJECTED`, no role-loss restart, no internal-contention `LEASE_EXPIRED_MAX_ATTEMPTS`, safe RSS/swap, and bounded cycle/lock metrics. Stop immediately on any failed gate.
+
+Scheduler second: only after Worker stability, start Scheduler; observe one tick at a time; require single-flight scheduling, no duplicate critical jobs/repairs/rechecks/publications, no lock contention, fresh Scheduler lease, and safe memory/swap. Save PM2 state only after all gates pass.
+
+Rollback/stop: stop Scheduler before Worker, allow only safe in-flight cleanup, preserve the durable data directory and evidence, and use the previously verified full release SHA through the guarded rollback procedure. Never delete jobs, leases, projections, backups, or audit history. Immediate stop conditions are PID churn, stale/mismatched identity, repeated lock timeout, incorrect live-lock recovery, fencing rejection, duplicate effect, sustained memory/swap pressure, App Health timeout, or publication without complete current evidence.
+
+### Recommended commit and classification
+
+- Recommended commit: `fix: bound automation memory leases and repair convergence`
+- Classification: `SAFE_TO_COMMIT_M3_1_5` based on the completed local gates and final diff review. This is not production deployment authorization; the documented Worker-first rollout and VPS acceptance gates remain mandatory.
+
 ## Current handoff: SanDeal M3.1.2
 
 ### Task

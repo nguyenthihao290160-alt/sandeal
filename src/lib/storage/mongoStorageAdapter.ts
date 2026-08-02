@@ -532,6 +532,10 @@ export class MongoStorageAdapter implements StorageAdapter {
         return { changed: false, itemCount };
       }
       await flush();
+      // Staged documents are still transactional and invisible. Revalidate
+      // authority after the last potentially expensive flush, immediately
+      // before advancing the visible collection revision.
+      await options.beforeCommit?.();
       const updatedAt = new Date().toISOString();
       if (expectedRevision === 0) {
         try {

@@ -172,11 +172,17 @@ export interface AutomationJob {
   dryRun: boolean;
   attemptCount: number;
   maxAttempts: number;
+  /**
+   * Bounded storage-contention deferrals are tracked separately from business
+   * attempts. This prevents a busy file lock from exhausting the handler's
+   * retry budget while preserving every durable deferral in audit history.
+   */
+  infrastructureRetryCount?: number;
   queuedAt: string;
   scheduledAt: string;
   nextRetryAt?: string;
   runnableAt?: string;
-  runnableReason?: 'RETRY_ELIGIBLE_AT' | 'SCHEDULED_AT' | 'CREATED_AT';
+  runnableReason?: 'RETRY_ELIGIBLE_AT' | 'SCHEDULED_AT' | 'CREATED_AT' | 'INFRASTRUCTURE_CONTENTION';
   claimedAt?: string;
   claimedBy?: string;
   claimToken?: string;
@@ -209,7 +215,7 @@ export interface AutomationJobAttempt {
   operationId: string;
   attemptNumber: number;
   runnableAt: string;
-  runnableReason: 'RETRY_ELIGIBLE_AT' | 'SCHEDULED_AT' | 'CREATED_AT';
+  runnableReason: 'RETRY_ELIGIBLE_AT' | 'SCHEDULED_AT' | 'CREATED_AT' | 'INFRASTRUCTURE_CONTENTION';
   createdAt: string;
   scheduledAt: string;
   retryEligibleAt?: string;

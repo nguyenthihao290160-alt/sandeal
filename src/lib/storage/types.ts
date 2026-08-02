@@ -19,8 +19,16 @@ export interface StorageStreamingTransactionOptions<T> {
   prepare?: StorageStreamingTransaction<T>;
   /** Runs after prepare and before the mutating pass, still under the boundary. */
   beforeMutation?: () => Promise<void> | void;
+  /** Runs immediately before the atomic replacement/commit. */
+  beforeCommit?: () => Promise<void> | void;
   /** Append bounded new records after the existing source has been transformed. */
   appendItems?: () => T[] | undefined;
+  /**
+   * The transaction is known to append only. Implementations may use a
+   * bounded-copy append path, but must preserve the same atomic and durable
+   * result as the normal streaming transaction.
+   */
+  appendOnly?: boolean;
 }
 
 export interface StoragePageOptions {

@@ -11,6 +11,7 @@ import {
 } from '@/lib/storage/adapter';
 import type { StorageStreamingTransaction, StorageTransaction } from '@/lib/storage/types';
 import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
+import { recordFencingRejection, recordJobLeaseRenewal } from '@/lib/storage/diagnostics';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
 import { getJobRegistryDefaults } from './botRegistry';
 import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, listAutomationPolicies } from './policyRegistry';
@@ -21,6 +22,7 @@ import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
 import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
 import { getFeatureRolloutState } from './featureRollout';
+import { getCycleControl, setCycleControl } from './cycleReadModel';
 import {
   AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
   AUTOMATION_JOB_PROJECTION_NAME,
@@ -119,6 +121,7 @@ const ALL_JOB_STATUSES = new Set<AutomationJobStatus>([
 const FAIRNESS_AFTER_MS = Math.max(15_000, Number(process.env.SANDEAL_JOB_FAIRNESS_AFTER_MS) || 60_000);
 const MAX_JOB_PROJECTIONS = getAutomationJobProjectionLimit();
 const PROJECTION_RECONCILE_AFTER_MS = Math.max(30_000, Number(process.env.SANDEAL_JOB_PROJECTION_RECONCILE_MS) || 60_000);
+const MAX_INFRASTRUCTURE_RETRIES = Math.max(1, Math.min(12, Number(process.env.SANDEAL_MAX_INFRASTRUCTURE_RETRIES) || 5));
 const projectionReconcileTimes = new Map<string, number>();
 let lastHeartbeatHealthSummaryRefreshAt = 0;
 const HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS = 15_000;
@@ -179,7 +182,7 @@ export function projectAutomationJobListItem(job: AutomationJob): AutomationJobL
       : undefined,
     updatedAt: job.progress.updatedAt,
   } : undefined;
-  return {
+  const output: AutomationJobListProjection = {
     projectionSchemaVersion: AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION,
     schemaVersion: job.schemaVersion,
     projectionSourceVersion: job.projectionSourceVersion,
@@ -236,6 +239,7 @@ export function projectAutomationJobListItem(job: AutomationJob): AutomationJobL
     resourceCandidateId: resources.resourceCandidateId,
     resourceDraftId: resources.resourceDraftId,
   };
+  return output;
 }
 
 const STATUS_RESULT_FIELDS = [
@@ -2013,8 +2017,14 @@ export async function appendAutomationAudit(input: Omit<AutomationAuditEvent, 's
 }
 
 export async function getAutomationControl(): Promise<AutomationControlState> {
+  const cached = getCycleControl();
+  if (cached) return cached;
   const stored = (await readCollection<Partial<AutomationControlState>>(CONTROL))[0];
-  if (!stored) return { ...DEFAULT_CONTROL };
+  if (!stored) {
+    const fallback = { ...DEFAULT_CONTROL };
+    setCycleControl(fallback);
+    return fallback;
+  }
   const runtimeJournal = runtimeControlApplicationJournal(stored.runtimeControlApplications);
   const runtimeControlJournalInvalidCount = runtimeJournal.invalidEntries.length;
   const hasProvenance = typeof stored.publishPausedByOperator === 'boolean'
@@ -2029,7 +2039,7 @@ export async function getAutomationControl(): Promise<AutomationControlState> {
     || runtimeControlJournalInvalidCount > 0
   );
   const publishBlockedByPolicy = stored.publishBlockedByPolicy ?? false;
-  return {
+  const output: AutomationControlState = {
     ...DEFAULT_CONTROL,
     ...stored,
     schemaVersion: 2,
@@ -2046,13 +2056,15 @@ export async function getAutomationControl(): Promise<AutomationControlState> {
     runtimeControlJournalInvalidCount,
     publishPaused: publishPausedByOperator || publishBlockedByRuntime || publishBlockedByPolicy,
   };
+  setCycleControl(output);
+  return output;
 }
 
 export async function updateAutomationControl(
   updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'publishPausedByOperator' | 'publishBlockedByRuntime' | 'publishBlockedByPolicy' | 'publishRuntimeReasons' | 'publishPolicyReasons' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'pausedAt' | 'pauseReason' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
   actor = 'system',
 ): Promise<AutomationControlState> {
-  let previous = await getAutomationControl();
+  let previous: AutomationControlState = { ...DEFAULT_CONTROL };
   let next = previous;
   const now = new Date().toISOString();
   const changesControlState = 'killSwitch' in updates
@@ -2149,7 +2161,8 @@ export async function updateAutomationControl(
       risk: updates.killSwitch ? 'HIGH' : 'MEDIUM', reasons: updates.reason ? [updates.reason] : [], dryRun: false, attempts: 0,
     });
   }
-  return getAutomationControl();
+  setCycleControl(next);
+  return next;
 }
 
 export interface ApplyRuntimePublishBlockResult {
@@ -2717,6 +2730,7 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       onBoundExceeded: () => {
         enqueueBoundExceeded = true;
       },
+      appendOnly: true,
     });
     if (enqueueBoundExceeded || !response) throw new Error('AUTOMATION_JOB_SOURCE_BOUND_EXCEEDED');
     if (!response.created) await abortAutomationJobProjectionMutation(projectionMutation);
@@ -2742,6 +2756,110 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
     reasonCode: response.created ? 'CREATED' : response.code === 'ALREADY_PROCESSED' ? 'COMPLETED_RECENTLY' : 'REUSED_ACTIVE_JOB',
   });
   return response;
+}
+
+/**
+ * Enqueue a bounded scheduler batch with one source scan and one atomic file
+ * append. This path is intentionally limited to non-product-capacity jobs;
+ * product reservations remain individually atomic in createAutomationJob.
+ */
+export async function createAutomationJobsBatch(
+  inputs: readonly CreateAutomationJobInput[],
+): Promise<AutomationJobCreateResult[]> {
+  if (!inputs.length) return [];
+  if (inputs.some(input => input.type === 'PROCESS_CANDIDATE')) {
+    throw new AutomationJobEnqueueError('BATCH_PRODUCT_CAPACITY_UNSUPPORTED');
+  }
+  const jobs: AutomationJob[] = [];
+  for (const input of inputs) {
+    try {
+      const job = createAutomationJobRecord(input);
+      assertAutomationJobContract(job, { requireFactoryMetadata: true });
+      jobs.push(job);
+    } catch (error) {
+      await auditRejectedAutomationJob(input, error);
+      throw error;
+    }
+  }
+
+  const responses = new Map<string, AutomationJobCreateResult>();
+  const createdJobs: AutomationJob[] = [];
+  let enqueueBoundExceeded = false;
+  let mutation: AutomationJobProjectionMutationHandle | undefined;
+  try {
+    mutation = await runAutomationJobSourceBoundedTransaction(items => {
+      const known = [...items];
+      for (const job of jobs) {
+        const sameKey = known
+          .filter(item => item.type === job.type && item.idempotencyKey === job.idempotencyKey)
+          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+        const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
+          || sameKey.find(item => item.status === 'SUCCEEDED');
+        const equivalentActive = existing || known.find(item => isEquivalentActiveScan(item, job));
+        if (equivalentActive) {
+          responses.set(job.id, {
+            job: equivalentActive,
+            created: false,
+            code: equivalentActive.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS',
+          });
+          continue;
+        }
+        known.push(job);
+        createdJobs.push(job);
+        responses.set(job.id, { job, created: true, code: 'CREATED' });
+      }
+      return createdJobs.length ? [...items, ...createdJobs] : undefined;
+    }, {
+      includeItem: item => jobs.some(job => (
+        (item.type === job.type && item.idempotencyKey === job.idempotencyKey)
+        || isEquivalentActiveScan(item, job)
+      )),
+      onBoundExceeded: () => { enqueueBoundExceeded = true; },
+      appendOnly: true,
+    });
+    if (enqueueBoundExceeded || responses.size !== jobs.length) throw new Error('AUTOMATION_JOB_SOURCE_BOUND_EXCEEDED');
+    if (createdJobs.length) {
+      await syncJobReadModelsBatchBestEffort(createdJobs, { mutation, sourceMutationCommitted: true });
+    } else {
+      await abortAutomationJobProjectionMutation(mutation);
+    }
+  } catch (error) {
+    if (mutation) await abortAutomationJobProjectionMutation(mutation).catch(() => undefined);
+    throw error;
+  }
+
+  for (const job of createdJobs) {
+    try {
+      await appendAutomationAudit({
+        correlationId: job.correlationId || job.operationId,
+        operationId: job.operationId,
+        jobId: job.id,
+        nextState: job.status,
+        operationType: job.type,
+        actor: job.requestedBy,
+        risk: job.riskLevel,
+        reasons: [],
+        dryRun: job.dryRun,
+        attempts: 0,
+      });
+    } catch (error) {
+      console.error(JSON.stringify({
+        type: 'automation_job_created_audit_failed',
+        jobId: job.id,
+        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+      }));
+    }
+    logAutomationJobEvent('job_created', job, { workerId: job.requestedBy, reasonCode: 'CREATED_BATCH' });
+  }
+  for (const result of responses.values()) {
+    if (!result.created) {
+      logAutomationJobEvent('job_reused', result.job, {
+        workerId: result.job.claimedBy,
+        reasonCode: result.code === 'ALREADY_PROCESSED' ? 'COMPLETED_RECENTLY' : 'REUSED_ACTIVE_JOB',
+      });
+    }
+  }
+  return jobs.map(job => responses.get(job.id)!);
 }
 
 const ACTIVE_SCAN_STATUSES = new Set<AutomationJobStatus>([
@@ -2986,13 +3104,24 @@ function retryDelayMs(type: AutomationJobType, attempt: number): number {
   return base + Math.floor(Math.random() * Math.max(250, base * 0.15));
 }
 
+function infrastructureRetryDelayMs(retryCount: number): number {
+  const base = Math.min(60_000, 2_000 * 2 ** Math.max(0, retryCount - 1));
+  return base + Math.floor(Math.random() * Math.max(100, base * 0.2));
+}
+
+export function isInfrastructureContentionCode(code: string): boolean {
+  return code === 'STORAGE_LOCK_TIMEOUT'
+    || code === 'STORAGE_LOCK_CONTENTION'
+    || code === 'ROLE_FENCE_LOCK_TIMEOUT';
+}
+
 function defaultErrorCategory(code: string): AutomationErrorCategory {
+  if (code === 'STORAGE_ERROR' || /STORAGE|LOCK/.test(code)) return 'STORAGE_ERROR';
   if (code === 'PROVIDER_TIMEOUT' || /TIMEOUT|NETWORK|UNAVAILABLE|TEMPORARY|LEASE_EXPIRED/.test(code)) return 'PROVIDER_TIMEOUT';
   if (code === 'PROVIDER_RATE_LIMIT' || /RATE|QUOTA/.test(code)) return 'PROVIDER_RATE_LIMIT';
   if (code === 'IMAGE_HOTLINK_BLOCKED') return 'IMAGE_HOTLINK_BLOCKED';
   if (code === 'LINK_NOT_FOUND') return 'LINK_NOT_FOUND';
   if (code === 'DUPLICATE') return 'DUPLICATE';
-  if (code === 'STORAGE_ERROR' || /STORAGE|LOCK/.test(code)) return 'STORAGE_ERROR';
   if (code === 'INVALID_SOURCE_DATA' || /CREDENTIAL|SOURCE/.test(code)) return 'INVALID_SOURCE_DATA';
   if (code === 'VALIDATION_FAILED' || /VALIDATION|SCHEMA|SAFETY|POLICY|APPROVAL|KILL/.test(code)) return 'VALIDATION_FAILED';
   if (code === 'UNKNOWN_ERROR') return 'UNKNOWN_ERROR';
@@ -3039,8 +3168,15 @@ function activeClaimMatches(
 
 async function assertClaimGuardOwnership(guard: AutomationJobClaimGuard): Promise<void> {
   if (guard.ownership && !await isRuntimeRoleOwner('WORKER', guard.ownership)) {
+    recordFencingRejection();
     throw new Error('WORKER_FENCING_REJECTED');
   }
+}
+
+export interface AutomationJobCreateResult {
+  job: AutomationJob;
+  created: boolean;
+  code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS';
 }
 
 async function runAutomationJobSourceTransactionWithAuthority(
@@ -3049,7 +3185,9 @@ async function runAutomationJobSourceTransactionWithAuthority(
 ): Promise<AutomationJobProjectionMutationHandle> {
   await assertClaimGuardOwnership(guard);
   if (!guard.ownership) return runAutomationJobSourceTransaction(work);
-  return withRuntimeRoleAuthority('WORKER', guard.ownership, () => runAutomationJobSourceTransaction(work));
+  return withRuntimeRoleAuthority('WORKER', guard.ownership, assertAuthority => (
+    assertAuthority().then(() => runAutomationJobSourceTransaction(work, assertAuthority))
+  ));
 }
 
 async function runAutomationJobSourceStreamingTransactionWithAuthority(
@@ -3061,7 +3199,7 @@ async function runAutomationJobSourceStreamingTransactionWithAuthority(
   return withRuntimeRoleAuthority(
     'WORKER',
     guard.ownership,
-    () => runAutomationJobSourceStreamingTransaction(work),
+    assertAuthority => runAutomationJobSourceStreamingTransaction(work, assertAuthority),
   );
 }
 
@@ -3080,6 +3218,7 @@ function markAutomationJobProjectionSourceMutation(job: AutomationJob): void {
 
 async function runAutomationJobSourceTransaction(
   work: StorageTransaction<AutomationJob>,
+  beforeCommit?: () => Promise<void>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   try {
@@ -3090,6 +3229,7 @@ async function runAutomationJobSourceTransaction(
       }]));
       const result = await work(items);
       if (!result) return undefined;
+      await beforeCommit?.();
       const assignedVersions: Record<string, number> = {};
       for (const item of result) {
         const prior = previous.get(item.id);
@@ -3112,6 +3252,7 @@ async function runAutomationJobSourceTransaction(
 
 async function runAutomationJobSourceStreamingTransaction(
   work: StorageStreamingTransaction<AutomationJob>,
+  beforeCommit?: () => Promise<void>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   try {
@@ -3128,7 +3269,7 @@ async function runAutomationJobSourceStreamingTransaction(
         [item.id]: nextVersion,
       };
       return true;
-    });
+    }, { beforeCommit });
     return mutation;
   } catch (error) {
     await abortAutomationJobProjectionMutation(mutation).catch(() => undefined);
@@ -3155,6 +3296,7 @@ async function runAutomationJobSourceBoundedTransaction(
     onBoundExceeded?: () => void;
     includeItem?: (item: AutomationJob) => boolean;
     planItem?: (item: AutomationJob, planningItems: AutomationJob[]) => BoundedPlanningDecision;
+    appendOnly?: boolean;
   } = {},
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
@@ -3235,6 +3377,7 @@ async function runAutomationJobSourceBoundedTransaction(
           }
         },
         appendItems: () => appendedItems,
+        appendOnly: options.appendOnly,
       },
     );
     return mutation;
@@ -3622,12 +3765,13 @@ export async function claimAutomationJobs(
       }
       if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) {
         const retryEligibleAt = item.nextRetryAt;
+        const infrastructureRetry = item.runnableReason === 'INFRASTRUCTURE_CONTENTION';
         const runnable = deriveJobRunnableContext(item, retryEligibleAt);
         item.status = 'PENDING';
         item.scheduledAt = retryEligibleAt;
         item.nextRetryAt = undefined;
-        item.runnableAt = runnable.runnableAt;
-        item.runnableReason = runnable.runnableReason;
+        item.runnableAt = infrastructureRetry ? retryEligibleAt : runnable.runnableAt;
+        item.runnableReason = infrastructureRetry ? 'INFRASTRUCTURE_CONTENTION' : runnable.runnableReason;
         markAutomationJobProjectionSourceMutation(item);
         projectionChangedIds.add(item.id);
         changed = true;
@@ -3733,6 +3877,7 @@ export async function claimAutomationJobs(
         .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
     }
     for (const item of due) {
+      const infrastructureRetry = item.runnableReason === 'INFRASTRUCTURE_CONTENTION';
       const execution = getAutomationExecutionDescriptor(item);
       const runnable = item.runnableAt && item.runnableReason
         ? { runnableAt: item.runnableAt, runnableReason: item.runnableReason }
@@ -3745,7 +3890,9 @@ export async function claimAutomationJobs(
       item.executionCritical = execution.critical;
       item.runnableAt = runnable.runnableAt;
       item.runnableReason = runnable.runnableReason;
-      item.leaseExpiresAt = new Date(nowMs + leaseMs).toISOString(); item.startedAt ||= now; item.attemptCount += 1; item.updatedAt = now;
+      item.leaseExpiresAt = new Date(nowMs + leaseMs).toISOString(); item.startedAt ||= now;
+      if (!infrastructureRetry) item.attemptCount += 1;
+      item.updatedAt = now;
       markAutomationJobProjectionSourceMutation(item);
       claimed.push(structuredClone(item));
       projectionChangedIds.add(item.id);
@@ -3954,94 +4101,101 @@ export async function heartbeatAutomationJob(
   claimToken?: string,
   ownership?: RuntimeRoleOwnership,
 ): Promise<boolean> {
-  const nowMs = Date.now();
-  if (ownership && !await isRuntimeRoleOwner('WORKER', ownership, nowMs)) return false;
-  if (!claimToken) return false;
-  const now = new Date(nowMs).toISOString();
-  const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
-  let renewed = false;
-  await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
-    const current = items.find(item => item.jobId === id);
-    if (!current || current.workerId !== workerId || current.claimToken !== claimToken) return undefined;
-    current.heartbeatAt = now;
-    current.leaseExpiresAt = leaseExpiresAt;
-    renewed = true;
-    return items.filter(item => item.jobId === id || Date.parse(item.leaseExpiresAt) > nowMs);
-  });
-  if (!renewed) return false;
-  // Projection is a read model. Update it atomically only while it still
-  // represents this claim, so an in-flight heartbeat can never overwrite a
-  // terminal projection written by complete/fail.
-  const activeProjection = await getAutomationJobActiveProjectionStorage();
-  const projectionUpdates = await Promise.allSettled([
-    runTransaction<AutomationJobStatusProjection>(activeProjection.collections.status, items => {
-      const current = items.find(item => item.id === id);
-      if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
-      if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
+  const startedAt = Date.now();
+  let renewalSucceeded = false;
+  try {
+    const nowMs = Date.now();
+    if (ownership && !await isRuntimeRoleOwner('WORKER', ownership, nowMs)) return false;
+    if (!claimToken) return false;
+    const now = new Date(nowMs).toISOString();
+    const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
+    let renewed = false;
+    await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+      const current = items.find(item => item.jobId === id);
+      if (!current || current.workerId !== workerId || current.claimToken !== claimToken) return undefined;
       current.heartbeatAt = now;
       current.leaseExpiresAt = leaseExpiresAt;
-      return items;
-    }),
-    runTransaction<AutomationJobListProjection>(activeProjection.collections.list, items => {
-      const current = items.find(item => item.id === id);
-      if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
-      if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
-      current.heartbeatAt = now;
-      current.leaseExpiresAt = leaseExpiresAt;
-      return items;
-    }),
-  ]);
-  projectionUpdates.forEach((result, index) => {
-    if (result.status === 'rejected') {
+      renewed = true;
+      return items.filter(item => item.jobId === id || Date.parse(item.leaseExpiresAt) > nowMs);
+    });
+    if (!renewed) return false;
+    renewalSucceeded = true;
+    // Projection is a read model. Update it atomically only while it still
+    // represents this claim, so an in-flight heartbeat can never overwrite a
+    // terminal projection written by complete/fail.
+    const activeProjection = await getAutomationJobActiveProjectionStorage();
+    const projectionUpdates = await Promise.allSettled([
+      runTransaction<AutomationJobStatusProjection>(activeProjection.collections.status, items => {
+        const current = items.find(item => item.id === id);
+        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
+        if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
+        current.heartbeatAt = now;
+        current.leaseExpiresAt = leaseExpiresAt;
+        return items;
+      }),
+      runTransaction<AutomationJobListProjection>(activeProjection.collections.list, items => {
+        const current = items.find(item => item.id === id);
+        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
+        if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
+        current.heartbeatAt = now;
+        current.leaseExpiresAt = leaseExpiresAt;
+        return items;
+      }),
+    ]);
+    projectionUpdates.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        console.error(JSON.stringify({
+          type: 'automation_job_projection_heartbeat_failed',
+          jobId: id,
+          readModel: index === 0 ? 'status-projection' : 'list-projection-v2',
+          reasonCode: sanitizeErrorMessage(result.reason instanceof Error ? result.reason.message : 'unknown_error'),
+        }));
+      }
+    });
+    if (projectionUpdates.some(result => result.status === 'rejected')) {
+      try {
+        const failureToken = await beginAutomationJobProjectionSync(nowMs);
+        await finishAutomationJobProjectionSync(failureToken, {
+          success: false,
+          inserted: false,
+          insertedCount: 0,
+          sourceAffected: false,
+          listProjectionCount: 0,
+          statusProjectionCount: 0,
+          listProjectionFingerprint: automationJobProjectionFingerprint([]),
+          statusProjectionFingerprint: automationJobProjectionFingerprint([]),
+          listProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
+          statusProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
+          activeJobCount: 0,
+          retainedTerminalCount: 0,
+          retentionLimitReached: false,
+          currentStateTruncated: false,
+          sourceUpdatedAt: null,
+          retentionBoundary: null,
+        }, nowMs);
+      } catch {
+        // The projection error was already logged; the stale heartbeat evidence
+        // remains fail-closed even when its manifest cannot be invalidated.
+      }
+      return true;
+    }
+    if (nowMs - lastHeartbeatHealthSummaryRefreshAt < HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS) return true;
+    const manifest = await getAutomationJobProjectionManifestForMaintenance().catch(() => null);
+    if (manifest?.rebuildToken || manifest?.inFlightSyncTokens.length) return true;
+    try {
+      await refreshAutomationJobHealthSummary(nowMs);
+      lastHeartbeatHealthSummaryRefreshAt = nowMs;
+    } catch (error) {
       console.error(JSON.stringify({
-        type: 'automation_job_projection_heartbeat_failed',
+        type: 'automation_job_health_summary_heartbeat_failed',
         jobId: id,
-        readModel: index === 0 ? 'status-projection' : 'list-projection-v2',
-        reasonCode: sanitizeErrorMessage(result.reason instanceof Error ? result.reason.message : 'unknown_error'),
+        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
       }));
     }
-  });
-  if (projectionUpdates.some(result => result.status === 'rejected')) {
-    try {
-      const failureToken = await beginAutomationJobProjectionSync(nowMs);
-      await finishAutomationJobProjectionSync(failureToken, {
-        success: false,
-        inserted: false,
-        insertedCount: 0,
-        sourceAffected: false,
-        listProjectionCount: 0,
-        statusProjectionCount: 0,
-        listProjectionFingerprint: automationJobProjectionFingerprint([]),
-        statusProjectionFingerprint: automationJobProjectionFingerprint([]),
-        listProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
-        statusProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
-        activeJobCount: 0,
-        retainedTerminalCount: 0,
-        retentionLimitReached: false,
-        currentStateTruncated: false,
-        sourceUpdatedAt: null,
-        retentionBoundary: null,
-      }, nowMs);
-    } catch {
-      // The projection error was already logged; the stale heartbeat evidence
-      // remains fail-closed even when its manifest cannot be invalidated.
-    }
     return true;
+  } finally {
+    recordJobLeaseRenewal(Date.now() - startedAt, renewalSucceeded);
   }
-  if (nowMs - lastHeartbeatHealthSummaryRefreshAt < HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS) return true;
-  const manifest = await getAutomationJobProjectionManifestForMaintenance().catch(() => null);
-  if (manifest?.rebuildToken || manifest?.inFlightSyncTokens.length) return true;
-  try {
-    await refreshAutomationJobHealthSummary(nowMs);
-    lastHeartbeatHealthSummaryRefreshAt = nowMs;
-  } catch (error) {
-    console.error(JSON.stringify({
-      type: 'automation_job_health_summary_heartbeat_failed',
-      jobId: id,
-      reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
-    }));
-  }
-  return true;
 }
 
 export async function completeAutomationJob(
@@ -4078,6 +4232,87 @@ export async function completeAutomationJob(
     }
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return completedJob;
+}
+
+/**
+ * Release a claim after bounded internal storage contention without consuming
+ * another business attempt. A small finite deferral budget prevents a lock
+ * outage from becoming an infinite retry loop; once exhausted the job is
+ * paused for explicit recovery and remains fail-closed.
+ */
+export async function deferAutomationJobForInfrastructure(
+  id: string,
+  workerId: string,
+  reasonCode: string,
+  error: unknown,
+  options: {
+    claimToken: string;
+    ownership?: RuntimeRoleOwnership;
+    attemptCount?: number;
+    releaseId?: string;
+  },
+): Promise<AutomationJob | null> {
+  const guard: AutomationJobClaimGuard = {
+    claimToken: options.claimToken,
+    ownership: options.ownership,
+    attemptCount: options.attemptCount,
+    releaseId: options.releaseId,
+  };
+  await assertClaimGuardOwnership(guard);
+  let deferred: AutomationJob | null = null;
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
+    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
+    const retryCount = Math.max(0, Math.floor(job.infrastructureRetryCount || 0)) + 1;
+    const paused = retryCount >= MAX_INFRASTRUCTURE_RETRIES;
+    const nextRetryAt = paused
+      ? undefined
+      : new Date(nowMs + infrastructureRetryDelayMs(retryCount)).toISOString();
+    job.infrastructureRetryCount = retryCount;
+    job.status = paused ? 'PAUSED' : 'RETRY_SCHEDULED';
+    job.nextRetryAt = nextRetryAt;
+    job.runnableAt = nextRetryAt;
+    job.runnableReason = paused ? undefined : 'INFRASTRUCTURE_CONTENTION';
+    job.lastErrorCode = 'STORAGE_LOCK_CONTENTION';
+    job.lastErrorCategory = 'STORAGE_ERROR';
+    job.lastErrorMessage = sanitizeErrorMessage(
+      error instanceof Error ? error.message : `${reasonCode}: internal storage contention`,
+    );
+    job.retryable = !paused;
+    job.deadLetterReason = paused ? 'STORAGE_ERROR:INFRASTRUCTURE_RETRY_BUDGET_EXHAUSTED' : undefined;
+    clearAutomationJobClaim(job);
+    job.updatedAt = now;
+    markAutomationJobProjectionSourceMutation(job);
+    deferred = { ...job };
+    return true;
+  });
+  const deferredJob = deferred as AutomationJob | null;
+  if (deferredJob) {
+    await syncJobReadModelsBestEffort(deferredJob, false, projectionMutation);
+    logAutomationJobEvent(deferredJob.status === 'PAUSED' ? 'job_skipped' : 'job_requeued', deferredJob, {
+      workerId,
+      reasonCode: deferredJob.status === 'PAUSED'
+        ? 'INFRASTRUCTURE_RETRY_BUDGET_EXHAUSTED'
+        : 'STORAGE_LOCK_CONTENTION',
+    });
+    await appendAutomationAudit({
+      correlationId: deferredJob.operationId,
+      operationId: `${deferredJob.operationId}:infrastructure:${deferredJob.infrastructureRetryCount}`.slice(0, 160),
+      jobId: deferredJob.id,
+      operationType: 'INFRASTRUCTURE_RETRY_DEFERRED',
+      actor: workerId,
+      previousState: 'RUNNING',
+      nextState: deferredJob.status,
+      risk: deferredJob.riskLevel,
+      reasons: ['STORAGE_LOCK_CONTENTION', reasonCode],
+      dryRun: deferredJob.dryRun,
+      attempts: deferredJob.attemptCount,
+    });
+  } else {
+    await abortAutomationJobProjectionMutation(projectionMutation);
+  }
+  return deferredJob;
 }
 
 export async function failAutomationJob(

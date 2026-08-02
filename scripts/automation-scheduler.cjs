@@ -9,9 +9,11 @@ const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 100
 const ownerId = `scheduler:${hostname}`;
 const instanceId = `${ownerId}:${process.pid}:${crypto.randomUUID()}`;
 const once = process.argv.includes('--once');
+const ROLE_HEARTBEAT_TIMEOUT_MS = 5_000;
 let stopping = false;
 let shutdownSignal = once ? 'once_complete' : 'runtime_complete';
 let wakeDelay;
+let activeRoleHeartbeat;
 
 function log(type, details = {}, error = false) {
   const output = JSON.stringify({ type, role: 'SCHEDULER', ownerId, instanceId, pid: process.pid, ...details });
@@ -32,6 +34,22 @@ function waitForNextTick(ms) {
     const timer = setTimeout(() => { wakeDelay = undefined; resolve(); }, ms);
     wakeDelay = () => { clearTimeout(timer); wakeDelay = undefined; resolve(); };
   });
+}
+
+function boundedRoleHeartbeat(ownership) {
+  if (activeRoleHeartbeat) return Promise.reject(new Error('ROLE_HEARTBEAT_IN_FLIGHT'));
+  const operation = Promise.resolve().then(() => heartbeatRuntimeRole('SCHEDULER', ownership));
+  activeRoleHeartbeat = operation;
+  void operation.then(() => undefined, () => undefined).finally(() => {
+    if (activeRoleHeartbeat === operation) activeRoleHeartbeat = undefined;
+  });
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('ROLE_HEARTBEAT_TIMEOUT')), ROLE_HEARTBEAT_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  return Promise.race([operation, timeout])
+    .finally(() => clearTimeout(timer));
 }
 
 process.on('SIGINT', () => requestShutdown('SIGINT'));
@@ -73,20 +91,29 @@ process.on('SIGTERM', () => requestShutdown('SIGTERM'));
     });
   }
   let heartbeatBusy = false;
+  let heartbeatFailures = 0;
   const roleHeartbeat = setInterval(() => {
-    if (stopping || heartbeatBusy) return;
+    if (stopping || heartbeatBusy || activeRoleHeartbeat) return;
     heartbeatBusy = true;
-    void heartbeatRuntimeRole('SCHEDULER', ownership)
+    void boundedRoleHeartbeat(ownership)
       .then(renewed => {
+        heartbeatFailures = renewed ? 0 : heartbeatFailures + 1;
         if (renewed) log('scheduler_role_heartbeat', { fencingToken: ownership.fencingToken });
         else {
-          log('scheduler_tick_failed', { code: 'SCHEDULER_ROLE_LOST', message: 'Scheduler lease is no longer owned by this instance.' }, true);
-          process.exitCode = 1;
-          requestShutdown('ROLE_LOST');
+          log('scheduler_tick_failed', { code: 'SCHEDULER_ROLE_LOST', message: 'Scheduler lease is no longer owned by this instance.', consecutiveFailures: heartbeatFailures }, true);
+          if (heartbeatFailures >= 2) {
+            process.exitCode = 1;
+            requestShutdown('ROLE_LOST');
+          }
         }
       })
       .catch(error => {
-        log('scheduler_tick_failed', { code: 'SCHEDULER_HEARTBEAT_FAILED', message: error instanceof Error ? error.message : 'unknown_error' }, true);
+        heartbeatFailures += 1;
+        log('scheduler_tick_failed', { code: 'SCHEDULER_HEARTBEAT_FAILED', message: error instanceof Error ? error.message : 'unknown_error', consecutiveFailures: heartbeatFailures }, true);
+        if (heartbeatFailures >= 2) {
+          process.exitCode = 1;
+          requestShutdown('ROLE_LOST');
+        }
       })
       .finally(() => { heartbeatBusy = false; });
   }, 15_000);

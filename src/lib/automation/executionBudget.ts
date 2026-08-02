@@ -5,7 +5,8 @@ export type AutomationExecutionAbortCode =
   | 'WORKER_FENCING_REJECTED'
   | 'JOB_CANCELLED'
   | 'KILL_SWITCH_ACTIVE'
-  | 'WORKER_SHUTDOWN_REQUESTED';
+  | 'WORKER_SHUTDOWN_REQUESTED'
+  | 'STORAGE_LOCK_CONTENTION';
 
 export class AutomationExecutionAborted extends Error {
   readonly code: AutomationExecutionAbortCode;
@@ -49,6 +50,7 @@ function abortCode(value: unknown): AutomationExecutionAbortCode {
     || value === 'JOB_CANCELLED'
     || value === 'KILL_SWITCH_ACTIVE'
     || value === 'WORKER_SHUTDOWN_REQUESTED'
+    || value === 'STORAGE_LOCK_CONTENTION'
     ? value
     : 'HANDLER_TIMEOUT';
 }

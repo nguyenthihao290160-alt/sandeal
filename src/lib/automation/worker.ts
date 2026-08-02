@@ -18,6 +18,7 @@ import {
   completeAutomationJob,
   AUTOMATION_JOB_SCHEMA_VERSION,
   createAutomationJob,
+  deferAutomationJobForInfrastructure,
   failAutomationJob,
   getAutomationControl,
   getAutomationJobAuthoritySnapshot,
@@ -30,6 +31,7 @@ import {
   waitAutomationJobForChildren,
   waitAutomationJobForManual,
   rebuildAutomationJobReadModelsFromDurable,
+  isInfrastructureContentionCode,
 } from './store';
 import {
   getAutomationJobHealthView,
@@ -51,6 +53,7 @@ import {
   createAutomationExecutionBudget,
   type AutomationExecutionBudget,
 } from './executionBudget';
+import { withAutomationCycleReadModel } from './cycleReadModel';
 
 function assertUnhandledJobType(type: never): never {
   throw new Error(`UNSUPPORTED_JOB_TYPE:${String(type)}`);
@@ -157,9 +160,12 @@ function errorCode(error: unknown): string {
   const explicitCode = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
     ? String((error as { code: string }).code).trim()
     : '';
+  if (explicitCode === 'ROLE_FENCE_LOST') return 'WORKER_FENCING_REJECTED';
+  if (explicitCode === 'ROLE_FENCE_LOCK_TIMEOUT') return 'ROLE_FENCE_LOCK_TIMEOUT';
   if (explicitCode) return explicitCode.slice(0, 80);
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes('WORKER_FENCING_REJECTED')) return 'WORKER_FENCING_REJECTED';
+  if (/storage\s+lock\s+timeout|lock.?timeout/i.test(message)) return 'STORAGE_LOCK_TIMEOUT';
   if (/429|rate.?limit/i.test(message)) return 'PROVIDER_RATE_LIMIT';
   if (/timeout|abort|TEMPORARY_ERROR/i.test(message)) return 'PROVIDER_TIMEOUT';
   if (/image.*(?:hotlink|403|forbidden)|hotlink.*image/i.test(message)) return 'IMAGE_HOTLINK_BLOCKED';
@@ -183,6 +189,7 @@ function errorCode(error: unknown): string {
 }
 
 function errorCategory(code: string): AutomationErrorCategory {
+  if (isInfrastructureContentionCode(code)) return 'STORAGE_ERROR';
   if (['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'LINK_NOT_FOUND', 'IMAGE_HOTLINK_BLOCKED', 'INVALID_SOURCE_DATA', 'VALIDATION_FAILED', 'DUPLICATE', 'STORAGE_ERROR', 'INTERNAL_CODE_ERROR', 'UNKNOWN_ERROR'].includes(code)) {
     return code as AutomationErrorCategory;
   }
@@ -692,7 +699,7 @@ async function executeJob(
   }
 }
 
-export async function processAutomationBatch(
+async function processAutomationBatchInternal(
   workerId: string,
   limit = 2,
   ownership?: RuntimeRoleOwnership,
@@ -764,6 +771,7 @@ export async function processAutomationBatch(
     const heartbeat = setInterval(() => { void heartbeatOnce(); }, 15_000);
     heartbeat.unref?.();
     let businessExecutionStarted = false;
+    let infrastructureDeferred = false;
     try {
       execution.throwIfAborted();
       assertWorkerPolicy(job);
@@ -915,6 +923,22 @@ export async function processAutomationBatch(
         result.skipped += 1;
         return;
       }
+      if (isInfrastructureContentionCode(code)) {
+        infrastructureDeferred = true;
+        execution.abort('STORAGE_LOCK_CONTENTION');
+        await deferAutomationJobForInfrastructure(job.id, workerId, code, error, claimMutationGuard(job, ownership))
+          .catch(deferError => {
+            if (errorCode(deferError) === 'WORKER_FENCING_REJECTED') workerFencingRejected = true;
+            console.error(JSON.stringify({
+              type: 'automation_job_infrastructure_defer_failed',
+              jobId: job.id,
+              reasonCode: errorCode(deferError),
+            }));
+          });
+        logAutomationJobEvent('job_skipped', job, { workerId, reasonCode: 'STORAGE_LOCK_CONTENTION' });
+        result.skipped += 1;
+        return;
+      }
       const failedJob = await failAutomationJob(job.id, workerId, code, error, {
         errorCategory: errorCategory(code),
         nextRetryAt: error instanceof CandidateRetryScheduledError ? error.nextRetryAt : undefined,
@@ -957,7 +981,14 @@ export async function processAutomationBatch(
           workerHeartbeatAt: new Date().toISOString(),
           workerId,
           workerCurrentJobId: remainingJob?.id,
-        }, workerId);
+        }, workerId).catch(error => {
+          console.error(JSON.stringify({
+            type: 'automation_worker_control_heartbeat_failed',
+            workerId,
+            reasonCode: errorCode(error),
+            infrastructureDeferred,
+          }));
+        });
       }
     }
   };
@@ -991,12 +1022,30 @@ export async function processAutomationBatch(
       fullDurableCollectionReadsByCollection: fullReadsByCollection,
       scanCollectionReads: storageAfter.scanCollectionCount - storageBefore.scanCollectionCount,
       boundedReads: storageAfter.boundedReadCount - storageBefore.boundedReadCount,
+      lockWaitCount: storageAfter.lockWaitCount - storageBefore.lockWaitCount,
+      totalLockWaitMs: storageAfter.totalLockWaitMs - storageBefore.totalLockWaitMs,
+      maximumLockWaitMs: storageAfter.maximumLockWaitMs,
       maximumLockHoldMs: storageAfter.maximumLockHoldMs,
+      staleLockRecoveries: storageAfter.staleLockRecoveryCount - storageBefore.staleLockRecoveryCount,
+      roleHeartbeatRenewals: storageAfter.roleHeartbeatRenewalCount - storageBefore.roleHeartbeatRenewalCount,
+      roleHeartbeatRenewalFailures: storageAfter.roleHeartbeatRenewalFailureCount - storageBefore.roleHeartbeatRenewalFailureCount,
+      jobLeaseRenewals: storageAfter.jobLeaseRenewalCount - storageBefore.jobLeaseRenewalCount,
+      jobLeaseRenewalFailures: storageAfter.jobLeaseRenewalFailureCount - storageBefore.jobLeaseRenewalFailureCount,
+      fencingRejections: storageAfter.fencingRejectionCount - storageBefore.fencingRejectionCount,
       rssBytes: process.memoryUsage().rss,
       heapUsedBytes: process.memoryUsage().heapUsed,
     }));
   }
   return result;
+}
+
+export async function processAutomationBatch(
+  workerId: string,
+  limit = 2,
+  ownership?: RuntimeRoleOwnership,
+  options: WorkerBatchOptions = {},
+): Promise<WorkerRunResult> {
+  return withAutomationCycleReadModel(() => processAutomationBatchInternal(workerId, limit, ownership, options));
 }
 
 function mergeWorkerRunResult(target: WorkerRunResult, source: WorkerRunResult): void {

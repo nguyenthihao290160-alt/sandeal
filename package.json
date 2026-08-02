@@ -47,6 +47,8 @@
     "test:m3.1.3": "npm run test:m3.1.3:gate-a && npm run test:m3.1.3:gate-b && npm run test:m3.1.3:product-publication-recovery && npm run test:m3.1.3:release-live-health",
     "test:m3.1.4": "node scripts/m3-1-4-resource-stability-tests.cjs",
     "test:m3.1.4:performance": "node --expose-gc scripts/m3-1-4-resource-stability-performance-tests.cjs",
+    "test:m3.1.5": "node scripts/m3-1-5-file-runtime-stability-tests.cjs",
+    "test:m3.1.5:performance": "node --expose-gc scripts/m3-1-5-file-runtime-performance-tests.cjs",
     "test:master:m4": "node scripts/master-m4-intelligence-tests.cjs && npm run test:gemini-provider && npm run test:operator-intelligence && node scripts/prompt09-bot-foundation-tests.cjs && node scripts/prompt10-business-source-tests.cjs",
     "test:master:pwa": "node scripts/master-pwa-metadata-tests.cjs",
     "test:master:m5": "node scripts/master-m5-platform-seo-tests.cjs && npm run test:storage && npm run test:storage:mongo && npm run test:storage:migration && npm run test:storage:acceptance && node scripts/prompt10-revenue-integrity-tests.cjs && node scripts/prompt10-business-search-seo-tests.cjs",

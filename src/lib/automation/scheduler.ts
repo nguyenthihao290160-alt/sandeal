@@ -1,9 +1,11 @@
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
-import { createAutomationJob, getAutomationControl, updateAutomationControl } from './store';
+import { createAutomationJob, createAutomationJobsBatch, getAutomationControl, updateAutomationControl } from './store';
 import { getAutomationPolicy } from './policyRegistry';
 import { heartbeatRuntimeRole, isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import type { AutomationJobType } from './types';
 import { getProductProcessingCapacity } from './businessUsage';
+import { withAutomationCycleReadModel } from './cycleReadModel';
+import { getStorageDiagnosticsSnapshot } from '@/lib/storage/adapter';
 
 export interface SchedulerTickResult {
   status: 'paused' | 'killed' | 'disabled' | 'ingestion_paused' | 'worker_stale' | 'limit_reached' | 'scheduled' | 'duplicate' | 'not_due';
@@ -69,10 +71,10 @@ export async function runProductIntelligenceSchedulerTick(
 
   const jobs: ProductIntelligenceSchedulerTickResult['jobs'] = [];
 
-  for (const schedule of PRODUCT_INTELLIGENCE_SCHEDULES) {
+  const batch = await createAutomationJobsBatch(PRODUCT_INTELLIGENCE_SCHEDULES.map(schedule => {
     const policy = getAutomationPolicy(schedule.type);
     const bucket = bucketKey(now, schedule.intervalHours);
-    const created = await createAutomationJob({
+    return {
       type: schedule.type,
       payload: {
         limit: settings.maxItemsPerRun,
@@ -85,9 +87,13 @@ export async function runProductIntelligenceSchedulerTick(
       riskLevel: policy.defaultRisk,
       dryRun: false,
       maxAttempts: policy.retryPolicy.maxAttempts,
-    });
-    jobs.push({ type: schedule.type, jobId: created.job.id, created: created.created });
-  }
+    };
+  }));
+  batch.forEach((created, index) => jobs.push({
+    type: PRODUCT_INTELLIGENCE_SCHEDULES[index].type,
+    jobId: created.job.id,
+    created: created.created,
+  }));
 
   const scheduled = jobs.filter((job) => job.created).length;
   const duplicates = jobs.length - scheduled;
@@ -156,7 +162,8 @@ export async function runOwnedSchedulerCycle(
   now = Date.now(),
 ): Promise<OwnedSchedulerCycleResult> {
   if (ownedSchedulerFlight) return { status: 'completed', skippedOverlap: true };
-  const flight = (async (): Promise<OwnedSchedulerCycleResult> => {
+  const storageBefore = getStorageDiagnosticsSnapshot();
+  const flight = withAutomationCycleReadModel(async (): Promise<OwnedSchedulerCycleResult> => {
     const startedAt = Date.now();
     if (!await heartbeatRuntimeRole('SCHEDULER', ownership, undefined, now)) return { status: 'role_lost' };
     const guardian = await runRuntimeControlSchedulerTick(now);
@@ -164,6 +171,12 @@ export async function runOwnedSchedulerCycle(
     const automation = await runAutomationSchedulerTick(now);
     if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, automation };
     const intelligence = await runProductIntelligenceSchedulerTick(now);
+    const storageAfter = getStorageDiagnosticsSnapshot();
+    const fullReadsByCollection: Record<string, number> = {};
+    for (const [collection, count] of Object.entries(storageAfter.fullCollectionReadsByCollection)) {
+      const delta = count - (storageBefore.fullCollectionReadsByCollection[collection] || 0);
+      if (delta > 0) fullReadsByCollection[collection] = delta;
+    }
     console.info(JSON.stringify({
       type: 'automation_scheduler_cycle',
       durationMs: Math.max(0, Date.now() - startedAt),
@@ -172,9 +185,22 @@ export async function runOwnedSchedulerCycle(
       intelligence: intelligence.status,
       scheduled: (automation.status === 'scheduled' ? 1 : 0) + intelligence.scheduled,
       duplicateCount: intelligence.duplicates + (automation.status === 'duplicate' ? 1 : 0),
+      fullDurableCollectionReads: storageAfter.fullCollectionReadCount - storageBefore.fullCollectionReadCount,
+      fullDurableCollectionReadsByCollection: fullReadsByCollection,
+      boundedReads: storageAfter.boundedReadCount - storageBefore.boundedReadCount,
+      lockWaitCount: storageAfter.lockWaitCount - storageBefore.lockWaitCount,
+      totalLockWaitMs: storageAfter.totalLockWaitMs - storageBefore.totalLockWaitMs,
+      maximumLockWaitMs: storageAfter.maximumLockWaitMs,
+      maximumLockHoldMs: storageAfter.maximumLockHoldMs,
+      staleLockRecoveries: storageAfter.staleLockRecoveryCount - storageBefore.staleLockRecoveryCount,
+      roleHeartbeatRenewals: storageAfter.roleHeartbeatRenewalCount - storageBefore.roleHeartbeatRenewalCount,
+      roleHeartbeatRenewalFailures: storageAfter.roleHeartbeatRenewalFailureCount - storageBefore.roleHeartbeatRenewalFailureCount,
+      fencingRejections: storageAfter.fencingRejectionCount - storageBefore.fencingRejectionCount,
+      rssBytes: process.memoryUsage().rss,
+      heapUsedBytes: process.memoryUsage().heapUsed,
     }));
     return { status: 'completed', guardian, automation, intelligence };
-  })();
+  });
   ownedSchedulerFlight = flight;
   try {
     return await flight;
