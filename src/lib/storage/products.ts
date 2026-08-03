@@ -723,7 +723,7 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
     } | null;
     if (!committedAudit) return committedResult;
     try {
-      await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items.slice(-999), {
+      await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items, {
         id: generateId(),
         existingProductId: committedAudit.productId,
         source: draft.source,
@@ -741,6 +741,258 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
       }));
     }
     return committedResult;
+  });
+}
+
+export type ProductRepairEvidenceField = 'canonicalProductUrl' | 'affiliateUrl' | 'imageUrl' | 'price';
+
+export class StaleProductRepairError extends Error {
+  readonly code = 'STALE_PRODUCT_REPAIR_REVISION';
+
+  constructor() {
+    super('STALE_PRODUCT_REPAIR_REVISION');
+    this.name = 'StaleProductRepairError';
+  }
+}
+
+export interface ProductEvidenceRepairOptions {
+  expectedUpdatedAt: string;
+  verifiedFields: Partial<Record<ProductRepairEvidenceField, boolean>>;
+  verifiedAt?: string;
+}
+
+export interface ProductEvidenceRepairResult {
+  product: Product;
+  updatedFields: string[];
+  preservedFields: string[];
+}
+
+function evidenceTimestamp(value: unknown): number {
+  const parsed = Date.parse(typeof value === 'string' ? value : '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function currentEvidenceTimestamp(product: Product, field: ProductRepairEvidenceField): number {
+  const provenance = product.fieldProvenance?.[field];
+  const direct = field === 'canonicalProductUrl' ? product.canonicalUrlVerifiedAt || product.linkLastCheckedAt
+    : field === 'affiliateUrl' ? product.affiliateUrlVerifiedAt || product.affiliateLastCheckedAt
+      : field === 'imageUrl' ? product.imageLastCheckedAt
+        : product.priceObservedAt;
+  return evidenceTimestamp(provenance?.verifiedAt || provenance?.fetchedAt || direct);
+}
+
+function currentEvidenceVerified(product: Product, field: ProductRepairEvidenceField): boolean {
+  if (product.fieldProvenance?.[field]?.verificationStatus === 'VERIFIED') return true;
+  if (field === 'canonicalProductUrl') return product.canonicalUrlStatus === 'verified' && product.linkHealthStatus === 'ok';
+  if (field === 'affiliateUrl') return product.affiliateUrlStatus === 'verified' && product.affiliateHealthStatus === 'ok';
+  if (field === 'imageUrl') return product.imageHealthStatus === 'ok' && product.imageValidationState === 'VALID';
+  return product.priceVerificationStatus === 'VERIFIED';
+}
+
+function sourceEvidenceValue(product: Partial<Product>, field: ProductRepairEvidenceField): unknown {
+  if (field === 'canonicalProductUrl') return product.canonicalProductUrl || product.originalUrl;
+  if (field === 'affiliateUrl') return product.affiliateUrl;
+  if (field === 'imageUrl') return product.imageUrl;
+  return Number(product.salePrice || product.price || 0) > 0 ? Number(product.salePrice || product.price) : undefined;
+}
+
+function repairHealthFields(field: ProductRepairEvidenceField): Array<keyof Product> {
+  if (field === 'canonicalProductUrl') return [
+    'linkHealthStatus', 'productHealthStatus', 'linkLastCheckedAt', 'canonicalUrlVerifiedAt',
+    'canonicalUrlStatus', 'productUrlHttpStatus', 'productUrlFinalUrl', 'productUrlFinalDomain',
+    'productUrlHealthReason', 'productUrlErrorCode', 'productUrlTimedOut',
+  ];
+  if (field === 'affiliateUrl') return [
+    'affiliateHealthStatus', 'affiliateLastCheckedAt', 'affiliateUrlVerifiedAt', 'affiliateUrlStatus',
+    'affiliateUrlHttpStatus', 'affiliateUrlFinalUrl', 'affiliateUrlFinalDomain',
+    'affiliateUrlHealthReason', 'affiliateUrlErrorCode', 'affiliateUrlTimedOut',
+  ];
+  if (field === 'imageUrl') return [
+    'imageHealthStatus', 'imageLastCheckedAt', 'imageUrlHttpStatus', 'imageUrlFinalUrl',
+    'imageUrlHealthReason', 'imageValidationState', 'imageWidth', 'imageHeight',
+    'imageDimensionsVerified', 'imageContentType',
+  ];
+  return [
+    'priceVerificationStatus', 'priceObservedAt', 'priceTruthState', 'priceTruthConfidence',
+    'priceTruthEffectivePrice', 'priceTruthDiscountPercent', 'priceTruthEvidenceFactIds',
+    'priceTruthReasons', 'priceTruthRuleVersion', 'priceTruthRequiresCrossCheck',
+  ];
+}
+
+/**
+ * Repairs evidence for one exact provider identity after the incoming values
+ * have been independently checked. The product revision is a fail-closed CAS;
+ * lifecycle, review, quarantine, archive and publication fields are never in
+ * the update whitelist.
+ */
+export async function repairSourceCandidateEvidence(
+  productId: string,
+  draft: Partial<Product>,
+  options: ProductEvidenceRepairOptions,
+): Promise<ProductEvidenceRepairResult> {
+  if (requestsPublicProductState(draft)) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
+  if (!productId || !draft.source || !options.expectedUpdatedAt) throw new Error('SOURCE_CANDIDATE_REPAIR_IDENTITY_REQUIRED');
+  const incomingSourceId = String(draft.sourceItemId || draft.sourceId || draft.externalId || '').trim();
+  if (!incomingSourceId) throw new Error('SOURCE_CANDIDATE_REPAIR_IDENTITY_REQUIRED');
+
+  return withProductWrite(async () => {
+    let result: ProductEvidenceRepairResult | null = null;
+    const auditId = generateId();
+    const verifiedAt = options.verifiedAt || new Date().toISOString();
+    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+      const products = stored.map(item => normalizeCanonicalProduct(item));
+      const index = products.findIndex(product => product.id === productId);
+      if (index < 0) throw new Error('SOURCE_CANDIDATE_REPAIR_PRODUCT_NOT_FOUND');
+      const existing = products[index];
+      if (existing.updatedAt !== options.expectedUpdatedAt) throw new StaleProductRepairError();
+      const existingSourceId = String(existing.sourceItemId || existing.sourceId || existing.externalId || '').trim();
+      if (existing.source !== draft.source || existingSourceId !== incomingSourceId) {
+        throw new Error('SOURCE_CANDIDATE_REPAIR_IDENTITY_MISMATCH');
+      }
+
+      const updates: Partial<Product> = {};
+      const updatedFields: string[] = [];
+      const preservedFields: string[] = [];
+      const incomingEvidenceAt = evidenceTimestamp(draft.providerUpdatedAt || draft.sourceFetchedAt || verifiedAt);
+      const mergedProvenance = { ...(existing.fieldProvenance || {}) };
+
+      for (const field of ['canonicalProductUrl', 'affiliateUrl', 'imageUrl', 'price'] as const) {
+        const incomingValue = sourceEvidenceValue(draft, field);
+        if (incomingValue === undefined || incomingValue === null || incomingValue === '') continue;
+        const currentValue = sourceEvidenceValue(existing, field);
+        const sameValue = String(currentValue ?? '') === String(incomingValue);
+        if (options.verifiedFields[field] !== true) {
+          if (sameValue) {
+            for (const healthField of repairHealthFields(field)) {
+              const value = draft[healthField];
+              if (value !== undefined) {
+                (updates as Record<string, unknown>)[healthField] = value;
+                updatedFields.push(String(healthField));
+              }
+            }
+          } else {
+            preservedFields.push(field);
+          }
+          continue;
+        }
+        const manualEvidence = existing.source === 'manual'
+          || existing.fieldProvenance?.[field]?.source === 'manual'
+          || existing.fieldProvenance?.[field]?.provider === 'manual';
+        const currentVerified = currentEvidenceVerified(existing, field);
+        const newerThanCurrent = incomingEvidenceAt > currentEvidenceTimestamp(existing, field);
+        const mayAdopt = !manualEvidence && (sameValue || !currentVerified || newerThanCurrent);
+        if (!mayAdopt) {
+          preservedFields.push(field);
+          continue;
+        }
+
+        if (field === 'canonicalProductUrl') {
+          updates.originalUrl = String(incomingValue);
+          updates.canonicalProductUrl = String(incomingValue);
+          updatedFields.push('originalUrl', 'canonicalProductUrl');
+        } else if (field === 'affiliateUrl') {
+          updates.affiliateUrl = String(incomingValue);
+          updatedFields.push('affiliateUrl');
+        } else if (field === 'imageUrl') {
+          updates.imageUrl = String(incomingValue);
+          updatedFields.push('imageUrl');
+        } else {
+          if (Number(draft.salePrice || 0) > 0) {
+            updates.salePrice = Number(draft.salePrice);
+            updatedFields.push('salePrice');
+          }
+          if (Number(draft.price || 0) > 0) {
+            updates.price = Number(draft.price);
+            updatedFields.push('price');
+          }
+        }
+        for (const healthField of repairHealthFields(field)) {
+          const value = draft[healthField];
+          if (value !== undefined) {
+            (updates as Record<string, unknown>)[healthField] = value;
+            updatedFields.push(String(healthField));
+          }
+        }
+        mergedProvenance[field] = {
+          ...(draft.fieldProvenance?.[field] || existing.fieldProvenance?.[field] || { source: String(draft.source) }),
+          value: typeof incomingValue === 'string' || typeof incomingValue === 'number' || typeof incomingValue === 'boolean'
+            ? incomingValue
+            : String(incomingValue),
+          source: draft.fieldProvenance?.[field]?.source || String(draft.source),
+          provider: draft.fieldProvenance?.[field]?.provider || String(draft.source),
+          fetchedAt: draft.fieldProvenance?.[field]?.fetchedAt || draft.sourceFetchedAt || verifiedAt,
+          verificationStatus: 'VERIFIED',
+          verifiedAt,
+        };
+        updatedFields.push(`fieldProvenance.${field}`);
+      }
+
+      const providerIsNewer = incomingEvidenceAt > evidenceTimestamp(existing.providerUpdatedAt || existing.sourceFetchedAt);
+      const refreshable: Array<keyof Product> = [
+        'title', 'description', 'category', 'brand', 'merchant', 'merchantDomain', 'shopId', 'shopName',
+        'sku', 'providerUpdatedAt', 'sourceFetchedAt', 'sourceEndpoint', 'sourceNormalizationIssues',
+      ];
+      for (const field of refreshable) {
+        const incoming = draft[field];
+        const current = existing[field];
+        if (incoming === undefined || incoming === null || incoming === '') continue;
+        if ((current === undefined || current === null || current === '') || providerIsNewer) {
+          (updates as Record<string, unknown>)[field] = incoming;
+          updatedFields.push(String(field));
+        } else if (String(current) !== String(incoming)) preservedFields.push(String(field));
+      }
+      for (const field of ['sourceHealthCooldownUntil', 'sourceHealthReason'] as const) {
+        if (Object.prototype.hasOwnProperty.call(draft, field)) {
+          (updates as Record<string, unknown>)[field] = draft[field];
+          updatedFields.push(field);
+        }
+      }
+      if (draft.sourceHealthReason && draft.publicBlockReason) {
+        updates.publicBlockReason = draft.publicBlockReason;
+        updatedFields.push('publicBlockReason');
+      }
+      const materialChanged = updatedFields.some(field => [
+        'title', 'description', 'originalUrl', 'canonicalProductUrl', 'affiliateUrl', 'imageUrl', 'price', 'salePrice',
+      ].includes(field));
+      if (materialChanged && existing.reviewContent?.reviewStatus === 'approved') {
+        updates.reviewContent = { ...existing.reviewContent, reviewStatus: 'stale' };
+        updatedFields.push('reviewContent.reviewStatus');
+      }
+      if (Object.keys(mergedProvenance).length) updates.fieldProvenance = mergedProvenance;
+      const uniqueUpdatedFields = [...new Set(updatedFields)];
+      const uniquePreservedFields = [...new Set(preservedFields)];
+      if (!uniqueUpdatedFields.length) {
+        result = { product: existing, updatedFields: [], preservedFields: uniquePreservedFields };
+        return undefined;
+      }
+      const now = new Date().toISOString();
+      const repaired = normalizeCanonicalProduct({ ...existing, ...updates, id: existing.id, updatedAt: now }, now);
+      products[index] = repaired;
+      result = { product: repaired, updatedFields: uniqueUpdatedFields, preservedFields: uniquePreservedFields };
+      return products;
+    });
+    const committed = result as ProductEvidenceRepairResult | null;
+    if (!committed) throw new Error('SOURCE_CANDIDATE_REPAIR_NOT_COMMITTED');
+    try {
+      await runTransaction<Record<string, unknown>>('product-evidence-repair-audit', items => [...items, {
+        id: auditId,
+        productId,
+        source: draft.source,
+        sourceItemId: incomingSourceId,
+        expectedUpdatedAt: options.expectedUpdatedAt,
+        updatedFields: committed.updatedFields,
+        preservedFields: committed.preservedFields,
+        verifiedFields: Object.entries(options.verifiedFields).filter(([, verified]) => verified).map(([field]) => field),
+        createdAt: verifiedAt,
+      }]);
+    } catch (error) {
+      console.error(JSON.stringify({
+        type: 'product_evidence_repair_audit_failed',
+        productId,
+        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'UNKNOWN_ERROR'),
+      }));
+    }
+    return committed;
   });
 }
 

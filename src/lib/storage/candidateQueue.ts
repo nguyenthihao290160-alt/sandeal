@@ -41,6 +41,15 @@ export interface CandidatePayload {
   mpn?: string;
   specifications?: Record<string, string | number>;
   merchant?: string;
+  merchantDomain?: string;
+  shopId?: string;
+  shopName?: string;
+  sourceItemId?: string;
+  sourceEndpoint?: 'datafeed' | 'offers';
+  sourceFetchedAt?: string;
+  providerUpdatedAt?: string;
+  sourceNormalizationIssues?: string[];
+  fieldProvenance?: Product['fieldProvenance'];
   rawSourceKind?: string;
   nonProductReason?: string;
   campaignName?: string;

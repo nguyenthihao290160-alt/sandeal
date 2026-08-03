@@ -70,3 +70,33 @@ Immediate stop conditions: PID churn; stale or mismatched release identity; repe
 The sequential 13,000-job fixture measured 55.7 MB (`58,453,671` bytes) durable job storage, Worker 20.842 s / 82 complete durable reads / 6.009 s maximum lock hold, Scheduler 5.800 s cold and 3.344 s warm with zero complete `automation-jobs` reads, repair 22.681 s cold, 25.473 s warm, 29.198 s incremental, and 1.692 s maximum catch-up lock hold, and peak RSS 497.9 MB. Critical pickup latency was 38.048 s in this run. The production observation supplied for comparison was 136 complete reads, 30.697 s maximum lock hold, and 397 MB RSS. Local figures are not a production claim; VPS observation remains a mandatory rollout gate, including the existing critical-pickup SLO.
 
 The completed local validation included M3.1.5 stability (11/11), the sequential performance fixture, M3.1.4 (12/12), M3.1.3 recovery/live-health gates, M3.1.2 and M3.1.1 projection tests, file/fake-Mongo/migration/storage acceptance tests, Worker/Scheduler/automation-health/product/publication safety suites, resilience (11/11), backup/recovery (7/7), `npm test`, typecheck, lint, secret scan, diff check, and build. Real provider calls, production/VPS/PM2 verification, and real isolated Mongo acceptance were not run because they are prohibited or no isolated non-production configuration exists. These omissions remain external rollout gates, not successful production observations.
+
+## Product-First AccessTrade rollout addendum
+
+This addendum is an operator checklist, not authorization to access production.
+
+### Retrieval contract
+
+- Keyword matching is local because AccessTrade datafeeds do not provide a reliable keyword query.
+- The default and hard scan bounds are sequential pages `5`, page size `200`, raw items `1,000`; default wall budget is 35 seconds and hard wall ceiling is 40 seconds.
+- A provider `total` is advisory unless it is greater than one full page, stable across observations, all pages contribute unique items, and cumulative unique identities equal it. `total=200` on a full 200-record page must not stop page 2.
+- Safe terminal reasons are `TARGET_MATCH_COUNT_REACHED`, `EMPTY_PAGE`, `SHORT_PAGE`, `TRUSTED_PROVIDER_TOTAL_EXHAUSTED`, `REPEATED_PAGE`, `NO_NEW_UNIQUE_RECORDS`, `MAX_PAGES_REACHED`, `RAW_ITEM_BUDGET_REACHED`, `TIME_BUDGET_EXCEEDED`, `REQUEST_ABORTED`, and `PROVIDER_ERROR`.
+- `EMPTY_PAGE`, `SHORT_PAGE`, and trusted-total exhaustion are end-of-data evidence. Maximum pages/raw/time are safety boundaries, not proof that the provider has no match. Repeated/no-new pages indicate ignored or broken pagination.
+
+### Preparation versus publication
+
+Runtime Guardian may block final publication without blocking safe ingestion, exact-identity deduplication, URL/affiliate/image health checks, price truth, evidence capture, scoring, review preparation, or publication-readiness evaluation. A source reappearance is never permission to unarchive, clear quarantine, approve review, or publish. Verified recovery is revision-fenced and audit-preserving; stale repairs fail closed.
+
+The continuous Worker pool uses the existing configured maximum and the launcher hard ceiling of four. When concurrency permits, one lane remains reserved for Guardian and non-Guardian capacity can advance product preparation. Duplicate active Guardian jobs coalesce. `WORKER_CONTINUOUS_POOL_V2=OFF` is the non-destructive runtime rollback control for the pool path; it does not roll back data or delete jobs.
+
+### Later production verification
+
+1. Deploy only through the normal guarded release workflow and record exact release/build identity. Do not modify `.data` manually.
+2. Confirm one current Worker and Scheduler lease owner, fencing token, heartbeat, configured concurrency, and no stale job claims before enabling scheduling.
+3. Keep publication paused. Run one operator-approved bounded keyword search and verify sequential page requests, application result cap, unique/duplicate counts, per-page advisory totals, stop reason, elapsed time, and no credential material in diagnostics.
+4. Confirm a full unrelated page 1 no longer proves an empty result. If later pages contain relevant products, verify they enter candidate processing exactly once and remain hidden.
+5. Observe RSS, swap, request latency, timeouts, queue depth, Guardian coalescing, product-critical pickup, retry counts, and fencing events on the 1-vCPU/2-GB file-backed host.
+6. For an exact existing provider identity, verify stronger evidence creates a repair audit and recalculates health/readiness while archive, merchant quarantine, and unapproved review state remain unchanged.
+7. Confirm Runtime Guardian still blocks final publication and no public count changes. Publication requires a separate authorized rollout with every existing gate green.
+
+Rollback or stop immediately for repeated-page loops not reflected in diagnostics, more than five pages/1,000 raw items, uncontrolled concurrency, sustained swap pressure, duplicate jobs/products, stale-revision overwrite, missing repair audit, cleared quarantine/review state, secret exposure, fencing rejection, or any unexpected public mutation. Preserve all products, jobs, snapshots, projections, audits, backups, leases, and runtime history during rollback.

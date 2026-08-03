@@ -96,11 +96,12 @@ type AccessTradeItem = Record<string, unknown> & {
 };
 
 type AccessTradeDiagnostics = {
-  state?: 'RESULTS_RETURNED' | 'PROVIDER_EMPTY' | 'PROVIDER_DATA_REJECTED';
+  state?: 'RESULTS_RETURNED' | 'PROVIDER_EMPTY' | 'PROVIDER_DATA_REJECTED' | 'PROVIDER_DATA_NO_KEYWORD_MATCH' | 'MATCHES_REJECTED';
   providerStatusCode?: number;
   providerResultType?: string;
   providerReportedItemCount?: number;
   rawItemCount?: number;
+  uniqueRawItemCount?: number;
   extractedItemCount?: number;
   normalizedItemCount?: number;
   acceptedCount?: number;
@@ -109,6 +110,27 @@ type AccessTradeDiagnostics = {
   duplicateCount?: number;
   filteredCount?: number;
   limitedCount?: number;
+  pagesRequested?: number;
+  pagesSucceeded?: number;
+  matchedBeforeClassification?: number;
+  stopReason?: string;
+  stopPage?: number;
+  targetMatchCount?: number;
+  rawItemBudget?: number;
+  maximumPages?: number;
+  elapsedMs?: number;
+  endedByEndOfData?: boolean;
+  safetyBoundaryReached?: boolean;
+  providerPaginationIssue?: boolean;
+  pageStatistics?: Array<{
+    page: number;
+    providerItemCount: number;
+    uniqueItemCount: number;
+    keywordMatchCount: number;
+    duplicateCount: number;
+    providerReportedTotal: number | null;
+    providerTotalTrusted: boolean;
+  }>;
   rejectedByReason?: Record<string, number>;
   reviewByReason?: Record<string, number>;
   rejectionGroups?: AccessTradeRejectionGroup[];
@@ -118,6 +140,28 @@ type AccessTradeDiagnostics = {
     selectedReason?: string | null;
   };
 };
+
+function accessTradeEmptyStateCopy(diagnostics?: AccessTradeDiagnostics): { title: string; description: string } {
+  switch (diagnostics?.state) {
+    case 'PROVIDER_DATA_REJECTED':
+    case 'MATCHES_REJECTED':
+      return {
+        title: 'Dữ liệu nguồn chưa vượt qua các cổng chất lượng',
+        description: `Nhà cung cấp trả ${diagnostics.providerReportedItemCount ?? diagnostics.rawItemCount ?? 0} bản ghi; bản ghi phù hợp đã bị từ chối. Mở phần lý do phía trên để kiểm tra.`,
+      };
+    case 'PROVIDER_DATA_NO_KEYWORD_MATCH':
+      return {
+        title: 'Chưa thấy sản phẩm khớp từ khóa',
+        description: diagnostics.safetyBoundaryReached
+          ? 'Phạm vi quét có giới hạn đã kết thúc trước khi đủ kết quả; đây không phải là bằng chứng nhà cung cấp không có sản phẩm.'
+          : 'Nhà cung cấp có dữ liệu nhưng không có bản ghi nào khớp từ khóa trong phạm vi đã quét.',
+      };
+    case 'PROVIDER_EMPTY':
+      return { title: 'Nhà cung cấp không trả dữ liệu', description: 'Thử lại sau hoặc thay đổi bộ lọc.' };
+    default:
+      return { title: 'AccessTrade không trả về kết quả phù hợp', description: 'Thử thay đổi từ khoá hoặc bộ lọc.' };
+  }
+}
 
 type AccessTradeRejectionSample = {
   id: string;
@@ -2135,7 +2179,7 @@ export default function ProductSourcesPage() {
                               style={{
                                 padding: 'var(--space-md)',
                                 marginBottom: 'var(--space-md)',
-                                borderColor: atResults.diagnostics.state === 'PROVIDER_DATA_REJECTED'
+                                borderColor: atResults.diagnostics.state !== 'RESULTS_RETURNED'
                                   ? 'rgba(245, 158, 11, 0.35)'
                                   : 'var(--ds-border)',
                               }}
@@ -2156,6 +2200,18 @@ export default function ProductSourcesPage() {
                                 <div className="stat-card-label">Đã trích xuất</div>
                               </div>
                               <div>
+                                <strong>{atResults.diagnostics.uniqueRawItemCount ?? atResults.diagnostics.extractedItemCount ?? 0}</strong>
+                                <div className="stat-card-label">Bản ghi duy nhất</div>
+                              </div>
+                              <div>
+                                <strong>{atResults.diagnostics.pagesSucceeded ?? 0}/{atResults.diagnostics.pagesRequested ?? 0}</strong>
+                                <div className="stat-card-label">Trang thành công/yêu cầu</div>
+                              </div>
+                              <div>
+                                <strong>{atResults.diagnostics.matchedBeforeClassification ?? 0}</strong>
+                                <div className="stat-card-label">Khớp trước phân loại</div>
+                              </div>
+                              <div>
                                 <strong>{atResults.diagnostics.normalizedItemCount ?? 0}</strong>
                                 <div className="stat-card-label">Đã chuẩn hoá</div>
                               </div>
@@ -2173,10 +2229,57 @@ export default function ProductSourcesPage() {
                               </div>
                             </div>
 
-                            {atResults.diagnostics.state === 'PROVIDER_DATA_REJECTED' && (
+                            {atResults.diagnostics?.state === 'PROVIDER_DATA_REJECTED' && (
                                 <p style={{ marginTop: 'var(--space-sm)', color: 'var(--color-warning)' }}>
                                   AccessTrade đã trả dữ liệu, nhưng không có bản ghi nào vượt qua bước chuẩn hoá và bộ lọc hiện tại.
                                 </p>
+                            )}
+                            {atResults.diagnostics.state === 'PROVIDER_EMPTY' && (
+                                <p style={{ marginTop: 'var(--space-sm)', color: 'var(--text-secondary)' }}>
+                                  Nhà cung cấp không trả dữ liệu trong phạm vi quét.
+                                </p>
+                            )}
+                            {atResults.diagnostics.state === 'PROVIDER_DATA_NO_KEYWORD_MATCH' && (
+                                <p style={{ marginTop: 'var(--space-sm)', color: 'var(--color-warning)' }}>
+                                  Nhà cung cấp có dữ liệu, nhưng không có sản phẩm nào khớp từ khóa trong phạm vi quét có giới hạn.
+                                </p>
+                            )}
+                            {atResults.diagnostics.state === 'MATCHES_REJECTED' && (
+                                <p style={{ marginTop: 'var(--space-sm)', color: 'var(--color-warning)' }}>
+                                  Đã tìm thấy bản ghi khớp từ khóa, nhưng tất cả đều bị từ chối bởi phân loại hoặc quy tắc chất lượng hiện tại.
+                                </p>
+                            )}
+                            {atResults.diagnostics.safetyBoundaryReached && (
+                                <p style={{ marginTop: 'var(--space-xs)', color: 'var(--color-warning)' }}>
+                                  Quét đã dừng ở ranh giới an toàn ({atResults.diagnostics.stopReason}); có thể chưa tìm đủ {atResults.diagnostics.targetMatchCount ?? 0} kết quả.
+                                </p>
+                            )}
+                            {atResults.diagnostics.providerPaginationIssue && (
+                                <p style={{ marginTop: 'var(--space-xs)', color: 'var(--color-warning)' }}>
+                                  AccessTrade lặp lại trang hoặc không cung cấp bản ghi mới ({atResults.diagnostics.stopReason}); hệ thống đã dừng để tránh quét vô hạn.
+                                </p>
+                            )}
+
+                            <div className="disclosure-banner" style={{ marginTop: 'var(--space-sm)' }}>
+                              <strong>Dừng:</strong> {atResults.diagnostics.stopReason || 'UNKNOWN'} tại trang {atResults.diagnostics.stopPage ?? 0}
+                              {' · '}ngân sách {atResults.diagnostics.rawItemCount ?? 0}/{atResults.diagnostics.rawItemBudget ?? 0} bản ghi
+                              {' · '}{atResults.diagnostics.elapsedMs ?? 0} ms
+                              {' · '}{atResults.diagnostics.endedByEndOfData ? 'đã thấy tín hiệu hết dữ liệu' : 'chưa có tín hiệu hết dữ liệu'}
+                            </div>
+
+                            {(atResults.diagnostics.pageStatistics || []).length > 0 && (
+                                <details style={{ marginTop: 'var(--space-sm)' }}>
+                                  <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>Chi tiết quét theo trang</summary>
+                                  <div style={{ display: 'grid', gap: '6px', marginTop: 'var(--space-xs)' }}>
+                                    {(atResults.diagnostics.pageStatistics || []).map((page) => (
+                                        <div key={page.page} className="disclosure-banner">
+                                          Trang {page.page}: {page.providerItemCount} từ nhà cung cấp, {page.uniqueItemCount} mới,
+                                          {' '}{page.keywordMatchCount} khớp, {page.duplicateCount} trùng, total {page.providerReportedTotal ?? 'không có'}
+                                          {page.providerTotalTrusted ? ' (được tin cậy)' : ' (chỉ tham khảo)'}
+                                        </div>
+                                    ))}
+                                  </div>
+                                </details>
                             )}
 
                             {Object.keys(atResults.diagnostics.rejectedByReason || {}).length > 0 && (
@@ -2645,14 +2748,10 @@ export default function ProductSourcesPage() {
                               AT
                             </div>
                             <div className="empty-state-title">
-                              {atResults.diagnostics?.state === 'PROVIDER_DATA_REJECTED'
-                                ? 'Dữ liệu nguồn chưa vượt qua bước chuẩn hoá'
-                                : 'AccessTrade không trả về kết quả phù hợp'}
+                              {accessTradeEmptyStateCopy(atResults.diagnostics).title}
                             </div>
                             <div className="empty-state-desc">
-                              {atResults.diagnostics?.state === 'PROVIDER_DATA_REJECTED'
-                                ? `Nhà cung cấp trả ${atResults.diagnostics.providerReportedItemCount ?? atResults.diagnostics.rawItemCount ?? 0} bản ghi, nhưng hiện có 0 bản ghi hợp lệ để hiển thị. Mở phần lý do phía trên để kiểm tra.`
-                                : 'Thử thay đổi từ khoá hoặc bộ lọc.'}
+                              {accessTradeEmptyStateCopy(atResults.diagnostics).description}
                             </div>
                           </div>
                       )}

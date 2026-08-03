@@ -55,6 +55,19 @@ const PRODUCT_JOB_TYPES = new Set<AutomationJobType>([
   'EDITORIAL_CHECK',
 ]);
 
+const PRODUCT_CRITICAL_JOB_TYPES = new Set<AutomationJobType>([
+  'PRODUCT_SCAN',
+  'AUTO_PILOT',
+  'PROCESS_CANDIDATE',
+  'IMPORT_PRODUCTS',
+  'RECHECK_PRODUCT_HEALTH',
+  'DETECT_DUPLICATES',
+  'SCORE_PRODUCTS',
+  'CAPTURE_PRICE_HISTORY',
+  'PREPARE_CONTENT_DRAFT',
+  'EDITORIAL_CHECK',
+]);
+
 const CONTROL_JOB_TYPES = new Set<AutomationJobType>([
   'RUNTIME_GUARDIAN',
   'HEALTH_CHECK',
@@ -197,6 +210,11 @@ export function isCriticalAutomationJob(
 
 export function isRuntimeGuardianJob(type: AutomationJobType): boolean {
   return type === 'RUNTIME_GUARDIAN';
+}
+
+/** Product preparation work that must receive bounded non-Guardian progress. */
+export function isProductCriticalAutomationJob(type: AutomationJobType): boolean {
+  return PRODUCT_CRITICAL_JOB_TYPES.has(type);
 }
 
 export function automationPriorityClassForJob(

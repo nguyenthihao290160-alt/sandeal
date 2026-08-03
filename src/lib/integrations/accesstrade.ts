@@ -31,8 +31,26 @@ export interface AccessTradeSearchParams {
   diagnosticReason?: AccessTradeRejectionReason;
   diagnosticPage?: number;
   diagnosticPageSize?: number;
+  /** Internal/operator scan controls. Every value is clamped to the hard VPS-safe ceiling. */
+  maximumPages?: number;
+  rawItemBudget?: number;
+  timeBudgetMs?: number;
   signal?: AbortSignal;
 }
+
+export const ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS = Object.freeze({
+  maximumPages: 5,
+  pageSize: 200,
+  rawItemBudget: 1_000,
+  timeBudgetMs: 35_000,
+});
+
+export const ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS = Object.freeze({
+  maximumPages: 5,
+  pageSize: 200,
+  rawItemBudget: 1_000,
+  timeBudgetMs: 40_000,
+});
 
 export type AccessTradePublicDecision =
     | 'public_candidate'
@@ -43,7 +61,32 @@ export type AccessTradePublicDecision =
 export type AccessTradeDiagnosticState =
   | 'RESULTS_RETURNED'
   | 'PROVIDER_EMPTY'
-  | 'PROVIDER_DATA_REJECTED';
+  | 'PROVIDER_DATA_REJECTED'
+  | 'PROVIDER_DATA_NO_KEYWORD_MATCH'
+  | 'MATCHES_REJECTED';
+
+export type AccessTradePaginationStopReason =
+  | 'TARGET_MATCH_COUNT_REACHED'
+  | 'EMPTY_PAGE'
+  | 'SHORT_PAGE'
+  | 'TRUSTED_PROVIDER_TOTAL_EXHAUSTED'
+  | 'REPEATED_PAGE'
+  | 'NO_NEW_UNIQUE_RECORDS'
+  | 'MAX_PAGES_REACHED'
+  | 'RAW_ITEM_BUDGET_REACHED'
+  | 'TIME_BUDGET_EXCEEDED'
+  | 'REQUEST_ABORTED'
+  | 'PROVIDER_ERROR';
+
+export interface AccessTradePageStatistic {
+  page: number;
+  providerItemCount: number;
+  uniqueItemCount: number;
+  keywordMatchCount: number;
+  duplicateCount: number;
+  providerReportedTotal: number | null;
+  providerTotalTrusted: boolean;
+}
 
 export type AccessTradeRejectionReason =
   | 'INVALID_RECORD'
@@ -165,6 +208,7 @@ export interface AccessTradeSearchDiagnostics {
   providerResultType: AccessTradeResultType;
   providerReportedItemCount: number;
   rawItemCount: number;
+  uniqueRawItemCount: number;
   extractedItemCount: number;
   normalizedItemCount: number;
   classifiedProductCount: number;
@@ -178,6 +222,19 @@ export interface AccessTradeSearchDiagnostics {
   duplicateCount: number;
   filteredCount: number;
   limitedCount: number;
+  pagesRequested: number;
+  pagesSucceeded: number;
+  matchedBeforeClassification: number;
+  stopReason: AccessTradePaginationStopReason;
+  stopPage: number;
+  targetMatchCount: number;
+  rawItemBudget: number;
+  maximumPages: number;
+  elapsedMs: number;
+  pageStatistics: AccessTradePageStatistic[];
+  endedByEndOfData: boolean;
+  safetyBoundaryReached: boolean;
+  providerPaginationIssue: boolean;
   rejectedByReason: Partial<Record<AccessTradeRejectionReason, number>>;
   reviewByReason: Partial<Record<AccessTradeReviewReason, number>>;
   rejectionGroups: AccessTradeRejectionGroup[];
@@ -293,7 +350,7 @@ export interface AccessTradeRejectionCounters {
 
 export type AccessTradeResultType =
   | 'success_with_results' | 'success_empty' | 'timeout' | 'rate_limited'
-  | 'unauthorized' | 'forbidden' | 'upstream_error' | 'malformed_response' | 'network_error' | 'circuit_open';
+  | 'unauthorized' | 'forbidden' | 'upstream_error' | 'client_error' | 'malformed_response' | 'network_error' | 'circuit_open';
 
 export interface AccessTradeRequestLog {
   endpoint: string;
@@ -303,6 +360,8 @@ export interface AccessTradeRequestLog {
   itemCount: number;
   retryAfter?: string;
   attempts?: number;
+  page?: number;
+  requestedLimit?: number;
   observedEnvelopeFields?: string[];
   observedItemFields?: string[];
   observedCanonicalUrlFields?: string[];
@@ -310,7 +369,12 @@ export interface AccessTradeRequestLog {
 }
 
 export class AccessTradeRequestError extends Error {
-  constructor(public readonly resultType: AccessTradeResultType, public readonly requests: AccessTradeRequestLog[], message: string) {
+  constructor(
+    public readonly resultType: AccessTradeResultType,
+    public readonly requests: AccessTradeRequestLog[],
+    message: string,
+    public readonly stopReason?: AccessTradePaginationStopReason,
+  ) {
     super(message);
     this.name = 'AccessTradeRequestError';
   }
@@ -325,11 +389,30 @@ interface AccessTradeFetchResult {
   status?: number;
   error?: string;
   request?: AccessTradeRequestLog;
+  pageRequests?: AccessTradeRequestLog[];
   attempts?: number;
   rawItemCount?: number;
   extractedItemCount?: number;
   providerReportedItemCount?: number;
   extractionRejectedByReason?: Partial<Record<AccessTradeRejectionReason, number>>;
+  retrieval?: {
+    pagesRequested: number;
+    pagesSucceeded: number;
+    rawItemCount: number;
+    uniqueRawItemCount: number;
+    duplicateCount: number;
+    matchedBeforeClassification: number;
+    stopReason: AccessTradePaginationStopReason;
+    stopPage: number;
+    targetMatchCount: number;
+    rawItemBudget: number;
+    maximumPages: number;
+    elapsedMs: number;
+    pageStatistics: AccessTradePageStatistic[];
+    endedByEndOfData: boolean;
+    safetyBoundaryReached: boolean;
+    providerPaginationIssue: boolean;
+  };
   payloadObservation?: Pick<AccessTradeRequestLog,
     'observedEnvelopeFields' | 'observedItemFields' | 'observedCanonicalUrlFields' | 'observedAffiliateUrlFields'>;
 }
@@ -511,6 +594,10 @@ export interface AccessTradeCredentialReadiness {
   reason: 'NOT_CONFIGURED' | 'CREDENTIAL_FORMAT_INVALID' | 'CONFIGURED';
 }
 
+function toRequestLogs(result: AccessTradeFetchResult): AccessTradeRequestLog[] {
+  return result.pageRequests?.length ? result.pageRequests : [toRequestLog(result)];
+}
+
 interface ResolvedAccessTradeCredential {
   readiness: AccessTradeCredentialReadiness;
   value: string | null;
@@ -618,22 +705,24 @@ export async function searchAccessTrade(
   }
 
   const successfulResults = fetchResults.filter((result) => result.ok);
+  const requestLogs = fetchResults.flatMap(toRequestLogs);
 
   if (!successfulResults.length) {
     const errorMessage = fetchResults
         .map((result) => `${result.endpoint}: ${result.error || `HTTP ${result.status || 'unknown'}`}`)
         .join(' | ');
 
-    const requests = fetchResults.map(toRequestLog);
+    const requests = requestLogs;
     const terminal = requests.find((item) => ['unauthorized', 'forbidden', 'rate_limited', 'circuit_open'].includes(item.resultType)) || requests[0];
     throw new AccessTradeRequestError(
         terminal?.resultType || 'network_error',
         requests,
         `Không thể lấy dữ liệu từ AccessTrade. Vui lòng kiểm tra API key hoặc thử lại sau. ${errorMessage}`,
+        fetchResults.find(result => result.retrieval)?.retrieval?.stopReason,
     );
   }
 
-  return buildAccessTradeSearchResult(successfulResults, fetchResults.map(toRequestLog), params, limit);
+  return buildAccessTradeSearchResult(successfulResults, requestLogs, params, limit);
 }
 
 interface ProcessAccessTradePayloadOptions {
@@ -683,6 +772,7 @@ export function processAccessTradePayload(
     extractedItemCount: extraction.extractedItemCount,
     providerReportedItemCount: extraction.providerReportedItemCount,
     extractionRejectedByReason: extraction.rejectedByReason,
+    retrieval: buildSinglePageRetrieval(items, extraction, params),
   };
   const limit = Math.min(Math.max(params.limit || 20, 1), 50);
   return buildAccessTradeSearchResult([fetchResult], [request], params, limit);
@@ -949,9 +1039,9 @@ function buildAccessTradeSearchResult(
     }
   }
 
-  const { items: uniqueItems, duplicateCount, duplicates } = dedupeNormalizedItems(normalized);
-  if (duplicateCount) {
-    increment(rejectedByReason, 'DUPLICATE', duplicateCount);
+  const { items: uniqueItems, duplicateCount: normalizedDuplicateCount, duplicates } = dedupeNormalizedItems(normalized);
+  if (normalizedDuplicateCount) {
+    increment(rejectedByReason, 'DUPLICATE', normalizedDuplicateCount);
     for (const item of duplicates) {
       addRejectionSample(rejectionSamples, {
         item,
@@ -967,6 +1057,11 @@ function buildAccessTradeSearchResult(
   const classifiedCampaignCount = uniqueItems.filter((item) => item.kind === 'campaign').length;
   const classifiedStoreOfferCount = uniqueItems.filter((item) => item.kind === 'store_offer').length;
   const classifiedUnknownCount = uniqueItems.filter((item) => item.kind === 'unknown').length;
+  const retrievalDuplicateCount = successfulResults.reduce(
+    (sum, result) => sum + (result.retrieval?.duplicateCount || 0),
+    0,
+  );
+  const duplicateCount = Math.max(normalizedDuplicateCount, retrievalDuplicateCount);
 
   let items = filterAccessTradeItems(uniqueItems, params, rejectedByReason, rejectionSamples);
   items = sortAccessTradeItems(items);
@@ -1105,17 +1200,26 @@ function buildAccessTradeDiagnostics(input: {
   const providerRequest = input.requests.find((request) => request.statusCode && request.statusCode >= 200 && request.statusCode < 300)
     || input.requests[0];
   const providerHasData = providerReportedItemCount > 0 || rawItemCount > 0 || extractedItemCount > 0;
+  const retrieval = aggregateAccessTradeRetrieval(input.successfulResults, input.params, {
+    rawItemCount,
+    extractedItemCount,
+  });
 
   return {
     state: input.returnedCount > 0
       ? 'RESULTS_RETURNED'
       : providerHasData
-        ? 'PROVIDER_DATA_REJECTED'
+        ? input.params.keyword && retrieval.matchedBeforeClassification === 0
+          ? 'PROVIDER_DATA_NO_KEYWORD_MATCH'
+          : input.params.keyword && retrieval.matchedBeforeClassification > 0
+            ? 'MATCHES_REJECTED'
+            : 'PROVIDER_DATA_REJECTED'
         : 'PROVIDER_EMPTY',
     providerStatusCode: providerRequest?.statusCode,
     providerResultType: providerRequest?.resultType || (providerHasData ? 'success_with_results' : 'success_empty'),
     providerReportedItemCount,
     rawItemCount,
+    uniqueRawItemCount: retrieval.uniqueRawItemCount,
     extractedItemCount,
     normalizedItemCount: input.normalizedItemCount,
     classifiedProductCount: input.classifiedProductCount,
@@ -1129,6 +1233,19 @@ function buildAccessTradeDiagnostics(input: {
     duplicateCount: input.duplicateCount,
     filteredCount,
     limitedCount: input.limitedCount,
+    pagesRequested: retrieval.pagesRequested,
+    pagesSucceeded: retrieval.pagesSucceeded,
+    matchedBeforeClassification: retrieval.matchedBeforeClassification,
+    stopReason: retrieval.stopReason,
+    stopPage: retrieval.stopPage,
+    targetMatchCount: retrieval.targetMatchCount,
+    rawItemBudget: retrieval.rawItemBudget,
+    maximumPages: retrieval.maximumPages,
+    elapsedMs: retrieval.elapsedMs,
+    pageStatistics: retrieval.pageStatistics,
+    endedByEndOfData: retrieval.endedByEndOfData,
+    safetyBoundaryReached: retrieval.safetyBoundaryReached,
+    providerPaginationIssue: retrieval.providerPaginationIssue,
     rejectedByReason: input.rejectedByReason,
     reviewByReason: input.reviewByReason,
     rejectionGroups: buildRejectionGroups(input.rejectedByReason, input.rejectionSamples, input.params),
@@ -1137,6 +1254,52 @@ function buildAccessTradeDiagnostics(input: {
       maximumPageSize: MAX_REJECTION_SAMPLE_PAGE_SIZE,
       selectedReason: input.params.diagnosticReason || null,
     },
+  };
+}
+
+function aggregateAccessTradeRetrieval(
+  results: AccessTradeFetchResult[],
+  params: AccessTradeSearchParams,
+  fallback: { rawItemCount: number; extractedItemCount: number },
+): NonNullable<AccessTradeFetchResult['retrieval']> {
+  const retrievals = results.map(result => result.retrieval).filter(
+    (value): value is NonNullable<AccessTradeFetchResult['retrieval']> => Boolean(value),
+  );
+  if (!retrievals.length) {
+    const targetMatchCount = boundedInteger(params.limit, 20, 1, 50);
+    const maximumPages = params.keyword ? boundedKeywordMaximumPages(params.maximumPages) : 1;
+    const rawItemBudget = params.keyword ? boundedKeywordRawItemBudget(params.rawItemBudget) : Math.max(1, fallback.rawItemCount);
+    const matchedBeforeClassification = params.keyword ? 0 : fallback.extractedItemCount;
+    return {
+      pagesRequested: 1,
+      pagesSucceeded: 1,
+      rawItemCount: fallback.rawItemCount,
+      uniqueRawItemCount: fallback.extractedItemCount,
+      duplicateCount: 0,
+      matchedBeforeClassification,
+      stopReason: fallback.rawItemCount === 0 ? 'EMPTY_PAGE' : 'SHORT_PAGE',
+      stopPage: 1,
+      targetMatchCount,
+      rawItemBudget,
+      maximumPages,
+      elapsedMs: 0,
+      pageStatistics: [],
+      endedByEndOfData: true,
+      safetyBoundaryReached: false,
+      providerPaginationIssue: false,
+    };
+  }
+  const primary = retrievals.find(retrieval => retrieval.maximumPages > 1) || retrievals[0];
+  return {
+    ...primary,
+    pagesRequested: retrievals.reduce((sum, retrieval) => sum + retrieval.pagesRequested, 0),
+    pagesSucceeded: retrievals.reduce((sum, retrieval) => sum + retrieval.pagesSucceeded, 0),
+    rawItemCount: retrievals.reduce((sum, retrieval) => sum + retrieval.rawItemCount, 0),
+    uniqueRawItemCount: retrievals.reduce((sum, retrieval) => sum + retrieval.uniqueRawItemCount, 0),
+    duplicateCount: retrievals.reduce((sum, retrieval) => sum + retrieval.duplicateCount, 0),
+    matchedBeforeClassification: retrievals.reduce((sum, retrieval) => sum + retrieval.matchedBeforeClassification, 0),
+    elapsedMs: retrievals.reduce((sum, retrieval) => sum + retrieval.elapsedMs, 0),
+    pageStatistics: retrievals.flatMap(retrieval => retrieval.pageStatistics).slice(0, 10),
   };
 }
 
@@ -1885,23 +2048,141 @@ async function getAccessTradeKey(): Promise<string | null> {
   return (await resolveAccessTradeCredential()).value;
 }
 
+function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.floor(parsed)));
+}
+
+function boundedKeywordMaximumPages(value: unknown): number {
+  return boundedInteger(
+    value,
+    ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.maximumPages,
+    1,
+    ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.maximumPages,
+  );
+}
+
+function boundedKeywordRawItemBudget(value: unknown): number {
+  return boundedInteger(
+    value,
+    ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.rawItemBudget,
+    1,
+    ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.rawItemBudget,
+  );
+}
+
+function boundedKeywordTimeBudgetMs(value: unknown): number {
+  return boundedInteger(
+    value,
+    ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.timeBudgetMs,
+    100,
+    ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.timeBudgetMs,
+  );
+}
+
+function retrievalTermination(stopReason: AccessTradePaginationStopReason): {
+  endedByEndOfData: boolean;
+  safetyBoundaryReached: boolean;
+  providerPaginationIssue: boolean;
+} {
+  return {
+    endedByEndOfData: ['EMPTY_PAGE', 'SHORT_PAGE', 'TRUSTED_PROVIDER_TOTAL_EXHAUSTED'].includes(stopReason),
+    safetyBoundaryReached: ['MAX_PAGES_REACHED', 'RAW_ITEM_BUDGET_REACHED', 'TIME_BUDGET_EXCEEDED'].includes(stopReason),
+    providerPaginationIssue: ['REPEATED_PAGE', 'NO_NEW_UNIQUE_RECORDS'].includes(stopReason),
+  };
+}
+
+function buildSinglePageRetrieval(
+  items: AccessTradeRawItem[],
+  extraction: AccessTradePayloadExtraction,
+  params: AccessTradeSearchParams,
+): NonNullable<AccessTradeFetchResult['retrieval']> {
+  const targetMatchCount = boundedInteger(params.limit, 20, 1, 50);
+  const identities = new Set(items.map(getRawAccessTradeIdentity));
+  const matchedBeforeClassification = [...new Map(items.map(item => [getRawAccessTradeIdentity(item), item])).values()]
+    .filter(item => rawAccessTradeRecordMatchesKeyword(item, params.keyword)).length;
+  const stopReason: AccessTradePaginationStopReason = extraction.rawItemCount === 0
+    ? 'EMPTY_PAGE'
+    : params.keyword && matchedBeforeClassification >= targetMatchCount
+      ? 'TARGET_MATCH_COUNT_REACHED'
+      : 'SHORT_PAGE';
+  const maximumPages = params.keyword ? boundedKeywordMaximumPages(params.maximumPages) : 1;
+  const rawItemBudget = params.keyword
+    ? boundedKeywordRawItemBudget(params.rawItemBudget)
+    : Math.max(1, extraction.rawItemCount);
+  return {
+    pagesRequested: 1,
+    pagesSucceeded: 1,
+    rawItemCount: extraction.rawItemCount,
+    uniqueRawItemCount: identities.size,
+    duplicateCount: Math.max(0, items.length - identities.size),
+    matchedBeforeClassification,
+    stopReason,
+    stopPage: 1,
+    targetMatchCount,
+    rawItemBudget,
+    maximumPages,
+    elapsedMs: 0,
+    pageStatistics: [{
+      page: 1,
+      providerItemCount: extraction.rawItemCount,
+      uniqueItemCount: identities.size,
+      keywordMatchCount: matchedBeforeClassification,
+      duplicateCount: Math.max(0, items.length - identities.size),
+      providerReportedTotal: extraction.providerReportedItemCount,
+      providerTotalTrusted: false,
+    }],
+    ...retrievalTermination(stopReason),
+  };
+}
+
 async function fetchAccessTradeDatafeeds(
     apiKey: string,
     params: AccessTradeSearchParams,
     limit: number,
 ): Promise<AccessTradeFetchResult> {
-  const pageSize = params.keyword ? 200 : limit;
-  const targetMatches = Math.min(Math.max(params.limit || 20, 1), 50);
-  const maxPages = params.keyword ? 5 : 1;
-  const combined: AccessTradeFetchResult[] = [];
-
+  const startedAt = Date.now();
+  const keywordSearch = Boolean(normalizeMatcherText(params.keyword || ''));
+  const pageSize = keywordSearch ? ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.pageSize : limit;
+  const targetMatches = boundedInteger(params.limit, 20, 1, 50);
+  const maximumPages = keywordSearch ? boundedKeywordMaximumPages(params.maximumPages) : 1;
+  const rawItemBudget = keywordSearch ? boundedKeywordRawItemBudget(params.rawItemBudget) : pageSize;
+  const timeBudgetMs = keywordSearch ? boundedKeywordTimeBudgetMs(params.timeBudgetMs) : ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.timeBudgetMs;
+  const uniqueItems = new Map<string, AccessTradeRawItem>();
+  const seenPageFingerprints = new Set<string>();
+  const successful: AccessTradeFetchResult[] = [];
+  const pageRequests: AccessTradeRequestLog[] = [];
+  const pageStatistics: AccessTradePageStatistic[] = [];
+  const reportedTotals: number[] = [];
   const domain = resolveAccessTradeDomain(params.platform);
   const campaign = resolveAccessTradeCampaign(params.platform);
-  let matchingRecordCount = 0;
+  let pagesRequested = 0;
+  let pagesSucceeded = 0;
+  let rawItemCount = 0;
+  let extractedItemCount = 0;
+  let duplicateCount = 0;
+  let matchedBeforeClassification = 0;
+  let stopReason: AccessTradePaginationStopReason | undefined;
+  let stopPage = 0;
 
-  for (let page = 1; page <= maxPages; page += 1) {
+  for (let page = 1; page <= maximumPages; page += 1) {
+    if (params.signal?.aborted) {
+      stopReason = 'REQUEST_ABORTED';
+      break;
+    }
+    if (Date.now() - startedAt >= timeBudgetMs) {
+      stopReason = 'TIME_BUDGET_EXCEEDED';
+      break;
+    }
+    const remainingRawBudget = rawItemBudget - rawItemCount;
+    if (remainingRawBudget <= 0) {
+      stopReason = 'RAW_ITEM_BUDGET_REACHED';
+      break;
+    }
+    const requestedPageSize = Math.min(pageSize, remainingRawBudget);
     const url = new URL('https://api.accesstrade.vn/v1/datafeeds');
-    url.searchParams.set('limit', String(pageSize));
+    url.searchParams.set('limit', String(requestedPageSize));
     url.searchParams.set('page', String(page));
     if (domain) url.searchParams.set('domain', domain);
     else if (campaign) url.searchParams.set('campaign', campaign);
@@ -1910,29 +2191,157 @@ async function fetchAccessTradeDatafeeds(
     // The official datafeeds contract has no keyword query parameter. Search
     // is performed locally over bounded pages so an ignored provider parameter
     // cannot silently turn the first page into a false empty result.
-    const result = await fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed', params.signal);
-    combined.push(result);
-    if (!result.ok) break;
+    pagesRequested += 1;
+    stopPage = page;
+    let result: AccessTradeFetchResult;
+    try {
+      result = await fetchAccessTradeEndpoint(apiKey, url, 'datafeed', 'product_feed', params.signal);
+    } catch (error) {
+      if (!params.signal?.aborted) throw error;
+      stopReason = 'REQUEST_ABORTED';
+      pageRequests.push({
+        endpoint: 'datafeed',
+        durationMs: Math.max(0, Date.now() - startedAt),
+        resultType: 'network_error',
+        itemCount: 0,
+        attempts: 1,
+        page,
+        requestedLimit: requestedPageSize,
+      });
+      break;
+    }
+    const pageRequest = { ...toRequestLog(result), page, requestedLimit: requestedPageSize };
+    pageRequests.push(pageRequest);
+    if (!result.ok) {
+      stopReason = 'PROVIDER_ERROR';
+      if (!successful.length) {
+        const termination = retrievalTermination(stopReason);
+        return {
+          ...result,
+          pageRequests,
+          retrieval: {
+            pagesRequested,
+            pagesSucceeded,
+            rawItemCount,
+            uniqueRawItemCount: uniqueItems.size,
+            duplicateCount,
+            matchedBeforeClassification,
+            stopReason,
+            stopPage: page,
+            targetMatchCount: targetMatches,
+            rawItemBudget,
+            maximumPages,
+            elapsedMs: Date.now() - startedAt,
+            pageStatistics,
+            ...termination,
+          },
+        };
+      }
+      break;
+    }
 
-    matchingRecordCount += result.items.filter((item) => rawAccessTradeRecordMatchesKeyword(item, params.keyword)).length;
-    const pageItemCount = result.rawItemCount ?? result.items.length;
-    const reportedTotal = result.providerReportedItemCount ?? pageItemCount;
-    if (!params.keyword || matchingRecordCount >= targetMatches || pageItemCount < pageSize || page * pageSize >= reportedTotal) break;
+    // Retain only the bounded request/envelope summary. The page records are
+    // folded into `uniqueItems` below so the scanner never keeps a second copy
+    // of every fetched page alive for diagnostics.
+    successful.push({ ...result, items: [] });
+    pagesSucceeded += 1;
+    const pageProviderItemCount = result.rawItemCount ?? result.items.length;
+    const scannedPageItemCount = Math.min(pageProviderItemCount, remainingRawBudget);
+    const pageItems = result.items.slice(0, remainingRawBudget);
+    rawItemCount += scannedPageItemCount;
+    extractedItemCount += Math.min(result.extractedItemCount ?? result.items.length, remainingRawBudget);
+    const pageFingerprint = stableHash(pageItems.map(rawAccessTradeRecordFingerprint).sort().join('\n'));
+    const repeatedPage = pageItems.length > 0 && seenPageFingerprints.has(pageFingerprint);
+    if (!repeatedPage) seenPageFingerprints.add(pageFingerprint);
+    let pageUniqueCount = 0;
+    let pageKeywordMatchCount = 0;
+    let pageDuplicateCount = 0;
+    for (const item of pageItems) {
+      const identity = getRawAccessTradeIdentity(item);
+      const existing = uniqueItems.get(identity);
+      if (existing) {
+        pageDuplicateCount += 1;
+        uniqueItems.set(identity, mergeRawAccessTradeRecords(existing, item));
+        continue;
+      }
+      uniqueItems.set(identity, item);
+      pageUniqueCount += 1;
+      if (rawAccessTradeRecordMatchesKeyword(item, params.keyword)) {
+        pageKeywordMatchCount += 1;
+        matchedBeforeClassification += 1;
+      }
+    }
+    duplicateCount += pageDuplicateCount;
+    const reportedTotal = result.providerReportedItemCount;
+    if (reportedTotal !== undefined) reportedTotals.push(reportedTotal);
+    const providerTotalTrusted = reportedTotal !== undefined
+      && reportedTotal > pageSize
+      && reportedTotals.length >= 2
+      && reportedTotals.at(-2) === reportedTotal
+      && uniqueItems.size === reportedTotal
+      && pageStatistics.every(statistic => statistic.uniqueItemCount > 0);
+    pageStatistics.push({
+      page,
+      providerItemCount: pageProviderItemCount,
+      uniqueItemCount: pageUniqueCount,
+      keywordMatchCount: pageKeywordMatchCount,
+      duplicateCount: pageDuplicateCount,
+      providerReportedTotal: reportedTotal ?? null,
+      providerTotalTrusted,
+    });
+
+    if (pageProviderItemCount === 0) stopReason = 'EMPTY_PAGE';
+    else if (repeatedPage) stopReason = 'REPEATED_PAGE';
+    else if (pageUniqueCount === 0) stopReason = 'NO_NEW_UNIQUE_RECORDS';
+    else if ((keywordSearch && matchedBeforeClassification >= targetMatches)
+      || (!keywordSearch && uniqueItems.size >= targetMatches)) stopReason = 'TARGET_MATCH_COUNT_REACHED';
+    else if (pageProviderItemCount < requestedPageSize) stopReason = 'SHORT_PAGE';
+    else if (providerTotalTrusted) stopReason = 'TRUSTED_PROVIDER_TOTAL_EXHAUSTED';
+    else if (rawItemCount >= rawItemBudget) stopReason = 'RAW_ITEM_BUDGET_REACHED';
+    else if (Date.now() - startedAt >= timeBudgetMs) stopReason = 'TIME_BUDGET_EXCEEDED';
+    else if (page >= maximumPages) stopReason = 'MAX_PAGES_REACHED';
+    if (stopReason) break;
   }
 
-  const successful = combined.filter((result) => result.ok);
-  if (!successful.length) return combined[0];
-
-  const items = successful.flatMap((result) => result.items);
+  stopReason ||= params.signal?.aborted ? 'REQUEST_ABORTED' : 'MAX_PAGES_REACHED';
+  if (!successful.length) {
+    const termination = retrievalTermination(stopReason);
+    return {
+      endpoint: 'datafeed',
+      ok: false,
+      items: [],
+      error: stopReason === 'REQUEST_ABORTED'
+        ? 'AccessTrade request aborted'
+        : stopReason === 'TIME_BUDGET_EXCEEDED'
+          ? 'AccessTrade request time budget exceeded'
+          : 'AccessTrade datafeed request failed',
+      pageRequests,
+      retrieval: {
+        pagesRequested,
+        pagesSucceeded,
+        rawItemCount,
+        uniqueRawItemCount: uniqueItems.size,
+        duplicateCount,
+        matchedBeforeClassification,
+        stopReason,
+        stopPage,
+        targetMatchCount: targetMatches,
+        rawItemBudget,
+        maximumPages,
+        elapsedMs: Date.now() - startedAt,
+        pageStatistics,
+        ...termination,
+      },
+    };
+  }
+  const items = [...uniqueItems.values()];
   const observedEnvelopeFields = mergeObservedFields(successful, 'observedEnvelopeFields');
   const observedItemFields = mergeObservedFields(successful, 'observedItemFields');
   const observedCanonicalUrlFields = mergeObservedFields(successful, 'observedCanonicalUrlFields');
   const observedAffiliateUrlFields = mergeObservedFields(successful, 'observedAffiliateUrlFields');
   const durationMs = successful.reduce((sum, result) => sum + (result.request?.durationMs || 0), 0);
   const status = successful.at(-1)?.status;
-  const rawItemCount = successful.reduce((sum, result) => sum + (result.rawItemCount ?? result.items.length), 0);
-  const extractedItemCount = successful.reduce((sum, result) => sum + (result.extractedItemCount ?? result.items.length), 0);
-  const providerReportedItemCount = Math.max(...successful.map((result) => result.providerReportedItemCount ?? 0), rawItemCount);
+  const providerReportedItemCount = Math.max(0, ...successful.map((result) => result.providerReportedItemCount ?? 0));
   const extractionRejectedByReason: Partial<Record<AccessTradeRejectionReason, number>> = {};
   for (const result of successful) {
     for (const [reason, count] of Object.entries(result.extractionRejectedByReason || {})) {
@@ -1940,6 +2349,7 @@ async function fetchAccessTradeDatafeeds(
         (extractionRejectedByReason[reason as AccessTradeRejectionReason] || 0) + (count || 0);
     }
   }
+  if (duplicateCount) extractionRejectedByReason.DUPLICATE = (extractionRejectedByReason.DUPLICATE || 0) + duplicateCount;
   const request: AccessTradeRequestLog = {
     endpoint: 'datafeed',
     durationMs,
@@ -1954,8 +2364,25 @@ async function fetchAccessTradeDatafeeds(
   };
   return {
     endpoint: 'datafeed', ok: true, items, status, request,
+    pageRequests,
     attempts: request.attempts, rawItemCount, extractedItemCount,
     providerReportedItemCount, extractionRejectedByReason,
+    retrieval: {
+      pagesRequested,
+      pagesSucceeded,
+      rawItemCount,
+      uniqueRawItemCount: uniqueItems.size,
+      duplicateCount,
+      matchedBeforeClassification,
+      stopReason,
+      stopPage,
+      targetMatchCount: targetMatches,
+      rawItemBudget,
+      maximumPages,
+      elapsedMs: Date.now() - startedAt,
+      pageStatistics,
+      ...retrievalTermination(stopReason),
+    },
     payloadObservation: { observedEnvelopeFields, observedItemFields, observedCanonicalUrlFields, observedAffiliateUrlFields },
   };
 }
@@ -1969,15 +2396,98 @@ function mergeObservedFields(
     .slice(0, key === 'observedItemFields' ? 120 : 80);
 }
 
+const ACCESS_TRADE_RAW_FINGERPRINT_FIELDS = [
+  'product_id', 'productId', 'source_id', 'sourceId', 'sku', 'sku_id', 'skuId',
+  'url', 'product_url', 'productUrl', 'aff_link', 'affiliate_url', 'affiliateUrl',
+  'name', 'title', 'product_name', 'merchant', 'shop_id', 'shop_name', 'domain',
+  'cate', 'category', 'price', 'image', 'update_time',
+] as const;
+
+function stableRawIdentityValue(value: unknown): string {
+  return stringifyValue(value).trim().toLowerCase().slice(0, 2_000);
+}
+
+function stableRawUrlIdentity(value: unknown): string {
+  const text = stringifyValue(value).trim();
+  if (!text) return '';
+  try {
+    const url = new URL(text);
+    url.hash = '';
+    url.hostname = url.hostname.toLowerCase();
+    return url.toString();
+  } catch {
+    return stableRawIdentityValue(text);
+  }
+}
+
+function getRawAccessTradeIdentity(item: AccessTradeRawItem): string {
+  const productId = getFirstText(item, ['product_id', 'productId']);
+  if (productId) return `product_id:${stableRawIdentityValue(productId)}`;
+  const sourceId = getFirstText(item, [
+    'source_id', 'sourceId', 'item_id', 'itemId', 'external_id', 'externalId', 'id', '_id',
+  ]);
+  if (sourceId) return `source_id:${stableRawIdentityValue(sourceId)}`;
+  const sku = getFirstText(item, ['sku', 'sku_id', 'skuId']);
+  if (sku) {
+    const merchantIdentity = getFirstText(item, ['shop_id', 'shopId', 'merchant', 'shop_name', 'shopName', 'domain']);
+    return `sku:${stableRawIdentityValue(merchantIdentity || 'unknown-merchant')}:${stableRawIdentityValue(sku)}`;
+  }
+  const canonicalUrl = getFirstText(item, ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS);
+  if (canonicalUrl) return `canonical_url:${stableRawUrlIdentity(canonicalUrl)}`;
+  const affiliateUrl = getFirstText(item, ACCESS_TRADE_AFFILIATE_URL_FIELDS);
+  if (affiliateUrl) return `affiliate_url:${stableRawUrlIdentity(affiliateUrl)}`;
+  return `fingerprint:${rawAccessTradeRecordFingerprint(item)}`;
+}
+
+function rawAccessTradeRecordFingerprint(item: AccessTradeRawItem): string {
+  const signature = ACCESS_TRADE_RAW_FINGERPRINT_FIELDS.map(field => [
+    field,
+    stableRawIdentityValue(item[field]),
+  ]).filter(([, value]) => Boolean(value));
+  return stableHash(JSON.stringify(signature));
+}
+
+function meaningfulRawValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return Boolean(value.trim());
+  return true;
+}
+
+function rawProviderUpdatedAt(item: AccessTradeRawItem): number {
+  const value = getFirstText(item, ['update_time', 'updateTime', 'updated_at', 'updatedAt']);
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeRawAccessTradeRecords(
+  current: AccessTradeRawItem,
+  incoming: AccessTradeRawItem,
+): AccessTradeRawItem {
+  const incomingIsNewer = rawProviderUpdatedAt(incoming) > rawProviderUpdatedAt(current);
+  const preferred = incomingIsNewer ? incoming : current;
+  const fallback = incomingIsNewer ? current : incoming;
+  const merged: AccessTradeRawItem = { ...preferred };
+  for (const [field, value] of Object.entries(fallback)) {
+    if (!meaningfulRawValue(merged[field]) && meaningfulRawValue(value)) merged[field] = value;
+  }
+  return merged;
+}
+
 function rawAccessTradeRecordMatchesKeyword(item: AccessTradeRawItem, keyword?: string): boolean {
-  if (!normalizeText(keyword)) return true;
-  const searchableFields = [
+  if (!normalizeMatcherText(keyword || '')) return true;
+  const productFields = [
     'title', 'name', 'product_name', 'productName',
     'description', 'desc', 'short_description', 'shortDescription',
     'category', 'cate', 'category_name', 'categoryName', 'cat_name',
+  ];
+  const contextFields = [
     'merchant', 'merchant_name', 'merchantName', 'shop', 'shop_name', 'shopName', 'domain',
   ];
-  return matchesSearchQuery(searchableFields.map((field) => getFirstText(item, [field])).join(' '), keyword || '');
+  return matchesProductKeyword(
+    productFields.map((field) => getFirstText(item, [field]).slice(0, 4_000)).join(' '),
+    contextFields.map((field) => getFirstText(item, [field]).slice(0, 1_000)).join(' '),
+    keyword || '',
+  );
 }
 
 async function fetchAccessTradeOffers(
@@ -2101,7 +2611,7 @@ async function fetchAccessTradeEndpoint(
       const resultType: AccessTradeResultType = response.status === 401 ? 'unauthorized'
         : response.status === 403 ? 'forbidden'
         : response.status === 429 ? 'rate_limited'
-        : response.status >= 500 ? 'upstream_error' : 'network_error';
+        : response.status >= 500 ? 'upstream_error' : 'client_error';
       const retryAfterHeader = response.headers.get('retry-after') || undefined;
       const retryAfterMs = retryAfterHeader
         ? (/^\d+$/.test(retryAfterHeader) ? Date.now() + Number(retryAfterHeader) * 1000 : Date.parse(retryAfterHeader))
@@ -2248,14 +2758,10 @@ function getAccessTradeFilterRejection(
   }
 
   if (params.keyword) {
-    const haystack = [
+    const productText = [
       item.name,
       item.description,
       item.category,
-      item.merchant,
-      item.shopName,
-      item.merchantDomain,
-      item.campaignName,
       getRawValueText(item.rawData, 'title'),
       getRawValueText(item.rawData, 'name'),
       getRawValueText(item.rawData, 'product_name'),
@@ -2265,13 +2771,18 @@ function getAccessTradeFilterRejection(
       getRawValueText(item.rawData, 'category'),
       getRawValueText(item.rawData, 'cate'),
       getRawValueText(item.rawData, 'category_name'),
+    ].join(' ');
+    const contextText = [
+      item.merchant,
+      item.shopName,
+      item.merchantDomain,
       getRawValueText(item.rawData, 'merchant'),
       getRawValueText(item.rawData, 'merchant_name'),
       getRawValueText(item.rawData, 'shop'),
       getRawValueText(item.rawData, 'shop_name'),
       getRawValueText(item.rawData, 'domain'),
     ].join(' ');
-    if (!matchesSearchQuery(haystack, params.keyword)) return 'KEYWORD_MISMATCH';
+    if (!matchesProductKeyword(productText, contextText, params.keyword)) return 'KEYWORD_MISMATCH';
   }
 
   if (params.category) {
@@ -2830,11 +3341,12 @@ export function observeAccessTradePayload(
     suppliedItems?: Array<Record<string, unknown>>,
 ): Pick<AccessTradeRequestLog,
   'observedEnvelopeFields' | 'observedItemFields' | 'observedCanonicalUrlFields' | 'observedAffiliateUrlFields'> {
+  const safeObservedField = (field: string) => !/(?:authorization|credential|password|secret|signature|api_?key|access_?token|refresh_?token|bearer)/i.test(field);
   const envelope = data && typeof data === 'object' && !Array.isArray(data)
-    ? Object.keys(data as Record<string, unknown>).sort().slice(0, 80)
+    ? Object.keys(data as Record<string, unknown>).filter(safeObservedField).sort().slice(0, 80)
     : [];
   const items = suppliedItems || extractAccessTradePayload(data).items;
-  const fields = [...new Set(items.slice(0, 25).flatMap(item => Object.keys(item)))].sort().slice(0, 120);
+  const fields = [...new Set(items.slice(0, 25).flatMap(item => Object.keys(item)).filter(safeObservedField))].sort().slice(0, 120);
   const present = (allowlist: readonly string[]) => allowlist.filter(field => fields.includes(field));
   return {
     observedEnvelopeFields: envelope,
@@ -3422,6 +3934,17 @@ export function matchesAccessTradeSearchQuery(haystackValue: string, queryValue:
   const tokens = query.split(' ').filter(token => token.length >= 2);
   if (!tokens.length) return false;
   return tokens.every(token => haystackWords.includes(` ${token} `));
+}
+
+function matchesProductKeyword(productValue: string, contextValue: string, queryValue: string): boolean {
+  const query = normalizeMatcherText(queryValue);
+  if (!query) return true;
+  const tokens = query.split(' ').filter(token => token.length >= 2);
+  if (!tokens.length) return false;
+  const productWords = ` ${normalizeMatcherText(productValue)} `;
+  const combinedWords = `${productWords}${normalizeMatcherText(contextValue)} `;
+  return tokens.every(token => combinedWords.includes(` ${token} `))
+    && tokens.some(token => productWords.includes(` ${token} `));
 }
 
 function matchesSearchQuery(haystackValue: string, queryValue: string): boolean {

@@ -78,7 +78,7 @@ export interface WorkerCriticalSchedulingRolloutState {
 const DEFAULT_MODES: Readonly<Record<SandealFeatureFlag, FeatureRolloutMode>> = {
   RUNTIME_RECOVERY_V2: 'SHADOW',
   RECOVERY_CANARY: 'OFF',
-  WORKER_CONTINUOUS_POOL_V2: 'OFF',
+  WORKER_CONTINUOUS_POOL_V2: 'ACTIVE',
   WORKER_CRITICAL_SCHEDULING_V3: 'SHADOW',
   SLO_RUNNABLE_AT_V2: 'SHADOW',
   PRODUCT_RECHECK_V2: 'SHADOW',

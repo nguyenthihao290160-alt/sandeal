@@ -9,6 +9,8 @@ import {
   searchAccessTrade,
   isAccessTradeConfigured,
   ACCESS_TRADE_REJECTION_REASONS,
+  ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS,
+  ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS,
   type AccessTradeSearchResult,
   type AccessTradeRejectionReason,
   type AccessTradeSearchParams,
@@ -30,6 +32,9 @@ type AccessTradeSearchBody = {
   diagnosticReason?: unknown;
   diagnosticPage?: unknown;
   diagnosticPageSize?: unknown;
+  maximumPages?: unknown;
+  rawItemBudget?: unknown;
+  timeBudgetMs?: unknown;
 };
 
 const ACCESS_TRADE_KINDS: AccessTradeKind[] = [
@@ -142,6 +147,7 @@ function emptyAccessTradeResult(message: string) {
       providerResultType: 'success_empty' as const,
       providerReportedItemCount: 0,
       rawItemCount: 0,
+      uniqueRawItemCount: 0,
       extractedItemCount: 0,
       normalizedItemCount: 0,
       classifiedProductCount: 0,
@@ -155,6 +161,19 @@ function emptyAccessTradeResult(message: string) {
       duplicateCount: 0,
       filteredCount: 0,
       limitedCount: 0,
+      pagesRequested: 0,
+      pagesSucceeded: 0,
+      matchedBeforeClassification: 0,
+      stopReason: 'EMPTY_PAGE' as const,
+      stopPage: 0,
+      targetMatchCount: 0,
+      rawItemBudget: 0,
+      maximumPages: 0,
+      elapsedMs: 0,
+      pageStatistics: [],
+      endedByEndOfData: true,
+      safetyBoundaryReached: false,
+      providerPaginationIssue: false,
       rejectedByReason: {},
       reviewByReason: {},
       rejectionGroups: [],
@@ -214,6 +233,21 @@ export async function POST(request: NextRequest) {
       diagnosticReason: asDiagnosticReason(body.diagnosticReason),
       diagnosticPage: asBoundedInteger(body.diagnosticPage, 1, 100),
       diagnosticPageSize: asBoundedInteger(body.diagnosticPageSize, 3, 20),
+      maximumPages: asBoundedInteger(
+        body.maximumPages,
+        ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.maximumPages,
+        ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.maximumPages,
+      ),
+      rawItemBudget: asBoundedInteger(
+        body.rawItemBudget,
+        ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.rawItemBudget,
+        ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.rawItemBudget,
+      ),
+      timeBudgetMs: asBoundedInteger(
+        body.timeBudgetMs,
+        ACCESS_TRADE_KEYWORD_SCAN_DEFAULTS.timeBudgetMs,
+        ACCESS_TRADE_KEYWORD_SCAN_HARD_LIMITS.timeBudgetMs,
+      ),
     };
 
     const result = compactPublicAccessTradeResult(await searchAccessTrade(params));

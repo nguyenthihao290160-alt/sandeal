@@ -79,6 +79,7 @@ export interface WorkerBatchOptions {
   enforceExecutionCompatibility?: boolean;
   claimLane?: AutomationWorkerClaimLane;
   preferCritical?: boolean;
+  preferProductCritical?: boolean;
 }
 
 export interface ContinuousWorkerPoolResult extends WorkerRunResult {
@@ -1164,6 +1165,7 @@ export async function runContinuousWorkerPool(options: {
       // At a single-slot concurrency there is no lane to reserve. The guarded
       // V3 path still gives the next free slot to critical work if any waits.
       preferCritical: priorityScheduling === 'ALL_CRITICAL',
+      preferProductCritical: lane === 'NON_GUARDIAN' || lane === 'NON_CRITICAL',
     }).then(
       result => ({ slotId, lane, result }),
       error => ({ slotId, lane, error }),

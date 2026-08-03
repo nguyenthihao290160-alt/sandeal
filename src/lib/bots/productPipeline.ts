@@ -10,7 +10,7 @@ import {
 } from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
 import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
-import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct, upsertCanonicalProduct } from '../storage/products';
+import { getAllProducts, publicationIdempotencyKey, repairSourceCandidateEvidence, saveCanonicalProduct, upsertCanonicalProduct, upsertSourceCandidateProduct } from '../storage/products';
 import { readCollection, runTransaction, scanCollection, writeCollection } from '../storage/adapter';
 import { createAutomationJob, getAutomationControl } from '../automation/store';
 import { completeJournalEffect } from '../automation/operationJournal';
@@ -259,7 +259,16 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
     currency: 'VND', category: item.category || undefined,
     rawSourceKind: item.rawSourceKind, nonProductReason: item.nonProductReason,
     campaignName: item.campaignName, commissionRate: item.commissionRate,
-    merchant: merchantFromUrl(item.canonicalProductUrl || item.originalUrl),
+    merchant: item.merchant || merchantFromUrl(item.canonicalProductUrl || item.originalUrl),
+    merchantDomain: item.merchantDomain,
+    shopId: item.shopId,
+    shopName: item.shopName,
+    sourceItemId: item.sourceItemId,
+    sourceEndpoint: item.sourceEndpoint,
+    sourceFetchedAt: item.fetchedAt,
+    providerUpdatedAt: item.providerUpdatedAt,
+    sourceNormalizationIssues: item.normalizationIssues,
+    fieldProvenance: item.fieldProvenance,
     verifiedSource: item.verifiedSource, autoPublishEligible: item.autoPublishEligible,
     sourceQualityScore: item.qualityScore,
   };
@@ -691,6 +700,17 @@ async function reviewAutonomousCandidate(
     category: payload.category || '',
     campaignName: payload.campaignName,
     commissionRate: payload.commissionRate,
+    sourceItemId: payload.sourceItemId || item.sourceId,
+    sourceEndpoint: payload.sourceEndpoint,
+    fetchedAt: payload.sourceFetchedAt,
+    merchant: payload.merchant,
+    merchantDomain: payload.merchantDomain,
+    shopId: payload.shopId,
+    shopName: payload.shopName,
+    sku: payload.sku,
+    providerUpdatedAt: payload.providerUpdatedAt,
+    normalizationIssues: payload.sourceNormalizationIssues as NormalizedAccessTradeItem['normalizationIssues'],
+    fieldProvenance: payload.fieldProvenance,
     rawSourceKind: payload.rawSourceKind || String(payload.kind || 'unknown'),
     nonProductReason: payload.nonProductReason,
     needsVerification: true,
@@ -728,7 +748,7 @@ async function reviewAutonomousCandidate(
     autoPublished: false,
   };
   initialDraft.identity = deriveProductIdentity(initialDraft);
-  const canonical = await upsertCanonicalProduct(initialDraft, { evaluate: false });
+  const canonical = await upsertSourceCandidateProduct(initialDraft);
   let product = canonical.product;
 
   if (product.lifecycleState === 'DISCOVERED') product = await transitionCandidateLifecycle(product, 'STAGED', item, workerId, 'staged');
@@ -946,7 +966,39 @@ async function reviewAutonomousCandidate(
     publicBlockReason: healthy ? '' : statuses.join(','),
   };
   throwIfExecutionAborted(execution.signal);
-  product = (await saveCanonicalProduct(product.id, healthPatch)) || product;
+  product = (await repairSourceCandidateEvidence(product.id, {
+    ...healthPatch,
+    source: item.source,
+    sourceId: item.sourceId,
+    sourceItemId: payload.sourceItemId || item.sourceId,
+    externalId: item.sourceId,
+    title: payload.title,
+    description: payload.description,
+    category: payload.category,
+    brand: payload.brand,
+    sku: payload.sku,
+    originalUrl: payload.canonicalProductUrl || payload.originalUrl,
+    canonicalProductUrl: payload.canonicalProductUrl || payload.originalUrl,
+    affiliateUrl: payload.affiliateUrl,
+    imageUrl,
+    merchant: payload.merchant,
+    merchantDomain: payload.merchantDomain,
+    shopId: payload.shopId,
+    shopName: payload.shopName,
+    sourceEndpoint: payload.sourceEndpoint,
+    sourceFetchedAt: payload.sourceFetchedAt,
+    providerUpdatedAt: payload.providerUpdatedAt,
+    sourceNormalizationIssues: payload.sourceNormalizationIssues,
+    fieldProvenance: payload.fieldProvenance,
+  }, {
+    expectedUpdatedAt: product.updatedAt,
+    verifiedAt: now,
+    verifiedFields: {
+      canonicalProductUrl: canonicalVerified,
+      affiliateUrl: affiliateVerified,
+      imageUrl: imageVerified,
+    },
+  })).product;
   throwIfExecutionAborted(execution.signal);
   if (!healthy) {
     const retryExhausted = item.attempts >= 6;
@@ -961,7 +1013,13 @@ async function reviewAutonomousCandidate(
     return { status, terminal: status !== 'delayed', nextRetryAt, reason: reasons.join(','), productId: product.id };
   }
 
-  const observedOffer = buildOffer(product, now);
+  const observedProduct = normalizeCanonicalProduct({
+    ...product,
+    price: Number(payload.price || 0) > 0 ? payload.price : product.price,
+    salePrice: Number(payload.salePrice || 0) > 0 ? payload.salePrice : product.salePrice,
+    priceObservedAt: payload.sourceFetchedAt || now,
+  });
+  const observedOffer = buildOffer(observedProduct, now);
   if (strongDuplicate) {
     const mergedSelection = selectBestPublicOffer(mergeOffers(strongDuplicate.product.offers, [observedOffer]), Date.parse(now));
     const mergedPriceTruth = evaluatePriceTruth(strongDuplicate.product, offerPriceObservations(mergedSelection.offers), Date.parse(now));
@@ -995,13 +1053,33 @@ async function reviewAutonomousCandidate(
     lastHealthyAt: now,
   })) || product;
   throwIfExecutionAborted(execution.signal);
-  const evidence = await captureProductEvidence(product, now, { signal: execution.signal });
+  const evidence = await captureProductEvidence(observedProduct, now, { signal: execution.signal });
   throwIfExecutionAborted(execution.signal);
   selectedOffer = selectBestPublicOffer(
-    attachObservedPriceEvidence(product, selectedOffer.offers, observedOffer.id, evidence.facts),
+    attachObservedPriceEvidence(observedProduct, selectedOffer.offers, observedOffer.id, evidence.facts),
     Date.parse(now),
   );
-  const priceTruth = evaluatePriceTruth(product, offerPriceObservations(selectedOffer.offers), Date.parse(now));
+  const priceTruth = evaluatePriceTruth(observedProduct, offerPriceObservations(selectedOffer.offers), Date.parse(now));
+  const priceTruthPatch = priceTruthProductPatch(priceTruth);
+  if (priceTruthPatch.priceVerificationStatus === 'VERIFIED') {
+    product = (await repairSourceCandidateEvidence(product.id, {
+      ...priceTruthPatch,
+      source: item.source,
+      sourceId: item.sourceId,
+      sourceItemId: payload.sourceItemId || item.sourceId,
+      externalId: item.sourceId,
+      price: payload.price,
+      salePrice: payload.salePrice,
+      priceObservedAt: priceTruth.observedAt || payload.sourceFetchedAt || now,
+      sourceFetchedAt: payload.sourceFetchedAt,
+      providerUpdatedAt: payload.providerUpdatedAt,
+      fieldProvenance: payload.fieldProvenance,
+    }, {
+      expectedUpdatedAt: product.updatedAt,
+      verifiedAt: now,
+      verifiedFields: { price: true },
+    })).product;
+  }
   product = (await saveCanonicalProduct(product.id, {
     evidenceFactIds: evidence.facts.map(fact => fact.id),
     evidenceCoverage: evidence.coverage,
@@ -1009,7 +1087,7 @@ async function reviewAutonomousCandidate(
     evidenceSnapshotHash: evidence.snapshot.snapshotHash,
     offers: selectedOffer.offers,
     bestOfferId: selectedOffer.bestOffer?.id,
-    ...priceTruthProductPatch(priceTruth),
+    ...priceTruthPatch,
   })) || product;
   if (product.lifecycleState === 'VERIFYING') product = await transitionCandidateLifecycle(product, 'CONTENT_PREPARING', item, workerId, 'content-preparing');
 
@@ -1024,8 +1102,16 @@ async function reviewAutonomousCandidate(
   throwIfExecutionAborted(execution.signal);
   const generatedValidation = gemini ? validateReviewClaims(gemini.review, product) : null;
   const duplicateGenerated = gemini ? comparisonProducts.some(other => other.reviewContent && textSimilarity(`${gemini.review.reviewTitle} ${gemini.review.reviewSummary} ${gemini.review.reviewVerdict}`, `${other.reviewContent.reviewTitle} ${other.reviewContent.reviewSummary} ${other.reviewContent.reviewVerdict}`) >= 0.8) : false;
-  const useGemini = Boolean(gemini && generatedValidation?.valid && !duplicateGenerated);
-  const linked = linkReviewClaimsToEvidence(product.id, useGemini ? gemini!.review : localReview, evidence.facts);
+  const existingUnapprovedReview = existingForSource?.reviewContent
+    && existingForSource.reviewContent.reviewStatus !== 'approved'
+    ? existingForSource.reviewContent
+    : undefined;
+  const useGemini = Boolean(!existingUnapprovedReview && gemini && generatedValidation?.valid && !duplicateGenerated);
+  const linked = linkReviewClaimsToEvidence(
+    product.id,
+    existingUnapprovedReview || (useGemini ? gemini!.review : localReview),
+    evidence.facts,
+  );
   const review = linked.review;
   counters.reviewGenerated += 1;
   if (review.reviewStatus === 'approved') counters.reviewApproved += 1; else if (review.reviewStatus === 'rejected') counters.reviewRejected += 1; else counters.reviewNeedsReview += 1;
@@ -1033,7 +1119,7 @@ async function reviewAutonomousCandidate(
   if (review.reviewBlockReasons.includes('low_originality')) counters.duplicateContentSkipped += 1;
   const withReview = (await saveCanonicalProduct(product.id, {
     reviewContent: review,
-    reviewGeneration: useGemini ? {
+    reviewGeneration: existingUnapprovedReview ? existingForSource?.reviewGeneration : useGemini ? {
       provider: 'gemini', modelId: gemini!.modelId, promptVersion: gemini!.promptVersion,
       generationFingerprint: gemini!.generationFingerprint, responseHash: gemini!.responseHash,
       generatedAt: gemini!.generatedAt, validationResult: 'approved',
@@ -1055,6 +1141,10 @@ async function reviewAutonomousCandidate(
   if (evidence.coverage < 0.8) readinessReasons.push('evidence_coverage_low');
   if (!selectedOffer.bestOffer) readinessReasons.push('healthy_offer_missing');
   if (!['FRESH', 'AGING'].includes(priceTruth.state)) readinessReasons.push('price_truth_unsafe');
+  // Provider reappearance is evidence, not a policy decision. Existing
+  // quarantine reasons remain blockers until their dedicated policy workflow
+  // explicitly supersedes them.
+  readinessReasons.push(...(existingForSource?.quarantineReasons || []));
   // Evaluate the newly observed evidence independently, but do not let that
   // internal calculation erase a persisted manual/unknown/policy blocker.
   const strictReadiness = evaluateSafePublish({
@@ -1085,7 +1175,9 @@ async function reviewAutonomousCandidate(
     // that require an explicit applicable superseding workflow.
     currentBlockers: reconciledBlockers,
     blockersCheckedAt: now,
-    quarantineReasons: ready ? [] : canonicalBlockerCodes(reconciledBlockers),
+    quarantineReasons: ready
+      ? [...new Set(existingForSource?.quarantineReasons || [])]
+      : [...new Set([...(existingForSource?.quarantineReasons || []), ...canonicalBlockerCodes(reconciledBlockers)])],
     nextAutomaticAction: ready ? 'AUTO_SAFE_PUBLISH' : 'RECHECK_QUARANTINED_PRODUCT',
     nextRetryAt: ready ? undefined : new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
   })) || withReview;

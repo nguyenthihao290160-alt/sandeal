@@ -617,8 +617,7 @@ Intermediate validation exposed and then verified fixes for an outdated M2 expec
 
 ## Remaining rollout controls
 
-- Worker Pool remains OFF unless the existing `WORKER_CONTINUOUS_POOL_V2` control is changed in a separately authorized rollout.
-- Recommended future progression is OFF → SHADOW observation → ACTIVE only after an explicit release review; do not enable ACTIVE as part of this handoff.
+- Historical M3.1 note: Worker Pool was OFF at that handoff. The Product-First addendum below supersedes this default for a future release; production still requires a separately authorized rollout.
 - Projection repair requires the existing Worker to execute the one deduplicated maintenance job.
 - Runtime recovery requires three unique qualifying current-release evidence revisions; repeated reads of one revision do not count.
 - These local changes do not alter current production state until a separately authorized commit/release/deployment.
@@ -640,3 +639,51 @@ Perform a separately authorized **M3.1 controlled rollout verification**: review
 ## Recommended commit message
 
 `fix: reconcile runtime health and product flow diagnostics`
+
+## Product-First bounded AccessTrade repair (2026-08-03)
+
+This section describes local repository changes only. No production/VPS/PM2 action or live provider probe was performed.
+
+### Confirmed root cause and retrieval semantics
+
+The AccessTrade datafeed contract has no dependable keyword parameter, so SanDeal must match keywords locally. The previous loop stopped when `page * pageSize >= reportedTotal`. A full first page of 200 unrelated records with an ambiguous provider `total=200` therefore ended the scan before page 2 and produced a false empty result.
+
+Keyword searches now request datafeed pages sequentially and retain one identity-keyed unique-record map. Defaults and hard ceilings are five pages, 200 requested records per page, 1,000 raw records, and a 35-second scan budget (40-second hard ceiling). The application result limit remains independently capped at 50; scanning 1,000 records never returns more than the requested result limit. A no-keyword request remains a single lightweight page.
+
+Provider `total` is advisory. It becomes trusted only when it is greater than one full page, repeats consistently, every observed page adds unique records, and cumulative unique identity count reaches that value. In particular, `total=200` on full page 1 is never an exhaustion signal. Every scan records one terminal reason:
+
+- `TARGET_MATCH_COUNT_REACHED`
+- `EMPTY_PAGE`
+- `SHORT_PAGE`
+- `TRUSTED_PROVIDER_TOTAL_EXHAUSTED`
+- `REPEATED_PAGE`
+- `NO_NEW_UNIQUE_RECORDS`
+- `MAX_PAGES_REACHED`
+- `RAW_ITEM_BUDGET_REACHED`
+- `TIME_BUDGET_EXCEEDED`
+- `REQUEST_ABORTED`
+- `PROVIDER_ERROR`
+
+Raw identities use provider product/source ID, SKU, canonical URL, affiliate URL, then a deterministic selected-field fingerprint. Page fingerprints are deterministic and order-independent. Duplicate records do not increment the keyword target or create duplicate candidates. Matching normalizes Vietnamese accents, case, punctuation, token order, and whole-word boundaries. Merchant/shop context may complete a query only when at least one query token also appears in bounded product title/description/category fields.
+
+Sanitized diagnostics now include requested/succeeded pages, raw/unique/duplicate counts, pre-classification matches, accepted/rejected/returned counts, the stop boundary, and per-page totals/trust. Secret-like field names and all credential values are excluded. The Product Sources UI distinguishes provider-empty, no keyword match, matched-but-rejected, accepted, safety-boundary, and repeated-pagination outcomes.
+
+### Product preparation, recovery, and publication
+
+AccessTrade candidate payloads retain provider endpoint and source ID, merchant/shop identity, SKU, source/provider timestamps, normalization issues, and per-field provenance. Initial ingestion uses exact source/canonical identity and does not merge by similar title. Vouchers, campaigns, store offers, and unknown records remain non-products.
+
+Existing products can receive verified evidence through `repairSourceCandidateEvidence`. It is an exact-provider-identity, `updatedAt` compare-and-set operation. Verified newer URL, affiliate, image, or price evidence can supersede invalid/older evidence; missing, manual, older, or weaker evidence is preserved. Repair appends an audit record without deleting prior history and never changes archive state, quarantine policy, lifecycle/publication state, or an unapproved review. Approved review evidence becomes stale after a material evidence change. A stale repair fails closed.
+
+Candidate preparation continues through health probes, price truth, evidence capture, scoring/review, and readiness evaluation while Runtime Guardian keeps the publish lane paused. Final public publication still requires every current URL, affiliate, image, price, evidence, review, merchant/policy, lifecycle, durable-worker, runtime, and release gate.
+
+### Worker progress and rollback
+
+The existing bounded continuous pool is now the default implementation. It uses the existing configured concurrency (the production launcher still clamps it to 1–4), reserves the established Guardian slot when capacity is greater than one, and executes one claimed job per slot. The non-Guardian lane gives product-preparation jobs one bounded selection opportunity; Guardian remains the critical/highest-priority class. Active Guardian requests with the same dry-run mode coalesce even across scheduler time buckets. Claim tokens, leases, resource conflicts, retries, fencing, and total concurrency are unchanged.
+
+Operational rollback does not delete queue/history or edit file-backed records. A separately authorized operator may set `WORKER_CONTINUOUS_POOL_V2=OFF` to restore the legacy batch path, then use the normal previously verified full-release rollback. Reverting only the scanner can restore the false-empty bug, so code rollback must be treated as a complete release decision.
+
+### Local evidence and remaining rollout work
+
+The isolated 1,000-record fixture retained 244,912 bytes after GC in the final focused run (272,544 bytes in the final full-suite run), below the documented 32 MiB fixture ceiling. All AccessTrade fetches were in-process mocks and all durable tests used `.test-tmp`, never production `.data`.
+
+Before a later production rollout, an operator must verify the exact release SHA/manifest, current Worker/Scheduler lease owner and fencing token, configured concurrency, sequential request count, page/unique/duplicate/stop diagnostics for a controlled Vietnamese keyword, RSS/swap/latency on the 1-vCPU/2-GB host, Guardian coalescing, product-job forward progress, evidence-repair audit creation, unchanged quarantine/review state, and zero public state changes while Runtime Guardian blocks publication. Stop on pagination loops, rising swap, stale fencing, duplicate execution, secret exposure, or any weakened public gate.

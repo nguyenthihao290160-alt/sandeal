@@ -68,6 +68,7 @@ import {
   getAutomationExecutionDescriptor,
   isAutomationJobEligibleForClaimLane,
   isCriticalAutomationJob,
+  isProductCriticalAutomationJob,
   selectCompatibleWorkerJobs,
   type AutomationWorkerClaimLane,
 } from './executionPolicy';
@@ -2880,6 +2881,7 @@ function payloadProductIds(payload: Record<string, unknown>): Set<string> {
 /** Prevent overlapping health/source scans even when callers use different time-based keys. */
 export function isEquivalentActiveScan(existing: AutomationJob, requested: AutomationJob): boolean {
   if (!ACTIVE_SCAN_STATUSES.has(existing.status) || existing.dryRun !== requested.dryRun) return false;
+  if (existing.type === 'RUNTIME_GUARDIAN' && requested.type === 'RUNTIME_GUARDIAN') return true;
   if (existing.type === 'PRODUCT_SCAN' && requested.type === 'PRODUCT_SCAN') return true;
   if (existing.type !== 'RECHECK_PRODUCT_HEALTH' || requested.type !== 'RECHECK_PRODUCT_HEALTH') return false;
   const existingIds = payloadProductIds(existing.payload);
@@ -3656,6 +3658,23 @@ export function selectFairRunnableJobs(items: AutomationJob[], limit: number, no
   return selected;
 }
 
+/**
+ * Gives a non-Guardian worker lane one product-preparation opportunity while
+ * retaining the established priority/FIFO order for all remaining slots.
+ */
+export function selectProductForwardRunnableJobs(items: AutomationJob[], limit: number, nowMs = Date.now()): AutomationJob[] {
+  const maximum = Math.max(0, Math.min(limit, 10));
+  if (!maximum) return [];
+  const fairOrder = selectFairRunnableJobs(items, items.length, nowMs);
+  const product = selectFairRunnableJobs(
+    items.filter(job => isProductCriticalAutomationJob(job.type)),
+    1,
+    nowMs,
+  )[0];
+  if (!product) return fairOrder.slice(0, maximum);
+  return [product, ...fairOrder.filter(job => job.id !== product.id)].slice(0, maximum);
+}
+
 const notRunnableLogTimes = new Map<string, number>();
 const MAX_CLAIM_EVENT_RECORDS = 2_048;
 
@@ -3671,6 +3690,7 @@ export async function claimAutomationJobs(
     enforceExecutionCompatibility?: boolean;
     claimLane?: AutomationWorkerClaimLane;
     preferCritical?: boolean;
+    preferProductCritical?: boolean;
   } = {},
 ): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
@@ -3852,7 +3872,7 @@ export async function claimAutomationJobs(
           activeJobs,
           availableCapacity,
           nowMs,
-          selectFairRunnableJobs,
+          options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs,
           options.criticalReservedCapacity,
           allCriticalLane
             ? {
@@ -3865,7 +3885,7 @@ export async function claimAutomationJobs(
               },
           options.preferCritical === true,
         )
-      : selectFairRunnableJobs(eligible, availableCapacity, nowMs);
+      : (options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs)(eligible, availableCapacity, nowMs);
     if (!due.length) {
       claimBlockReason = availableCapacity <= 0
         ? 'WORKER_CAPACITY_FULL'
