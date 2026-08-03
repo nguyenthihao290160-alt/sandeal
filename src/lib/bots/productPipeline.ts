@@ -133,6 +133,7 @@ export interface SourceRunMetrics {
 export interface SourceScanOptions {
   registry?: SourceAdapterRegistry;
   runId?: string;
+  signal?: AbortSignal;
 }
 
 export function selectOperationMode(publicProductCount: number): OperationMode {
@@ -392,6 +393,7 @@ export async function scanSourcesToQueue(
   deadlineMs = Date.now() + 240_000,
   options: SourceScanOptions = {},
 ): Promise<PipelineCounters & SourceRunMetrics & { resultTypes: Partial<Record<AccessTradeResultType, number>>; retryAfter?: string }> {
+  throwIfExecutionAborted(options.signal);
   const startedMs = Date.now();
   const counters = emptyCounters();
   const resultTypes: Partial<Record<AccessTradeResultType, number>> = {};
@@ -405,6 +407,7 @@ export async function scanSourcesToQueue(
   let sourceStatus: SourceProviderStatus = 'not_configured';
   const settings = await getAutomationSettings();
   const usage = await getDailyPipelineUsage();
+  throwIfExecutionAborted(options.signal);
   const sourceBudgetRemaining = Math.max(0, settings.sourceRequestBudgetPerDay - usage.sourceRequests);
   const registry = options.registry || createDefaultSourceAdapterRegistry();
   const adapter = registry.get<NormalizedAccessTradeItem, NormalizedAccessTradeItem>('accesstrade');
@@ -444,10 +447,12 @@ export async function scanSourcesToQueue(
   let timeoutStreak = 0;
 
   for (const stat of selected) {
+    throwIfExecutionAborted(options.signal);
     if (Date.now() >= deadlineMs || counters.found >= candidateLimit || counters.sourceRequests >= sourceBudgetRemaining) break;
     stat.lastUsedAt = new Date().toISOString();
     try {
       const result = await adapter.discover({ keyword: stat.keyword, limit: Math.min(50, candidateLimit - counters.found) });
+      throwIfExecutionAborted(options.signal);
       counters.sourceRequests += result.requests;
       stat.requests += result.requests;
       retryAfter = result.retryAfter || retryAfter;
@@ -465,6 +470,7 @@ export async function scanSourcesToQueue(
       stat.nextEligibleAt = new Date(startedMs + (result.items.length ? settings.intervalHours * 60 * 60_000 : Math.min(48, 3 * 2 ** Math.min(4, stat.noResult)) * 60 * 60_000)).toISOString();
       counters.found += result.items.length;
       for (const sourceItem of result.items) {
+        throwIfExecutionAborted(options.signal);
         const item = adapter.normalize(sourceItem);
         normalized++;
         stat.normalized += 1;

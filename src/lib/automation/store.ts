@@ -72,6 +72,7 @@ import {
   selectCompatibleWorkerJobs,
   type AutomationWorkerClaimLane,
 } from './executionPolicy';
+import type { AutomationJobLeaseRenewalAttempt } from './jobLeaseRenewal';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -132,15 +133,78 @@ interface AutomationJobHeartbeat {
   jobId: string;
   workerId: string;
   claimToken: string;
+  status?: 'RUNNING';
+  workerOwnerId?: string;
+  workerInstanceId?: string;
+  workerFencingToken?: number;
+  attemptCount?: number;
+  releaseId?: string;
   heartbeatAt: string;
   leaseExpiresAt: string;
+}
+
+type AutomationJobRecoveryClaim = Pick<AutomationJob,
+  | 'id'
+  | 'claimedBy'
+  | 'claimToken'
+  | 'workerOwnerId'
+  | 'workerInstanceId'
+  | 'workerFencingToken'
+  | 'attemptCount'
+  | 'releaseId'
+  | 'leaseExpiresAt'
+>;
+
+function heartbeatMatchesAutomationJobClaim(
+  heartbeat: AutomationJobHeartbeat,
+  job: AutomationJobRecoveryClaim,
+): boolean {
+  return heartbeat.jobId === job.id
+    && heartbeat.workerId === job.claimedBy
+    && Boolean(job.claimToken)
+    && heartbeat.claimToken === job.claimToken
+    && (job.workerOwnerId === undefined || heartbeat.workerOwnerId === job.workerOwnerId)
+    && (job.workerInstanceId === undefined || heartbeat.workerInstanceId === job.workerInstanceId)
+    && (job.workerFencingToken === undefined || heartbeat.workerFencingToken === job.workerFencingToken)
+    && (heartbeat.attemptCount === undefined || heartbeat.attemptCount === job.attemptCount)
+    && (heartbeat.releaseId === undefined || heartbeat.releaseId === job.releaseId)
+    && (heartbeat.status === undefined || heartbeat.status === 'RUNNING');
+}
+
+async function invalidateExpiredAutomationJobHeartbeatsForRecovery(
+  recoveries: AutomationJobRecoveryClaim[],
+  nowMs: number,
+): Promise<void> {
+  if (!recoveries.length) return;
+  const recoveryById = new Map(recoveries.map(job => [job.id, job]));
+  await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+    for (const heartbeat of items) {
+      const recovery = recoveryById.get(heartbeat.jobId);
+      if (!recovery) continue;
+      const fresh = Date.parse(heartbeat.leaseExpiresAt) > nowMs;
+      if (fresh && heartbeatMatchesAutomationJobClaim(heartbeat, recovery)) {
+        const error = new Error('JOB_LEASE_RECOVERY_RACE') as Error & { code?: string };
+        error.code = 'JOB_LEASE_RECOVERY_RACE';
+        throw error;
+      }
+      if (fresh) {
+        const error = new Error('JOB_LEASE_RECOVERY_EVIDENCE_MISMATCH') as Error & { code?: string };
+        error.code = 'JOB_LEASE_RECOVERY_EVIDENCE_MISMATCH';
+        throw error;
+      }
+    }
+    return items.filter(item => !recoveryById.has(item.jobId));
+  });
 }
 
 export type AutomationJobLogEvent =
   | 'job_created' | 'job_reused' | 'job_claim_attempt' | 'job_claimed'
   | 'job_skipped' | 'job_not_runnable' | 'job_handler_resolved' | 'job_started'
   | 'job_completed' | 'job_failed' | 'job_requeued' | 'job_terminal_timeout'
-  | 'job_execution_cancelled';
+  | 'job_execution_cancelled' | 'job_lease_renewal_started' | 'job_lease_renewed'
+  | 'job_lease_renewal_failed' | 'job_ownership_lost' | 'job_handler_aborted'
+  | 'stale_completion_rejected' | 'expired_job_safely_recovered'
+  | 'worker_retry_backoff_applied';
 
 export function logAutomationJobEvent(
   event: AutomationJobLogEvent,
@@ -3162,7 +3226,8 @@ function activeClaimMatches(
     && (
       !guard.ownership
       || (
-        job.workerInstanceId === guard.ownership.instanceId
+        job.workerOwnerId === guard.ownership.ownerId
+        && job.workerInstanceId === guard.ownership.instanceId
         && job.workerFencingToken === guard.ownership.fencingToken
       )
     );
@@ -3299,6 +3364,7 @@ async function runAutomationJobSourceBoundedTransaction(
     includeItem?: (item: AutomationJob) => boolean;
     planItem?: (item: AutomationJob, planningItems: AutomationJob[]) => BoundedPlanningDecision;
     appendOnly?: boolean;
+    beforeCommit?: () => Promise<void>;
   } = {},
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
@@ -3380,6 +3446,7 @@ async function runAutomationJobSourceBoundedTransaction(
         },
         appendItems: () => appendedItems,
         appendOnly: options.appendOnly,
+        beforeCommit: options.beforeCommit,
       },
     );
     return mutation;
@@ -3700,6 +3767,7 @@ export async function claimAutomationJobs(
   const rejectedBeforeClaim: Array<{ job: AutomationJob; validation: AutomationJobContractValidation; previousStatus: AutomationJobStatus }> = [];
   const timedOut: AutomationJob[] = [];
   const requeued: AutomationJob[] = [];
+  const recoveryClaims: AutomationJobRecoveryClaim[] = [];
   let rejectedOverflowCount = 0;
   let timeoutOverflowCount = 0;
   let requeueOverflowCount = 0;
@@ -3757,11 +3825,26 @@ export async function claimAutomationJobs(
       }
       if (item.status === 'RUNNING') {
         const heartbeat = heartbeats.get(item.id);
-        const heartbeatMatches = heartbeat
-          && heartbeat.workerId === item.claimedBy
-          && (!item.claimToken || heartbeat.claimToken === item.claimToken);
-        const effectiveLease = heartbeatMatches ? heartbeat.leaseExpiresAt : item.leaseExpiresAt;
+        const heartbeatMatches = Boolean(heartbeat && heartbeatMatchesAutomationJobClaim(heartbeat, item));
+        const heartbeatFresh = Boolean(heartbeat && Date.parse(heartbeat.leaseExpiresAt) > nowMs);
+        // A fresh but mismatched record is inconsistent ownership evidence. It
+        // may not authorize the current worker, but it also may not be ignored
+        // to take over the job. Once stale, recovery can remove it atomically.
+        const effectiveLease = heartbeatMatches || heartbeatFresh
+          ? heartbeat?.leaseExpiresAt
+          : item.leaseExpiresAt;
         if (effectiveLease && Date.parse(effectiveLease) <= nowMs) {
+        recoveryClaims.push({
+          id: item.id,
+          claimedBy: item.claimedBy,
+          claimToken: item.claimToken,
+          workerOwnerId: item.workerOwnerId,
+          workerInstanceId: item.workerInstanceId,
+          workerFencingToken: item.workerFencingToken,
+          attemptCount: item.attemptCount,
+          releaseId: item.releaseId,
+          leaseExpiresAt: item.leaseExpiresAt,
+        });
         item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
         item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
         item.runnableAt = item.nextRetryAt;
@@ -3957,6 +4040,7 @@ export async function claimAutomationJobs(
       claimPlanningBoundExceeded = true;
       claimBlockReason = 'EXECUTION_RESOURCE_CONFLICT';
     },
+    beforeCommit: () => invalidateExpiredAutomationJobHeartbeatsForRecovery(recoveryClaims, nowMs),
   });
   if (claimed.length) {
     try {
@@ -4028,6 +4112,12 @@ export async function claimAutomationJobs(
         jobId: job.id,
         workerId,
         claimToken: job.claimToken || '',
+        status: 'RUNNING',
+        workerOwnerId: job.workerOwnerId,
+        workerInstanceId: job.workerInstanceId,
+        workerFencingToken: job.workerFencingToken,
+        attemptCount: job.attemptCount,
+        releaseId: job.releaseId,
         heartbeatAt: now,
         leaseExpiresAt: job.leaseExpiresAt || now,
       });
@@ -4036,6 +4126,12 @@ export async function claimAutomationJobs(
   }
   for (const job of requeued) logAutomationJobEvent('job_requeued', job, { workerId, reasonCode: 'LEASE_EXPIRED' });
   for (const job of timedOut) logAutomationJobEvent('job_terminal_timeout', job, { workerId, reasonCode: 'LEASE_EXPIRED_MAX_ATTEMPTS' });
+  for (const job of [...requeued, ...timedOut]) {
+    logAutomationJobEvent('expired_job_safely_recovered', job, {
+      workerId,
+      reasonCode: job.status === 'FAILED' ? 'LEASE_EXPIRED_MAX_ATTEMPTS' : 'LEASE_EXPIRED_RETRY_SCHEDULED',
+    });
+  }
   const notRunnable = oldestNotRunnable as AutomationJob | undefined;
   if (notRunnable && nowMs - (notRunnableLogTimes.get(notRunnable.id) || 0) >= 60_000) {
     notRunnableLogTimes.set(notRunnable.id, nowMs);
@@ -4114,31 +4210,82 @@ export async function claimAutomationJobs(
   return claimed;
 }
 
-export async function heartbeatAutomationJob(
+export async function renewAutomationJobClaimLease(
   id: string,
   workerId: string,
   leaseMs = 60_000,
-  claimToken?: string,
-  ownership?: RuntimeRoleOwnership,
-): Promise<boolean> {
+  guard: AutomationJobClaimGuard,
+  nowMs = Date.now(),
+): Promise<AutomationJobLeaseRenewalAttempt> {
   const startedAt = Date.now();
   let renewalSucceeded = false;
   try {
-    const nowMs = Date.now();
-    if (ownership && !await isRuntimeRoleOwner('WORKER', ownership, nowMs)) return false;
-    if (!claimToken) return false;
+    if (!guard.claimToken) return { renewed: false, reasonCode: 'JOB_CLAIM_TOKEN_MISMATCH' };
+    if (guard.ownership && !await isRuntimeRoleOwner('WORKER', guard.ownership, nowMs)) {
+      return { renewed: false, reasonCode: 'WORKER_ROLE_LOST' };
+    }
     const now = new Date(nowMs).toISOString();
     const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
-    let renewed = false;
-    await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+    let result: AutomationJobLeaseRenewalAttempt = { renewed: false, reasonCode: 'JOB_CLAIM_MISSING' };
+    const renewHeartbeat = async () => runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
       const current = items.find(item => item.jobId === id);
-      if (!current || current.workerId !== workerId || current.claimToken !== claimToken) return undefined;
+      if (!current) return undefined;
+      if (current.status !== undefined && current.status !== 'RUNNING') {
+        result = { renewed: false, reasonCode: 'JOB_NOT_RUNNING' };
+        return undefined;
+      }
+      if (Date.parse(current.leaseExpiresAt) <= nowMs) {
+        result = { renewed: false, reasonCode: 'JOB_LEASE_EXPIRED' };
+        return undefined;
+      }
+      if (current.workerId !== workerId) {
+        result = { renewed: false, reasonCode: 'JOB_WORKER_MISMATCH' };
+        return undefined;
+      }
+      if (current.claimToken !== guard.claimToken) {
+        result = { renewed: false, reasonCode: 'JOB_CLAIM_TOKEN_MISMATCH' };
+        return undefined;
+      }
+      if (guard.ownership && (
+        current.workerOwnerId !== guard.ownership.ownerId
+        || current.workerInstanceId !== guard.ownership.instanceId
+        || current.workerFencingToken !== guard.ownership.fencingToken
+      )) {
+        result = { renewed: false, reasonCode: 'JOB_FENCING_MISMATCH' };
+        return undefined;
+      }
+      if ((guard.attemptCount !== undefined && current.attemptCount !== undefined && current.attemptCount !== guard.attemptCount)
+        || (guard.releaseId !== undefined && current.releaseId !== undefined && current.releaseId !== guard.releaseId)) {
+        result = { renewed: false, reasonCode: 'JOB_FENCING_MISMATCH' };
+        return undefined;
+      }
       current.heartbeatAt = now;
       current.leaseExpiresAt = leaseExpiresAt;
-      renewed = true;
+      result = { renewed: true, leaseExpiresAt };
       return items.filter(item => item.jobId === id || Date.parse(item.leaseExpiresAt) > nowMs);
     });
-    if (!renewed) return false;
+    if (guard.ownership) {
+      try {
+        await withRuntimeRoleAuthority(
+          'WORKER',
+          guard.ownership,
+          async assertAuthority => {
+            await renewHeartbeat();
+            await assertAuthority();
+          },
+          nowMs,
+          Math.max(1, Math.min(5_000, Math.floor(leaseMs / 6))),
+        );
+      } catch (error) {
+        if (error instanceof Error && /WORKER_FENCING_REJECTED|ROLE_FENCE_LOST/.test(error.message)) {
+          return { renewed: false, reasonCode: 'WORKER_ROLE_LOST' };
+        }
+        throw error;
+      }
+    } else {
+      await renewHeartbeat();
+    }
+    if (!result.renewed) return result;
     renewalSucceeded = true;
     // Projection is a read model. Update it atomically only while it still
     // represents this claim, so an in-flight heartbeat can never overwrite a
@@ -4147,16 +4294,16 @@ export async function heartbeatAutomationJob(
     const projectionUpdates = await Promise.allSettled([
       runTransaction<AutomationJobStatusProjection>(activeProjection.collections.status, items => {
         const current = items.find(item => item.id === id);
-        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
-        if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
+        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== guard.claimToken) return undefined;
+        if (guard.ownership && (current.workerInstanceId !== guard.ownership.instanceId || current.workerFencingToken !== guard.ownership.fencingToken)) return undefined;
         current.heartbeatAt = now;
         current.leaseExpiresAt = leaseExpiresAt;
         return items;
       }),
       runTransaction<AutomationJobListProjection>(activeProjection.collections.list, items => {
         const current = items.find(item => item.id === id);
-        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== claimToken) return undefined;
-        if (ownership && (current.workerInstanceId !== ownership.instanceId || current.workerFencingToken !== ownership.fencingToken)) return undefined;
+        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== guard.claimToken) return undefined;
+        if (guard.ownership && (current.workerInstanceId !== guard.ownership.instanceId || current.workerFencingToken !== guard.ownership.fencingToken)) return undefined;
         current.heartbeatAt = now;
         current.leaseExpiresAt = leaseExpiresAt;
         return items;
@@ -4197,11 +4344,11 @@ export async function heartbeatAutomationJob(
         // The projection error was already logged; the stale heartbeat evidence
         // remains fail-closed even when its manifest cannot be invalidated.
       }
-      return true;
+      return result;
     }
-    if (nowMs - lastHeartbeatHealthSummaryRefreshAt < HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS) return true;
+    if (nowMs - lastHeartbeatHealthSummaryRefreshAt < HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS) return result;
     const manifest = await getAutomationJobProjectionManifestForMaintenance().catch(() => null);
-    if (manifest?.rebuildToken || manifest?.inFlightSyncTokens.length) return true;
+    if (manifest?.rebuildToken || manifest?.inFlightSyncTokens.length) return result;
     try {
       await refreshAutomationJobHealthSummary(nowMs);
       lastHeartbeatHealthSummaryRefreshAt = nowMs;
@@ -4212,10 +4359,24 @@ export async function heartbeatAutomationJob(
         reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
       }));
     }
-    return true;
+    return result;
   } finally {
     recordJobLeaseRenewal(Date.now() - startedAt, renewalSucceeded);
   }
+}
+
+export async function heartbeatAutomationJob(
+  id: string,
+  workerId: string,
+  leaseMs = 60_000,
+  claimToken?: string,
+  ownership?: RuntimeRoleOwnership,
+): Promise<boolean> {
+  const result = await renewAutomationJobClaimLease(id, workerId, leaseMs, {
+    claimToken: claimToken || '',
+    ownership,
+  });
+  return result.renewed;
 }
 
 export async function completeAutomationJob(
@@ -4456,11 +4617,23 @@ export async function appendAutomationAuditOnce(input: Omit<AutomationAuditEvent
 export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRoleOwnership, actor: string, nowMs = Date.now()): Promise<AutomationJob | null> {
   if (!await isRuntimeRoleOwner('WORKER', ownership, nowMs)) throw new Error('STALE_RECOVERY_FENCING_REJECTED');
   let recovered: AutomationJob | null = null;
+  const recoveryClaims: AutomationJobRecoveryClaim[] = [];
   const now = new Date(nowMs).toISOString();
   const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'RUNNING' || job.completedAt) return undefined;
     if (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) > nowMs) throw new Error('HEALTHY_JOB_LEASE_TAKEOVER_FORBIDDEN');
+    recoveryClaims.push({
+      id: job.id,
+      claimedBy: job.claimedBy,
+      claimToken: job.claimToken,
+      workerOwnerId: job.workerOwnerId,
+      workerInstanceId: job.workerInstanceId,
+      workerFencingToken: job.workerFencingToken,
+      attemptCount: job.attemptCount,
+      releaseId: job.releaseId,
+      leaseExpiresAt: job.leaseExpiresAt,
+    });
     const retry = job.attemptCount < job.maxAttempts;
     job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED';
     job.nextRetryAt = retry ? new Date(nowMs + retryDelayMs(job.type, job.attemptCount)).toISOString() : undefined;
@@ -4472,10 +4645,14 @@ export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRo
     markAutomationJobProjectionSourceMutation(job);
     recovered = structuredClone(job);
     return items;
-  });
+  }, () => invalidateExpiredAutomationJobHeartbeatsForRecovery(recoveryClaims, nowMs));
   const result = recovered as AutomationJob | null;
   if (result) {
     await syncJobReadModelsBestEffort(result, true, projectionMutation);
+    logAutomationJobEvent('expired_job_safely_recovered', result, {
+      workerId: actor,
+      reasonCode: result.status === 'FAILED' ? 'LEASE_EXPIRED_MAX_ATTEMPTS' : 'LEASE_EXPIRED_RETRY_SCHEDULED',
+    });
     await appendAutomationAudit({ correlationId: result.operationId, operationId: `${result.operationId}:stale-recovery:${ownership.fencingToken}`.slice(0, 160), jobId: result.id, operationType: 'STALE_JOB_RECOVERED', actor, previousState: 'RUNNING', nextState: result.status, risk: 'MEDIUM', reasons: ['LEASE_EXPIRED', `fencing:${ownership.fencingToken}`], dryRun: result.dryRun, attempts: result.attemptCount });
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return result;

@@ -36,6 +36,7 @@ import {
 import { createAutomationJob, getAutomationControl } from './store';
 import type { AutomationJob } from './types';
 import { vietnamDayKey } from './timezone';
+import { throwIfExecutionAborted } from './executionBudget';
 
 const OUTBOUND_COLLECTION = 'automation-outbound-events';
 const CONTROL_BLOCK_REASONS = new Set([
@@ -475,7 +476,12 @@ function blockedJournalOperationId(operationId: string, productId: string): stri
   return `blocked:${operationId.slice(0, 120)}:${identity}`.slice(0, 160);
 }
 
-export async function executeAutoSafePublish(job: AutomationJob, workerId: string): Promise<Record<string, unknown>> {
+export async function executeAutoSafePublish(
+  job: AutomationJob,
+  workerId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<Record<string, unknown>> {
+  throwIfExecutionAborted(options.signal);
   const productId = typeof job.payload.productId === 'string' ? job.payload.productId : '';
   if (!productId) throw new Error('VALIDATION_PRODUCT_ID_REQUIRED');
   const existingJournal = await getOperationJournal(job.operationId);
@@ -485,6 +491,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
   const product = await getProductById(productId);
   if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
   const control = await getAutomationControl();
+  throwIfExecutionAborted(options.signal);
   const currentSnapshot = readinessSnapshotHash(product);
   const requestedSnapshot = typeof job.payload.readinessSnapshotHash === 'string' ? job.payload.readinessSnapshotHash : undefined;
   const publishingTransitionExists = await hasPublishingTransition(job, productId, false);
@@ -621,6 +628,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
   }
 
   if (!decision.eligible) {
+    throwIfExecutionAborted(options.signal);
     const blockedDecision = contextualizeBlockedDecision(decision, control);
     const journalOperationId = existingJournal?.operationType === 'AUTO_SAFE_PUBLISH'
       ? blockedJournalOperationId(job.operationId, productId)
@@ -642,6 +650,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
 
   const publicationAuditJournalEffect = !existingJournal
     || existingJournal.intendedEffects.some(effect => effect.id === 'publication-audit');
+  throwIfExecutionAborted(options.signal);
   await ensureOperationJournal({
     operationId: job.operationId,
     jobId: job.id,
@@ -697,6 +706,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
   };
 
   try {
+    throwIfExecutionAborted(options.signal);
     if (recoveryCanaryPermit && await acquireEffect('recovery-canary-permit')) {
       await finishEffect('recovery-canary-permit', {
         permitId: recoveryCanaryPermit.id,
@@ -705,11 +715,13 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
       });
     }
     await ensurePublishingLifecycle(job, workerId, productId);
+    throwIfExecutionAborted(options.signal);
     if (process.env.NODE_ENV === 'test' && job.payload.simulateCrashAfterPublishingTransition === true && job.attemptCount === 1) {
       throw new Error('TEMPORARY_ERROR:SIMULATED_CRASH_AFTER_PUBLISHING_TRANSITION');
     }
 
     const fresh = await getProductById(productId);
+    throwIfExecutionAborted(options.signal);
     const publishEffectRequired = await acquireEffect('publish-product');
     if (!publishEffectRequired) {
       if (fresh?.publicationEffectKey !== effectKey || fresh.status !== 'published' || fresh.publicHidden !== false) {
@@ -718,6 +730,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
     } else if (fresh?.publicationEffectKey === effectKey && fresh.status === 'published' && fresh.publicHidden === false) {
       await finishEffect('publish-product', { productId, effectKey, publishedAt: fresh.publishedAt });
     } else {
+      throwIfExecutionAborted(options.signal);
       const published = await publishCanonicalProductTransaction(productId, {
         status: 'published',
         autoPublished: true,
@@ -737,6 +750,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
         runtimeRecoveryCanaryPermitId: recoveryCanaryPermit?.id,
         dryRun: false,
       });
+      throwIfExecutionAborted(options.signal);
       if (!published || published.status !== 'published' || published.publicHidden !== false || published.lifecycleState !== 'PUBLISHING') {
         throw new Error('AUTO_SAFE_PUBLISH_WRITE_BLOCKED');
       }
@@ -746,6 +760,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
       await finishEffect('publish-product', { productId, effectKey, publishedAt: published.publishedAt });
     }
 
+    throwIfExecutionAborted(options.signal);
     if (publicationAuditJournalEffect) {
       if (await acquireEffect('publication-audit')) {
         const audit = await ensurePublishedPublicationAudit(job, workerId, productId, effectKey);
@@ -755,8 +770,10 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
       await ensurePublishedPublicationAudit(job, workerId, productId, effectKey);
     }
     await ensurePublishedLifecycle(job, workerId, productId);
+    throwIfExecutionAborted(options.signal);
 
     if (await acquireEffect('outbound-event')) {
+      throwIfExecutionAborted(options.signal);
       if (process.env.NODE_ENV === 'test' && job.payload.simulateCrashAfterEventClaim === true && job.attemptCount === 1) throw new Error('TEMPORARY_ERROR:SIMULATED_CRASH_AFTER_EVENT_CLAIM');
       const event = await recordPublicationEvent(effectKey, productId, job.id);
       await finishEffect('outbound-event', { id: event.event.id, effectKey: event.event.effectKey });
@@ -764,6 +781,7 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
 
     let monitorJobId: string | undefined;
     if (await acquireEffect('monitor-job')) {
+      throwIfExecutionAborted(options.signal);
       if (process.env.NODE_ENV === 'test' && job.payload.simulateCrashAfterMonitorClaim === true && job.attemptCount === 1) throw new Error('TEMPORARY_ERROR:SIMULATED_CRASH_AFTER_MONITOR_CLAIM');
       const scheduledAt = new Date(Date.now() + 15 * 60_000).toISOString();
       const monitor = await createAutomationJob({
@@ -784,11 +802,13 @@ export async function executeAutoSafePublish(job: AutomationJob, workerId: strin
         priority: 70,
         scheduledAt,
       });
+      throwIfExecutionAborted(options.signal);
       monitorJobId = monitor.job.id;
       await saveCanonicalProduct(productId, { monitoringScheduledAt: scheduledAt, nextAutomaticAction: 'POST_PUBLISH_MONITOR' });
       await finishEffect('monitor-job', { jobId: monitor.job.id });
     }
     const journal = await getOperationJournal(job.operationId);
+    throwIfExecutionAborted(options.signal);
     if (!journal || journal.reconciliationStatus !== 'CONSISTENT') throw new Error('TEMPORARY_ERROR:JOURNAL_INCOMPLETE');
     await completeCanaryEffect(control.effectiveMode, effectKey, true);
     const published = await getProductById(productId);

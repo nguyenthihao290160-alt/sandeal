@@ -15,6 +15,7 @@ import type { AutomationJob } from './types';
 import { reconcilePendingLifecycleTransitions } from '@/lib/autonomous/lifecycleStore';
 import { recordSuccessfulShadowCycle } from './canaryController';
 import { scheduleSafeProductRechecks } from './safeProductRechecks';
+import { throwIfExecutionAborted } from './executionBudget';
 
 const TERMINAL_JOB_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED']);
 
@@ -56,7 +57,11 @@ function descendantsOf(parentId: string, jobs: AutomationJob[]): AutomationJob[]
   return descendants;
 }
 
-export async function runAutonomousReconciler(nowMs = Date.now()): Promise<ReconcilerResult> {
+export async function runAutonomousReconciler(
+  nowMs = Date.now(),
+  options: { signal?: AbortSignal } = {},
+): Promise<ReconcilerResult> {
+  throwIfExecutionAborted(options.signal);
   // Deliberate maintenance-only full-history scan. This durable worker job
   // repairs lineage and never runs inside an interactive health/dashboard
   // request; current-state consumers use compact projections.
@@ -81,6 +86,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
     skipped: 0,
   };
   const control = await getAutomationControl();
+  throwIfExecutionAborted(options.signal);
   result.staleCandidates = await recoverStaleProcessing(nowMs);
   result.repaired += result.staleCandidates;
   const lifecycleRepair = await reconcilePendingLifecycleTransitions(100);
@@ -91,12 +97,14 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
   const initialJobs = await getAllAutomationJobs();
   const initialJobIds = new Set(initialJobs.map(job => job.id));
   for (const candidate of await listCandidateQueue()) {
+    throwIfExecutionAborted(options.signal);
     if (!candidate.durableJobId || initialJobIds.has(candidate.durableJobId)) continue;
     result.orphans += 1;
     if (await clearOrphanedCandidateBridge(candidate.id, candidate.durableJobId)) result.repaired += 1;
   }
 
   const bridge = await bridgeCandidatesToDurableJobs({ requestedBy: 'autonomous-reconciler', limit: 100 });
+  throwIfExecutionAborted(options.signal);
   result.bridgeJobs = bridge.created;
   result.repaired += bridge.created;
 
@@ -105,6 +113,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
   result.inspected += products.length + jobs.length;
 
   for (const job of jobs) {
+    throwIfExecutionAborted(options.signal);
     if (job.status !== 'WAITING_APPROVAL' || !job.approvalExpiresAt || Date.parse(job.approvalExpiresAt) > nowMs) continue;
     if (await approveAutomationJob(job.id, 'autonomous-reconciler', 'Approval snapshot expired.', false)) {
       result.staleApprovalsExpired += 1;
@@ -114,15 +123,18 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
 
   const duplicateGroups = new Map<string, AutomationJob[]>();
   for (const job of jobs) {
+    throwIfExecutionAborted(options.signal);
     const key = `${job.type}:${job.idempotencyKey}`;
     const group = duplicateGroups.get(key) || [];
     group.push(job);
     duplicateGroups.set(key, group);
   }
   for (const group of duplicateGroups.values()) {
+    throwIfExecutionAborted(options.signal);
     if (group.length < 2) continue;
     const ordered = [...group].sort((a, b) => Number(b.status === 'SUCCEEDED') - Number(a.status === 'SUCCEEDED') || Date.parse(a.createdAt) - Date.parse(b.createdAt));
     for (const duplicate of ordered.slice(1)) {
+      throwIfExecutionAborted(options.signal);
       if (!['PENDING', 'WAITING_APPROVAL', 'WAITING_FOR_MANUAL_INPUT', 'WAITING_CHILDREN', 'RETRY_SCHEDULED', 'PAUSED'].includes(duplicate.status)) continue;
       if (await cancelAutomationJob(duplicate.id, 'autonomous-reconciler', 'Duplicate durable child idempotency key.')) {
         result.duplicateJobsCancelled += 1;
@@ -132,6 +144,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
   }
 
   for (const job of jobs) {
+    throwIfExecutionAborted(options.signal);
     if (job.parentJobId && !jobsById.has(job.parentJobId)) result.orphans += 1;
     if (job.status !== 'WAITING_CHILDREN') continue;
     const descendants = descendantsOf(job.id, jobs);
@@ -156,6 +169,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
   }
 
   for (const product of products) {
+    throwIfExecutionAborted(options.signal);
     if (product.lifecycleState === 'READY_FOR_PUBLISH' && ['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode) && !control.publishPaused && !control.killSwitch) {
       const key = `auto-safe-publish:${publicationIdempotencyKey(product)}:${control.effectiveMode}`.slice(0, 160);
       const created = await createAutomationJob({
@@ -210,6 +224,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
     }
   }
   const rechecks = await scheduleSafeProductRechecks(products, { now: nowMs, limit: 50 });
+  throwIfExecutionAborted(options.signal);
   result.recheckJobs = rechecks.created;
   result.duplicateRechecksSuppressed = rechecks.duplicateSuppressed;
   result.rechecksAwaitingExecution = rechecks.created + rechecks.duplicateSuppressed;
@@ -220,6 +235,7 @@ export async function runAutonomousReconciler(nowMs = Date.now()): Promise<Recon
     + rechecks.manualInputRequired;
 
   for (const journal of await listInconsistentJournals()) {
+    throwIfExecutionAborted(options.signal);
     const product = products.find(item => item.publicationJobId === journal.jobId || item.relatedJobId === journal.jobId);
     if (!product?.publicationEffectKey) continue;
     const effect = journal.intendedEffects.find(item => item.id === 'publish-product' && item.status !== 'COMPLETED');

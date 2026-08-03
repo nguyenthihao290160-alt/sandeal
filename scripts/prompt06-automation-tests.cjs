@@ -62,7 +62,7 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
   });
 
   await test('lease hết hạn phục hồi tác vụ mà không báo thành công', async () => {
-    await reset(); const created = await create({ idempotencyKey: 'expired-lease-01', maxAttempts: 3 }); const base = Date.now();
+    await reset(); const created = await create({ idempotencyKey: 'expired-lease-01', maxAttempts: 3 }); const base = Math.max(Date.now(), Date.parse(created.job.scheduledAt));
     await store.claimAutomationJobs('worker-a', 1, 100, base);
     await store.claimAutomationJobs('worker-b', 1, 100, base + 101);
     const recovered = await store.getAutomationJob(created.job.id);
@@ -70,7 +70,7 @@ const headers = { authorization: auth, 'content-type': 'application/json' };
   });
 
   await test('heartbeat gia hạn lease đúng worker', async () => {
-    await reset(); const created = await create({ idempotencyKey: 'heartbeat-job-01' }); const [claimed] = await store.claimAutomationJobs('worker-heartbeat', 1, 100);
+    await reset(); const created = await create({ idempotencyKey: 'heartbeat-job-01' }); const [claimed] = await store.claimAutomationJobs('worker-heartbeat', 1, 5_000);
     assert(claimed?.claimToken); assert(await store.heartbeatAutomationJob(created.job.id, 'worker-heartbeat', 5000, claimed.claimToken));
     assert(!(await store.heartbeatAutomationJob(created.job.id, 'worker-other', 5000, claimed.claimToken)));
     assert(!(await store.heartbeatAutomationJob(created.job.id, 'worker-heartbeat', 5000)));

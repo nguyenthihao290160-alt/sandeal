@@ -589,7 +589,8 @@ async function main() {
     assert.match(workerScript, /isContinuousWorkerPoolEnabled\(\)/);
     assert.match(workerScript, /criticalSchedulingActive[\s\S]*continuousPoolActive[\s\S]*runContinuousWorkerPool[\s\S]*processAutomationBatch/);
     const workerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'lib', 'automation', 'worker.ts'), 'utf8');
-    assert.match(workerSource, /claimAutomationJobs\(workerId, limit, 60_000, Date\.now\(\), ownership, options\)/);
+    assert.match(workerSource, /jobLeaseMs = normalizeAutomationJobLeaseMs[\s\S]*claimAutomationJobs\(workerId, limit, jobLeaseMs, Date\.now\(\), ownership, options\)/);
+    assert.match(workerSource, /for \(const job of claimed\)[\s\S]*startAutomationJobLeaseRenewal[\s\S]*claimedJobLifecycles\.set/);
     assert.match(
       workerSource,
       /orderAutomationWorkerBatch[\s\S]*isCriticalAutomationJob[\s\S]*orderedClaimed = orderAutomationWorkerBatch\(claimed\)[\s\S]*orderedClaimed\.every\(job => job\.type === 'PROCESS_CANDIDATE'\)[\s\S]*Promise\.all\(orderedClaimed\.map\(processJob\)\)[\s\S]*for \(const job of orderedClaimed\) await processJob\(job\)/,

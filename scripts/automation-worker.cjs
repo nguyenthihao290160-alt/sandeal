@@ -16,15 +16,33 @@ const instanceId = `${workerId}:${process.pid}:${crypto.randomUUID()}`;
 const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 1000)).toISOString();
 const once = process.argv.includes('--once');
 const ROLE_HEARTBEAT_TIMEOUT_MS = 5_000;
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 12_000;
 let stopping = false;
 let roleLeaseLost = false;
 let forcedShutdown = false;
 let activeRoleHeartbeat;
+let shutdownDeadlineTimer;
+const shutdownController = new AbortController();
+function armShutdownDeadline(reasonCode) {
+  if (shutdownDeadlineTimer) return;
+  shutdownDeadlineTimer = setTimeout(() => {
+    forcedShutdown = true;
+    console.error(JSON.stringify({
+      type: 'worker_shutdown',
+      workerId: instanceId,
+      phase: 'drain_timeout',
+      reasonCode,
+    }));
+    process.exit(1);
+  }, SHUTDOWN_DRAIN_TIMEOUT_MS);
+}
 function requestShutdown(signal) {
   if (stopping) return;
   stopping = true;
+  shutdownController.abort('WORKER_SHUTDOWN_REQUESTED');
+  armShutdownDeadline('WORKER_SHUTDOWN_DRAIN_TIMEOUT');
   console.log(JSON.stringify({
-    type: 'worker_shutdown',
+    type: 'worker_shutdown_drain_started',
     workerId: instanceId,
     phase: 'requested',
     signal,
@@ -80,7 +98,10 @@ async function waitForWorkerRole() {
 
 (async () => {
   const role = await waitForWorkerRole();
-  if (!role?.ownership) return;
+  if (!role?.ownership) {
+    if (shutdownDeadlineTimer) clearTimeout(shutdownDeadlineTimer);
+    return;
+  }
   const ownership = role.ownership;
   console.log(JSON.stringify({
     type: 'worker_role_acquired',
@@ -101,6 +122,8 @@ async function waitForWorkerRole() {
       if (!renewed || roleHeartbeatFailures >= 2) {
         roleLeaseLost = true;
         stopping = true;
+        shutdownController.abort('WORKER_FENCING_REJECTED');
+        armShutdownDeadline('WORKER_ROLE_LOST_DRAIN_TIMEOUT');
         console.error(JSON.stringify({ type: 'worker_role_lost', workerId: instanceId, reasonCode: 'WORKER_FENCING_REJECTED', consecutiveFailures: roleHeartbeatFailures }));
       }
     }).catch(error => {
@@ -109,6 +132,8 @@ async function waitForWorkerRole() {
       if (roleHeartbeatFailures >= 2) {
         roleLeaseLost = true;
         stopping = true;
+        shutdownController.abort('WORKER_FENCING_REJECTED');
+        armShutdownDeadline('WORKER_ROLE_LOST_DRAIN_TIMEOUT');
       }
     }).finally(() => {
       roleHeartbeatBusy = false;
@@ -135,9 +160,12 @@ async function waitForWorkerRole() {
               criticalReservedCapacity: concurrency > 1 ? 1 : 0,
               priorityScheduling: criticalSchedulingActive ? 'ALL_CRITICAL' : 'RUNTIME_GUARDIAN_ONLY',
               shouldStop: () => stopping || roleLeaseLost,
-              drainTimeoutMs: 12_000,
+              shutdownSignal: shutdownController.signal,
+              drainTimeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS,
             })
-          : await processAutomationBatch(instanceId, concurrency, ownership);
+          : await processAutomationBatch(instanceId, concurrency, ownership, {
+              shutdownSignal: shutdownController.signal,
+            });
         if (continuousPoolActive && !result.drained) {
           forcedShutdown = true;
           console.error(JSON.stringify({
@@ -155,9 +183,19 @@ async function waitForWorkerRole() {
         if (reasonCode.includes('WORKER_FENCING_REJECTED')) {
           roleLeaseLost = true;
           stopping = true;
+          shutdownController.abort('WORKER_FENCING_REJECTED');
+          armShutdownDeadline('WORKER_ROLE_LOST_DRAIN_TIMEOUT');
           break;
         }
-        if (!once && !stopping) await wait(5_000);
+        if (!once && !stopping) {
+          console.warn(JSON.stringify({
+            type: 'worker_retry_backoff_applied',
+            workerId: instanceId,
+            delayMs: 5_000,
+            reasonCode: 'WORKER_TICK_FAILED',
+          }));
+          await wait(5_000);
+        }
         if (once) throw error;
         continue;
       }
@@ -175,8 +213,9 @@ async function waitForWorkerRole() {
     const released = !roleLeaseLost && !forcedShutdown
       ? await releaseRuntimeRole('WORKER', ownership)
       : false;
+    if (shutdownDeadlineTimer) clearTimeout(shutdownDeadlineTimer);
     console.log(JSON.stringify({
-      type: 'worker_shutdown',
+      type: 'worker_shutdown_drain_completed',
       workerId: instanceId,
       phase: 'completed',
       released,

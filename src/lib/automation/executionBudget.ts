@@ -67,7 +67,8 @@ export function createAutomationExecutionBudget(
     abortReason = abortCode(parentSignal?.reason);
     if (!controller.signal.aborted) controller.abort(abortReason);
   };
-  parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+  if (parentSignal?.aborted) onParentAbort();
+  else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
   const timer = setTimeout(() => {
     abortReason = 'HANDLER_TIMEOUT';
     if (!controller.signal.aborted) controller.abort(abortReason);

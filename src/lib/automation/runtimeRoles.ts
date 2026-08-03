@@ -139,11 +139,15 @@ async function acquireRuntimeFence(
   ownerId: string,
   instanceId: string,
   shouldRenew?: () => Promise<boolean>,
+  maximumWaitMs?: number,
 ): Promise<RuntimeFenceHandle> {
   const token = generateId();
   const startedAt = Date.now();
+  const boundedMaximumWaitMs = maximumWaitMs === undefined
+    ? ROLE_FENCE_WAIT_MS
+    : Math.max(1, Math.min(ROLE_FENCE_WAIT_MS, maximumWaitMs));
   let acquired = false;
-  while (!acquired && Date.now() - startedAt < ROLE_FENCE_WAIT_MS) {
+  while (!acquired && Date.now() - startedAt < boundedMaximumWaitMs) {
     const nowMs = Date.now();
     const now = new Date(nowMs).toISOString();
     await runTransaction<RuntimeRoleFenceLease>(ROLE_FENCE_COLLECTION, items => {
@@ -240,8 +244,9 @@ async function withRuntimeFence<T>(
   instanceId: string,
   work: (assertHeld: RuntimeFenceAssertion) => Promise<T>,
   shouldRenew?: () => Promise<boolean>,
+  maximumWaitMs?: number,
 ): Promise<T> {
-  const fence = await acquireRuntimeFence(role, ownerId, instanceId, shouldRenew);
+  const fence = await acquireRuntimeFence(role, ownerId, instanceId, shouldRenew, maximumWaitMs);
   try {
     await fence.assertHeld();
     return await work(fence.assertHeld);
@@ -415,6 +420,7 @@ export async function withRuntimeRoleAuthority<T>(
   ownership: RuntimeRoleOwnership,
   work: (assertAuthority: RuntimeFenceAssertion) => Promise<T>,
   nowMs = Date.now(),
+  maximumWaitMs?: number,
 ): Promise<T> {
   return withRuntimeFence(role, `authority:${ownership.ownerId}`, ownership.instanceId, async assertFence => {
     let authorized = false;
@@ -443,7 +449,7 @@ export async function withRuntimeRoleAuthority<T>(
     };
     await assertAuthority();
     return work(assertAuthority);
-  }, () => isRuntimeRoleOwner(role, ownership));
+  }, () => isRuntimeRoleOwner(role, ownership), maximumWaitMs);
 }
 
 export async function listRuntimeRoleLeases(): Promise<RuntimeRoleLease[]> {
