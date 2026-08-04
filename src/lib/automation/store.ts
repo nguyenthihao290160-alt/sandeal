@@ -55,6 +55,7 @@ import {
   invalidateAutomationJobProjectionMutation,
   deterministicProjectionFingerprint,
   readBoundedAutomationJobProjections,
+  readBoundedAutomationJobStatuses,
   refreshAutomationJobHealthSummary,
   transitionAutomationJobProjectionRepair,
   validateAutomationJobHealthSummary,
@@ -3879,8 +3880,413 @@ export function selectProductForwardRunnableJobs(items: AutomationJob[], limit: 
   return [product, ...fairOrder.filter(job => job.id !== product.id)].slice(0, maximum);
 }
 
+interface AutomationJobClaimOptions {
+  maximumInFlight?: number;
+  criticalReservedCapacity?: number;
+  enforceExecutionCompatibility?: boolean;
+  claimLane?: AutomationWorkerClaimLane;
+  preferCritical?: boolean;
+  preferProductCritical?: boolean;
+}
+
+type AutomationJobClaimBlockReason =
+  | 'WORKER_CAPACITY_FULL'
+  | 'EXECUTION_RESOURCE_CONFLICT'
+  | 'SCHEDULED_FOR_FUTURE';
+
+interface AutomationJobClaimSelection {
+  activeJobs: AutomationJob[];
+  due: AutomationJob[];
+  oldestNotRunnable?: AutomationJob;
+  poolActiveSlots: number;
+  poolAvailableSlots: number;
+  claimBlockReason: AutomationJobClaimBlockReason;
+}
+
+function selectAutomationJobsForClaim(
+    items: AutomationJob[],
+    limit: number,
+    nowMs: number,
+    control: AutomationControlState,
+    options: AutomationJobClaimOptions,
+): AutomationJobClaimSelection {
+  const activeJobs = items.filter(item => item.status === 'RUNNING');
+  const maximumInFlight = Number.isInteger(options.maximumInFlight)
+      ? Math.max(1, Number(options.maximumInFlight))
+      : undefined;
+  const reservedCriticalCapacity = maximumInFlight && maximumInFlight > 1
+      ? Math.max(0, Math.min(maximumInFlight - 1, Math.floor(Number(options.criticalReservedCapacity) || 0)))
+      : 0;
+  const activeGuardianJobs = activeJobs.filter(item => item.type === 'RUNTIME_GUARDIAN').length;
+  const activeNonGuardianJobs = activeJobs.length - activeGuardianJobs;
+  const activeCriticalJobs = activeJobs.filter(item => isCriticalAutomationJob(item)).length;
+  const activeNormalJobs = activeJobs.length - activeCriticalJobs;
+  const totalAvailableCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(0, maximumInFlight - activeJobs.length);
+  const guardianCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(0, (reservedCriticalCapacity || maximumInFlight) - activeGuardianJobs);
+  const nonGuardianCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(0, maximumInFlight - reservedCriticalCapacity - activeNonGuardianJobs);
+  const criticalCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(0, (reservedCriticalCapacity || maximumInFlight) - activeCriticalJobs);
+  const normalCapacity = maximumInFlight === undefined
+      ? limit
+      : Math.max(0, maximumInFlight - reservedCriticalCapacity - activeNormalJobs);
+  const claimLane = options.claimLane || 'ANY';
+  const allCriticalLane = claimLane === 'CRITICAL' || claimLane === 'NON_CRITICAL';
+  const laneAvailableCapacity = claimLane === 'RUNTIME_GUARDIAN'
+      ? guardianCapacity
+      : claimLane === 'NON_GUARDIAN'
+          ? nonGuardianCapacity
+          : claimLane === 'CRITICAL'
+              ? criticalCapacity
+              : claimLane === 'NON_CRITICAL'
+                  ? normalCapacity
+                  : guardianCapacity + nonGuardianCapacity;
+  const availableCapacity = Math.max(
+      0,
+      Math.min(limit, totalAvailableCapacity, laneAvailableCapacity),
+  );
+  const eligible = items.filter(item => item.status === 'PENDING'
+      && Date.parse(item.scheduledAt) <= nowMs
+      && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
+      && isAutomationJobEligibleForClaimLane(item, claimLane));
+  const due = options.enforceExecutionCompatibility
+      ? selectCompatibleWorkerJobs(
+          eligible,
+          activeJobs,
+          availableCapacity,
+          nowMs,
+          options.preferProductCritical === true
+              ? selectProductForwardRunnableJobs
+              : selectFairRunnableJobs,
+          options.criticalReservedCapacity,
+          allCriticalLane
+              ? {
+                critical: claimLane === 'NON_CRITICAL' ? 0 : criticalCapacity,
+                normal: claimLane === 'CRITICAL' ? 0 : normalCapacity,
+              }
+              : {
+                runtimeGuardian: claimLane === 'NON_GUARDIAN' ? 0 : guardianCapacity,
+                nonGuardian: claimLane === 'RUNTIME_GUARDIAN' ? 0 : nonGuardianCapacity,
+              },
+          options.preferCritical === true,
+      )
+      : (options.preferProductCritical === true
+          ? selectProductForwardRunnableJobs
+          : selectFairRunnableJobs)(eligible, availableCapacity, nowMs);
+  const claimBlockReason: AutomationJobClaimBlockReason = due.length
+      ? 'SCHEDULED_FOR_FUTURE'
+      : availableCapacity <= 0
+          ? 'WORKER_CAPACITY_FULL'
+          : eligible.length > 0 && options.enforceExecutionCompatibility
+              ? 'EXECUTION_RESOURCE_CONFLICT'
+              : 'SCHEDULED_FOR_FUTURE';
+  return {
+    activeJobs,
+    due,
+    oldestNotRunnable: due.length
+        ? undefined
+        : items
+            .filter(item => item.status === 'PENDING')
+            .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0],
+    poolActiveSlots: activeJobs.length,
+    poolAvailableSlots: availableCapacity,
+    claimBlockReason,
+  };
+}
+
+function compareClaimPlanningCandidates(
+    left: AutomationJob,
+    right: AutomationJob,
+    nowMs: number,
+): number {
+  const leftOverdue = nowMs - runnableCreatedAt(left) >= FAIRNESS_AFTER_MS;
+  const rightOverdue = nowMs - runnableCreatedAt(right) >= FAIRNESS_AFTER_MS;
+  if (leftOverdue !== rightOverdue) return leftOverdue ? -1 : 1;
+  if (leftOverdue) return runnableCreatedAt(left) - runnableCreatedAt(right);
+  return right.priority - left.priority
+      || runnableCreatedAt(left) - runnableCreatedAt(right)
+      || left.id.localeCompare(right.id);
+}
+
+function includeAutomationJobInClaimPlan(
+    item: AutomationJob,
+    nowMs: number,
+    control: AutomationControlState,
+    options: AutomationJobClaimOptions,
+): boolean {
+  if (TERMINAL.has(item.status)) return false;
+  if (item.status === 'RUNNING') return true;
+  if (item.status === 'RETRY_SCHEDULED') {
+    return Boolean(item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs);
+  }
+  if (item.status !== 'PENDING' || Date.parse(item.scheduledAt) > nowMs) return false;
+  if (control.killSwitch && item.type !== 'RUNTIME_GUARDIAN') return false;
+  return isAutomationJobEligibleForClaimLane(item, options.claimLane || 'ANY');
+}
+
+function automationJobFromClaimProjection(
+    projection: AutomationJobStatusProjection,
+): AutomationJob {
+  const payload: Record<string, unknown> = {};
+  if (projection.resourceProductIds?.length) {
+    payload.productIds = [...projection.resourceProductIds];
+    payload.productId = projection.resourceProductIds[0];
+  }
+  if (projection.resourceCandidateId) payload.candidateId = projection.resourceCandidateId;
+  if (projection.resourceDraftId) payload.draftId = projection.resourceDraftId;
+  if (
+      projection.type === 'RECONCILE_AUTOMATION'
+      && (projection.executionConcurrencyClass === 'PROJECTION_MAINTENANCE'
+        || projection.executionCritical === true)
+  ) {
+    payload.maintenanceTask = 'JOB_HEALTH_PROJECTION_REBUILD';
+  }
+  return {
+    ...projection,
+    payload,
+    // Status projections intentionally redact this value. A synchronized
+    // projection can still validate every claim-planning field without
+    // retaining the durable idempotency key.
+    idempotencyKey: `projection:${projection.id}`.slice(0, 160),
+  };
+}
+
+interface AutomationJobReadOnlyClaimPlan {
+  requiresSourceMutation: boolean;
+  selection: AutomationJobClaimSelection;
+  oldestNotRunnable?: AutomationJob;
+  boundExceeded: boolean;
+  candidatesTruncated: boolean;
+  source: 'MANIFEST_EMPTY' | 'STATUS_PROJECTION' | 'DURABLE_SCAN';
+  durationMs: number;
+}
+
+function evaluateAutomationJobReadOnlyClaimPlan(
+    items: AutomationJob[],
+    heartbeats: Map<string, AutomationJobHeartbeat>,
+    limit: number,
+    nowMs: number,
+    control: AutomationControlState,
+    options: AutomationJobClaimOptions,
+): Pick<AutomationJobReadOnlyClaimPlan, 'requiresSourceMutation' | 'selection'> {
+  for (const item of items) {
+    const validation = validateAutomationJobContract(item);
+    if (!validation.valid) {
+      return {
+        requiresSourceMutation: true,
+        selection: selectAutomationJobsForClaim(items, limit, nowMs, control, options),
+      };
+    }
+    if (item.status === 'RUNNING') {
+      const heartbeat = heartbeats.get(item.id);
+      const heartbeatMatches = Boolean(heartbeat && heartbeatMatchesAutomationJobClaim(heartbeat, item));
+      const heartbeatFresh = Boolean(heartbeat && Date.parse(heartbeat.leaseExpiresAt) > nowMs);
+      const effectiveLease = heartbeatMatches || heartbeatFresh
+          ? heartbeat?.leaseExpiresAt
+          : item.leaseExpiresAt;
+      if (effectiveLease && Date.parse(effectiveLease) <= nowMs) {
+        return {
+          requiresSourceMutation: true,
+          selection: selectAutomationJobsForClaim(items, limit, nowMs, control, options),
+        };
+      }
+    }
+    if (item.status === 'RETRY_SCHEDULED'
+        && item.nextRetryAt
+        && Date.parse(item.nextRetryAt) <= nowMs) {
+      return {
+        requiresSourceMutation: true,
+        selection: selectAutomationJobsForClaim(items, limit, nowMs, control, options),
+      };
+    }
+  }
+  const selection = selectAutomationJobsForClaim(items, limit, nowMs, control, options);
+  return { requiresSourceMutation: selection.due.length > 0, selection };
+}
+
+let claimPlanningProjectionCache: {
+  key: string;
+  items: AutomationJob[];
+} | undefined;
+
+function claimPlanningProjectionKey(manifest: AutomationJobProjectionManifest): string {
+  return [
+    manifest.activeSlot || 'LEGACY',
+    manifest.activeStorageRepairFence || 0,
+    manifest.sourceRevision,
+    manifest.sourceHighWatermark || 0,
+    manifest.projectionFingerprint,
+    manifest.updatedAt,
+  ].join(':');
+}
+
+function projectionManifestCanPlanClaims(
+    manifest: AutomationJobProjectionManifest | null,
+): manifest is AutomationJobProjectionManifest {
+  return Boolean(
+      manifest
+      && manifest.baselineEstablished
+      && manifest.currentStateComplete
+      && manifest.completeness.currentStateComplete
+      && manifest.inFlightSyncTokens.length === 0
+      && (manifest.inFlightSyncOperations || []).length === 0
+      && !manifest.activeRepair
+      && manifest.syncFailureCountSinceRebuild === 0,
+  );
+}
+
+async function readAutomationJobClaimPlan(
+    heartbeats: Map<string, AutomationJobHeartbeat>,
+    limit: number,
+    nowMs: number,
+    control: AutomationControlState,
+    options: AutomationJobClaimOptions,
+): Promise<AutomationJobReadOnlyClaimPlan> {
+  const startedAt = Date.now();
+  const activeProjection = await getAutomationJobActiveProjectionStorage();
+  if (projectionManifestCanPlanClaims(activeProjection.manifest)) {
+    if (activeProjection.manifest.activeJobCount === 0) {
+      return {
+        requiresSourceMutation: false,
+        selection: selectAutomationJobsForClaim([], limit, nowMs, control, options),
+        boundExceeded: false,
+        candidatesTruncated: false,
+        source: 'MANIFEST_EMPTY',
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    const key = claimPlanningProjectionKey(activeProjection.manifest);
+    let projectedItems = claimPlanningProjectionCache?.key === key
+        ? claimPlanningProjectionCache.items
+        : undefined;
+    if (!projectedItems) {
+      const projection = await readBoundedAutomationJobStatuses();
+      if (
+          projection.currentStateComplete
+          && projection.sourceRevision === activeProjection.manifest.sourceRevision
+          && projection.projectionFingerprint === activeProjection.manifest.projectionFingerprint
+      ) {
+        projectedItems = projection.items
+            .filter(item => !TERMINAL.has(item.status))
+            .map(automationJobFromClaimProjection);
+        claimPlanningProjectionCache = { key, items: projectedItems };
+      }
+    }
+    if (projectedItems) {
+      const oldestFuture = projectedItems
+          .filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) > nowMs)
+          .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
+      const relevant = projectedItems.filter(item =>
+        includeAutomationJobInClaimPlan(item, nowMs, control, options));
+      const evaluated = evaluateAutomationJobReadOnlyClaimPlan(
+          relevant,
+          heartbeats,
+          limit,
+          nowMs,
+          control,
+          options,
+      );
+      return {
+        ...evaluated,
+        oldestNotRunnable: evaluated.selection.oldestNotRunnable || oldestFuture,
+        boundExceeded: false,
+        candidatesTruncated: false,
+        source: 'STATUS_PROJECTION',
+        durationMs: Date.now() - startedAt,
+      };
+    }
+  }
+
+  const planningItems: AutomationJob[] = [];
+  let oldestFuture: AutomationJob | undefined;
+  let boundExceeded = false;
+  let candidatesTruncated = false;
+  await scanCollection<AutomationJob>(JOBS, item => {
+    if (item.status === 'PENDING' && Date.parse(item.scheduledAt) > nowMs) {
+      if (!oldestFuture || runnableCreatedAt(item) < runnableCreatedAt(oldestFuture)) {
+        oldestFuture = structuredClone(item);
+      }
+    }
+    if (!includeAutomationJobInClaimPlan(item, nowMs, control, options)) return;
+    if (item.status === 'PENDING') {
+      const pendingCandidates = planningItems.filter(candidate => candidate.status === 'PENDING');
+      if (pendingCandidates.length >= MAX_CLAIM_PENDING_CANDIDATES) {
+        const worst = pendingCandidates.reduce((currentWorst, candidate) =>
+          compareClaimPlanningCandidates(candidate, currentWorst, nowMs) > 0
+              ? candidate
+              : currentWorst,
+        );
+        if (compareClaimPlanningCandidates(item, worst, nowMs) >= 0) {
+          candidatesTruncated = true;
+          return;
+        }
+        candidatesTruncated = true;
+        const worstIndex = planningItems.findIndex(candidate => candidate.id === worst.id);
+        if (worstIndex >= 0) planningItems.splice(worstIndex, 1);
+      }
+    }
+    if (planningItems.length >= MAX_CLAIM_PLANNING_ITEMS) {
+      boundExceeded = true;
+      return;
+    }
+    planningItems.push(structuredClone(item));
+  });
+  const evaluated = evaluateAutomationJobReadOnlyClaimPlan(
+      planningItems,
+      heartbeats,
+      limit,
+      nowMs,
+      control,
+      options,
+  );
+  return {
+    ...evaluated,
+    requiresSourceMutation: boundExceeded || evaluated.requiresSourceMutation,
+    oldestNotRunnable: evaluated.selection.oldestNotRunnable || oldestFuture,
+    boundExceeded,
+    candidatesTruncated,
+    source: 'DURABLE_SCAN',
+    durationMs: Date.now() - startedAt,
+  };
+}
+
 const notRunnableLogTimes = new Map<string, number>();
 const MAX_CLAIM_EVENT_RECORDS = 2_048;
+
+// Worker pool lanes share one durable claimant identity. Serializing their
+// claim/recovery cycles prevents same-process lanes from queueing duplicate
+// collection scans or stale planning transactions behind the FileStorage
+// collection lock. Different workers remain independent and the source
+// transaction is still the cross-process atomic authority.
+const automationJobClaimCycleTails = new Map<string, Promise<void>>();
+
+async function runAutomationJobClaimCycleExclusive<T>(
+    workerId: string,
+    work: () => Promise<T>,
+): Promise<T> {
+  const previous = automationJobClaimCycleTails.get(workerId) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  const tail = previous.catch(() => undefined).then(() => current);
+  automationJobClaimCycleTails.set(workerId, tail);
+  await previous.catch(() => undefined);
+  try {
+    return await work();
+  } finally {
+    release();
+    if (automationJobClaimCycleTails.get(workerId) === tail) {
+      automationJobClaimCycleTails.delete(workerId);
+    }
+  }
+}
 
 export async function claimAutomationJobs(
     workerId: string,
@@ -3888,14 +4294,19 @@ export async function claimAutomationJobs(
     leaseMs = 60_000,
     nowMs = Date.now(),
     ownership?: RuntimeRoleOwnership,
-    options: {
-      maximumInFlight?: number;
-      criticalReservedCapacity?: number;
-      enforceExecutionCompatibility?: boolean;
-      claimLane?: AutomationWorkerClaimLane;
-      preferCritical?: boolean;
-      preferProductCritical?: boolean;
-    } = {},
+    options: AutomationJobClaimOptions = {},
+): Promise<AutomationJob[]> {
+  return runAutomationJobClaimCycleExclusive(workerId, () =>
+    claimAutomationJobsExclusive(workerId, limit, leaseMs, nowMs, ownership, options));
+}
+
+async function claimAutomationJobsExclusive(
+    workerId: string,
+    limit: number,
+    leaseMs: number,
+    nowMs: number,
+    ownership: RuntimeRoleOwnership | undefined,
+    options: AutomationJobClaimOptions,
 ): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
   if (control.workerPaused) return [];
@@ -3922,15 +4333,23 @@ export async function claimAutomationJobs(
   let poolActiveSlots = 0;
   let poolAvailableSlots = 0;
   let claimBlockReason: 'WORKER_CAPACITY_FULL' | 'EXECUTION_RESOURCE_CONFLICT' | 'SCHEDULED_FOR_FUTURE' = 'SCHEDULED_FOR_FUTURE';
-  function compareClaimPlanningCandidates(left: AutomationJob, right: AutomationJob): number {
-    const leftOverdue = nowMs - runnableCreatedAt(left) >= FAIRNESS_AFTER_MS;
-    const rightOverdue = nowMs - runnableCreatedAt(right) >= FAIRNESS_AFTER_MS;
-    if (leftOverdue !== rightOverdue) return leftOverdue ? -1 : 1;
-    if (leftOverdue) return runnableCreatedAt(left) - runnableCreatedAt(right);
-    return right.priority - left.priority || runnableCreatedAt(left) - runnableCreatedAt(right) || left.id.localeCompare(right.id);
-  }
+  const readOnlyPlan = await readAutomationJobClaimPlan(
+      heartbeats,
+      limit,
+      nowMs,
+      control,
+      options,
+  );
+  claimPlanningBoundExceeded = readOnlyPlan.boundExceeded;
+  claimPlanningTruncated = readOnlyPlan.candidatesTruncated;
+  oldestNotRunnable = readOnlyPlan.oldestNotRunnable;
+  poolActiveSlots = readOnlyPlan.selection.poolActiveSlots;
+  poolAvailableSlots = readOnlyPlan.selection.poolAvailableSlots;
+  claimBlockReason = readOnlyPlan.selection.claimBlockReason;
 
-  const projectionMutation = await runAutomationJobSourceBoundedTransaction(items => {
+  let projectionMutation: AutomationJobProjectionMutationHandle | undefined;
+  if (readOnlyPlan.requiresSourceMutation) {
+    projectionMutation = await runAutomationJobSourceBoundedTransaction(items => {
     let changed = false;
     for (const item of items) {
       if (!TERMINAL.has(item.status)) {
@@ -4028,93 +4447,13 @@ export async function claimAutomationJobs(
         changed = true;
       }
     }
-    const activeJobs = items.filter(item => item.status === 'RUNNING');
-    poolActiveSlots = activeJobs.length;
-    const maximumInFlight = Number.isInteger(options.maximumInFlight)
-        ? Math.max(1, Number(options.maximumInFlight))
-        : undefined;
-    const reservedCriticalCapacity = maximumInFlight && maximumInFlight > 1
-        ? Math.max(0, Math.min(maximumInFlight - 1, Math.floor(Number(options.criticalReservedCapacity) || 0)))
-        : 0;
-    const activeGuardianJobs = activeJobs.filter(item => item.type === 'RUNTIME_GUARDIAN').length;
-    const activeNonGuardianJobs = activeJobs.length - activeGuardianJobs;
-    const activeCriticalJobs = activeJobs.filter(item => isCriticalAutomationJob(item)).length;
-    const activeNormalJobs = activeJobs.length - activeCriticalJobs;
-    const totalAvailableCapacity = maximumInFlight === undefined
-        ? limit
-        : Math.max(0, maximumInFlight - activeJobs.length);
-    const guardianCapacity = maximumInFlight === undefined
-        ? limit
-        : Math.max(
-            0,
-            (reservedCriticalCapacity || maximumInFlight) - activeGuardianJobs,
-        );
-    const nonGuardianCapacity = maximumInFlight === undefined
-        ? limit
-        : Math.max(
-            0,
-            maximumInFlight - reservedCriticalCapacity - activeNonGuardianJobs,
-        );
-    const criticalCapacity = maximumInFlight === undefined
-        ? limit
-        : Math.max(
-            0,
-            (reservedCriticalCapacity || maximumInFlight) - activeCriticalJobs,
-        );
-    const normalCapacity = maximumInFlight === undefined
-        ? limit
-        : Math.max(
-            0,
-            maximumInFlight - reservedCriticalCapacity - activeNormalJobs,
-        );
-    const claimLane = options.claimLane || 'ANY';
-    const allCriticalLane = claimLane === 'CRITICAL' || claimLane === 'NON_CRITICAL';
-    const laneAvailableCapacity = claimLane === 'RUNTIME_GUARDIAN'
-        ? guardianCapacity
-        : claimLane === 'NON_GUARDIAN'
-            ? nonGuardianCapacity
-            : claimLane === 'CRITICAL'
-                ? criticalCapacity
-                : claimLane === 'NON_CRITICAL'
-                    ? normalCapacity
-                    : guardianCapacity + nonGuardianCapacity;
-    const availableCapacity = Math.max(
-        0,
-        Math.min(limit, totalAvailableCapacity, laneAvailableCapacity),
-    );
-    poolAvailableSlots = availableCapacity;
-    const eligible = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
-        && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
-        && isAutomationJobEligibleForClaimLane(item, claimLane));
-    const due = options.enforceExecutionCompatibility
-        ? selectCompatibleWorkerJobs(
-            eligible,
-            activeJobs,
-            availableCapacity,
-            nowMs,
-            options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs,
-            options.criticalReservedCapacity,
-            allCriticalLane
-                ? {
-                  critical: claimLane === 'NON_CRITICAL' ? 0 : criticalCapacity,
-                  normal: claimLane === 'CRITICAL' ? 0 : normalCapacity,
-                }
-                : {
-                  runtimeGuardian: claimLane === 'NON_GUARDIAN' ? 0 : guardianCapacity,
-                  nonGuardian: claimLane === 'RUNTIME_GUARDIAN' ? 0 : nonGuardianCapacity,
-                },
-            options.preferCritical === true,
-        )
-        : (options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs)(eligible, availableCapacity, nowMs);
+    const selection = selectAutomationJobsForClaim(items, limit, nowMs, control, options);
+    poolActiveSlots = selection.poolActiveSlots;
+    poolAvailableSlots = selection.poolAvailableSlots;
+    claimBlockReason = selection.claimBlockReason;
+    const due = selection.due;
     if (!due.length) {
-      claimBlockReason = availableCapacity <= 0
-          ? 'WORKER_CAPACITY_FULL'
-          : eligible.length > 0 && options.enforceExecutionCompatibility
-              ? 'EXECUTION_RESOURCE_CONFLICT'
-              : 'SCHEDULED_FOR_FUTURE';
-      oldestNotRunnable = items
-          .filter(item => item.status === 'PENDING')
-          .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
+      oldestNotRunnable = selection.oldestNotRunnable;
     }
     for (const item of due) {
       const infrastructureRetry = item.runnableReason === 'INFRASTRUCTURE_CONTENTION';
@@ -4144,29 +4483,21 @@ export async function claimAutomationJobs(
     return changed ? items : undefined;
   }, {
     includeItem: item => {
-      if (TERMINAL.has(item.status)) return false;
-      if (item.status === 'RUNNING') return true;
-      if (item.status === 'RETRY_SCHEDULED') {
-        return Boolean(item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs);
-      }
-      if (item.status !== 'PENDING') return false;
-      if (Date.parse(item.scheduledAt) > nowMs) {
+      if (item.status === 'PENDING' && Date.parse(item.scheduledAt) > nowMs) {
         if (!oldestNotRunnable || runnableCreatedAt(item) < runnableCreatedAt(oldestNotRunnable)) {
           oldestNotRunnable = structuredClone(item);
         }
-        return false;
       }
-      if (control.killSwitch && item.type !== 'RUNTIME_GUARDIAN') return false;
-      return isAutomationJobEligibleForClaimLane(item, options.claimLane || 'ANY');
+      return includeAutomationJobInClaimPlan(item, nowMs, control, options);
     },
     planItem: (item, planningItems) => {
       if (item.status !== 'PENDING') return true;
       const pendingCandidates = planningItems.filter(candidate => candidate.status === 'PENDING');
       if (pendingCandidates.length < MAX_CLAIM_PENDING_CANDIDATES) return true;
       const worst = pendingCandidates.reduce((currentWorst, candidate) =>
-          compareClaimPlanningCandidates(candidate, currentWorst) > 0 ? candidate : currentWorst,
+          compareClaimPlanningCandidates(candidate, currentWorst, nowMs) > 0 ? candidate : currentWorst,
       );
-      if (compareClaimPlanningCandidates(item, worst) >= 0) {
+      if (compareClaimPlanningCandidates(item, worst, nowMs) >= 0) {
         claimPlanningTruncated = true;
         return false;
       }
@@ -4181,6 +4512,7 @@ export async function claimAutomationJobs(
     withCommitGuard: ownership ? runtimeRoleCommitGuard(ownership) : undefined,
     operationCategory: 'automation_job_claim_recovery',
   });
+  }
   if (claimed.length) {
     const writeClaimHeartbeats = () => runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
       const claimedIds = new Set(claimed.map(job => job.id));
@@ -4253,11 +4585,12 @@ export async function claimAutomationJobs(
     }
   }
   if (projectionChanges.length) {
+    if (!projectionMutation) throw new Error('AUTOMATION_JOB_PROJECTION_MUTATION_MISSING');
     await syncJobReadModelsBatchBestEffort(projectionChanges, {
       mutation: projectionMutation,
       sourceMutationCommitted: true,
     });
-  } else {
+  } else if (projectionMutation) {
     await abortAutomationJobProjectionMutation(projectionMutation);
   }
   if (claimPlanningBoundExceeded || claimPlanningTruncated || rejectedOverflowCount || timeoutOverflowCount || requeueOverflowCount) {

@@ -630,6 +630,7 @@ function logFileTransactionTiming(
     options: StorageTransactionOptions,
     timing: FileTransactionTiming,
     error?: unknown,
+    changed = true,
 ): void {
   const completedAt = timing.completedAt || Date.now();
   const lockAcquiredAt = timing.collectionLockAcquiredAt || completedAt;
@@ -647,7 +648,7 @@ function logFileTransactionTiming(
     type: 'file_storage_transaction_timing',
     collection,
     operationCategory: safeOperationCategory(options.operationCategory),
-    status: error ? 'FAILED' : 'COMMITTED',
+    status: error ? 'FAILED' : changed ? 'COMMITTED' : 'NO_CHANGE',
     phase: error ? inferFileTransactionFailurePhase(timing) : 'COMPLETED',
     collectionLockWaitMs: Math.max(0, lockAcquiredAt - timing.startedAt),
     preparationMs: Math.max(0, preparationCompletedAt - lockAcquiredAt),
@@ -1240,6 +1241,7 @@ async function runTransaction<T>(
     options: StorageTransactionOptions = {},
 ): Promise<void> {
   const timing: FileTransactionTiming = { startedAt: Date.now() };
+  let changed = false;
   try {
     await invokeTransactionTestHook('COLLECTION_LOCK_WAIT_STARTED', collection, options);
     await withCollectionLock(collection, async assertLockHeld => {
@@ -1249,10 +1251,11 @@ async function runTransaction<T>(
       const updated = await fn(items);
       if (updated !== undefined) {
         await writeCollectionUnlocked(collection, updated, options, assertLockHeld, timing);
+        changed = true;
       }
     });
     timing.completedAt = Date.now();
-    logFileTransactionTiming(collection, options, timing);
+    logFileTransactionTiming(collection, options, timing, undefined, changed);
   } catch (error) {
     timing.completedAt = Date.now();
     logFileTransactionTiming(collection, options, timing, error);
@@ -1320,7 +1323,7 @@ async function runStreamingTransaction<T>(
       );
     });
     timing.completedAt = Date.now();
-    logFileTransactionTiming(collection, options, timing);
+    logFileTransactionTiming(collection, options, timing, undefined, result.changed);
     return result;
   } catch (error) {
     timing.completedAt = Date.now();
