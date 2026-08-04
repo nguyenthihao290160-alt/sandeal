@@ -37,7 +37,6 @@ import {
   abortAutomationJobProjectionMutation,
   beginAutomationJobProjectionRebuild,
   beginAutomationJobProjectionMutation,
-  beginAutomationJobProjectionSync,
   buildAutomationJobHealthSummary,
   completeAutomationJobProjectionRepair,
   failAutomationJobProjectionRepair,
@@ -125,8 +124,6 @@ const MAX_JOB_PROJECTIONS = getAutomationJobProjectionLimit();
 const PROJECTION_RECONCILE_AFTER_MS = Math.max(30_000, Number(process.env.SANDEAL_JOB_PROJECTION_RECONCILE_MS) || 60_000);
 const MAX_INFRASTRUCTURE_RETRIES = Math.max(1, Math.min(12, Number(process.env.SANDEAL_MAX_INFRASTRUCTURE_RETRIES) || 5));
 const projectionReconcileTimes = new Map<string, number>();
-let lastHeartbeatHealthSummaryRefreshAt = 0;
-const HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS = 15_000;
 
 interface AutomationJobHeartbeat {
   id: string;
@@ -144,36 +141,36 @@ interface AutomationJobHeartbeat {
 }
 
 type AutomationJobRecoveryClaim = Pick<AutomationJob,
-  | 'id'
-  | 'claimedBy'
-  | 'claimToken'
-  | 'workerOwnerId'
-  | 'workerInstanceId'
-  | 'workerFencingToken'
-  | 'attemptCount'
-  | 'releaseId'
-  | 'leaseExpiresAt'
+    | 'id'
+    | 'claimedBy'
+    | 'claimToken'
+    | 'workerOwnerId'
+    | 'workerInstanceId'
+    | 'workerFencingToken'
+    | 'attemptCount'
+    | 'releaseId'
+    | 'leaseExpiresAt'
 >;
 
 function heartbeatMatchesAutomationJobClaim(
-  heartbeat: AutomationJobHeartbeat,
-  job: AutomationJobRecoveryClaim,
+    heartbeat: AutomationJobHeartbeat,
+    job: AutomationJobRecoveryClaim,
 ): boolean {
   return heartbeat.jobId === job.id
-    && heartbeat.workerId === job.claimedBy
-    && Boolean(job.claimToken)
-    && heartbeat.claimToken === job.claimToken
-    && (job.workerOwnerId === undefined || heartbeat.workerOwnerId === job.workerOwnerId)
-    && (job.workerInstanceId === undefined || heartbeat.workerInstanceId === job.workerInstanceId)
-    && (job.workerFencingToken === undefined || heartbeat.workerFencingToken === job.workerFencingToken)
-    && (heartbeat.attemptCount === undefined || heartbeat.attemptCount === job.attemptCount)
-    && (heartbeat.releaseId === undefined || heartbeat.releaseId === job.releaseId)
-    && (heartbeat.status === undefined || heartbeat.status === 'RUNNING');
+      && heartbeat.workerId === job.claimedBy
+      && Boolean(job.claimToken)
+      && heartbeat.claimToken === job.claimToken
+      && (job.workerOwnerId === undefined || heartbeat.workerOwnerId === job.workerOwnerId)
+      && (job.workerInstanceId === undefined || heartbeat.workerInstanceId === job.workerInstanceId)
+      && (job.workerFencingToken === undefined || heartbeat.workerFencingToken === job.workerFencingToken)
+      && (heartbeat.attemptCount === undefined || heartbeat.attemptCount === job.attemptCount)
+      && (heartbeat.releaseId === undefined || heartbeat.releaseId === job.releaseId)
+      && (heartbeat.status === undefined || heartbeat.status === 'RUNNING');
 }
 
 async function invalidateExpiredAutomationJobHeartbeatsForRecovery(
-  recoveries: AutomationJobRecoveryClaim[],
-  nowMs: number,
+    recoveries: AutomationJobRecoveryClaim[],
+    nowMs: number,
 ): Promise<void> {
   if (!recoveries.length) return;
   const recoveryById = new Map(recoveries.map(job => [job.id, job]));
@@ -198,18 +195,18 @@ async function invalidateExpiredAutomationJobHeartbeatsForRecovery(
 }
 
 export type AutomationJobLogEvent =
-  | 'job_created' | 'job_reused' | 'job_claim_attempt' | 'job_claimed'
-  | 'job_skipped' | 'job_not_runnable' | 'job_handler_resolved' | 'job_started'
-  | 'job_completed' | 'job_failed' | 'job_requeued' | 'job_terminal_timeout'
-  | 'job_execution_cancelled' | 'job_lease_renewal_started' | 'job_lease_renewed'
-  | 'job_lease_renewal_failed' | 'job_ownership_lost' | 'job_handler_aborted'
-  | 'stale_completion_rejected' | 'expired_job_safely_recovered'
-  | 'worker_retry_backoff_applied';
+    | 'job_created' | 'job_reused' | 'job_claim_attempt' | 'job_claimed'
+    | 'job_skipped' | 'job_not_runnable' | 'job_handler_resolved' | 'job_started'
+    | 'job_completed' | 'job_failed' | 'job_requeued' | 'job_terminal_timeout'
+    | 'job_execution_cancelled' | 'job_lease_renewal_started' | 'job_lease_renewed'
+    | 'job_lease_renewal_failed' | 'job_ownership_lost' | 'job_handler_aborted'
+    | 'stale_completion_rejected' | 'expired_job_safely_recovered'
+    | 'worker_retry_backoff_applied';
 
 export function logAutomationJobEvent(
-  event: AutomationJobLogEvent,
-  job: Pick<AutomationJob, 'id' | 'type' | 'status' | 'scheduledAt' | 'priority' | 'attemptCount'>,
-  input: { workerId?: string; reasonCode: string; durationMs?: number },
+    event: AutomationJobLogEvent,
+    job: Pick<AutomationJob, 'id' | 'type' | 'status' | 'scheduledAt' | 'priority' | 'attemptCount'>,
+    input: { workerId?: string; reasonCode: string; durationMs?: number },
 ): void {
   console.log(JSON.stringify({
     type: event,
@@ -243,8 +240,8 @@ export function projectAutomationJobListItem(job: AutomationJob): AutomationJobL
     skipped: Math.max(0, Number(job.progress.skipped) || 0),
     failed: Math.max(0, Number(job.progress.failed) || 0),
     percentage: Number.isFinite(job.progress.percentage)
-      ? Math.max(0, Math.min(100, Number(job.progress.percentage)))
-      : undefined,
+        ? Math.max(0, Math.min(100, Number(job.progress.percentage)))
+        : undefined,
     updatedAt: job.progress.updatedAt,
   } : undefined;
   const output: AutomationJobListProjection = {
@@ -271,8 +268,8 @@ export function projectAutomationJobListItem(job: AutomationJob): AutomationJobL
     aiRequestCount: Math.max(0, Number(disclosure?.aiRequests) || 0),
     fallbackUsed: Boolean(disclosure?.fallbackReason),
     evidenceCoverage: Number.isFinite(disclosure?.evidenceCoverage)
-      ? Math.max(0, Math.min(100, Number(disclosure?.evidenceCoverage)))
-      : undefined,
+        ? Math.max(0, Math.min(100, Number(disclosure?.evidenceCoverage)))
+        : undefined,
     approvalStatus: job.approvalStatus,
     approvalExpiresAt: job.approvalExpiresAt,
     riskLevel: job.riskLevel,
@@ -364,9 +361,9 @@ interface ProjectionValueBudget {
 }
 
 function compactProjectionValue(
-  value: unknown,
-  budget: ProjectionValueBudget,
-  depth = 0,
+    value: unknown,
+    budget: ProjectionValueBudget,
+    depth = 0,
 ): unknown {
   if (budget.remainingNodes <= 0 || budget.remainingBytes <= 0 || depth > 3) return undefined;
   budget.remainingNodes -= 1;
@@ -408,9 +405,9 @@ function compactProjectionValue(
   const output: Record<string, unknown> = {};
   budget.remainingBytes -= 2;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)
-    .filter(([key]) => !SECRET_KEY.test(key))
-    .sort(([left], [right]) => left.localeCompare(right))
-    .slice(0, 30)) {
+      .filter(([key]) => !SECRET_KEY.test(key))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, 30)) {
     const keyBytes = Buffer.byteLength(key, 'utf8') + 4;
     if (budget.remainingBytes <= keyBytes) break;
     budget.remainingBytes -= keyBytes;
@@ -422,7 +419,7 @@ function compactProjectionValue(
 }
 
 function compactAutomationJobStatusResult(
-  result: AutomationJob['result'],
+    result: AutomationJob['result'],
 ): Record<string, unknown> | undefined {
   if (!result) return undefined;
   const selected: Record<string, unknown> = {};
@@ -443,8 +440,8 @@ function automationJobResourceReferences(job: AutomationJob): {
   const resourceProductIds = [
     typeof job.payload.productId === 'string' ? job.payload.productId : undefined,
     ...(Array.isArray(job.payload.productIds)
-      ? job.payload.productIds.filter((value): value is string => typeof value === 'string')
-      : []),
+        ? job.payload.productIds.filter((value): value is string => typeof value === 'string')
+        : []),
   ].filter((value): value is string => Boolean(value)).slice(0, 100);
   return {
     resourceProductIds: [...new Set(resourceProductIds)],
@@ -491,8 +488,8 @@ export function projectAutomationJobStatusItem(job: AutomationJob): AutomationJo
       skipped: Math.max(0, Number(job.progress.skipped) || 0),
       failed: Math.max(0, Number(job.progress.failed) || 0),
       percentage: job.progress.percentage === undefined
-        ? undefined
-        : Math.max(0, Math.min(100, Number(job.progress.percentage) || 0)),
+          ? undefined
+          : Math.max(0, Math.min(100, Number(job.progress.percentage) || 0)),
       updatedAt: job.progress.updatedAt,
     } : undefined,
     checkpoint: job.checkpoint ? {
@@ -656,14 +653,14 @@ function projectionRange(items: AutomationJobListProjection[]): AutomationJobPro
 }
 
 function projectionCandidateFingerprint(
-  candidate: Omit<AutomationJobProjectionRebuildCandidate, 'candidateFingerprint' | 'generatedAt'>,
+    candidate: Omit<AutomationJobProjectionRebuildCandidate, 'candidateFingerprint' | 'generatedAt'>,
 ): string {
   return deterministicProjectionFingerprint(candidate);
 }
 
 export function validateAutomationJobProjectionRebuildCandidate(
-  value: unknown,
-  expected: { sourceSnapshotFingerprint?: string } = {},
+    value: unknown,
+    expected: { sourceSnapshotFingerprint?: string } = {},
 ): { valid: boolean; reasonCodes: string[] } {
   if (!value || typeof value !== 'object') {
     return { valid: false, reasonCodes: ['JOB_PROJECTION_CANDIDATE_INVALID'] };
@@ -687,9 +684,9 @@ export function validateAutomationJobProjectionRebuildCandidate(
   const activeCount = list.filter(item => !TERMINAL.has(item.status)).length;
   const retainedTerminalCount = list.length - activeCount;
   const matchingIdentities = deterministicProjectionFingerprint(
-    list.map(item => [item.id, item.status, item.updatedAt]).sort(),
+      list.map(item => [item.id, item.status, item.updatedAt]).sort(),
   ) === deterministicProjectionFingerprint(
-    statuses.map(item => [item.id, item.status, item.updatedAt]).sort(),
+      statuses.map(item => [item.id, item.status, item.updatedAt]).sort(),
   );
   const expectedSourceRevision = automationJobProjectionSourceRevision({
     releaseId: candidate.releaseId,
@@ -705,109 +702,109 @@ export function validateAutomationJobProjectionRebuildCandidate(
   const reasons = [
     ...(candidate.schemaVersion !== 2 ? ['JOB_PROJECTION_CANDIDATE_SCHEMA_MISMATCH'] : []),
     ...(candidate.projectionName !== AUTOMATION_JOB_PROJECTION_NAME
-      ? ['JOB_PROJECTION_CANDIDATE_NAME_MISMATCH']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_NAME_MISMATCH']
+        : []),
     ...(candidate.projectionVersion !== AUTOMATION_JOB_PROJECTION_VERSION
-      ? ['JOB_PROJECTION_CANDIDATE_VERSION_MISMATCH']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_VERSION_MISMATCH']
+        : []),
     ...(!/^[a-f0-9]{64}$/.test(String(candidate.sourceSnapshotFingerprint || ''))
-      ? ['JOB_PROJECTION_CANDIDATE_SOURCE_FINGERPRINT_INVALID']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_SOURCE_FINGERPRINT_INVALID']
+        : []),
     ...(expected.sourceSnapshotFingerprint
-      && candidate.sourceSnapshotFingerprint !== expected.sourceSnapshotFingerprint
-      ? ['JOB_PROJECTION_CANDIDATE_SOURCE_CHANGED']
-      : []),
+    && candidate.sourceSnapshotFingerprint !== expected.sourceSnapshotFingerprint
+        ? ['JOB_PROJECTION_CANDIDATE_SOURCE_CHANGED']
+        : []),
     ...(candidate.startBoundary?.schemaVersion !== 1
-      || candidate.sourceBoundary?.schemaVersion !== 1
-      || !Number.isInteger(candidate.startBoundary?.highWatermark)
-      || !Number.isInteger(candidate.sourceBoundary?.highWatermark)
-      || candidate.sourceBoundary.highWatermark < candidate.startBoundary.highWatermark
-      || candidate.sourceBoundary.sourceFingerprint !== candidate.sourceSnapshotFingerprint
-      ? ['JOB_PROJECTION_CANDIDATE_BOUNDARY_INVALID']
-      : []),
+    || candidate.sourceBoundary?.schemaVersion !== 1
+    || !Number.isInteger(candidate.startBoundary?.highWatermark)
+    || !Number.isInteger(candidate.sourceBoundary?.highWatermark)
+    || candidate.sourceBoundary.highWatermark < candidate.startBoundary.highWatermark
+    || candidate.sourceBoundary.sourceFingerprint !== candidate.sourceSnapshotFingerprint
+        ? ['JOB_PROJECTION_CANDIDATE_BOUNDARY_INVALID']
+        : []),
     ...(!Number.isInteger(candidate.targetGeneration)
-      || candidate.targetGeneration <= 0
-      || (candidate.targetSlot !== 'A' && candidate.targetSlot !== 'B')
-      || candidate.repairId !== String(candidate.repairId || '').slice(0, 160)
-      || !candidate.repairId
-      || !Number.isInteger(candidate.repairFence)
-      || candidate.repairFence <= 0
-      || !Number.isInteger(candidate.repairAttemptNumber)
-      || candidate.repairAttemptNumber <= 0
-      || !Number.isInteger(candidate.catchUpPasses)
-      || candidate.catchUpPasses < 0
-      || !Number.isInteger(candidate.deltaJobCount)
-      || candidate.deltaJobCount < 0
-      ? ['JOB_PROJECTION_CANDIDATE_REPAIR_METADATA_INVALID']
-      : []),
+    || candidate.targetGeneration <= 0
+    || (candidate.targetSlot !== 'A' && candidate.targetSlot !== 'B')
+    || candidate.repairId !== String(candidate.repairId || '').slice(0, 160)
+    || !candidate.repairId
+    || !Number.isInteger(candidate.repairFence)
+    || candidate.repairFence <= 0
+    || !Number.isInteger(candidate.repairAttemptNumber)
+    || candidate.repairAttemptNumber <= 0
+    || !Number.isInteger(candidate.catchUpPasses)
+    || candidate.catchUpPasses < 0
+    || !Number.isInteger(candidate.deltaJobCount)
+    || candidate.deltaJobCount < 0
+        ? ['JOB_PROJECTION_CANDIDATE_REPAIR_METADATA_INVALID']
+        : []),
     ...(!Array.isArray(candidate.listProjections) || !Array.isArray(candidate.statusProjections)
-      ? ['JOB_PROJECTION_CANDIDATE_ITEMS_INVALID']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_ITEMS_INVALID']
+        : []),
     ...(list.length !== statuses.length || !matchingIdentities
-      ? ['JOB_PROJECTION_CANDIDATE_IDENTITY_MISMATCH']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_IDENTITY_MISMATCH']
+        : []),
     ...(new Set(list.map(item => item.id)).size !== list.length
-      || new Set(statuses.map(item => item.id)).size !== statuses.length
-      ? ['JOB_PROJECTION_CANDIDATE_DUPLICATE_ID']
-      : []),
+    || new Set(statuses.map(item => item.id)).size !== statuses.length
+        ? ['JOB_PROJECTION_CANDIDATE_DUPLICATE_ID']
+        : []),
     ...(list.some(item => item.projectionSchemaVersion !== AUTOMATION_JOB_LIST_PROJECTION_SCHEMA_VERSION)
-      || statuses.some(item => item.projectionSchemaVersion !== AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION)
-      ? ['JOB_PROJECTION_CANDIDATE_ITEM_SCHEMA_MISMATCH']
-      : []),
+    || statuses.some(item => item.projectionSchemaVersion !== AUTOMATION_JOB_STATUS_PROJECTION_SCHEMA_VERSION)
+        ? ['JOB_PROJECTION_CANDIDATE_ITEM_SCHEMA_MISMATCH']
+        : []),
     ...(list.some(item => (
-      !item
-      || typeof item.id !== 'string'
-      || typeof item.type !== 'string'
-      || !ALL_JOB_STATUSES.has(item.status)
-      || !Number.isFinite(Date.parse(item.createdAt))
-      || !Number.isFinite(Date.parse(item.updatedAt))
+        !item
+        || typeof item.id !== 'string'
+        || typeof item.type !== 'string'
+        || !ALL_JOB_STATUSES.has(item.status)
+        || !Number.isFinite(Date.parse(item.createdAt))
+        || !Number.isFinite(Date.parse(item.updatedAt))
     )) || statuses.some(item => (
-      !item
-      || typeof item.id !== 'string'
-      || typeof item.type !== 'string'
-      || !ALL_JOB_STATUSES.has(item.status)
-      || !Number.isFinite(Date.parse(item.createdAt))
-      || !Number.isFinite(Date.parse(item.updatedAt))
+        !item
+        || typeof item.id !== 'string'
+        || typeof item.type !== 'string'
+        || !ALL_JOB_STATUSES.has(item.status)
+        || !Number.isFinite(Date.parse(item.createdAt))
+        || !Number.isFinite(Date.parse(item.updatedAt))
     )) ? ['JOB_PROJECTION_CANDIDATE_ITEM_INVALID'] : []),
     ...(candidate.listProjectionFingerprint !== listIdentity
-      || candidate.statusProjectionFingerprint !== statusIdentity
-      || candidate.listProjectionContentFingerprint !== listContent
-      || candidate.statusProjectionContentFingerprint !== statusContent
-      || candidate.projectionFingerprint !== combined
-      ? ['JOB_PROJECTION_CANDIDATE_FINGERPRINT_MISMATCH']
-      : []),
+    || candidate.statusProjectionFingerprint !== statusIdentity
+    || candidate.listProjectionContentFingerprint !== listContent
+    || candidate.statusProjectionContentFingerprint !== statusContent
+    || candidate.projectionFingerprint !== combined
+        ? ['JOB_PROJECTION_CANDIDATE_FINGERPRINT_MISMATCH']
+        : []),
     ...(candidate.recordCounts?.retained !== list.length
-      || candidate.recordCounts?.list !== list.length
-      || candidate.recordCounts?.status !== statuses.length
-      || candidate.recordCounts?.retainedTerminal !== retainedTerminalCount
-      || candidate.recordCounts?.active < activeCount
-      || (candidate.completeness?.currentStateComplete && candidate.recordCounts.active !== activeCount)
-      || !Number.isInteger(candidate.recordCounts?.durable)
-      || candidate.recordCounts.durable < list.length
-      ? ['JOB_PROJECTION_CANDIDATE_COUNT_MISMATCH']
-      : []),
+    || candidate.recordCounts?.list !== list.length
+    || candidate.recordCounts?.status !== statuses.length
+    || candidate.recordCounts?.retainedTerminal !== retainedTerminalCount
+    || candidate.recordCounts?.active < activeCount
+    || (candidate.completeness?.currentStateComplete && candidate.recordCounts.active !== activeCount)
+    || !Number.isInteger(candidate.recordCounts?.durable)
+    || candidate.recordCounts.durable < list.length
+        ? ['JOB_PROJECTION_CANDIDATE_COUNT_MISMATCH']
+        : []),
     ...(candidate.projectionCapacity !== getAutomationJobProjectionLimit()
-      || list.length > candidate.projectionCapacity
-      ? ['JOB_PROJECTION_CANDIDATE_CAPACITY_INVALID']
-      : []),
+    || list.length > candidate.projectionCapacity
+        ? ['JOB_PROJECTION_CANDIDATE_CAPACITY_INVALID']
+        : []),
     ...(candidate.completeness?.baselineEstablished !== true
-      || candidate.completeness.currentStateComplete !== (candidate.recordCounts?.active <= candidate.projectionCapacity)
-      || candidate.completeness.historyComplete !== !candidate.completeness.truncated
-      ? ['JOB_PROJECTION_CANDIDATE_COMPLETENESS_INVALID']
-      : []),
+    || candidate.completeness.currentStateComplete !== (candidate.recordCounts?.active <= candidate.projectionCapacity)
+    || candidate.completeness.historyComplete !== !candidate.completeness.truncated
+        ? ['JOB_PROJECTION_CANDIDATE_COMPLETENESS_INVALID']
+        : []),
     ...(deterministicProjectionFingerprint(candidate.observedRange) !== deterministicProjectionFingerprint(range)
-      || candidate.sourceUpdatedAt !== range.latestUpdatedAt
-      ? ['JOB_PROJECTION_CANDIDATE_OBSERVED_RANGE_MISMATCH']
-      : []),
+    || candidate.sourceUpdatedAt !== range.latestUpdatedAt
+        ? ['JOB_PROJECTION_CANDIDATE_OBSERVED_RANGE_MISMATCH']
+        : []),
     ...(candidate.sourceRevision !== expectedSourceRevision
-      ? ['JOB_PROJECTION_CANDIDATE_SOURCE_REVISION_MISMATCH']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_SOURCE_REVISION_MISMATCH']
+        : []),
     ...(candidate.candidateFingerprint !== projectionCandidateFingerprint(fingerprinted)
-      ? ['JOB_PROJECTION_CANDIDATE_SERIALIZATION_MISMATCH']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_SERIALIZATION_MISMATCH']
+        : []),
     ...(Number.isNaN(Date.parse(candidate.generatedAt))
-      ? ['JOB_PROJECTION_CANDIDATE_GENERATED_AT_INVALID']
-      : []),
+        ? ['JOB_PROJECTION_CANDIDATE_GENERATED_AT_INVALID']
+        : []),
   ];
   return { valid: reasons.length === 0, reasonCodes: [...new Set(reasons)] };
 }
@@ -831,8 +828,8 @@ function assertProjectionSourceJobs(jobs: AutomationJob[]): void {
   for (const job of jobs) {
     if (!job || typeof job.id !== 'string' || ids.has(job.id)) {
       throw new Error(ids.has(job?.id)
-        ? 'JOB_PROJECTION_REBUILD_DUPLICATE_JOB_ID'
-        : 'JOB_PROJECTION_REBUILD_INPUT_INVALID');
+          ? 'JOB_PROJECTION_REBUILD_DUPLICATE_JOB_ID'
+          : 'JOB_PROJECTION_REBUILD_INPUT_INVALID');
     }
     ids.add(job.id);
   }
@@ -847,8 +844,8 @@ function projectionSourceItemFingerprint(job: AutomationJob): string {
 }
 
 export function automationJobMutationAffectsProjection(
-  before: AutomationJob | null,
-  after: AutomationJob | null,
+    before: AutomationJob | null,
+    after: AutomationJob | null,
 ): boolean {
   if (!before || !after) return before !== after;
   return projectionSourceItemFingerprint(before) !== projectionSourceItemFingerprint(after);
@@ -878,11 +875,11 @@ export function automationJobProjectionSourceFingerprint(jobs: AutomationJob[]):
 }
 
 function projectionSourceIdentity(
-  jobs: AutomationJob[],
-  counts: Pick<AutomationJobProjectionSourceSnapshot, 'durableJobCount' | 'activeJobCount'> = {
-    durableJobCount: jobs.length,
-    activeJobCount: jobs.filter(job => !TERMINAL.has(job.status)).length,
-  },
+    jobs: AutomationJob[],
+    counts: Pick<AutomationJobProjectionSourceSnapshot, 'durableJobCount' | 'activeJobCount'> = {
+      durableJobCount: jobs.length,
+      activeJobCount: jobs.filter(job => !TERMINAL.has(job.status)).length,
+    },
 ): AutomationJobProjectionSourceIdentity {
   assertProjectionSourceJobs(jobs);
   const jobFingerprints = new Map<string, string>();
@@ -893,8 +890,8 @@ function projectionSourceIdentity(
       durableJobCount: counts.durableJobCount,
       activeJobCount: counts.activeJobCount,
       retainedProjectionInputs: selection.retained
-        .map(job => [job.id, jobFingerprints.get(job.id)])
-        .sort(([left], [right]) => String(left).localeCompare(String(right))),
+          .map(job => [job.id, jobFingerprints.get(job.id)])
+          .sort(([left], [right]) => String(left).localeCompare(String(right))),
     }),
     jobFingerprints,
     durableJobCount: counts.durableJobCount,
@@ -913,7 +910,7 @@ function newerJobFirst(left: AutomationJob, right: AutomationJob): number {
  * intentionally left for the next catch-up/repair generation.
  */
 async function scanAutomationJobProjectionSource(
-  maximumSequence?: number,
+    maximumSequence?: number,
 ): Promise<AutomationJobProjectionSourceSnapshot> {
   const active: AutomationJob[] = [];
   const terminal: AutomationJob[] = [];
@@ -943,8 +940,8 @@ async function scanAutomationJobProjectionSource(
 }
 
 function changedProjectionSourceJobs(
-  previous: Map<string, string>,
-  current: Map<string, string>,
+    previous: Map<string, string>,
+    current: Map<string, string>,
 ): number {
   let changed = 0;
   for (const [id, fingerprint] of current) {
@@ -964,9 +961,9 @@ async function applyCurrentProjectionHeartbeats(jobs: AutomationJob[]): Promise<
     if (job.status !== 'RUNNING') return job;
     const heartbeat = byJobId.get(job.id);
     if (
-      !heartbeat
-      || heartbeat.workerId !== job.claimedBy
-      || (job.claimToken && heartbeat.claimToken !== job.claimToken)
+        !heartbeat
+        || heartbeat.workerId !== job.claimedBy
+        || (job.claimToken && heartbeat.claimToken !== job.claimToken)
     ) return job;
     return {
       ...job,
@@ -977,26 +974,26 @@ async function applyCurrentProjectionHeartbeats(jobs: AutomationJob[]): Promise<
 }
 
 function buildProjectionRepairCandidate(
-  jobs: AutomationJob[],
-  identity: AutomationJobProjectionSourceIdentity,
-  context: AutomationJobProjectionRepairContext,
-  sourceBoundary: AutomationJobProjectionSourceBoundary,
-  input: { now: number; catchUpPasses: number; deltaJobCount: number },
-  reuse?: {
-    identity: AutomationJobProjectionSourceIdentity;
-    candidate: AutomationJobProjectionRebuildCandidate;
-  },
+    jobs: AutomationJob[],
+    identity: AutomationJobProjectionSourceIdentity,
+    context: AutomationJobProjectionRepairContext,
+    sourceBoundary: AutomationJobProjectionSourceBoundary,
+    input: { now: number; catchUpPasses: number; deltaJobCount: number },
+    reuse?: {
+      identity: AutomationJobProjectionSourceIdentity;
+      candidate: AutomationJobProjectionRebuildCandidate;
+    },
 ): AutomationJobProjectionRebuildCandidate {
   const { active, retained } = selectProjectionSourceJobs(jobs);
   const reusableStatuses = new Map(reuse?.candidate.statusProjections.map(item => [item.id, item]) || []);
   const reusableList = new Map(reuse?.candidate.listProjections.map(item => [item.id, item]) || []);
   const unchanged = (job: AutomationJob) => reuse?.identity.jobFingerprints.get(job.id) === identity.jobFingerprints.get(job.id);
   const statusProjections = retained.map(job => unchanged(job) && reusableStatuses.has(job.id)
-    ? reusableStatuses.get(job.id)!
-    : projectAutomationJobStatusItem(job));
+      ? reusableStatuses.get(job.id)!
+      : projectAutomationJobStatusItem(job));
   const listProjections = retained.map(job => unchanged(job) && reusableList.has(job.id)
-    ? reusableList.get(job.id)!
-    : projectAutomationJobListItem(job));
+      ? reusableList.get(job.id)!
+      : projectAutomationJobListItem(job));
   const listFingerprint = automationJobProjectionFingerprint(listProjections);
   const statusFingerprint = automationJobProjectionFingerprint(statusProjections);
   const listContentFingerprint = automationJobProjectionContentFingerprint(listProjections);
@@ -1005,8 +1002,8 @@ function buildProjectionRepairCandidate(
   const atCapacity = retained.length >= MAX_JOB_PROJECTIONS;
   const truncated = identity.durableJobCount > retained.length || atCapacity;
   const retentionBoundary = atCapacity && range.earliestUpdatedAt
-    ? { field: 'updatedAt' as const, oldestRetainedAt: range.earliestUpdatedAt }
-    : null;
+      ? { field: 'updatedAt' as const, oldestRetainedAt: range.earliestUpdatedAt }
+      : null;
   const projectionFingerprint = automationJobCombinedProjectionFingerprint({
     listProjectionFingerprint: listFingerprint,
     statusProjectionFingerprint: statusFingerprint,
@@ -1076,7 +1073,7 @@ function buildProjectionRepairCandidate(
 }
 
 function candidateProjectionEvidence(
-  candidate: AutomationJobProjectionRebuildCandidate,
+    candidate: AutomationJobProjectionRebuildCandidate,
 ): AutomationJobProjectionEvidence {
   return {
     evidenceClassification: candidate.completeness.currentStateComplete ? 'COMPLETE' : 'INCOMPLETE',
@@ -1126,15 +1123,15 @@ export interface AutomationJobProjectionRepairOptions {
 }
 
 function projectionRepairOwned(
-  manifest: AutomationJobProjectionManifest | null,
-  context: AutomationJobProjectionRepairContext,
+    manifest: AutomationJobProjectionManifest | null,
+    context: AutomationJobProjectionRepairContext,
 ): boolean {
   const repair = manifest?.activeRepair;
   return Boolean(
-    repair
-    && repair.repairId === context.repairId
-    && repair.rebuildToken === context.rebuildToken
-    && repair.repairFence === context.repairFence,
+      repair
+      && repair.repairId === context.repairId
+      && repair.rebuildToken === context.rebuildToken
+      && repair.repairFence === context.repairFence,
   );
 }
 
@@ -1145,8 +1142,8 @@ async function delayProjectionRepair(milliseconds: number): Promise<void> {
 async function cleanupStaleProjectionCandidates(now = Date.now()): Promise<void> {
   const manifest = await getAutomationJobProjectionManifestForMaintenance();
   const stale = (manifest?.staleCandidateStorage || []).filter(ref => !(
-    manifest?.activeSlot === ref.slot
-    && manifest.activeStorageRepairFence === ref.repairFence
+      manifest?.activeSlot === ref.slot
+      && manifest.activeStorageRepairFence === ref.repairFence
   ));
   const cleaned: AutomationJobProjectionCandidateStorageRef[] = [];
   for (const ref of stale) {
@@ -1167,9 +1164,9 @@ async function cleanupStaleProjectionCandidates(now = Date.now()): Promise<void>
 const activeProjectionRepairFlights = new Map<string, Promise<AutomationJobProjectionManifest>>();
 
 export function rebuildAutomationJobReadModelsFromDurable(
-  suppliedJobs: AutomationJob[] | null,
-  now = Date.now(),
-  options: AutomationJobProjectionRepairOptions = {},
+    suppliedJobs: AutomationJob[] | null,
+    now = Date.now(),
+    options: AutomationJobProjectionRepairOptions = {},
 ): Promise<AutomationJobProjectionManifest> {
   const owner = options.owner;
   if (!owner) return performAutomationJobReadModelRebuild(suppliedJobs, now, options);
@@ -1195,9 +1192,9 @@ export function rebuildAutomationJobReadModelsFromDurable(
 }
 
 async function performAutomationJobReadModelRebuild(
-  suppliedJobs: AutomationJob[] | null,
-  now = Date.now(),
-  options: AutomationJobProjectionRepairOptions = {},
+    suppliedJobs: AutomationJob[] | null,
+    now = Date.now(),
+    options: AutomationJobProjectionRepairOptions = {},
 ): Promise<AutomationJobProjectionManifest> {
   if (suppliedJobs !== null) assertProjectionSourceJobs(suppliedJobs);
   const localRepairId = `projection-repair:${generateId()}`.slice(0, 160);
@@ -1216,8 +1213,8 @@ async function performAutomationJobReadModelRebuild(
   const context = await beginAutomationJobProjectionRebuild(owner, now);
   const targetCollections = automationJobProjectionStorageCollections(context.targetSlot, context.repairFence);
   const observePhase = async (
-    phase: AutomationJobProjectionRepairPhase,
-    input: { catchUpPasses?: number; catchUpPending?: boolean; lastFailureReason?: string | null } = {},
+      phase: AutomationJobProjectionRepairPhase,
+      input: { catchUpPasses?: number; catchUpPending?: boolean; lastFailureReason?: string | null } = {},
   ): Promise<void> => {
     await options.onPhase?.({
       context,
@@ -1240,8 +1237,8 @@ async function performAutomationJobReadModelRebuild(
     }));
   };
   const transitionRepair = async (
-    phase: AutomationJobProjectionRepairPhase,
-    input: Parameters<typeof transitionAutomationJobProjectionRepair>[2] = {},
+      phase: AutomationJobProjectionRepairPhase,
+      input: Parameters<typeof transitionAutomationJobProjectionRepair>[2] = {},
   ): Promise<void> => {
     const repair = await transitionAutomationJobProjectionRepair(context, phase, input, now);
     await observePhase(phase, {
@@ -1259,12 +1256,12 @@ async function performAutomationJobReadModelRebuild(
     await observePhase('CLAIMED');
     await transitionRepair('REBUILDING');
     const baseSource = suppliedJobs !== null
-      ? {
+        ? {
           jobs: suppliedJobs,
           durableJobCount: suppliedJobs.length,
           activeJobCount: suppliedJobs.filter(job => !TERMINAL.has(job.status)).length,
         }
-      : await scanAutomationJobProjectionSource(context.startBoundary.highWatermark);
+        : await scanAutomationJobProjectionSource(context.startBoundary.highWatermark);
     let currentJobs = await applyCurrentProjectionHeartbeats(baseSource.jobs);
     suppliedJobs = null;
     identity = projectionSourceIdentity(currentJobs, baseSource);
@@ -1278,8 +1275,8 @@ async function performAutomationJobReadModelRebuild(
 
     const activeStorage = await getAutomationJobActiveProjectionStorage();
     const previousSummarySnapshot = await readBoundedCollectionSnapshot<AutomationJobHealthSummary>(
-      activeStorage.collections.summary,
-      { maximumItems: 1, maximumBytes: 512 * 1024 },
+        activeStorage.collections.summary,
+        { maximumItems: 1, maximumBytes: 512 * 1024 },
     ).catch(() => null);
     const previousSummary = previousSummarySnapshot?.items[0];
 
@@ -1324,8 +1321,8 @@ async function performAutomationJobReadModelRebuild(
       await options.hooks?.afterCatchUpPass?.({ context, pass, deltaJobCount });
       const settled = await getAutomationJobProjectionManifestForMaintenance();
       const stableBoundary = projectionRepairOwned(settled, context)
-        && (settled!.sourceHighWatermark || 0) === sourceBoundary.highWatermark
-        && !(settled!.inFlightSyncOperations || []).some(operation => operation.sequence <= sourceBoundary.highWatermark);
+          && (settled!.sourceHighWatermark || 0) === sourceBoundary.highWatermark
+          && !(settled!.inFlightSyncOperations || []).some(operation => operation.sequence <= sourceBoundary.highWatermark);
       if (!stableBoundary) {
         await sleep(backoffs[Math.min(pass - 1, backoffs.length - 1)] || 0);
         continue;
@@ -1349,9 +1346,9 @@ async function performAutomationJobReadModelRebuild(
         evidence: candidateProjectionEvidence(candidate),
       });
       if (
-        summary.sourceRevision !== candidate.sourceRevision
-        || summary.projectionFingerprint !== candidate.projectionFingerprint
-        || !summary.projectionEvidence.currentStateComplete
+          summary.sourceRevision !== candidate.sourceRevision
+          || summary.projectionFingerprint !== candidate.projectionFingerprint
+          || !summary.projectionEvidence.currentStateComplete
       ) {
         throw new Error('JOB_PROJECTION_REBUILD_SUMMARY_NOT_VERIFIED');
       }
@@ -1377,8 +1374,8 @@ async function performAutomationJobReadModelRebuild(
         candidateFingerprint: candidate.candidateFingerprint,
       };
       await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
-        JOB_PROJECTION_REBUILD_STAGING,
-        items => [...items.filter(item => item.id !== context.rebuildToken).slice(-9), stagingRecord],
+          JOB_PROJECTION_REBUILD_STAGING,
+          items => [...items.filter(item => item.id !== context.rebuildToken).slice(-9), stagingRecord],
       );
       await Promise.all([
         runTransaction<AutomationJobStatusProjection>(targetCollections.status, () => candidate!.statusProjections),
@@ -1399,21 +1396,21 @@ async function performAutomationJobReadModelRebuild(
           maximumBytes: 512 * 1024,
         }),
         readBoundedCollectionSnapshot<AutomationJobProjectionRebuildStagingRecord>(
-          JOB_PROJECTION_REBUILD_STAGING,
-          { maximumItems: 10, maximumBytes: 128 * 1024 },
+            JOB_PROJECTION_REBUILD_STAGING,
+            { maximumItems: 10, maximumBytes: 128 * 1024 },
         ),
       ]);
       const stagedCandidate = staged.items.find(item => item.id === context.rebuildToken);
       if (
-        writtenStatuses.items.length !== candidate.statusProjections.length
-        || writtenList.items.length !== candidate.listProjections.length
-        || automationJobProjectionFingerprint(writtenStatuses.items) !== candidate.statusProjectionFingerprint
-        || automationJobProjectionFingerprint(writtenList.items) !== candidate.listProjectionFingerprint
-        || automationJobProjectionContentFingerprint(writtenStatuses.items) !== candidate.statusProjectionContentFingerprint
-        || automationJobProjectionContentFingerprint(writtenList.items) !== candidate.listProjectionContentFingerprint
-        || !validateAutomationJobHealthSummary(writtenSummary.items[0])
-        || writtenSummary.items[0]?.summaryRevision !== summary.summaryRevision
-        || stagedCandidate?.candidateFingerprint !== candidate.candidateFingerprint
+          writtenStatuses.items.length !== candidate.statusProjections.length
+          || writtenList.items.length !== candidate.listProjections.length
+          || automationJobProjectionFingerprint(writtenStatuses.items) !== candidate.statusProjectionFingerprint
+          || automationJobProjectionFingerprint(writtenList.items) !== candidate.listProjectionFingerprint
+          || automationJobProjectionContentFingerprint(writtenStatuses.items) !== candidate.statusProjectionContentFingerprint
+          || automationJobProjectionContentFingerprint(writtenList.items) !== candidate.listProjectionContentFingerprint
+          || !validateAutomationJobHealthSummary(writtenSummary.items[0])
+          || writtenSummary.items[0]?.summaryRevision !== summary.summaryRevision
+          || stagedCandidate?.candidateFingerprint !== candidate.candidateFingerprint
       ) {
         throw new Error('JOB_PROJECTION_REBUILD_CANDIDATE_STORAGE_MISMATCH');
       }
@@ -1436,16 +1433,16 @@ async function performAutomationJobReadModelRebuild(
         }),
       ]);
       if (
-        publishStatuses.items.length !== candidate.statusProjections.length
-        || publishList.items.length !== candidate.listProjections.length
-        || automationJobProjectionFingerprint(publishStatuses.items) !== candidate.statusProjectionFingerprint
-        || automationJobProjectionFingerprint(publishList.items) !== candidate.listProjectionFingerprint
-        || automationJobProjectionContentFingerprint(publishStatuses.items)
+          publishStatuses.items.length !== candidate.statusProjections.length
+          || publishList.items.length !== candidate.listProjections.length
+          || automationJobProjectionFingerprint(publishStatuses.items) !== candidate.statusProjectionFingerprint
+          || automationJobProjectionFingerprint(publishList.items) !== candidate.listProjectionFingerprint
+          || automationJobProjectionContentFingerprint(publishStatuses.items)
           !== candidate.statusProjectionContentFingerprint
-        || automationJobProjectionContentFingerprint(publishList.items)
+          || automationJobProjectionContentFingerprint(publishList.items)
           !== candidate.listProjectionContentFingerprint
-        || !validateAutomationJobHealthSummary(publishSummary.items[0])
-        || publishSummary.items[0].summaryRevision !== summary.summaryRevision
+          || !validateAutomationJobHealthSummary(publishSummary.items[0])
+          || publishSummary.items[0].summaryRevision !== summary.summaryRevision
       ) {
         throw new Error('JOB_PROJECTION_REPAIR_PRE_PUBLISH_VALIDATION_FAILED');
       }
@@ -1486,10 +1483,10 @@ async function performAutomationJobReadModelRebuild(
         throw error;
       }
       await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
-        JOB_PROJECTION_REBUILD_STAGING,
-        items => items.map(item => item.id === context.rebuildToken
-          ? { ...item, status: 'PROMOTED' as const }
-          : item),
+          JOB_PROJECTION_REBUILD_STAGING,
+          items => items.map(item => item.id === context.rebuildToken
+              ? { ...item, status: 'PROMOTED' as const }
+              : item),
       );
       break;
     }
@@ -1539,16 +1536,16 @@ async function performAutomationJobReadModelRebuild(
         }),
       ]);
       if (
-        mirroredStatuses.items.length !== mirrorManifest!.statusProjectionCount
-        || mirroredList.items.length !== mirrorManifest!.listProjectionCount
-        || automationJobProjectionFingerprint(mirroredStatuses.items) !== mirrorManifest!.statusProjectionFingerprint
-        || automationJobProjectionFingerprint(mirroredList.items) !== mirrorManifest!.listProjectionFingerprint
-        || automationJobProjectionContentFingerprint(mirroredStatuses.items)
+          mirroredStatuses.items.length !== mirrorManifest!.statusProjectionCount
+          || mirroredList.items.length !== mirrorManifest!.listProjectionCount
+          || automationJobProjectionFingerprint(mirroredStatuses.items) !== mirrorManifest!.statusProjectionFingerprint
+          || automationJobProjectionFingerprint(mirroredList.items) !== mirrorManifest!.listProjectionFingerprint
+          || automationJobProjectionContentFingerprint(mirroredStatuses.items)
           !== mirrorManifest!.statusProjectionContentFingerprint
-        || automationJobProjectionContentFingerprint(mirroredList.items)
+          || automationJobProjectionContentFingerprint(mirroredList.items)
           !== mirrorManifest!.listProjectionContentFingerprint
-        || !validateAutomationJobHealthSummary(mirroredSummary.items[0])
-        || mirroredSummary.items[0].summaryRevision !== mirrorManifest!.summaryRevision
+          || !validateAutomationJobHealthSummary(mirroredSummary.items[0])
+          || mirroredSummary.items[0].summaryRevision !== mirrorManifest!.summaryRevision
       ) {
         throw new Error('JOB_PROJECTION_LEGACY_MIRROR_VALIDATION_FAILED');
       }
@@ -1576,20 +1573,20 @@ async function performAutomationJobReadModelRebuild(
       catchUpPending: false,
     });
     await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
-      JOB_PROJECTION_REBUILD_STAGING,
-      items => items.map(item => item.id === context.rebuildToken ? {
-        ...item,
-        status: legacyMirrored ? 'MIRRORED' : 'PROMOTED',
-        completedAt: new Date(now).toISOString(),
-      } : item),
+        JOB_PROJECTION_REBUILD_STAGING,
+        items => items.map(item => item.id === context.rebuildToken ? {
+          ...item,
+          status: legacyMirrored ? 'MIRRORED' : 'PROMOTED',
+          completedAt: new Date(now).toISOString(),
+        } : item),
     );
     await cleanupStaleProjectionCandidates(now);
     const manifest = await getAutomationJobProjectionManifestForMaintenance();
     if (
-      !manifest
-      || manifest.activeGeneration !== context.targetGeneration
-      || (manifest.sourceHighWatermark || 0) < candidate.sourceBoundary.highWatermark
-      || !manifest.lastSuccessfulRepairAt
+        !manifest
+        || manifest.activeGeneration !== context.targetGeneration
+        || (manifest.sourceHighWatermark || 0) < candidate.sourceBoundary.highWatermark
+        || !manifest.lastSuccessfulRepairAt
     ) {
       throw new Error('JOB_PROJECTION_REBUILD_MANIFEST_NOT_VERIFIED');
     }
@@ -1597,14 +1594,14 @@ async function performAutomationJobReadModelRebuild(
   } catch (error) {
     if (promoted) {
       const recovered = await completeAutomationJobProjectionRepair(
-        context,
-        { legacyMirrored: false },
-        now,
+          context,
+          { legacyMirrored: false },
+          now,
       ).catch(() => getAutomationJobProjectionManifestForMaintenance());
       if (
-        recovered?.activeGeneration === context.targetGeneration
-        && (recovered.activeSlot === 'LEGACY'
-          || recovered.activeStorageRepairFence === context.repairFence)
+          recovered?.activeGeneration === context.targetGeneration
+          && (recovered.activeSlot === 'LEGACY'
+              || recovered.activeStorageRepairFence === context.repairFence)
       ) {
         await observePhase('COMPLETED', {
           catchUpPasses: candidate?.catchUpPasses || 0,
@@ -1615,15 +1612,15 @@ async function performAutomationJobReadModelRebuild(
       }
     } else {
       await failAutomationJobProjectionRepair(
-        context,
-        error instanceof Error ? error.message : 'JOB_PROJECTION_REBUILD_FAILED',
-        now,
+          context,
+          error instanceof Error ? error.message : 'JOB_PROJECTION_REBUILD_FAILED',
+          now,
       ).catch(() => undefined);
       await refreshAutomationJobHealthSummary(now).catch(() => undefined);
       const terminalPhase: AutomationJobProjectionRepairPhase = error instanceof Error
-        && error.message.includes('FENCING')
-        ? 'SUPERSEDED'
-        : 'FAILED';
+      && error.message.includes('FENCING')
+          ? 'SUPERSEDED'
+          : 'FAILED';
       await observePhase(terminalPhase, {
         catchUpPasses: candidate?.catchUpPasses || 0,
         catchUpPending: false,
@@ -1632,15 +1629,15 @@ async function performAutomationJobReadModelRebuild(
     }
     await cleanupStaleProjectionCandidates(now).catch(() => undefined);
     await runTransaction<AutomationJobProjectionRebuildStagingRecord>(
-      JOB_PROJECTION_REBUILD_STAGING,
-      items => items.map(item => item.id === context.rebuildToken ? {
-        ...item,
-        status: 'FAILED',
-        completedAt: new Date(now).toISOString(),
-        reasonCode: error instanceof Error
-          ? error.message.replace(/[^A-Z0-9_:-]/gi, '_').slice(0, 120)
-          : 'JOB_PROJECTION_REBUILD_FAILED',
-      } : item),
+        JOB_PROJECTION_REBUILD_STAGING,
+        items => items.map(item => item.id === context.rebuildToken ? {
+          ...item,
+          status: 'FAILED',
+          completedAt: new Date(now).toISOString(),
+          reasonCode: error instanceof Error
+              ? error.message.replace(/[^A-Z0-9_:-]/gi, '_').slice(0, 120)
+              : 'JOB_PROJECTION_REBUILD_FAILED',
+        } : item),
     ).catch(() => undefined);
     throw error;
   }
@@ -1662,7 +1659,7 @@ interface ProjectionMutationStats {
 }
 
 function boundedProjectionItems<T extends Pick<AutomationJob, 'id' | 'status' | 'updatedAt'>>(
-  items: T[],
+    items: T[],
 ): { items: T[]; stats: Omit<ProjectionMutationStats, 'inserted' | 'insertedCount' | 'sourceAffected'> } {
   const activeBeforeRetention = items.filter(item => !TERMINAL.has(item.status)).length;
   let retained = items;
@@ -1681,9 +1678,9 @@ function boundedProjectionItems<T extends Pick<AutomationJob, 'id' | 'status' | 
     retained = removeIds.size ? items.filter(item => !removeIds.has(item.id)) : items;
   }
   const timestamps = retained
-    .map(item => ({ value: item.updatedAt, parsed: Date.parse(item.updatedAt) }))
-    .filter((item): item is { value: string; parsed: number } => Number.isFinite(item.parsed))
-    .sort((left, right) => left.parsed - right.parsed);
+      .map(item => ({ value: item.updatedAt, parsed: Date.parse(item.updatedAt) }))
+      .filter((item): item is { value: string; parsed: number } => Number.isFinite(item.parsed))
+      .sort((left, right) => left.parsed - right.parsed);
   const retentionLimitReached = items.length >= MAX_JOB_PROJECTIONS;
   return {
     items: retained,
@@ -1697,15 +1694,15 @@ function boundedProjectionItems<T extends Pick<AutomationJob, 'id' | 'status' | 
       currentStateTruncated: activeBeforeRetention > MAX_JOB_PROJECTIONS,
       sourceUpdatedAt: timestamps.at(-1)?.value || null,
       retentionBoundary: retentionLimitReached && timestamps[0]
-        ? { field: 'updatedAt', oldestRetainedAt: timestamps[0].value }
-        : null,
+          ? { field: 'updatedAt', oldestRetainedAt: timestamps[0].value }
+          : null,
     },
   };
 }
 
 async function syncJobProjections(
-  jobs: AutomationJob[],
-  collection: string,
+    jobs: AutomationJob[],
+    collection: string,
 ): Promise<ProjectionMutationStats> {
   let output: ProjectionMutationStats | undefined;
   await runTransaction<AutomationJobStatusProjection>(collection, items => {
@@ -1736,8 +1733,8 @@ async function syncJobProjections(
 }
 
 async function syncJobListProjections(
-  jobs: AutomationJob[],
-  collection: string,
+    jobs: AutomationJob[],
+    collection: string,
 ): Promise<ProjectionMutationStats> {
   let output: ProjectionMutationStats | undefined;
   await runTransaction<AutomationJobListProjection>(collection, items => {
@@ -1768,8 +1765,8 @@ async function syncJobListProjections(
 }
 
 async function removeJobProjections<T extends Pick<AutomationJob, 'id' | 'status' | 'updatedAt'>>(
-  jobIds: ReadonlySet<string>,
-  collection: string,
+    jobIds: ReadonlySet<string>,
+    collection: string,
 ): Promise<ProjectionMutationStats> {
   let output: ProjectionMutationStats | undefined;
   await runTransaction<T>(collection, items => {
@@ -1797,13 +1794,13 @@ async function removeJobHeartbeats(jobIds: string[]): Promise<void> {
 }
 
 async function syncJobReadModelsBatchBestEffort(
-  jobs: AutomationJob[],
-  input: {
-    removeHeartbeatJobIds?: string[];
-    mutation?: AutomationJobProjectionMutationHandle;
-    sourceMutationCommitted?: boolean;
-    supersededRetry?: boolean;
-  } = {},
+    jobs: AutomationJob[],
+    input: {
+      removeHeartbeatJobIds?: string[];
+      mutation?: AutomationJobProjectionMutationHandle;
+      sourceMutationCommitted?: boolean;
+      supersededRetry?: boolean;
+    } = {},
 ): Promise<void> {
   if (!jobs.length) {
     if (input.mutation) await abortAutomationJobProjectionMutation(input.mutation).catch(() => undefined);
@@ -1812,8 +1809,8 @@ async function syncJobReadModelsBatchBestEffort(
   const mutation = input.mutation || await beginAutomationJobProjectionMutation();
   const sourceVersions = mutation.jobSourceVersions || {};
   const versionedJobs = jobs.map(job => sourceVersions[job.id] === undefined
-    ? job
-    : { ...job, projectionSourceVersion: sourceVersions[job.id] });
+      ? job
+      : { ...job, projectionSourceVersion: sourceVersions[job.id] });
   const collections = automationJobProjectionStorageCollections(mutation.targetSlot, mutation.targetRepairFence);
   const operations: Array<{ label: string; work: Promise<ProjectionMutationStats | void> }> = [
     { label: 'status-projection', work: syncJobProjections(versionedJobs, collections.status) },
@@ -1837,15 +1834,15 @@ async function syncJobReadModelsBatchBestEffort(
   const statusResult = results[0];
   const listResult = results[1];
   const projectionSyncSucceeded = statusResult.status === 'fulfilled'
-    && listResult.status === 'fulfilled'
-    && statusResult.value !== undefined
-    && listResult.value !== undefined;
+      && listResult.status === 'fulfilled'
+      && statusResult.value !== undefined
+      && listResult.value !== undefined;
   const statusStats = statusResult.status === 'fulfilled' && statusResult.value
-    ? statusResult.value
-    : undefined;
+      ? statusResult.value
+      : undefined;
   const listStats = listResult.status === 'fulfilled' && listResult.value
-    ? listResult.value
-    : undefined;
+      ? listResult.value
+      : undefined;
   try {
     await finishAutomationJobProjectionSync(mutation, {
       success: projectionSyncSucceeded,
@@ -1854,9 +1851,9 @@ async function syncJobReadModelsBatchBestEffort(
       // The durable source watermark advances only for a committed JOBS write.
       // Repairing an already-existing read model must not invent a source event.
       sourceAffected: input.sourceMutationCommitted === true && (
-        !projectionSyncSucceeded
-        || Boolean(statusStats?.sourceAffected || listStats?.sourceAffected)
-        || Math.max(statusStats?.insertedCount || 0, listStats?.insertedCount || 0) > 0
+          !projectionSyncSucceeded
+          || Boolean(statusStats?.sourceAffected || listStats?.sourceAffected)
+          || Math.max(statusStats?.insertedCount || 0, listStats?.insertedCount || 0) > 0
       ),
       projectionChanged: Boolean(statusStats?.sourceAffected || listStats?.sourceAffected),
       listProjectionCount: listStats?.count || 0,
@@ -1864,18 +1861,18 @@ async function syncJobReadModelsBatchBestEffort(
       listProjectionFingerprint: listStats?.fingerprint || automationJobProjectionFingerprint([]),
       statusProjectionFingerprint: statusStats?.fingerprint || automationJobProjectionFingerprint([]),
       listProjectionContentFingerprint: listStats?.contentFingerprint
-        || automationJobProjectionContentFingerprint([]),
+          || automationJobProjectionContentFingerprint([]),
       statusProjectionContentFingerprint: statusStats?.contentFingerprint
-        || automationJobProjectionContentFingerprint([]),
+          || automationJobProjectionContentFingerprint([]),
       activeJobCount: Math.max(statusStats?.activeCount || 0, listStats?.activeCount || 0),
       retainedTerminalCount: projectionSyncSucceeded
-        ? Math.min(statusStats?.terminalCount || 0, listStats?.terminalCount || 0)
-        : 0,
+          ? Math.min(statusStats?.terminalCount || 0, listStats?.terminalCount || 0)
+          : 0,
       retentionLimitReached: Boolean(statusStats?.retentionLimitReached || listStats?.retentionLimitReached),
       currentStateTruncated: Boolean(statusStats?.currentStateTruncated || listStats?.currentStateTruncated),
       sourceUpdatedAt: [statusStats?.sourceUpdatedAt, listStats?.sourceUpdatedAt]
-        .filter((value): value is string => Boolean(value))
-        .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
+          .filter((value): value is string => Boolean(value))
+          .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
       retentionBoundary: statusStats?.retentionBoundary || listStats?.retentionBoundary || null,
     });
   } catch (error) {
@@ -1886,10 +1883,10 @@ async function syncJobReadModelsBatchBestEffort(
       reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
     }));
     if (
-      input.sourceMutationCommitted === true
-      && input.supersededRetry !== true
-      && error instanceof Error
-      && ['JOB_PROJECTION_MUTATION_SUPERSEDED', 'JOB_PROJECTION_MUTATION_GENERATION_SUPERSEDED'].includes(error.message)
+        input.sourceMutationCommitted === true
+        && input.supersededRetry !== true
+        && error instanceof Error
+        && ['JOB_PROJECTION_MUTATION_SUPERSEDED', 'JOB_PROJECTION_MUTATION_GENERATION_SUPERSEDED'].includes(error.message)
     ) {
       await syncJobReadModelsBatchBestEffort(versionedJobs, {
         removeHeartbeatJobIds: input.removeHeartbeatJobIds,
@@ -1916,9 +1913,9 @@ async function syncJobReadModelsBatchBestEffort(
 }
 
 async function syncJobReadModelsBestEffort(
-  job: AutomationJob,
-  removeHeartbeat = false,
-  mutation?: AutomationJobProjectionMutationHandle,
+    job: AutomationJob,
+    removeHeartbeat = false,
+    mutation?: AutomationJobProjectionMutationHandle,
 ): Promise<void> {
   await syncJobReadModelsBatchBestEffort([job], {
     mutation,
@@ -1972,27 +1969,27 @@ function normalizedRuntimeControlApplication(value: unknown): RuntimeControlAppl
   if (!value || typeof value !== 'object') return null;
   const candidate = value as Partial<RuntimeControlApplication>;
   const validMode = (mode: unknown): mode is AutomationControlState['effectiveMode'] =>
-    ['OBSERVE', 'SHADOW', 'CANARY', 'AUTONOMOUS'].includes(String(mode));
+      ['OBSERVE', 'SHADOW', 'CANARY', 'AUTONOMOUS'].includes(String(mode));
   const appliedAt = Date.parse(String(candidate.appliedAt || ''));
   const auditedAt = candidate.auditedAt === undefined
-    ? undefined
-    : Date.parse(String(candidate.auditedAt || ''));
+      ? undefined
+      : Date.parse(String(candidate.auditedAt || ''));
   if (
-    candidate.schemaVersion !== 1
-    || !['RUNTIME_BLOCK_APPLIED', 'RUNTIME_REASONS_CLEARED'].includes(String(candidate.operationType))
-    || typeof candidate.evaluationId !== 'string'
-    || !candidate.evaluationId.trim()
-    || candidate.evaluationId.length > 240
-    || typeof candidate.actor !== 'string'
-    || !candidate.actor.trim()
-    || candidate.actor.length > 200
-    || !validMode(candidate.previousEffectiveMode)
-    || !validMode(candidate.nextEffectiveMode)
-    || !Number.isFinite(appliedAt)
-    || (auditedAt !== undefined && !Number.isFinite(auditedAt))
-    || !Array.isArray(candidate.reasons)
-    || !Array.isArray(candidate.previousRuntimeReasons)
-    || !Array.isArray(candidate.nextRuntimeReasons)
+      candidate.schemaVersion !== 1
+      || !['RUNTIME_BLOCK_APPLIED', 'RUNTIME_REASONS_CLEARED'].includes(String(candidate.operationType))
+      || typeof candidate.evaluationId !== 'string'
+      || !candidate.evaluationId.trim()
+      || candidate.evaluationId.length > 240
+      || typeof candidate.actor !== 'string'
+      || !candidate.actor.trim()
+      || candidate.actor.length > 200
+      || !validMode(candidate.previousEffectiveMode)
+      || !validMode(candidate.nextEffectiveMode)
+      || !Number.isFinite(appliedAt)
+      || (auditedAt !== undefined && !Number.isFinite(auditedAt))
+      || !Array.isArray(candidate.reasons)
+      || !Array.isArray(candidate.previousRuntimeReasons)
+      || !Array.isArray(candidate.nextRuntimeReasons)
   ) return null;
   return {
     schemaVersion: 1,
@@ -2025,7 +2022,7 @@ function runtimeControlApplicationJournal(value: unknown): {
 }
 
 function retainedRuntimeControlApplications(
-  value: AutomationControlState['runtimeControlApplications'] | unknown,
+    value: AutomationControlState['runtimeControlApplications'] | unknown,
 ): NonNullable<AutomationControlState['runtimeControlApplications']> {
   const applications = runtimeControlApplicationJournal(value).valid;
   const audited = applications.filter(application => Boolean(application.auditedAt));
@@ -2038,8 +2035,8 @@ function retainedRuntimeControlApplications(
 }
 
 function persistedRuntimeControlApplications(
-  original: unknown,
-  validApplications: RuntimeControlApplication[],
+    original: unknown,
+    validApplications: RuntimeControlApplication[],
 ): AutomationControlState['runtimeControlApplications'] {
   const invalidEntries = runtimeControlApplicationJournal(original).invalidEntries;
   // Malformed durable entries are retained verbatim for forensic recovery.
@@ -2055,8 +2052,8 @@ export function sanitizeAutomationData(value: unknown, depth = 0): unknown {
   if (value === null || ['number', 'boolean'].includes(typeof value)) return value;
   if (typeof value === 'string') {
     const redacted = value
-      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-      .replace(/([?&](?:access_?token|token|api_?key|signature|secret|password|authorization)=)[^&\s]+/gi, '$1[REDACTED]');
+        .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+        .replace(/([?&](?:access_?token|token|api_?key|signature|secret|password|authorization)=)[^&\s]+/gi, '$1[REDACTED]');
     return redacted.slice(0, 1_000);
   }
   if (Array.isArray(value)) return value.slice(0, 100).map(item => sanitizeAutomationData(item, depth + 1));
@@ -2093,15 +2090,15 @@ export async function getAutomationControl(): Promise<AutomationControlState> {
   const runtimeJournal = runtimeControlApplicationJournal(stored.runtimeControlApplications);
   const runtimeControlJournalInvalidCount = runtimeJournal.invalidEntries.length;
   const hasProvenance = typeof stored.publishPausedByOperator === 'boolean'
-    || typeof stored.publishBlockedByRuntime === 'boolean'
-    || typeof stored.publishBlockedByPolicy === 'boolean';
+      || typeof stored.publishBlockedByRuntime === 'boolean'
+      || typeof stored.publishBlockedByPolicy === 'boolean';
   const systemPause = ['runtime-guardian', 'error-budget-controller'].includes(String(stored.changedBy || ''));
   const publishPausedByOperator = stored.publishPausedByOperator
-    ?? (hasProvenance ? false : Boolean(stored.publishPaused) && !systemPause);
+      ?? (hasProvenance ? false : Boolean(stored.publishPaused) && !systemPause);
   const publishBlockedByRuntime = Boolean(
-    (stored.publishBlockedByRuntime
-      ?? (hasProvenance ? false : Boolean(stored.publishPaused) && systemPause))
-    || runtimeControlJournalInvalidCount > 0
+      (stored.publishBlockedByRuntime
+          ?? (hasProvenance ? false : Boolean(stored.publishPaused) && systemPause))
+      || runtimeControlJournalInvalidCount > 0
   );
   const publishBlockedByPolicy = stored.publishBlockedByPolicy ?? false;
   const output: AutomationControlState = {
@@ -2126,39 +2123,39 @@ export async function getAutomationControl(): Promise<AutomationControlState> {
 }
 
 export async function updateAutomationControl(
-  updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'publishPausedByOperator' | 'publishBlockedByRuntime' | 'publishBlockedByPolicy' | 'publishRuntimeReasons' | 'publishPolicyReasons' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'pausedAt' | 'pauseReason' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
-  actor = 'system',
+    updates: Partial<Pick<AutomationControlState, 'mode' | 'effectiveMode' | 'publishPaused' | 'publishPausedByOperator' | 'publishBlockedByRuntime' | 'publishBlockedByPolicy' | 'publishRuntimeReasons' | 'publishPolicyReasons' | 'ingestionPaused' | 'workerPaused' | 'schedulerPaused' | 'pausedAt' | 'pauseReason' | 'killSwitch' | 'reason' | 'changedBy' | 'workerHeartbeatAt' | 'workerId' | 'workerCurrentJobId' | 'schedulerHeartbeatAt' | 'schedulerLastRunAt' | 'schedulerNextRunAt' | 'guardianHeartbeatAt' | 'degradedAt' | 'degradedReason'>>,
+    actor = 'system',
 ): Promise<AutomationControlState> {
   let previous: AutomationControlState = { ...DEFAULT_CONTROL };
   let next = previous;
   const now = new Date().toISOString();
   const changesControlState = 'killSwitch' in updates
-    || 'workerPaused' in updates
-    || 'schedulerPaused' in updates
-    || 'mode' in updates
-    || 'effectiveMode' in updates
-    || 'publishPaused' in updates
-    || 'publishPausedByOperator' in updates
-    || 'publishBlockedByRuntime' in updates
-    || 'publishBlockedByPolicy' in updates
-    || 'ingestionPaused' in updates;
+      || 'workerPaused' in updates
+      || 'schedulerPaused' in updates
+      || 'mode' in updates
+      || 'effectiveMode' in updates
+      || 'publishPaused' in updates
+      || 'publishPausedByOperator' in updates
+      || 'publishBlockedByRuntime' in updates
+      || 'publishBlockedByPolicy' in updates
+      || 'ingestionPaused' in updates;
   await runTransaction<AutomationControlState>(CONTROL, items => {
     const rawPrevious = items[0] || { ...DEFAULT_CONTROL };
     const runtimeJournal = runtimeControlApplicationJournal(rawPrevious.runtimeControlApplications);
     const invalidRuntimeJournal = runtimeJournal.invalidEntries.length > 0;
     const hasProvenance = typeof rawPrevious.publishPausedByOperator === 'boolean'
-      || typeof rawPrevious.publishBlockedByRuntime === 'boolean'
-      || typeof rawPrevious.publishBlockedByPolicy === 'boolean';
+        || typeof rawPrevious.publishBlockedByRuntime === 'boolean'
+        || typeof rawPrevious.publishBlockedByPolicy === 'boolean';
     const legacySystemPause = ['runtime-guardian', 'error-budget-controller'].includes(String(rawPrevious.changedBy || ''));
     previous = {
       ...DEFAULT_CONTROL,
       ...rawPrevious,
       publishPausedByOperator: rawPrevious.publishPausedByOperator
-        ?? (hasProvenance ? false : Boolean(rawPrevious.publishPaused) && !legacySystemPause),
+          ?? (hasProvenance ? false : Boolean(rawPrevious.publishPaused) && !legacySystemPause),
       publishBlockedByRuntime: Boolean(
-        (rawPrevious.publishBlockedByRuntime
-          ?? (hasProvenance ? false : Boolean(rawPrevious.publishPaused) && legacySystemPause))
-        || invalidRuntimeJournal
+          (rawPrevious.publishBlockedByRuntime
+              ?? (hasProvenance ? false : Boolean(rawPrevious.publishPaused) && legacySystemPause))
+          || invalidRuntimeJournal
       ),
       publishBlockedByPolicy: rawPrevious.publishBlockedByPolicy ?? false,
       publishRuntimeReasons: normalizedRuntimeReasons([
@@ -2170,9 +2167,9 @@ export async function updateAutomationControl(
     };
     const normalizedUpdates = { ...updates };
     if ('publishPaused' in updates
-      && !('publishPausedByOperator' in updates)
-      && !('publishBlockedByRuntime' in updates)
-      && !('publishBlockedByPolicy' in updates)) {
+        && !('publishPausedByOperator' in updates)
+        && !('publishBlockedByRuntime' in updates)
+        && !('publishBlockedByPolicy' in updates)) {
       if (['runtime-guardian', 'error-budget-controller'].includes(actor)) {
         normalizedUpdates.publishBlockedByRuntime = Boolean(updates.publishPaused);
       } else {
@@ -2180,14 +2177,14 @@ export async function updateAutomationControl(
       }
     }
     if (
-      previous.publishBlockedByRuntime === true
-      && normalizedUpdates.publishBlockedByRuntime === false
+        previous.publishBlockedByRuntime === true
+        && normalizedUpdates.publishBlockedByRuntime === false
     ) {
       throw new Error('RUNTIME_PUBLISH_BLOCK_CLEAR_REQUIRES_EVIDENCE_PATH');
     }
     if (
-      previous.publishBlockedByRuntime === true
-      && Array.isArray(normalizedUpdates.publishRuntimeReasons)
+        previous.publishBlockedByRuntime === true
+        && Array.isArray(normalizedUpdates.publishRuntimeReasons)
     ) {
       const requestedRuntimeReasons = normalizedRuntimeReasons(normalizedUpdates.publishRuntimeReasons);
       const existingRuntimeReasons = normalizedRuntimeReasons(previous.publishRuntimeReasons);
@@ -2197,9 +2194,9 @@ export async function updateAutomationControl(
     }
     next = { ...previous, ...normalizedUpdates, schemaVersion: 2, id: 'automation-control', updatedAt: now };
     if ('publishPaused' in updates
-      || 'publishPausedByOperator' in normalizedUpdates
-      || 'publishBlockedByRuntime' in normalizedUpdates
-      || 'publishBlockedByPolicy' in normalizedUpdates) {
+        || 'publishPausedByOperator' in normalizedUpdates
+        || 'publishBlockedByRuntime' in normalizedUpdates
+        || 'publishBlockedByPolicy' in normalizedUpdates) {
       next.publishPaused = Boolean(next.publishPausedByOperator || next.publishBlockedByRuntime || next.publishBlockedByPolicy);
     }
     if (changesControlState) {
@@ -2239,7 +2236,7 @@ export interface ApplyRuntimePublishBlockResult {
 }
 
 function nextRuntimeDegradedMode(
-  mode: AutomationControlState['effectiveMode'],
+    mode: AutomationControlState['effectiveMode'],
 ): AutomationControlState['effectiveMode'] {
   if (mode === 'AUTONOMOUS') return 'CANARY';
   if (mode === 'CANARY') return 'SHADOW';
@@ -2249,9 +2246,9 @@ function nextRuntimeDegradedMode(
 function normalizedRuntimeReasons(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
   const reasons = [...new Set(values
-    .map(String)
-    .map(item => item.trim().slice(0, 200))
-    .filter(Boolean))];
+      .map(String)
+      .map(item => item.trim().slice(0, 200))
+      .filter(Boolean))];
   if (reasons.length <= MAX_EXPLICIT_RUNTIME_REASONS) return reasons;
   const overflowHash = createHash('sha256').update(JSON.stringify(reasons)).digest('hex').slice(0, 16);
   return [
@@ -2265,13 +2262,13 @@ function normalizedRuntimeReasons(values: unknown): string[] {
  * key, so retrying an interrupted controller invocation cannot degrade twice.
  */
 export async function applyRuntimePublishBlock(
-  input: {
-    reasonCodes: string[];
-    evaluationId: string;
-    evaluatedAt?: string;
-    degradeMode?: boolean;
-  },
-  actor = 'error-budget-controller',
+    input: {
+      reasonCodes: string[];
+      evaluationId: string;
+      evaluatedAt?: string;
+      degradeMode?: boolean;
+    },
+    actor = 'error-budget-controller',
 ): Promise<ApplyRuntimePublishBlockResult> {
   const reasons = normalizedRuntimeReasons(input.reasonCodes);
   if (!reasons.length) throw new Error('RUNTIME_PUBLISH_BLOCK_REASON_REQUIRED');
@@ -2283,18 +2280,18 @@ export async function applyRuntimePublishBlock(
     const runtimeJournal = runtimeControlApplicationJournal(raw.runtimeControlApplications);
     const invalidRuntimeJournal = runtimeJournal.invalidEntries.length > 0;
     const hasProvenance = typeof raw.publishPausedByOperator === 'boolean'
-      || typeof raw.publishBlockedByRuntime === 'boolean'
-      || typeof raw.publishBlockedByPolicy === 'boolean';
+        || typeof raw.publishBlockedByRuntime === 'boolean'
+        || typeof raw.publishBlockedByPolicy === 'boolean';
     const legacySystemPause = ['runtime-guardian', 'error-budget-controller'].includes(String(raw.changedBy || ''));
     const previous: AutomationControlState = {
       ...DEFAULT_CONTROL,
       ...raw,
       publishPausedByOperator: raw.publishPausedByOperator
-        ?? (hasProvenance ? false : Boolean(raw.publishPaused) && !legacySystemPause),
+          ?? (hasProvenance ? false : Boolean(raw.publishPaused) && !legacySystemPause),
       publishBlockedByRuntime: Boolean(
-        (raw.publishBlockedByRuntime
-          ?? (hasProvenance ? false : Boolean(raw.publishPaused) && legacySystemPause))
-        || invalidRuntimeJournal
+          (raw.publishBlockedByRuntime
+              ?? (hasProvenance ? false : Boolean(raw.publishPaused) && legacySystemPause))
+          || invalidRuntimeJournal
       ),
       publishBlockedByPolicy: raw.publishBlockedByPolicy ?? false,
       publishRuntimeReasons: normalizedRuntimeReasons([
@@ -2306,8 +2303,8 @@ export async function applyRuntimePublishBlock(
       runtimeControlJournalInvalidCount: runtimeJournal.invalidEntries.length,
     };
     const existing = previous.runtimeControlApplications?.find(
-      application => application.evaluationId === evaluationId
-        && application.operationType === 'RUNTIME_BLOCK_APPLIED',
+        application => application.evaluationId === evaluationId
+            && application.operationType === 'RUNTIME_BLOCK_APPLIED',
     );
     if (existing) {
       output = {
@@ -2322,11 +2319,11 @@ export async function applyRuntimePublishBlock(
     const previousReasons = normalizedRuntimeReasons(previous.publishRuntimeReasons);
     const nextReasons = normalizedRuntimeReasons([...previousReasons, ...reasons]);
     const nextMode = input.degradeMode === false
-      ? previous.effectiveMode
-      : nextRuntimeDegradedMode(previous.effectiveMode);
+        ? previous.effectiveMode
+        : nextRuntimeDegradedMode(previous.effectiveMode);
     const appliedAt = input.evaluatedAt && Number.isFinite(Date.parse(input.evaluatedAt))
-      ? new Date(input.evaluatedAt).toISOString()
-      : new Date().toISOString();
+        ? new Date(input.evaluatedAt).toISOString()
+        : new Date().toISOString();
     const application: NonNullable<AutomationControlState['runtimeControlApplications']>[number] = {
       schemaVersion: 1,
       evaluationId,
@@ -2352,8 +2349,8 @@ export async function applyRuntimePublishBlock(
       changedBy: actor,
       updatedAt: appliedAt,
       runtimeControlApplications: persistedRuntimeControlApplications(
-        raw.runtimeControlApplications,
-        [...(previous.runtimeControlApplications || []), application],
+          raw.runtimeControlApplications,
+          [...(previous.runtimeControlApplications || []), application],
       ),
     };
     output = {
@@ -2381,8 +2378,8 @@ export async function flushRuntimeControlApplicationAudits(): Promise<number> {
       correlationId: application.evaluationId,
       operationId: `${application.evaluationId}:${application.operationType}:automation-control`,
       operationType: application.operationType === 'RUNTIME_BLOCK_APPLIED'
-        ? 'CONTROL_RUNTIME_BLOCK_APPLIED'
-        : 'CONTROL_RUNTIME_REASONS_CLEARED',
+          ? 'CONTROL_RUNTIME_BLOCK_APPLIED'
+          : 'CONTROL_RUNTIME_REASONS_CLEARED',
       actor: application.actor,
       target: 'automation-control',
       previousState: JSON.stringify({
@@ -2405,7 +2402,7 @@ export async function flushRuntimeControlApplicationAudits(): Promise<number> {
       const target = (current.runtimeControlApplications as unknown[]).find(item => {
         const normalized = normalizedRuntimeControlApplication(item);
         return normalized?.evaluationId === application.evaluationId
-          && normalized.operationType === application.operationType;
+            && normalized.operationType === application.operationType;
       });
       const normalizedTarget = normalizedRuntimeControlApplication(target);
       if (!target || !normalizedTarget || normalizedTarget.auditedAt) return undefined;
@@ -2430,14 +2427,14 @@ export interface ClearRuntimePublishReasonsResult {
  * an older healthy observation.
  */
 export async function clearRuntimePublishReasons(
-  input: {
-    reasonCodes: string[];
-    expectedChangedAt?: string;
-    expectedRuntimeReasons: string[];
-    reason: string;
-    evaluationId: string;
-  },
-  actor = 'error-budget-controller',
+    input: {
+      reasonCodes: string[];
+      expectedChangedAt?: string;
+      expectedRuntimeReasons: string[];
+      reason: string;
+      evaluationId: string;
+    },
+    actor = 'error-budget-controller',
 ): Promise<ClearRuntimePublishReasonsResult> {
   const requestedReasons = normalizedRuntimeReasons(input.reasonCodes);
   const expectedReasons = normalizedRuntimeReasons(input.expectedRuntimeReasons).sort();
@@ -2450,18 +2447,18 @@ export async function clearRuntimePublishReasons(
     const runtimeJournal = runtimeControlApplicationJournal(raw.runtimeControlApplications);
     const invalidRuntimeJournal = runtimeJournal.invalidEntries.length > 0;
     const hasProvenance = typeof raw.publishPausedByOperator === 'boolean'
-      || typeof raw.publishBlockedByRuntime === 'boolean'
-      || typeof raw.publishBlockedByPolicy === 'boolean';
+        || typeof raw.publishBlockedByRuntime === 'boolean'
+        || typeof raw.publishBlockedByPolicy === 'boolean';
     const legacySystemPause = ['runtime-guardian', 'error-budget-controller'].includes(String(raw.changedBy || ''));
     previous = {
       ...DEFAULT_CONTROL,
       ...raw,
       publishPausedByOperator: raw.publishPausedByOperator
-        ?? (hasProvenance ? false : Boolean(raw.publishPaused) && !legacySystemPause),
+          ?? (hasProvenance ? false : Boolean(raw.publishPaused) && !legacySystemPause),
       publishBlockedByRuntime: Boolean(
-        (raw.publishBlockedByRuntime
-          ?? (hasProvenance ? false : Boolean(raw.publishPaused) && legacySystemPause))
-        || invalidRuntimeJournal
+          (raw.publishBlockedByRuntime
+              ?? (hasProvenance ? false : Boolean(raw.publishPaused) && legacySystemPause))
+          || invalidRuntimeJournal
       ),
       publishBlockedByPolicy: raw.publishBlockedByPolicy ?? false,
       publishRuntimeReasons: normalizedRuntimeReasons([
@@ -2469,8 +2466,8 @@ export async function clearRuntimePublishReasons(
         ...(invalidRuntimeJournal ? [RUNTIME_CONTROL_JOURNAL_INVALID_REASON] : []),
       ]),
       publishPolicyReasons: Array.isArray(raw.publishPolicyReasons)
-        ? [...new Set(raw.publishPolicyReasons.map(String).filter(Boolean))].slice(0, 20)
-        : [],
+          ? [...new Set(raw.publishPolicyReasons.map(String).filter(Boolean))].slice(0, 20)
+          : [],
       runtimeControlApplications: retainedRuntimeControlApplications(runtimeJournal.valid),
       runtimeControlJournalInvalidCount: runtimeJournal.invalidEntries.length,
     };
@@ -2480,8 +2477,8 @@ export async function clearRuntimePublishReasons(
       return undefined;
     }
     const priorApplication = previous.runtimeControlApplications?.find(application =>
-      application.evaluationId === input.evaluationId
-      && application.operationType === 'RUNTIME_REASONS_CLEARED');
+        application.evaluationId === input.evaluationId
+        && application.operationType === 'RUNTIME_REASONS_CLEARED');
     if (priorApplication) {
       clearedReasons = [...priorApplication.reasons];
       status = 'CLEARED';
@@ -2490,8 +2487,8 @@ export async function clearRuntimePublishReasons(
     }
     const currentReasons = [...(previous.publishRuntimeReasons || [])].sort();
     if (
-      previous.changedAt !== input.expectedChangedAt
-      || JSON.stringify(currentReasons) !== JSON.stringify(expectedReasons)
+        previous.changedAt !== input.expectedChangedAt
+        || JSON.stringify(currentReasons) !== JSON.stringify(expectedReasons)
     ) {
       status = 'STATE_CONFLICT';
       next = previous;
@@ -2522,9 +2519,9 @@ export async function clearRuntimePublishReasons(
       publishBlockedByRuntime: remainingReasons.length > 0,
       publishRuntimeReasons: remainingReasons,
       publishPaused: Boolean(
-        previous.publishPausedByOperator
-        || previous.publishBlockedByPolicy
-        || remainingReasons.length > 0
+          previous.publishPausedByOperator
+          || previous.publishBlockedByPolicy
+          || remainingReasons.length > 0
       ),
       degradedReason: remainingReasons.length ? remainingReasons.join(',') : undefined,
       reason: input.reason,
@@ -2532,8 +2529,8 @@ export async function clearRuntimePublishReasons(
       changedBy: actor,
       updatedAt: now,
       runtimeControlApplications: persistedRuntimeControlApplications(
-        raw.runtimeControlApplications,
-        [...(previous.runtimeControlApplications || []), application],
+          raw.runtimeControlApplications,
+          [...(previous.runtimeControlApplications || []), application],
       ),
     };
     status = 'CLEARED';
@@ -2596,8 +2593,8 @@ function rejectAutomationJob(code: string, reasons: string[] = []): never {
 }
 
 export function validateAutomationJobContract(
-  job: Partial<AutomationJob>,
-  options: { requireFactoryMetadata?: boolean } = {},
+    job: Partial<AutomationJob>,
+    options: { requireFactoryMetadata?: boolean } = {},
 ): AutomationJobContractValidation {
   if (job.schemaVersion !== AUTOMATION_JOB_SCHEMA_VERSION) {
     return { valid: false, code: 'AUTOMATION_JOB_SCHEMA_UNSUPPORTED', reasons: [`schemaVersion must be ${AUTOMATION_JOB_SCHEMA_VERSION}`] };
@@ -2630,13 +2627,13 @@ export function validateAutomationJobContract(
     if (!Array.isArray(job.executionPlan) || !job.executionPlan.length) reasons.push('executionPlan is required');
   }
   return reasons.length
-    ? { valid: false, code: 'SCHEMA_VALIDATION_FAILED', reasons }
-    : { valid: true, reasons: [] };
+      ? { valid: false, code: 'SCHEMA_VALIDATION_FAILED', reasons }
+      : { valid: true, reasons: [] };
 }
 
 export function assertAutomationJobContract(
-  job: Partial<AutomationJob>,
-  options: { requireFactoryMetadata?: boolean } = {},
+    job: Partial<AutomationJob>,
+    options: { requireFactoryMetadata?: boolean } = {},
 ): void {
   const validation = validateAutomationJobContract(job, options);
   if (!validation.valid) rejectAutomationJob(validation.code || 'SCHEMA_VALIDATION_FAILED', validation.reasons);
@@ -2658,8 +2655,8 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
   const risk = effectiveRisk(jobPolicy.defaultRisk, input.riskLevel);
   const registryDefaults = getJobRegistryDefaults(input.type, payload);
   const capability = typeof input.capability === 'string' && input.capability.trim()
-    ? input.capability.trim().slice(0, 160)
-    : jobPolicy.capability;
+      ? input.capability.trim().slice(0, 160)
+      : jobPolicy.capability;
   const now = new Date(nowMs).toISOString();
   const approvalStatus: ApprovalStatus = approvalStatusForPolicy(jobPolicy, risk);
   const status: AutomationJobStatus = initialStatusForPolicy(jobPolicy, risk);
@@ -2769,10 +2766,10 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
   try {
     const projectionMutation = await runAutomationJobSourceBoundedTransaction(items => {
       const sameKey = items
-        .filter(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey)
-        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+          .filter(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey)
+          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
       const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
-        || sameKey.find(item => item.status === 'SUCCEEDED');
+          || sameKey.find(item => item.status === 'SUCCEEDED');
       if (existing) {
         response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
         return undefined;
@@ -2791,7 +2788,7 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       // non-terminal job here recreated the production-sized queue snapshot
       // that this bounded transaction is intended to avoid.
       includeItem: item => (item.type === input.type && item.idempotencyKey === job.idempotencyKey)
-        || isEquivalentActiveScan(item, job),
+          || isEquivalentActiveScan(item, job),
       onBoundExceeded: () => {
         enqueueBoundExceeded = true;
       },
@@ -2829,7 +2826,7 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
  * product reservations remain individually atomic in createAutomationJob.
  */
 export async function createAutomationJobsBatch(
-  inputs: readonly CreateAutomationJobInput[],
+    inputs: readonly CreateAutomationJobInput[],
 ): Promise<AutomationJobCreateResult[]> {
   if (!inputs.length) return [];
   if (inputs.some(input => input.type === 'PROCESS_CANDIDATE')) {
@@ -2856,10 +2853,10 @@ export async function createAutomationJobsBatch(
       const known = [...items];
       for (const job of jobs) {
         const sameKey = known
-          .filter(item => item.type === job.type && item.idempotencyKey === job.idempotencyKey)
-          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+            .filter(item => item.type === job.type && item.idempotencyKey === job.idempotencyKey)
+            .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
         const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
-          || sameKey.find(item => item.status === 'SUCCEEDED');
+            || sameKey.find(item => item.status === 'SUCCEEDED');
         const equivalentActive = existing || known.find(item => isEquivalentActiveScan(item, job));
         if (equivalentActive) {
           responses.set(job.id, {
@@ -2876,8 +2873,8 @@ export async function createAutomationJobsBatch(
       return createdJobs.length ? [...items, ...createdJobs] : undefined;
     }, {
       includeItem: item => jobs.some(job => (
-        (item.type === job.type && item.idempotencyKey === job.idempotencyKey)
-        || isEquivalentActiveScan(item, job)
+          (item.type === job.type && item.idempotencyKey === job.idempotencyKey)
+          || isEquivalentActiveScan(item, job)
       )),
       onBoundExceeded: () => { enqueueBoundExceeded = true; },
       appendOnly: true,
@@ -2980,13 +2977,13 @@ export async function getAutomationJobProjection(id: string): Promise<Automation
     const nowMs = Date.now();
     const heartbeat = (await readCollection<AutomationJobHeartbeat>(JOB_HEARTBEATS)).find(item => item.jobId === id);
     const matchingActiveHeartbeat = Boolean(heartbeat
-      && heartbeat.workerId === projection.claimedBy
-      && (!projection.claimToken || heartbeat.claimToken === projection.claimToken)
-      && Date.parse(heartbeat.leaseExpiresAt) > nowMs);
+        && heartbeat.workerId === projection.claimedBy
+        && (!projection.claimToken || heartbeat.claimToken === projection.claimToken)
+        && Date.parse(heartbeat.leaseExpiresAt) > nowMs);
     const projectionAge = nowMs - Date.parse(projection.updatedAt || projection.createdAt);
     const statusContradictsHeartbeat = projection.status === 'RUNNING'
-      ? !matchingActiveHeartbeat
-      : matchingActiveHeartbeat;
+        ? !matchingActiveHeartbeat
+        : matchingActiveHeartbeat;
     const periodicReconcileDue = !Number.isFinite(projectionAge) || projectionAge >= PROJECTION_RECONCILE_AFTER_MS;
     if (!statusContradictsHeartbeat && !periodicReconcileDue) {
       return projection;
@@ -3002,10 +2999,10 @@ export async function getAutomationJobProjection(id: string): Promise<Automation
     const durable = await getAutomationJob(id);
     if (!durable) return projection;
     const reconciled = durable.status === 'RUNNING' && heartbeat
-      && heartbeat.workerId === durable.claimedBy
-      && (!durable.claimToken || heartbeat.claimToken === durable.claimToken)
-      ? { ...durable, heartbeatAt: heartbeat.heartbeatAt, leaseExpiresAt: heartbeat.leaseExpiresAt }
-      : durable;
+    && heartbeat.workerId === durable.claimedBy
+    && (!durable.claimToken || heartbeat.claimToken === durable.claimToken)
+        ? { ...durable, heartbeatAt: heartbeat.heartbeatAt, leaseExpiresAt: heartbeat.leaseExpiresAt }
+        : durable;
     await syncJobReadModelsBestEffort(reconciled);
     return reconciled;
   }
@@ -3074,9 +3071,9 @@ export async function getAutomationJobAuthoritySnapshot(id: string): Promise<Aut
 export async function listAutomationJobs(options: { status?: AutomationJobStatus; type?: AutomationJobType; page: number; pageSize: number }) {
   const projection = await readBoundedAutomationJobProjections();
   const filtered = projection.items
-    .filter(item => !options.status || item.status === options.status)
-    .filter(item => !options.type || item.type === options.type)
-    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+      .filter(item => !options.status || item.status === options.status)
+      .filter(item => !options.type || item.type === options.type)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   const totalItems = filtered.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / options.pageSize));
   const start = (options.page - 1) * options.pageSize;
@@ -3177,8 +3174,8 @@ function infrastructureRetryDelayMs(retryCount: number): number {
 
 export function isInfrastructureContentionCode(code: string): boolean {
   return code === 'STORAGE_LOCK_TIMEOUT'
-    || code === 'STORAGE_LOCK_CONTENTION'
-    || code === 'ROLE_FENCE_LOCK_TIMEOUT';
+      || code === 'STORAGE_LOCK_CONTENTION'
+      || code === 'ROLE_FENCE_LOCK_TIMEOUT';
 }
 
 function defaultErrorCategory(code: string): AutomationErrorCategory {
@@ -3213,24 +3210,24 @@ export interface AutomationJobClaimGuard {
 }
 
 function activeClaimMatches(
-  job: AutomationJob,
-  workerId: string,
-  guard: AutomationJobClaimGuard,
+    job: AutomationJob,
+    workerId: string,
+    guard: AutomationJobClaimGuard,
 ): boolean {
   return job.status === 'RUNNING'
-    && job.claimedBy === workerId
-    && Boolean(guard.claimToken)
-    && job.claimToken === guard.claimToken
-    && (guard.attemptCount === undefined || job.attemptCount === guard.attemptCount)
-    && (guard.releaseId === undefined || job.releaseId === guard.releaseId)
-    && (
-      !guard.ownership
-      || (
-        job.workerOwnerId === guard.ownership.ownerId
-        && job.workerInstanceId === guard.ownership.instanceId
-        && job.workerFencingToken === guard.ownership.fencingToken
-      )
-    );
+      && job.claimedBy === workerId
+      && Boolean(guard.claimToken)
+      && job.claimToken === guard.claimToken
+      && (guard.attemptCount === undefined || job.attemptCount === guard.attemptCount)
+      && (guard.releaseId === undefined || job.releaseId === guard.releaseId)
+      && (
+          !guard.ownership
+          || (
+              job.workerOwnerId === guard.ownership.ownerId
+              && job.workerInstanceId === guard.ownership.instanceId
+              && job.workerFencingToken === guard.ownership.fencingToken
+          )
+      );
 }
 
 async function assertClaimGuardOwnership(guard: AutomationJobClaimGuard): Promise<void> {
@@ -3247,26 +3244,26 @@ export interface AutomationJobCreateResult {
 }
 
 async function runAutomationJobSourceTransactionWithAuthority(
-  guard: AutomationJobClaimGuard,
-  work: StorageTransaction<AutomationJob>,
+    guard: AutomationJobClaimGuard,
+    work: StorageTransaction<AutomationJob>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   await assertClaimGuardOwnership(guard);
   if (!guard.ownership) return runAutomationJobSourceTransaction(work);
   return withRuntimeRoleAuthority('WORKER', guard.ownership, assertAuthority => (
-    assertAuthority().then(() => runAutomationJobSourceTransaction(work, assertAuthority))
+      assertAuthority().then(() => runAutomationJobSourceTransaction(work, assertAuthority))
   ));
 }
 
 async function runAutomationJobSourceStreamingTransactionWithAuthority(
-  guard: AutomationJobClaimGuard,
-  work: StorageStreamingTransaction<AutomationJob>,
+    guard: AutomationJobClaimGuard,
+    work: StorageStreamingTransaction<AutomationJob>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   await assertClaimGuardOwnership(guard);
   if (!guard.ownership) return runAutomationJobSourceStreamingTransaction(work);
   return withRuntimeRoleAuthority(
-    'WORKER',
-    guard.ownership,
-    assertAuthority => runAutomationJobSourceStreamingTransaction(work, assertAuthority),
+      'WORKER',
+      guard.ownership,
+      assertAuthority => runAutomationJobSourceStreamingTransaction(work, assertAuthority),
   );
 }
 
@@ -3284,8 +3281,8 @@ function markAutomationJobProjectionSourceMutation(job: AutomationJob): void {
 }
 
 async function runAutomationJobSourceTransaction(
-  work: StorageTransaction<AutomationJob>,
-  beforeCommit?: () => Promise<void>,
+    work: StorageTransaction<AutomationJob>,
+    beforeCommit?: () => Promise<void>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   try {
@@ -3318,8 +3315,8 @@ async function runAutomationJobSourceTransaction(
 }
 
 async function runAutomationJobSourceStreamingTransaction(
-  work: StorageStreamingTransaction<AutomationJob>,
-  beforeCommit?: () => Promise<void>,
+    work: StorageStreamingTransaction<AutomationJob>,
+    beforeCommit?: () => Promise<void>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   try {
@@ -3358,14 +3355,14 @@ type BoundedPlanningDecision = boolean | {
  * selection deterministic without retaining terminal job history.
  */
 async function runAutomationJobSourceBoundedTransaction(
-  work: StorageTransaction<AutomationJob>,
-  options: {
-    onBoundExceeded?: () => void;
-    includeItem?: (item: AutomationJob) => boolean;
-    planItem?: (item: AutomationJob, planningItems: AutomationJob[]) => BoundedPlanningDecision;
-    appendOnly?: boolean;
-    beforeCommit?: () => Promise<void>;
-  } = {},
+    work: StorageTransaction<AutomationJob>,
+    options: {
+      onBoundExceeded?: () => void;
+      includeItem?: (item: AutomationJob) => boolean;
+      planItem?: (item: AutomationJob, planningItems: AutomationJob[]) => BoundedPlanningDecision;
+      appendOnly?: boolean;
+      beforeCommit?: () => Promise<void>;
+    } = {},
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   const planningItems: AutomationJob[] = [];
@@ -3376,78 +3373,78 @@ async function runAutomationJobSourceBoundedTransaction(
   let appendedItems: AutomationJob[] = [];
   try {
     await runStreamingTransaction<AutomationJob>(
-      JOBS,
-      async item => {
-        const next = plannedById.get(item.id);
-        if (!next) return false;
-        const before = JSON.stringify(item);
-        const original = planningOriginalById.get(item.id);
-        if (!original || JSON.stringify(original) === JSON.stringify(next)) return false;
-        const currentVersion = Math.max(0, Math.floor(item.projectionSourceVersion || 0));
-        const nextVersion = Math.max(
-          currentVersion + 1,
-          Math.floor(next.projectionSourceVersion || 0),
-        );
-        next.projectionSourceVersion = nextVersion;
-        next.projectionSourceSequence = mutation.sequence;
-        const after = JSON.stringify(next);
-        if (before === after) return false;
-        for (const key of Object.keys(item)) {
-          if (!(key in next)) delete (item as unknown as Record<string, unknown>)[key];
-        }
-        Object.assign(item, next);
-        mutation.jobSourceVersions = {
-          ...(mutation.jobSourceVersions || {}),
-          [item.id]: nextVersion,
-        };
-        return true;
-      },
-      {
-        prepare: async item => {
-          if (options.includeItem ? !options.includeItem(item) : TERMINAL.has(item.status)) return false;
-          const decision = options.planItem?.(item, planningItems);
-          const retain = typeof decision === 'boolean' ? decision : decision?.retain !== false;
-          if (!retain) return false;
-          const evictId = typeof decision === 'object' ? decision.evictId : undefined;
-          if (evictId) {
-            const evictIndex = planningItems.findIndex(candidate => candidate.id === evictId);
-            if (evictIndex >= 0) {
-              planningItems.splice(evictIndex, 1);
-              planningOriginalById.delete(evictId);
+        JOBS,
+        async item => {
+          const next = plannedById.get(item.id);
+          if (!next) return false;
+          const before = JSON.stringify(item);
+          const original = planningOriginalById.get(item.id);
+          if (!original || JSON.stringify(original) === JSON.stringify(next)) return false;
+          const currentVersion = Math.max(0, Math.floor(item.projectionSourceVersion || 0));
+          const nextVersion = Math.max(
+              currentVersion + 1,
+              Math.floor(next.projectionSourceVersion || 0),
+          );
+          next.projectionSourceVersion = nextVersion;
+          next.projectionSourceSequence = mutation.sequence;
+          const after = JSON.stringify(next);
+          if (before === after) return false;
+          for (const key of Object.keys(item)) {
+            if (!(key in next)) delete (item as unknown as Record<string, unknown>)[key];
+          }
+          Object.assign(item, next);
+          mutation.jobSourceVersions = {
+            ...(mutation.jobSourceVersions || {}),
+            [item.id]: nextVersion,
+          };
+          return true;
+        },
+        {
+          prepare: async item => {
+            if (options.includeItem ? !options.includeItem(item) : TERMINAL.has(item.status)) return false;
+            const decision = options.planItem?.(item, planningItems);
+            const retain = typeof decision === 'boolean' ? decision : decision?.retain !== false;
+            if (!retain) return false;
+            const evictId = typeof decision === 'object' ? decision.evictId : undefined;
+            if (evictId) {
+              const evictIndex = planningItems.findIndex(candidate => candidate.id === evictId);
+              if (evictIndex >= 0) {
+                planningItems.splice(evictIndex, 1);
+                planningOriginalById.delete(evictId);
+              }
             }
-          }
-          if (planningItems.length >= MAX_CLAIM_PLANNING_ITEMS) {
-            planningOverflow = true;
+            if (planningItems.length >= MAX_CLAIM_PLANNING_ITEMS) {
+              planningOverflow = true;
+              return false;
+            }
+            planningItems.push(structuredClone(item));
+            planningOriginalById.set(item.id, structuredClone(item));
             return false;
-          }
-          planningItems.push(structuredClone(item));
-          planningOriginalById.set(item.id, structuredClone(item));
-          return false;
+          },
+          beforeMutation: async () => {
+            if (planningOverflow) {
+              options.onBoundExceeded?.();
+              plannedItems = undefined;
+              return;
+            }
+            const result = await work(planningItems);
+            plannedItems = result ? result : undefined;
+            plannedById = new Map((plannedItems || []).map(item => [item.id, item]));
+            appendedItems = (plannedItems || []).filter(item => !planningOriginalById.has(item.id));
+            for (const item of appendedItems) {
+              const nextVersion = Math.max(1, Math.floor(item.projectionSourceVersion || 0));
+              item.projectionSourceVersion = nextVersion;
+              item.projectionSourceSequence = mutation.sequence;
+              mutation.jobSourceVersions = {
+                ...(mutation.jobSourceVersions || {}),
+                [item.id]: nextVersion,
+              };
+            }
+          },
+          appendItems: () => appendedItems,
+          appendOnly: options.appendOnly,
+          beforeCommit: options.beforeCommit,
         },
-        beforeMutation: async () => {
-          if (planningOverflow) {
-            options.onBoundExceeded?.();
-            plannedItems = undefined;
-            return;
-          }
-          const result = await work(planningItems);
-          plannedItems = result ? result : undefined;
-          plannedById = new Map((plannedItems || []).map(item => [item.id, item]));
-          appendedItems = (plannedItems || []).filter(item => !planningOriginalById.has(item.id));
-          for (const item of appendedItems) {
-            const nextVersion = Math.max(1, Math.floor(item.projectionSourceVersion || 0));
-            item.projectionSourceVersion = nextVersion;
-            item.projectionSourceSequence = mutation.sequence;
-            mutation.jobSourceVersions = {
-              ...(mutation.jobSourceVersions || {}),
-              [item.id]: nextVersion,
-            };
-          }
-        },
-        appendItems: () => appendedItems,
-        appendOnly: options.appendOnly,
-        beforeCommit: options.beforeCommit,
-      },
     );
     return mutation;
   } catch (error) {
@@ -3457,10 +3454,10 @@ async function runAutomationJobSourceBoundedTransaction(
 }
 
 export async function updateAutomationJobExecution(
-  id: string,
-  workerId: string,
-  patch: Partial<ExecutionUpdate>,
-  guard: AutomationJobClaimGuard,
+    id: string,
+    workerId: string,
+    patch: Partial<ExecutionUpdate>,
+    guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
   await assertClaimGuardOwnership(guard);
   let updated: AutomationJob | null = null;
@@ -3486,12 +3483,12 @@ export async function updateAutomationJobExecution(
 }
 
 export async function waitAutomationJobForManual(
-  id: string,
-  workerId: string,
-  taskId: string,
-  checkpoint: AutomationCheckpoint,
-  disclosure: AutomationExecutionDisclosure,
-  guard: AutomationJobClaimGuard,
+    id: string,
+    workerId: string,
+    taskId: string,
+    checkpoint: AutomationCheckpoint,
+    disclosure: AutomationExecutionDisclosure,
+    guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
   await assertClaimGuardOwnership(guard);
   let waiting: AutomationJob | null = null;
@@ -3531,10 +3528,10 @@ export async function waitAutomationJobForManual(
 }
 
 export async function waitAutomationJobForChildren(
-  id: string,
-  workerId: string,
-  result: Record<string, unknown>,
-  guard: AutomationJobClaimGuard,
+    id: string,
+    workerId: string,
+    result: Record<string, unknown>,
+    guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
   await assertClaimGuardOwnership(guard);
   let waiting: AutomationJob | null = null;
@@ -3570,9 +3567,9 @@ export async function waitAutomationJobForChildren(
 }
 
 export async function completeAutomationParentJob(
-  id: string,
-  actor: string,
-  childSummary: Record<string, unknown>,
+    id: string,
+    actor: string,
+    childSummary: Record<string, unknown>,
 ): Promise<AutomationJob | null> {
   let completed: AutomationJob | null = null;
   const now = new Date().toISOString();
@@ -3668,8 +3665,8 @@ function runnableCreatedAt(job: AutomationJob): number {
 }
 
 function deriveJobRunnableContext(
-  job: Pick<AutomationJob, 'createdAt' | 'scheduledAt'>,
-  retryEligibleAt?: string,
+    job: Pick<AutomationJob, 'createdAt' | 'scheduledAt'>,
+    retryEligibleAt?: string,
 ): {
   runnableAt: string;
   runnableReason: AutomationJobAttempt['runnableReason'];
@@ -3684,7 +3681,7 @@ function deriveJobRunnableContext(
   const createdAt = Date.parse(job.createdAt);
   const scheduledAt = Date.parse(job.scheduledAt);
   if (Number.isFinite(scheduledAt)
-    && (!Number.isFinite(createdAt) || scheduledAt > createdAt)) {
+      && (!Number.isFinite(createdAt) || scheduledAt > createdAt)) {
     return {
       runnableAt: new Date(scheduledAt).toISOString(),
       runnableReason: 'SCHEDULED_AT',
@@ -3692,8 +3689,8 @@ function deriveJobRunnableContext(
   }
   return {
     runnableAt: Number.isFinite(createdAt)
-      ? new Date(createdAt).toISOString()
-      : new Date(scheduledAt).toISOString(),
+        ? new Date(createdAt).toISOString()
+        : new Date(scheduledAt).toISOString(),
     runnableReason: 'CREATED_AT',
   };
 }
@@ -3703,11 +3700,11 @@ export function selectFairRunnableJobs(items: AutomationJob[], limit: number, no
   const maximum = Math.max(0, Math.min(limit, 10));
   if (!maximum) return [];
   const priorityOrder = (left: AutomationJob, right: AutomationJob) =>
-    right.priority - left.priority || runnableCreatedAt(left) - runnableCreatedAt(right);
+      right.priority - left.priority || runnableCreatedAt(left) - runnableCreatedAt(right);
   const due = [...items].sort(priorityOrder);
   const overdue = due
-    .filter(item => nowMs - runnableCreatedAt(item) >= FAIRNESS_AFTER_MS)
-    .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right));
+      .filter(item => nowMs - runnableCreatedAt(item) >= FAIRNESS_AFTER_MS)
+      .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right));
   const selected: AutomationJob[] = overdue[0] ? [overdue[0]] : [];
   const selectedIds = new Set(selected.map(item => item.id));
   const selectedTypes = new Set(selected.map(item => item.type));
@@ -3734,9 +3731,9 @@ export function selectProductForwardRunnableJobs(items: AutomationJob[], limit: 
   if (!maximum) return [];
   const fairOrder = selectFairRunnableJobs(items, items.length, nowMs);
   const product = selectFairRunnableJobs(
-    items.filter(job => isProductCriticalAutomationJob(job.type)),
-    1,
-    nowMs,
+      items.filter(job => isProductCriticalAutomationJob(job.type)),
+      1,
+      nowMs,
   )[0];
   if (!product) return fairOrder.slice(0, maximum);
   return [product, ...fairOrder.filter(job => job.id !== product.id)].slice(0, maximum);
@@ -3746,19 +3743,19 @@ const notRunnableLogTimes = new Map<string, number>();
 const MAX_CLAIM_EVENT_RECORDS = 2_048;
 
 export async function claimAutomationJobs(
-  workerId: string,
-  limit = 1,
-  leaseMs = 60_000,
-  nowMs = Date.now(),
-  ownership?: RuntimeRoleOwnership,
-  options: {
-    maximumInFlight?: number;
-    criticalReservedCapacity?: number;
-    enforceExecutionCompatibility?: boolean;
-    claimLane?: AutomationWorkerClaimLane;
-    preferCritical?: boolean;
-    preferProductCritical?: boolean;
-  } = {},
+    workerId: string,
+    limit = 1,
+    leaseMs = 60_000,
+    nowMs = Date.now(),
+    ownership?: RuntimeRoleOwnership,
+    options: {
+      maximumInFlight?: number;
+      criticalReservedCapacity?: number;
+      enforceExecutionCompatibility?: boolean;
+      claimLane?: AutomationWorkerClaimLane;
+      preferCritical?: boolean;
+      preferProductCritical?: boolean;
+    } = {},
 ): Promise<AutomationJob[]> {
   const control = await getAutomationControl();
   if (control.workerPaused) return [];
@@ -3831,39 +3828,39 @@ export async function claimAutomationJobs(
         // may not authorize the current worker, but it also may not be ignored
         // to take over the job. Once stale, recovery can remove it atomically.
         const effectiveLease = heartbeatMatches || heartbeatFresh
-          ? heartbeat?.leaseExpiresAt
-          : item.leaseExpiresAt;
+            ? heartbeat?.leaseExpiresAt
+            : item.leaseExpiresAt;
         if (effectiveLease && Date.parse(effectiveLease) <= nowMs) {
-        recoveryClaims.push({
-          id: item.id,
-          claimedBy: item.claimedBy,
-          claimToken: item.claimToken,
-          workerOwnerId: item.workerOwnerId,
-          workerInstanceId: item.workerInstanceId,
-          workerFencingToken: item.workerFencingToken,
-          attemptCount: item.attemptCount,
-          releaseId: item.releaseId,
-          leaseExpiresAt: item.leaseExpiresAt,
-        });
-        item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
-        item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
-        item.runnableAt = item.nextRetryAt;
-        item.runnableReason = item.nextRetryAt ? 'RETRY_ELIGIBLE_AT' : item.runnableReason;
-        item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorCategory = 'PROVIDER_TIMEOUT'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.';
-        item.retryable = item.status === 'RETRY_SCHEDULED'; item.deadLetterReason = item.retryable ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED'; item.claimedBy = undefined; item.updatedAt = now;
-        item.claimedAt = undefined; item.claimToken = undefined; item.workerOwnerId = undefined; item.workerInstanceId = undefined; item.workerFencingToken = undefined; item.leaseExpiresAt = undefined;
-        markAutomationJobProjectionSourceMutation(item);
-        if (item.status === 'FAILED') {
-          item.completedAt = now;
-          if (timedOut.length < MAX_CLAIM_EVENT_RECORDS) timedOut.push(structuredClone(item));
-          else timeoutOverflowCount += 1;
-        } else if (requeued.length < MAX_CLAIM_EVENT_RECORDS) {
-          requeued.push(structuredClone(item));
-        } else {
-          requeueOverflowCount += 1;
-        }
-        projectionChangedIds.add(item.id);
-        changed = true;
+          recoveryClaims.push({
+            id: item.id,
+            claimedBy: item.claimedBy,
+            claimToken: item.claimToken,
+            workerOwnerId: item.workerOwnerId,
+            workerInstanceId: item.workerInstanceId,
+            workerFencingToken: item.workerFencingToken,
+            attemptCount: item.attemptCount,
+            releaseId: item.releaseId,
+            leaseExpiresAt: item.leaseExpiresAt,
+          });
+          item.status = item.attemptCount < item.maxAttempts ? 'RETRY_SCHEDULED' : 'FAILED';
+          item.nextRetryAt = item.status === 'RETRY_SCHEDULED' ? new Date(nowMs + retryDelayMs(item.type, item.attemptCount)).toISOString() : undefined;
+          item.runnableAt = item.nextRetryAt;
+          item.runnableReason = item.nextRetryAt ? 'RETRY_ELIGIBLE_AT' : item.runnableReason;
+          item.lastErrorCode = 'LEASE_EXPIRED'; item.lastErrorCategory = 'PROVIDER_TIMEOUT'; item.lastErrorMessage = 'Bộ xử lý mất tín hiệu trước khi hoàn tất.';
+          item.retryable = item.status === 'RETRY_SCHEDULED'; item.deadLetterReason = item.retryable ? undefined : 'PROVIDER_TIMEOUT:LEASE_EXPIRED'; item.claimedBy = undefined; item.updatedAt = now;
+          item.claimedAt = undefined; item.claimToken = undefined; item.workerOwnerId = undefined; item.workerInstanceId = undefined; item.workerFencingToken = undefined; item.leaseExpiresAt = undefined;
+          markAutomationJobProjectionSourceMutation(item);
+          if (item.status === 'FAILED') {
+            item.completedAt = now;
+            if (timedOut.length < MAX_CLAIM_EVENT_RECORDS) timedOut.push(structuredClone(item));
+            else timeoutOverflowCount += 1;
+          } else if (requeued.length < MAX_CLAIM_EVENT_RECORDS) {
+            requeued.push(structuredClone(item));
+          } else {
+            requeueOverflowCount += 1;
+          }
+          projectionChangedIds.add(item.id);
+          changed = true;
         }
       }
       if (item.status === 'RETRY_SCHEDULED' && item.nextRetryAt && Date.parse(item.nextRetryAt) <= nowMs) {
@@ -3894,97 +3891,97 @@ export async function claimAutomationJobs(
     const activeJobs = items.filter(item => item.status === 'RUNNING');
     poolActiveSlots = activeJobs.length;
     const maximumInFlight = Number.isInteger(options.maximumInFlight)
-      ? Math.max(1, Number(options.maximumInFlight))
-      : undefined;
+        ? Math.max(1, Number(options.maximumInFlight))
+        : undefined;
     const reservedCriticalCapacity = maximumInFlight && maximumInFlight > 1
-      ? Math.max(0, Math.min(maximumInFlight - 1, Math.floor(Number(options.criticalReservedCapacity) || 0)))
-      : 0;
+        ? Math.max(0, Math.min(maximumInFlight - 1, Math.floor(Number(options.criticalReservedCapacity) || 0)))
+        : 0;
     const activeGuardianJobs = activeJobs.filter(item => item.type === 'RUNTIME_GUARDIAN').length;
     const activeNonGuardianJobs = activeJobs.length - activeGuardianJobs;
     const activeCriticalJobs = activeJobs.filter(item => isCriticalAutomationJob(item)).length;
     const activeNormalJobs = activeJobs.length - activeCriticalJobs;
     const totalAvailableCapacity = maximumInFlight === undefined
-      ? limit
-      : Math.max(0, maximumInFlight - activeJobs.length);
+        ? limit
+        : Math.max(0, maximumInFlight - activeJobs.length);
     const guardianCapacity = maximumInFlight === undefined
-      ? limit
-      : Math.max(
-          0,
-          (reservedCriticalCapacity || maximumInFlight) - activeGuardianJobs,
+        ? limit
+        : Math.max(
+            0,
+            (reservedCriticalCapacity || maximumInFlight) - activeGuardianJobs,
         );
     const nonGuardianCapacity = maximumInFlight === undefined
-      ? limit
-      : Math.max(
-          0,
-          maximumInFlight - reservedCriticalCapacity - activeNonGuardianJobs,
+        ? limit
+        : Math.max(
+            0,
+            maximumInFlight - reservedCriticalCapacity - activeNonGuardianJobs,
         );
     const criticalCapacity = maximumInFlight === undefined
-      ? limit
-      : Math.max(
-          0,
-          (reservedCriticalCapacity || maximumInFlight) - activeCriticalJobs,
+        ? limit
+        : Math.max(
+            0,
+            (reservedCriticalCapacity || maximumInFlight) - activeCriticalJobs,
         );
     const normalCapacity = maximumInFlight === undefined
-      ? limit
-      : Math.max(
-          0,
-          maximumInFlight - reservedCriticalCapacity - activeNormalJobs,
+        ? limit
+        : Math.max(
+            0,
+            maximumInFlight - reservedCriticalCapacity - activeNormalJobs,
         );
     const claimLane = options.claimLane || 'ANY';
     const allCriticalLane = claimLane === 'CRITICAL' || claimLane === 'NON_CRITICAL';
     const laneAvailableCapacity = claimLane === 'RUNTIME_GUARDIAN'
-      ? guardianCapacity
-      : claimLane === 'NON_GUARDIAN'
-        ? nonGuardianCapacity
-        : claimLane === 'CRITICAL'
-          ? criticalCapacity
-          : claimLane === 'NON_CRITICAL'
-            ? normalCapacity
-            : guardianCapacity + nonGuardianCapacity;
+        ? guardianCapacity
+        : claimLane === 'NON_GUARDIAN'
+            ? nonGuardianCapacity
+            : claimLane === 'CRITICAL'
+                ? criticalCapacity
+                : claimLane === 'NON_CRITICAL'
+                    ? normalCapacity
+                    : guardianCapacity + nonGuardianCapacity;
     const availableCapacity = Math.max(
-      0,
-      Math.min(limit, totalAvailableCapacity, laneAvailableCapacity),
+        0,
+        Math.min(limit, totalAvailableCapacity, laneAvailableCapacity),
     );
     poolAvailableSlots = availableCapacity;
     const eligible = items.filter(item => item.status === 'PENDING' && Date.parse(item.scheduledAt) <= nowMs
-      && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
-      && isAutomationJobEligibleForClaimLane(item, claimLane));
+        && (!control.killSwitch || item.type === 'RUNTIME_GUARDIAN')
+        && isAutomationJobEligibleForClaimLane(item, claimLane));
     const due = options.enforceExecutionCompatibility
-      ? selectCompatibleWorkerJobs(
-          eligible,
-          activeJobs,
-          availableCapacity,
-          nowMs,
-          options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs,
-          options.criticalReservedCapacity,
-          allCriticalLane
-            ? {
-                critical: claimLane === 'NON_CRITICAL' ? 0 : criticalCapacity,
-                normal: claimLane === 'CRITICAL' ? 0 : normalCapacity,
-              }
-            : {
-                runtimeGuardian: claimLane === 'NON_GUARDIAN' ? 0 : guardianCapacity,
-                nonGuardian: claimLane === 'RUNTIME_GUARDIAN' ? 0 : nonGuardianCapacity,
-              },
-          options.preferCritical === true,
+        ? selectCompatibleWorkerJobs(
+            eligible,
+            activeJobs,
+            availableCapacity,
+            nowMs,
+            options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs,
+            options.criticalReservedCapacity,
+            allCriticalLane
+                ? {
+                  critical: claimLane === 'NON_CRITICAL' ? 0 : criticalCapacity,
+                  normal: claimLane === 'CRITICAL' ? 0 : normalCapacity,
+                }
+                : {
+                  runtimeGuardian: claimLane === 'NON_GUARDIAN' ? 0 : guardianCapacity,
+                  nonGuardian: claimLane === 'RUNTIME_GUARDIAN' ? 0 : nonGuardianCapacity,
+                },
+            options.preferCritical === true,
         )
-      : (options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs)(eligible, availableCapacity, nowMs);
+        : (options.preferProductCritical === true ? selectProductForwardRunnableJobs : selectFairRunnableJobs)(eligible, availableCapacity, nowMs);
     if (!due.length) {
       claimBlockReason = availableCapacity <= 0
-        ? 'WORKER_CAPACITY_FULL'
-        : eligible.length > 0 && options.enforceExecutionCompatibility
-          ? 'EXECUTION_RESOURCE_CONFLICT'
-          : 'SCHEDULED_FOR_FUTURE';
+          ? 'WORKER_CAPACITY_FULL'
+          : eligible.length > 0 && options.enforceExecutionCompatibility
+              ? 'EXECUTION_RESOURCE_CONFLICT'
+              : 'SCHEDULED_FOR_FUTURE';
       oldestNotRunnable = items
-        .filter(item => item.status === 'PENDING')
-        .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
+          .filter(item => item.status === 'PENDING')
+          .sort((left, right) => runnableCreatedAt(left) - runnableCreatedAt(right))[0];
     }
     for (const item of due) {
       const infrastructureRetry = item.runnableReason === 'INFRASTRUCTURE_CONTENTION';
       const execution = getAutomationExecutionDescriptor(item);
       const runnable = item.runnableAt && item.runnableReason
-        ? { runnableAt: item.runnableAt, runnableReason: item.runnableReason }
-        : deriveJobRunnableContext(item);
+          ? { runnableAt: item.runnableAt, runnableReason: item.runnableReason }
+          : deriveJobRunnableContext(item);
       item.status = 'RUNNING'; item.claimedBy = workerId; item.claimedAt = now; item.heartbeatAt = now;
       item.claimToken = generateId(); item.workerOwnerId = ownership?.ownerId; item.workerInstanceId = ownership?.instanceId; item.workerFencingToken = ownership?.fencingToken;
       item.executionConcurrencyClass = execution.concurrencyClass;
@@ -4002,8 +3999,8 @@ export async function claimAutomationJobs(
       changed = true;
     }
     projectionChanges.push(...items
-      .filter(item => projectionChangedIds.has(item.id))
-      .map(item => structuredClone(item)));
+        .filter(item => projectionChangedIds.has(item.id))
+        .map(item => structuredClone(item)));
     return changed ? items : undefined;
   }, {
     includeItem: item => {
@@ -4027,7 +4024,7 @@ export async function claimAutomationJobs(
       const pendingCandidates = planningItems.filter(candidate => candidate.status === 'PENDING');
       if (pendingCandidates.length < MAX_CLAIM_PENDING_CANDIDATES) return true;
       const worst = pendingCandidates.reduce((currentWorst, candidate) =>
-        compareClaimPlanningCandidates(candidate, currentWorst) > 0 ? candidate : currentWorst,
+          compareClaimPlanningCandidates(candidate, currentWorst) > 0 ? candidate : currentWorst,
       );
       if (compareClaimPlanningCandidates(item, worst) >= 0) {
         claimPlanningTruncated = true;
@@ -4067,7 +4064,7 @@ export async function claimAutomationJobs(
             workerFencingToken: job.workerFencingToken,
             releaseId: job.releaseId || getReleaseIdentity().releaseId,
             rolloutCohort: job.rolloutCohort
-              || `SLO_RUNNABLE_AT_V2:${getFeatureRolloutState('SLO_RUNNABLE_AT_V2').mode}`,
+                || `SLO_RUNNABLE_AT_V2:${getFeatureRolloutState('SLO_RUNNABLE_AT_V2').mode}`,
             priorityClass: isCriticalAutomationJob(job) ? 'CRITICAL' : 'NORMAL',
             priority: job.priority,
           });
@@ -4211,166 +4208,153 @@ export async function claimAutomationJobs(
 }
 
 export async function renewAutomationJobClaimLease(
-  id: string,
-  workerId: string,
-  leaseMs = 60_000,
-  guard: AutomationJobClaimGuard,
-  nowMs = Date.now(),
+    id: string,
+    workerId: string,
+    leaseMs = 60_000,
+    guard: AutomationJobClaimGuard,
+    nowMs = Date.now(),
 ): Promise<AutomationJobLeaseRenewalAttempt> {
   const startedAt = Date.now();
   let renewalSucceeded = false;
+  let failurePhase:
+      | 'VALIDATE_CLAIM'
+      | 'WORKER_ROLE_PRECHECK'
+      | 'WORKER_ROLE_AUTHORITY'
+      | 'JOB_HEARTBEAT_TRANSACTION'
+      | 'WORKER_ROLE_ASSERTION' = 'VALIDATE_CLAIM';
+
   try {
-    if (!guard.claimToken) return { renewed: false, reasonCode: 'JOB_CLAIM_TOKEN_MISMATCH' };
-    if (guard.ownership && !await isRuntimeRoleOwner('WORKER', guard.ownership, nowMs)) {
-      return { renewed: false, reasonCode: 'WORKER_ROLE_LOST' };
+    if (!guard.claimToken) {
+      return { renewed: false, reasonCode: 'JOB_CLAIM_TOKEN_MISMATCH' };
     }
+
+    if (guard.ownership) {
+      failurePhase = 'WORKER_ROLE_PRECHECK';
+      if (!await isRuntimeRoleOwner('WORKER', guard.ownership, nowMs)) {
+        return { renewed: false, reasonCode: 'WORKER_ROLE_LOST' };
+      }
+    }
+
     const now = new Date(nowMs).toISOString();
     const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
-    let result: AutomationJobLeaseRenewalAttempt = { renewed: false, reasonCode: 'JOB_CLAIM_MISSING' };
-    const renewHeartbeat = async () => runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
-      const current = items.find(item => item.jobId === id);
-      if (!current) return undefined;
-      if (current.status !== undefined && current.status !== 'RUNNING') {
-        result = { renewed: false, reasonCode: 'JOB_NOT_RUNNING' };
-        return undefined;
-      }
-      if (Date.parse(current.leaseExpiresAt) <= nowMs) {
-        result = { renewed: false, reasonCode: 'JOB_LEASE_EXPIRED' };
-        return undefined;
-      }
-      if (current.workerId !== workerId) {
-        result = { renewed: false, reasonCode: 'JOB_WORKER_MISMATCH' };
-        return undefined;
-      }
-      if (current.claimToken !== guard.claimToken) {
-        result = { renewed: false, reasonCode: 'JOB_CLAIM_TOKEN_MISMATCH' };
-        return undefined;
-      }
-      if (guard.ownership && (
-        current.workerOwnerId !== guard.ownership.ownerId
-        || current.workerInstanceId !== guard.ownership.instanceId
-        || current.workerFencingToken !== guard.ownership.fencingToken
-      )) {
-        result = { renewed: false, reasonCode: 'JOB_FENCING_MISMATCH' };
-        return undefined;
-      }
-      if ((guard.attemptCount !== undefined && current.attemptCount !== undefined && current.attemptCount !== guard.attemptCount)
-        || (guard.releaseId !== undefined && current.releaseId !== undefined && current.releaseId !== guard.releaseId)) {
-        result = { renewed: false, reasonCode: 'JOB_FENCING_MISMATCH' };
-        return undefined;
-      }
-      current.heartbeatAt = now;
-      current.leaseExpiresAt = leaseExpiresAt;
-      result = { renewed: true, leaseExpiresAt };
-      return items.filter(item => item.jobId === id || Date.parse(item.leaseExpiresAt) > nowMs);
-    });
+    let result: AutomationJobLeaseRenewalAttempt = {
+      renewed: false,
+      reasonCode: 'JOB_CLAIM_MISSING',
+    };
+
+    const renewHeartbeat = async (): Promise<void> => {
+      failurePhase = 'JOB_HEARTBEAT_TRANSACTION';
+      await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+        const current = items.find(item => item.jobId === id);
+        if (!current) return undefined;
+
+        if (current.status !== undefined && current.status !== 'RUNNING') {
+          result = { renewed: false, reasonCode: 'JOB_NOT_RUNNING' };
+          return undefined;
+        }
+        if (Date.parse(current.leaseExpiresAt) <= nowMs) {
+          result = { renewed: false, reasonCode: 'JOB_LEASE_EXPIRED' };
+          return undefined;
+        }
+        if (current.workerId !== workerId) {
+          result = { renewed: false, reasonCode: 'JOB_WORKER_MISMATCH' };
+          return undefined;
+        }
+        if (current.claimToken !== guard.claimToken) {
+          result = { renewed: false, reasonCode: 'JOB_CLAIM_TOKEN_MISMATCH' };
+          return undefined;
+        }
+        if (guard.ownership && (
+            current.workerOwnerId !== guard.ownership.ownerId
+            || current.workerInstanceId !== guard.ownership.instanceId
+            || current.workerFencingToken !== guard.ownership.fencingToken
+        )) {
+          result = { renewed: false, reasonCode: 'JOB_FENCING_MISMATCH' };
+          return undefined;
+        }
+        if (
+            (guard.attemptCount !== undefined
+                && current.attemptCount !== undefined
+                && current.attemptCount !== guard.attemptCount)
+            || (guard.releaseId !== undefined
+                && current.releaseId !== undefined
+                && current.releaseId !== guard.releaseId)
+        ) {
+          result = { renewed: false, reasonCode: 'JOB_FENCING_MISMATCH' };
+          return undefined;
+        }
+
+        current.heartbeatAt = now;
+        current.leaseExpiresAt = leaseExpiresAt;
+        result = { renewed: true, leaseExpiresAt };
+
+        return items.filter(item =>
+            item.jobId === id || Date.parse(item.leaseExpiresAt) > nowMs);
+      });
+    };
+
     if (guard.ownership) {
-      try {
-        await withRuntimeRoleAuthority(
+      failurePhase = 'WORKER_ROLE_AUTHORITY';
+      await withRuntimeRoleAuthority(
           'WORKER',
           guard.ownership,
           async assertAuthority => {
             await renewHeartbeat();
+            failurePhase = 'WORKER_ROLE_ASSERTION';
             await assertAuthority();
           },
           nowMs,
           Math.max(1, Math.min(5_000, Math.floor(leaseMs / 6))),
-        );
-      } catch (error) {
-        if (error instanceof Error && /WORKER_FENCING_REJECTED|ROLE_FENCE_LOST/.test(error.message)) {
-          return { renewed: false, reasonCode: 'WORKER_ROLE_LOST' };
-        }
-        throw error;
-      }
+      );
     } else {
       await renewHeartbeat();
     }
+
     if (!result.renewed) return result;
+
     renewalSucceeded = true;
-    // Projection is a read model. Update it atomically only while it still
-    // represents this claim, so an in-flight heartbeat can never overwrite a
-    // terminal projection written by complete/fail.
-    const activeProjection = await getAutomationJobActiveProjectionStorage();
-    const projectionUpdates = await Promise.allSettled([
-      runTransaction<AutomationJobStatusProjection>(activeProjection.collections.status, items => {
-        const current = items.find(item => item.id === id);
-        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== guard.claimToken) return undefined;
-        if (guard.ownership && (current.workerInstanceId !== guard.ownership.instanceId || current.workerFencingToken !== guard.ownership.fencingToken)) return undefined;
-        current.heartbeatAt = now;
-        current.leaseExpiresAt = leaseExpiresAt;
-        return items;
-      }),
-      runTransaction<AutomationJobListProjection>(activeProjection.collections.list, items => {
-        const current = items.find(item => item.id === id);
-        if (!current || current.status !== 'RUNNING' || current.claimedBy !== workerId || current.claimToken !== guard.claimToken) return undefined;
-        if (guard.ownership && (current.workerInstanceId !== guard.ownership.instanceId || current.workerFencingToken !== guard.ownership.fencingToken)) return undefined;
-        current.heartbeatAt = now;
-        current.leaseExpiresAt = leaseExpiresAt;
-        return items;
-      }),
-    ]);
-    projectionUpdates.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        console.error(JSON.stringify({
-          type: 'automation_job_projection_heartbeat_failed',
-          jobId: id,
-          readModel: index === 0 ? 'status-projection' : 'list-projection-v2',
-          reasonCode: sanitizeErrorMessage(result.reason instanceof Error ? result.reason.message : 'unknown_error'),
-        }));
-      }
-    });
-    if (projectionUpdates.some(result => result.status === 'rejected')) {
-      try {
-        const failureToken = await beginAutomationJobProjectionSync(nowMs);
-        await finishAutomationJobProjectionSync(failureToken, {
-          success: false,
-          inserted: false,
-          insertedCount: 0,
-          sourceAffected: false,
-          listProjectionCount: 0,
-          statusProjectionCount: 0,
-          listProjectionFingerprint: automationJobProjectionFingerprint([]),
-          statusProjectionFingerprint: automationJobProjectionFingerprint([]),
-          listProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
-          statusProjectionContentFingerprint: automationJobProjectionContentFingerprint([]),
-          activeJobCount: 0,
-          retainedTerminalCount: 0,
-          retentionLimitReached: false,
-          currentStateTruncated: false,
-          sourceUpdatedAt: null,
-          retentionBoundary: null,
-        }, nowMs);
-      } catch {
-        // The projection error was already logged; the stale heartbeat evidence
-        // remains fail-closed even when its manifest cannot be invalidated.
-      }
-      return result;
-    }
-    if (nowMs - lastHeartbeatHealthSummaryRefreshAt < HEALTH_SUMMARY_HEARTBEAT_REFRESH_MS) return result;
-    const manifest = await getAutomationJobProjectionManifestForMaintenance().catch(() => null);
-    if (manifest?.rebuildToken || manifest?.inFlightSyncTokens.length) return result;
-    try {
-      await refreshAutomationJobHealthSummary(nowMs);
-      lastHeartbeatHealthSummaryRefreshAt = nowMs;
-    } catch (error) {
-      console.error(JSON.stringify({
-        type: 'automation_job_health_summary_heartbeat_failed',
-        jobId: id,
-        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
-      }));
-    }
+
+    // JOB_HEARTBEATS is authoritative for the claimed job lease. Projection,
+    // manifest and health-summary collections are read models and must not
+    // participate in the authority decision. Keeping them out of this hot
+    // path prevents a read-model failure from aborting a handler after its
+    // durable lease was renewed, and avoids repeated large FileStorage writes
+    // on every heartbeat. Existing maintenance paths reconcile those models.
     return result;
+  } catch (error) {
+    const explicitCode = error && typeof error === 'object'
+    && typeof (error as { code?: unknown }).code === 'string'
+        ? String((error as { code: string }).code)
+        : '';
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (
+        explicitCode === 'ROLE_FENCE_LOST'
+        || explicitCode === 'WORKER_FENCING_REJECTED'
+        || /WORKER_FENCING_REJECTED|ROLE_FENCE_LOST/.test(message)
+    ) {
+      return { renewed: false, reasonCode: 'WORKER_ROLE_LOST' };
+    }
+
+    console.error(JSON.stringify({
+      type: 'automation_job_lease_renewal_storage_failed',
+      jobId: id,
+      workerId,
+      phase: failurePhase,
+      reasonCode: sanitizeErrorMessage(message || 'unknown_error'),
+    }));
+    throw error;
   } finally {
     recordJobLeaseRenewal(Date.now() - startedAt, renewalSucceeded);
   }
 }
 
 export async function heartbeatAutomationJob(
-  id: string,
-  workerId: string,
-  leaseMs = 60_000,
-  claimToken?: string,
-  ownership?: RuntimeRoleOwnership,
+    id: string,
+    workerId: string,
+    leaseMs = 60_000,
+    claimToken?: string,
+    ownership?: RuntimeRoleOwnership,
 ): Promise<boolean> {
   const result = await renewAutomationJobClaimLease(id, workerId, leaseMs, {
     claimToken: claimToken || '',
@@ -4380,10 +4364,10 @@ export async function heartbeatAutomationJob(
 }
 
 export async function completeAutomationJob(
-  id: string,
-  workerId: string,
-  result: Record<string, unknown>,
-  guard: AutomationJobClaimGuard,
+    id: string,
+    workerId: string,
+    result: Record<string, unknown>,
+    guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
   await assertClaimGuardOwnership(guard);
   let completed: AutomationJob | null = null; const now = new Date().toISOString();
@@ -4395,8 +4379,8 @@ export async function completeAutomationJob(
       const total = job.progress.total;
       const fullyCompleted = job.outcomeStatus !== 'PARTIALLY_COMPLETED' && !job.checkpoint?.pendingSteps.length;
       job.progress = fullyCompleted
-        ? { ...job.progress, processed: total ?? Math.max(1, job.progress.processed), succeeded: Math.max(job.progress.succeeded, 1), percentage: total ? 100 : undefined, updatedAt: now }
-        : { ...job.progress, updatedAt: now };
+          ? { ...job.progress, processed: total ?? Math.max(1, job.progress.processed), succeeded: Math.max(job.progress.succeeded, 1), percentage: total ? 100 : undefined, updatedAt: now }
+          : { ...job.progress, updatedAt: now };
     }
     clearAutomationJobClaim(job); job.heartbeatAt = now; job.updatedAt = now;
     markAutomationJobProjectionSourceMutation(job); completed = { ...job }; return true;
@@ -4422,16 +4406,16 @@ export async function completeAutomationJob(
  * paused for explicit recovery and remains fail-closed.
  */
 export async function deferAutomationJobForInfrastructure(
-  id: string,
-  workerId: string,
-  reasonCode: string,
-  error: unknown,
-  options: {
-    claimToken: string;
-    ownership?: RuntimeRoleOwnership;
-    attemptCount?: number;
-    releaseId?: string;
-  },
+    id: string,
+    workerId: string,
+    reasonCode: string,
+    error: unknown,
+    options: {
+      claimToken: string;
+      ownership?: RuntimeRoleOwnership;
+      attemptCount?: number;
+      releaseId?: string;
+    },
 ): Promise<AutomationJob | null> {
   const guard: AutomationJobClaimGuard = {
     claimToken: options.claimToken,
@@ -4448,8 +4432,8 @@ export async function deferAutomationJobForInfrastructure(
     const retryCount = Math.max(0, Math.floor(job.infrastructureRetryCount || 0)) + 1;
     const paused = retryCount >= MAX_INFRASTRUCTURE_RETRIES;
     const nextRetryAt = paused
-      ? undefined
-      : new Date(nowMs + infrastructureRetryDelayMs(retryCount)).toISOString();
+        ? undefined
+        : new Date(nowMs + infrastructureRetryDelayMs(retryCount)).toISOString();
     job.infrastructureRetryCount = retryCount;
     job.status = paused ? 'PAUSED' : 'RETRY_SCHEDULED';
     job.nextRetryAt = nextRetryAt;
@@ -4458,7 +4442,7 @@ export async function deferAutomationJobForInfrastructure(
     job.lastErrorCode = 'STORAGE_LOCK_CONTENTION';
     job.lastErrorCategory = 'STORAGE_ERROR';
     job.lastErrorMessage = sanitizeErrorMessage(
-      error instanceof Error ? error.message : `${reasonCode}: internal storage contention`,
+        error instanceof Error ? error.message : `${reasonCode}: internal storage contention`,
     );
     job.retryable = !paused;
     job.deadLetterReason = paused ? 'STORAGE_ERROR:INFRASTRUCTURE_RETRY_BUDGET_EXHAUSTED' : undefined;
@@ -4474,8 +4458,8 @@ export async function deferAutomationJobForInfrastructure(
     logAutomationJobEvent(deferredJob.status === 'PAUSED' ? 'job_skipped' : 'job_requeued', deferredJob, {
       workerId,
       reasonCode: deferredJob.status === 'PAUSED'
-        ? 'INFRASTRUCTURE_RETRY_BUDGET_EXHAUSTED'
-        : 'STORAGE_LOCK_CONTENTION',
+          ? 'INFRASTRUCTURE_RETRY_BUDGET_EXHAUSTED'
+          : 'STORAGE_LOCK_CONTENTION',
     });
     await appendAutomationAudit({
       correlationId: deferredJob.operationId,
@@ -4497,19 +4481,19 @@ export async function deferAutomationJobForInfrastructure(
 }
 
 export async function failAutomationJob(
-  id: string,
-  workerId: string,
-  code: string,
-  error: unknown,
-  options: {
-    nextRetryAt?: string;
-    errorCategory?: AutomationErrorCategory;
-    result?: Record<string, unknown>;
-    claimToken: string;
-    ownership?: RuntimeRoleOwnership;
-    attemptCount?: number;
-    releaseId?: string;
-  },
+    id: string,
+    workerId: string,
+    code: string,
+    error: unknown,
+    options: {
+      nextRetryAt?: string;
+      errorCategory?: AutomationErrorCategory;
+      result?: Record<string, unknown>;
+      claimToken: string;
+      ownership?: RuntimeRoleOwnership;
+      attemptCount?: number;
+      releaseId?: string;
+    },
 ): Promise<AutomationJob | null> {
   const guard: AutomationJobClaimGuard = {
     claimToken: options.claimToken,
@@ -4525,9 +4509,9 @@ export async function failAutomationJob(
     const requestedRetryAt = Date.parse(options.nextRetryAt || '');
     job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED';
     job.nextRetryAt = retry ? Number.isFinite(requestedRetryAt) && requestedRetryAt > Date.now()
-      ? new Date(requestedRetryAt).toISOString()
-      : new Date(Date.now() + retryDelayMs(job.type, job.attemptCount)).toISOString()
-      : undefined;
+            ? new Date(requestedRetryAt).toISOString()
+            : new Date(Date.now() + retryDelayMs(job.type, job.attemptCount)).toISOString()
+        : undefined;
     job.runnableAt = job.nextRetryAt;
     job.runnableReason = job.nextRetryAt ? 'RETRY_ELIGIBLE_AT' : job.runnableReason;
     job.lastErrorCode = code; job.lastErrorCategory = options.errorCategory || defaultErrorCategory(code);
@@ -4785,15 +4769,15 @@ export interface AutomationJobCompactionPlan {
 }
 
 function buildCompactionSelection(
-  jobs: AutomationJob[],
-  nowMs: number,
-  retentionDays: number,
-  minimumTerminalJobs: number,
+    jobs: AutomationJob[],
+    nowMs: number,
+    retentionDays: number,
+    minimumTerminalJobs: number,
 ): { removable: Set<string>; cutoffAt: string; terminalJobs: AutomationJob[] } {
   const cutoffAt = new Date(nowMs - retentionDays * 24 * 60 * 60_000).toISOString();
   const terminalJobs = jobs
-    .filter(job => TERMINAL.has(job.status))
-    .sort((left, right) => Date.parse(right.completedAt || right.updatedAt) - Date.parse(left.completedAt || left.updatedAt));
+      .filter(job => TERMINAL.has(job.status))
+      .sort((left, right) => Date.parse(right.completedAt || right.updatedAt) - Date.parse(left.completedAt || left.updatedAt));
   const jobsById = new Map(jobs.map(job => [job.id, job]));
   const childrenByParent = new Map<string, AutomationJob[]>();
   for (const job of jobs) {
@@ -4828,8 +4812,8 @@ function buildCompactionSelection(
     ...workflowProtectedIds,
   ]);
   const removable = new Set(terminalJobs
-    .filter(job => !protectedIds.has(job.id) && Date.parse(job.completedAt || job.updatedAt) < Date.parse(cutoffAt))
-    .map(job => job.id));
+      .filter(job => !protectedIds.has(job.id) && Date.parse(job.completedAt || job.updatedAt) < Date.parse(cutoffAt))
+      .map(job => job.id));
   return { removable, cutoffAt, terminalJobs };
 }
 
@@ -4863,8 +4847,8 @@ export async function compactAutomationJobs(options: {
       } else {
         const removedSet = new Set(removedIds);
         const collections = automationJobProjectionStorageCollections(
-          projectionMutation.targetSlot,
-          projectionMutation.targetRepairFence,
+            projectionMutation.targetSlot,
+            projectionMutation.targetRepairFence,
         );
         const [statusStats, listStats] = await Promise.all([
           removeJobProjections<AutomationJobStatusProjection>(removedSet, collections.status),
@@ -4889,8 +4873,8 @@ export async function compactAutomationJobs(options: {
           retentionLimitReached: statusStats.retentionLimitReached || listStats.retentionLimitReached,
           currentStateTruncated: statusStats.currentStateTruncated || listStats.currentStateTruncated,
           sourceUpdatedAt: [statusStats.sourceUpdatedAt, listStats.sourceUpdatedAt]
-            .filter((value): value is string => Boolean(value))
-            .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
+              .filter((value): value is string => Boolean(value))
+              .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
           retentionBoundary: statusStats.retentionBoundary || listStats.retentionBoundary,
         }, nowMs);
         await refreshAutomationJobHealthSummary(nowMs).catch(error => {

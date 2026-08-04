@@ -9,6 +9,11 @@ if (path.dirname(path.resolve(testRoot)) !== allowedTempRoot) throw new Error('U
 fs.mkdirSync(testRoot, { recursive: true });
 process.env.SANDEAL_DATA_DIR = testRoot;
 process.env.NODE_ENV = 'test';
+process.env.SANDEAL_STORAGE_DRIVER = 'file';
+process.env.SANDEAL_BUILD_COMMIT = 'f'.repeat(40);
+process.env.SANDEAL_RELEASE_ID = 'f'.repeat(40);
+process.env.GIT_COMMIT_SHA = 'f'.repeat(40);
+process.env.NEXT_PUBLIC_SANDEAL_RELEASE_ID = 'f'.repeat(40);
 process.env.ALLOW_PAID_AI = 'false';
 require('./register-typescript.cjs');
 
@@ -53,6 +58,48 @@ function selectionJob(id, type, priority, createdAt, payload = {}) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForCondition(check, timeoutMs = 3_000, intervalMs = 10) {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue;
+  while (Date.now() < deadline) {
+    lastValue = await check();
+    if (lastValue?.done) return lastValue.value;
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`WAIT_FOR_CONDITION_TIMEOUT:${JSON.stringify(lastValue?.value ?? null)}`);
+}
+
+const COLLECTIONS = [
+  'automation-jobs',
+  'automation-job-attempts',
+  'automation-job-heartbeats',
+  'automation-job-projections',
+  'automation-job-list-projections-v2',
+  'automation-job-health-summary-v1',
+  'automation-job-projection-manifest-v1',
+  'automation-job-projection-maintenance-v1',
+  'automation-job-projection-rebuild-staging-v1',
+  'automation-control',
+  'automation-audit',
+  'runtime-role-leases',
+  'runtime-role-conflicts',
+  'runtime-role-fencing',
+  'automation-settings',
+  'business-usage',
+  'products',
+  'candidate-queue',
+];
+
 async function main() {
   const adapter = require('../src/lib/storage/adapter.ts');
   const worker = require('../src/lib/automation/worker.ts');
@@ -61,16 +108,7 @@ async function main() {
   const execution = require('../src/lib/automation/executionPolicy.ts');
 
   async function reset() {
-    for (const collection of [
-      'automation-jobs',
-      'automation-job-heartbeats',
-      'automation-job-projections',
-      'automation-job-list-projections-v2',
-      'automation-control',
-      'automation-audit',
-      'runtime-role-leases',
-      'runtime-role-conflicts',
-    ]) {
+    for (const collection of COLLECTIONS) {
       await adapter.writeCollection(collection, []);
     }
     await store.updateAutomationControl({
@@ -125,6 +163,89 @@ async function main() {
     assert.ok(result.replacementClaims >= 1);
   });
 
+  await test('shared worker activity keeps a slow sibling visible after the fast slot completes', async () => {
+    await reset();
+    const fast = await createJob('HEALTH_CHECK', 'shared-activity-fast', { marker: 'fast' }, 80);
+    const slow = await createJob('HEALTH_CHECK', 'shared-activity-slow', { marker: 'slow' }, 70);
+    const fastGate = deferred();
+    const slowGate = deferred();
+    const bothStarted = deferred();
+    const started = new Set();
+
+    const poolPromise = worker.runContinuousWorkerPool({
+      workerId: 'shared-activity-worker',
+      maxConcurrency: 2,
+      maximumClaims: 2,
+      criticalReservedCapacity: 0,
+      stopPollMs: 10,
+      runBatch: (workerId, ownership, batchOptions) =>
+          worker.processAutomationBatch(workerId, 1, ownership, {
+            ...batchOptions,
+            executeJobOverride: async job => {
+              started.add(job.id);
+              if (started.size === 2) bothStarted.resolve();
+              if (job.id === fast.job.id) await fastGate.promise;
+              else if (job.id === slow.job.id) await slowGate.promise;
+              else throw new Error(`UNEXPECTED_SHARED_ACTIVITY_JOB:${job.id}`);
+              return {
+                checkedAt: new Date().toISOString(),
+                businessDataChanged: false,
+              };
+            },
+          }),
+    });
+
+    try {
+      await Promise.race([
+        bothStarted.promise,
+        new Promise((resolve, reject) => {
+          setTimeout(() => reject(new Error('SHARED_ACTIVITY_START_TIMEOUT')), 3_000);
+        }),
+      ]);
+
+      const runningControl = await store.getAutomationControl();
+      assert.ok(
+          [fast.job.id, slow.job.id].includes(runningControl.workerCurrentJobId),
+          JSON.stringify(runningControl),
+      );
+
+      fastGate.resolve();
+      const intermediate = await waitForCondition(async () => {
+        const jobs = await store.getAllAutomationJobs();
+        const fastState = jobs.find(job => job.id === fast.job.id);
+        const slowState = jobs.find(job => job.id === slow.job.id);
+        const control = await store.getAutomationControl();
+        const value = {
+          fastStatus: fastState?.status,
+          slowStatus: slowState?.status,
+          workerCurrentJobId: control.workerCurrentJobId,
+        };
+        return {
+          done: fastState?.status === 'SUCCEEDED'
+              && slowState?.status === 'RUNNING'
+              && control.workerCurrentJobId === slow.job.id,
+          value,
+        };
+      });
+      assert.deepEqual(intermediate, {
+        fastStatus: 'SUCCEEDED',
+        slowStatus: 'RUNNING',
+        workerCurrentJobId: slow.job.id,
+      });
+
+      slowGate.resolve();
+      const result = await poolPromise;
+      assert.equal(result.claimed, 2);
+      assert.equal(result.succeeded, 2);
+      const finalControl = await store.getAutomationControl();
+      assert.ok(!finalControl.workerCurrentJobId, JSON.stringify(finalControl));
+    } finally {
+      fastGate.resolve();
+      slowGate.resolve();
+      await poolPromise.catch(() => undefined);
+    }
+  });
+
   await test('the global maximumClaims bound remains hard when Guardian capacity is reserved', async () => {
     const queued = [
       { id: 'guardian-only-budget', type: 'RUNTIME_GUARDIAN' },
@@ -138,8 +259,8 @@ async function main() {
       criticalReservedCapacity: 1,
       runBatch: async (workerId, ownership, batchOptions) => {
         const index = queued.findIndex(job =>
-          (batchOptions.claimLane !== 'RUNTIME_GUARDIAN' || job.type === 'RUNTIME_GUARDIAN')
-          && (batchOptions.claimLane !== 'NON_GUARDIAN' || job.type !== 'RUNTIME_GUARDIAN'));
+            (batchOptions.claimLane !== 'RUNTIME_GUARDIAN' || job.type === 'RUNTIME_GUARDIAN')
+            && (batchOptions.claimLane !== 'NON_GUARDIAN' || job.type !== 'RUNTIME_GUARDIAN'));
         const nextJob = index >= 0 ? queued.splice(index, 1)[0] : undefined;
         if (!nextJob) return batchResult(workerId, { claimed: 0, succeeded: 0, normalClaimed: 0 });
         executed.push(nextJob.id);
@@ -179,9 +300,9 @@ async function main() {
       lanePollMs: 100,
       runBatch: async (workerId, ownership, batchOptions) => {
         const laneEligible = queued
-          .filter(job => batchOptions.claimLane !== 'RUNTIME_GUARDIAN' || job.type === 'RUNTIME_GUARDIAN')
-          .filter(job => batchOptions.claimLane !== 'NON_GUARDIAN' || job.type !== 'RUNTIME_GUARDIAN')
-          .sort((left, right) => right.priority - left.priority);
+            .filter(job => batchOptions.claimLane !== 'RUNTIME_GUARDIAN' || job.type === 'RUNTIME_GUARDIAN')
+            .filter(job => batchOptions.claimLane !== 'NON_GUARDIAN' || job.type !== 'RUNTIME_GUARDIAN')
+            .sort((left, right) => right.priority - left.priority);
         const nextJob = laneEligible[0];
         if (!nextJob) return batchResult(workerId, { claimed: 0, succeeded: 0, normalClaimed: 0 });
         queued.splice(queued.findIndex(job => job.id === nextJob.id), 1);
@@ -288,8 +409,8 @@ async function main() {
         next += 1;
         await new Promise(resolve => setTimeout(resolve, index === 0 ? 20 : 5));
         return index === 1
-          ? batchResult(workerId, { succeeded: 0, failed: 1 })
-          : batchResult(workerId);
+            ? batchResult(workerId, { succeeded: 0, failed: 1 })
+            : batchResult(workerId);
       },
     });
     assert.equal(result.claimed, 5);
@@ -316,6 +437,45 @@ async function main() {
     assert.equal(result.claimAttempts, 40);
     assert.equal(result.peakInFlight, 3);
     assert.equal(peak, 3);
+  });
+
+  await test('an empty reserved lane uses bounded probe backoff while ordinary work remains active', async () => {
+    let guardianProbes = 0;
+    let ordinaryAvailable = true;
+    const result = await worker.runContinuousWorkerPool({
+      workerId: 'reserved-lane-backoff-worker',
+      maxConcurrency: 2,
+      maximumClaims: 2,
+      criticalReservedCapacity: 1,
+      stopPollMs: 10,
+      lanePollMs: 50,
+      laneMaximumPollMs: 200,
+      runBatch: async (workerId, ownership, batchOptions) => {
+        if (batchOptions.claimLane === 'RUNTIME_GUARDIAN') {
+          guardianProbes += 1;
+          return batchResult(workerId, {
+            claimed: 0,
+            succeeded: 0,
+            criticalClaimed: 0,
+            normalClaimed: 0,
+          });
+        }
+        if (!ordinaryAvailable) {
+          return batchResult(workerId, {
+            claimed: 0,
+            succeeded: 0,
+            criticalClaimed: 0,
+            normalClaimed: 0,
+          });
+        }
+        ordinaryAvailable = false;
+        await new Promise(resolve => setTimeout(resolve, 420));
+        return batchResult(workerId);
+      },
+    });
+    assert.equal(result.claimed, 1);
+    assert.ok(guardianProbes >= 2, `guardianProbes=${guardianProbes}`);
+    assert.ok(guardianProbes <= 6, `guardianProbes=${guardianProbes}`);
   });
 
   await test('shutdown stops replacement claims and drains already running slots', async () => {
@@ -347,24 +507,24 @@ async function main() {
     const guardian = selectionJob('guardian', 'RUNTIME_GUARDIAN', 100, fresh);
     const normal = selectionJob('normal', 'HEALTH_CHECK', 50, fresh);
     const selected = execution.selectCompatibleWorkerJobs(
-      [normal, overdueNormal, guardian],
-      [],
-      2,
-      now,
-      store.selectFairRunnableJobs,
-      1,
-      { runtimeGuardian: 1, nonGuardian: 1 },
+        [normal, overdueNormal, guardian],
+        [],
+        2,
+        now,
+        store.selectFairRunnableJobs,
+        1,
+        { runtimeGuardian: 1, nonGuardian: 1 },
     );
     assert.equal(selected[0].id, 'guardian');
     assert.equal(selected[1].id, 'overdue-normal');
     const reserved = execution.selectCompatibleWorkerJobs(
-      [normal, overdueNormal],
-      [],
-      2,
-      now,
-      store.selectFairRunnableJobs,
-      1,
-      { runtimeGuardian: 1, nonGuardian: 1 },
+        [normal, overdueNormal],
+        [],
+        2,
+        now,
+        store.selectFairRunnableJobs,
+        1,
+        { runtimeGuardian: 1, nonGuardian: 1 },
     );
     assert.deepEqual(reserved.map(job => job.id), ['overdue-normal']);
   });
@@ -386,7 +546,23 @@ async function main() {
     await reset();
     for (let index = 0; index < 7; index += 1) await createJob('HEALTH_CHECK', `bound-${index}`);
     const claims = await Promise.all(Array.from({ length: 7 }, () =>
-      store.claimAutomationJobs(
+        store.claimAutomationJobs(
+            'durable-bound-worker',
+            1,
+            60_000,
+            Date.now(),
+            undefined,
+            {
+              maximumInFlight: 4,
+              criticalReservedCapacity: 1,
+              enforceExecutionCompatibility: true,
+              claimLane: 'NON_GUARDIAN',
+            },
+        )));
+    assert.equal(claims.flat().length, 3);
+    const guardian = await createJob('RUNTIME_GUARDIAN', 'reserved-after-long-jobs', {}, 100);
+    const guardianCreatedAt = Date.parse(guardian.job.createdAt);
+    const guardianClaim = await store.claimAutomationJobs(
         'durable-bound-worker',
         1,
         60_000,
@@ -396,24 +572,8 @@ async function main() {
           maximumInFlight: 4,
           criticalReservedCapacity: 1,
           enforceExecutionCompatibility: true,
-          claimLane: 'NON_GUARDIAN',
+          claimLane: 'RUNTIME_GUARDIAN',
         },
-      )));
-    assert.equal(claims.flat().length, 3);
-    const guardian = await createJob('RUNTIME_GUARDIAN', 'reserved-after-long-jobs', {}, 100);
-    const guardianCreatedAt = Date.parse(guardian.job.createdAt);
-    const guardianClaim = await store.claimAutomationJobs(
-      'durable-bound-worker',
-      1,
-      60_000,
-      Date.now(),
-      undefined,
-      {
-        maximumInFlight: 4,
-        criticalReservedCapacity: 1,
-        enforceExecutionCompatibility: true,
-        claimLane: 'RUNTIME_GUARDIAN',
-      },
     );
     assert.equal(guardianClaim.length, 1);
     assert.equal(guardianClaim[0].id, guardian.job.id);
@@ -427,12 +587,12 @@ async function main() {
     await createJob('CAPTURE_PRICE_HISTORY', 'same-product-price', { productId: 'product-one' }, 70);
     await createJob('SCORE_PRODUCTS', 'other-product-score', { productId: 'product-two' }, 60);
     const claimed = await store.claimAutomationJobs(
-      'durable-resource-worker',
-      4,
-      60_000,
-      Date.now(),
-      undefined,
-      { maximumInFlight: 4, criticalReservedCapacity: 1, enforceExecutionCompatibility: true },
+        'durable-resource-worker',
+        4,
+        60_000,
+        Date.now(),
+        undefined,
+        { maximumInFlight: 4, criticalReservedCapacity: 1, enforceExecutionCompatibility: true },
     );
     assert.equal(claimed.length, 2);
     assert.equal(claimed.filter(job => job.executionResourceKeys.some(key => key.startsWith('product:'))).length, 2);
@@ -443,17 +603,17 @@ async function main() {
     await reset();
     for (let index = 0; index < 4; index += 1) await createJob('HEALTH_CHECK', `borrow-${index}`, {}, 20 + index);
     let claimed = await store.claimAutomationJobs(
-      'critical-capacity-worker',
-      4,
-      60_000,
-      Date.now(),
-      undefined,
-      {
-        maximumInFlight: 4,
-        criticalReservedCapacity: 1,
-        enforceExecutionCompatibility: true,
-        claimLane: 'NON_GUARDIAN',
-      },
+        'critical-capacity-worker',
+        4,
+        60_000,
+        Date.now(),
+        undefined,
+        {
+          maximumInFlight: 4,
+          criticalReservedCapacity: 1,
+          enforceExecutionCompatibility: true,
+          claimLane: 'NON_GUARDIAN',
+        },
     );
     assert.equal(claimed.length, 3);
     assert.equal(claimed.every(job => job.executionCritical === false), true);
@@ -462,34 +622,34 @@ async function main() {
     for (let index = 0; index < 4; index += 1) await createJob('HEALTH_CHECK', `mixed-${index}`, {}, 20 + index);
     const guardian = await createJob('RUNTIME_GUARDIAN', 'critical-guardian', {}, 100);
     claimed = await store.claimAutomationJobs(
-      'critical-capacity-worker',
-      4,
-      60_000,
-      Date.now(),
-      undefined,
-      {
-        maximumInFlight: 4,
-        criticalReservedCapacity: 1,
-        enforceExecutionCompatibility: true,
-        claimLane: 'RUNTIME_GUARDIAN',
-      },
+        'critical-capacity-worker',
+        4,
+        60_000,
+        Date.now(),
+        undefined,
+        {
+          maximumInFlight: 4,
+          criticalReservedCapacity: 1,
+          enforceExecutionCompatibility: true,
+          claimLane: 'RUNTIME_GUARDIAN',
+        },
     );
     assert.equal(claimed.length, 1);
     assert.equal(claimed[0].id, guardian.job.id);
     assert.equal(claimed.filter(job => job.executionCritical).length, 1);
     assert.ok(Date.parse(claimed[0].claimedAt) - Date.parse(claimed[0].scheduledAt) < 30_000);
     const ordinary = await store.claimAutomationJobs(
-      'critical-capacity-worker',
-      4,
-      60_000,
-      Date.now(),
-      undefined,
-      {
-        maximumInFlight: 4,
-        criticalReservedCapacity: 1,
-        enforceExecutionCompatibility: true,
-        claimLane: 'NON_GUARDIAN',
-      },
+        'critical-capacity-worker',
+        4,
+        60_000,
+        Date.now(),
+        undefined,
+        {
+          maximumInFlight: 4,
+          criticalReservedCapacity: 1,
+          enforceExecutionCompatibility: true,
+          claimLane: 'NON_GUARDIAN',
+        },
     );
     assert.equal(ordinary.length, 3);
     assert.equal(ordinary.every(job => job.type !== 'RUNTIME_GUARDIAN'), true);
@@ -501,10 +661,10 @@ async function main() {
     const templates = [];
     for (const type of mixedTypes) {
       const created = await createJob(
-        type,
-        `production-template-${type.toLowerCase()}`,
-        type === 'SCORE_PRODUCTS' ? { productId: 'mixed-product-template' } : {},
-        50,
+          type,
+          `production-template-${type.toLowerCase()}`,
+          type === 'SCORE_PRODUCTS' ? { productId: 'mixed-product-template' } : {},
+          50,
       );
       templates.push(created.job);
     }
@@ -514,8 +674,8 @@ async function main() {
       const template = structuredClone(templates[index % templates.length]);
       const suffix = String(index).padStart(5, '0');
       const productPayload = template.type === 'SCORE_PRODUCTS'
-        ? { productId: `mixed-product-${suffix}` }
-        : template.payload;
+          ? { productId: `mixed-product-${suffix}` }
+          : template.payload;
       return {
         ...template,
         id: `production-mixed-${suffix}`,
@@ -533,33 +693,33 @@ async function main() {
     });
     await adapter.writeCollection('automation-jobs', productionJobs);
     const ordinaryClaims = await store.claimAutomationJobs(
-      'production-mixed-worker',
-      4,
-      60_000,
-      Date.now(),
-      undefined,
-      {
-        maximumInFlight: 4,
-        criticalReservedCapacity: 1,
-        enforceExecutionCompatibility: true,
-        claimLane: 'NON_GUARDIAN',
-      },
+        'production-mixed-worker',
+        4,
+        60_000,
+        Date.now(),
+        undefined,
+        {
+          maximumInFlight: 4,
+          criticalReservedCapacity: 1,
+          enforceExecutionCompatibility: true,
+          claimLane: 'NON_GUARDIAN',
+        },
     );
     assert.equal(ordinaryClaims.length, 3);
     const guardian = await createJob('RUNTIME_GUARDIAN', 'production-mixed-guardian', {}, 100);
     const startedAt = Date.now();
     const guardianClaim = await store.claimAutomationJobs(
-      'production-mixed-worker',
-      1,
-      60_000,
-      Date.now(),
-      undefined,
-      {
-        maximumInFlight: 4,
-        criticalReservedCapacity: 1,
-        enforceExecutionCompatibility: true,
-        claimLane: 'RUNTIME_GUARDIAN',
-      },
+        'production-mixed-worker',
+        1,
+        60_000,
+        Date.now(),
+        undefined,
+        {
+          maximumInFlight: 4,
+          criticalReservedCapacity: 1,
+          enforceExecutionCompatibility: true,
+          claimLane: 'RUNTIME_GUARDIAN',
+        },
     );
     assert.equal(guardianClaim[0]?.id, guardian.job.id);
     const pickupMs = Date.now() - startedAt;
@@ -591,9 +751,20 @@ async function main() {
     const workerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'lib', 'automation', 'worker.ts'), 'utf8');
     assert.match(workerSource, /jobLeaseMs = normalizeAutomationJobLeaseMs[\s\S]*claimAutomationJobs\(workerId, limit, jobLeaseMs, Date\.now\(\), ownership, options\)/);
     assert.match(workerSource, /for \(const job of claimed\)[\s\S]*startAutomationJobLeaseRenewal[\s\S]*claimedJobLifecycles\.set/);
+    assert.match(workerSource, /maybeMaterializeJobHealthProjectionMaintenance/);
+    assert.match(workerSource, /jobHealthMaintenanceMaterializationFlight/);
+    assert.match(workerSource, /nextJobHealthMaintenanceMaterializationAt/);
+    assert.match(workerSource, /activeJobIds/);
+    assert.match(workerSource, /createWorkerActivityRegistry/);
+    assert.match(workerSource, /queueWorkerActivityControlUpdate/);
+    assert.match(workerSource, /activityRegistry/);
+    assert.doesNotMatch(workerSource, /activeJobIds\.clear\(\)/);
+    assert.match(workerSource, /automation_job_lease_renewal_diagnostic/);
+    assert.match(workerSource, /automation_job_lease_authority_lost/);
+    assert.doesNotMatch(workerSource, /getAutomationJobHealthView/);
     assert.match(
-      workerSource,
-      /orderAutomationWorkerBatch[\s\S]*isCriticalAutomationJob[\s\S]*orderedClaimed = orderAutomationWorkerBatch\(claimed\)[\s\S]*orderedClaimed\.every\(job => job\.type === 'PROCESS_CANDIDATE'\)[\s\S]*Promise\.all\(orderedClaimed\.map\(processJob\)\)[\s\S]*for \(const job of orderedClaimed\) await processJob\(job\)/,
+        workerSource,
+        /orderAutomationWorkerBatch[\s\S]*isCriticalAutomationJob[\s\S]*orderedClaimed = orderAutomationWorkerBatch\(claimed\)[\s\S]*orderedClaimed\.every\(job => job\.type === 'PROCESS_CANDIDATE'\)[\s\S]*Promise\.all\(orderedClaimed\.map\(processJob\)\)[\s\S]*for \(const job of orderedClaimed\) await processJob\(job\)/,
     );
     assert.doesNotMatch(workerSource, /const claimOptions: WorkerBatchOptions/);
   });
@@ -610,13 +781,13 @@ async function main() {
     await createJob('HEALTH_CHECK', 'fenced-job');
     assert.equal(await roles.releaseRuntimeRole('WORKER', role.ownership), true);
     await assert.rejects(
-      worker.runContinuousWorkerPool({
-        workerId: 'fenced-worker',
-        ownership: role.ownership,
-        maxConcurrency: 2,
-        maximumClaims: 2,
-      }),
-      /WORKER_FENCING_REJECTED/,
+        worker.runContinuousWorkerPool({
+          workerId: 'fenced-worker',
+          ownership: role.ownership,
+          maxConcurrency: 2,
+          maximumClaims: 2,
+        }),
+        /WORKER_FENCING_REJECTED/,
     );
     assert.equal((await store.getAllAutomationJobs()).filter(job => job.status === 'RUNNING').length, 0);
   });
@@ -627,8 +798,8 @@ async function main() {
 }
 
 main()
-  .catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => fs.rmSync(testRoot, { recursive: true, force: true }));
+    .catch(error => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(() => fs.rmSync(testRoot, { recursive: true, force: true }));

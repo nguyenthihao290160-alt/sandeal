@@ -1,8 +1,13 @@
 export type StorageDriver = 'file' | 'mongo';
 
 export type StorageTransaction<T> = (
-  items: T[]
+    items: T[],
 ) => Promise<T[] | undefined> | T[] | undefined;
+
+export type StorageScanVisitor<T> = (
+    item: T,
+    index: number,
+) => Promise<void> | void;
 
 /**
  * Mutate a collection one item at a time while the adapter owns its atomic
@@ -10,35 +15,51 @@ export type StorageTransaction<T> = (
  * Implementations may retain only the current item and bounded bookkeeping.
  */
 export type StorageStreamingTransaction<T> = (
-  item: T,
-  index: number,
+    item: T,
+    index: number,
 ) => Promise<boolean | void> | boolean | void;
 
 export interface StorageStreamingTransactionOptions<T> {
-  /** Optional bounded first pass executed under the same atomic boundary. */
+  /**
+   * Optional first pass executed under the same adapter-owned boundary.
+   * Implementations must preserve callback errors instead of rewriting them as
+   * generic storage failures, because this hook can carry validation/fencing.
+   */
   prepare?: StorageStreamingTransaction<T>;
   /** Runs after prepare and before the mutating pass, still under the boundary. */
   beforeMutation?: () => Promise<void> | void;
-  /** Runs immediately before the atomic replacement/commit. */
+  /**
+   * Runs after all preparatory I/O and immediately before the visible atomic
+   * replacement/commit. Adapters must propagate this callback's original error.
+   */
   beforeCommit?: () => Promise<void> | void;
   /** Append bounded new records after the existing source has been transformed. */
   appendItems?: () => T[] | undefined;
   /**
    * The transaction is known to append only. Implementations may use a
-   * bounded-copy append path, but must preserve the same atomic and durable
-   * result as the normal streaming transaction.
+   * bounded-copy append path, but must preserve item count, ordering, callback
+   * behavior, and the same atomic/durable result as the normal transaction.
    */
   appendOnly?: boolean;
+}
+
+export interface StorageStreamingTransactionResult {
+  changed: boolean;
+  itemCount: number;
+}
+
+export type StoragePageSortDirection = 'asc' | 'desc';
+
+export interface StoragePageSort {
+  field: string;
+  direction: StoragePageSortDirection;
 }
 
 export interface StoragePageOptions {
   page: number;
   pageSize: number;
   filters?: Record<string, string>;
-  sort?: {
-    field: string;
-    direction: 'asc' | 'desc';
-  };
+  sort?: StoragePageSort;
 }
 
 export interface StoragePage<T> {
@@ -46,8 +67,8 @@ export interface StoragePage<T> {
   totalItems: number;
   /**
    * Number of storage round trips used for this page. File storage reads the
-   * compact collection once; Mongo verifies schema, reads the active revision,
-   * and executes one bounded query.
+   * selected durable snapshot once; Mongo verifies schema, reads the active
+   * revision, and executes one bounded query.
    */
   queryCount: number;
 }
@@ -68,6 +89,10 @@ export interface StorageBoundedCollectionMetadata {
   observedBytes: number;
   maximumItems: number;
   maximumBytes: number;
+  /**
+   * Bounded collection reads are fail-closed: adapters reject an oversized
+   * collection instead of silently returning a partial durable snapshot.
+   */
   truncated: false;
   queryCount: number;
 }
@@ -120,24 +145,33 @@ export interface StorageBulkMutation<T extends { id: string }> {
   value?: T;
 }
 
+export interface StorageBulkMutationOptions {
+  optimized?: boolean;
+}
+
 export interface StorageBulkItemResult {
   mutationId: string;
   itemId: string;
   status: 'APPLIED' | 'FAILED';
   code:
-    | 'UPSERTED'
-    | 'DELETED'
-    | 'ITEM_NOT_FOUND'
-    | 'INVALID_MUTATION'
-    | 'INVALID_VALUE'
-    | 'DUPLICATE_MUTATION_ID'
-    | 'DUPLICATE_TARGET';
+      | 'UPSERTED'
+      | 'DELETED'
+      | 'ITEM_NOT_FOUND'
+      | 'INVALID_MUTATION'
+      | 'INVALID_VALUE'
+      | 'DUPLICATE_MUTATION_ID'
+      | 'DUPLICATE_TARGET';
 }
+
+export type StorageBulkMode =
+    | 'FILE_ATOMIC_REVISION'
+    | 'MONGO_COMPATIBILITY_REVISION'
+    | 'MONGO_OPT_IN_REVISION';
 
 export interface StorageBulkResult {
   schemaVersion: 1;
   driver: StorageDriver;
-  mode: 'FILE_ATOMIC_REVISION' | 'MONGO_COMPATIBILITY_REVISION' | 'MONGO_OPT_IN_REVISION';
+  mode: StorageBulkMode;
   requested: number;
   applied: number;
   failed: number;
@@ -147,38 +181,51 @@ export interface StorageBulkResult {
 export interface StorageAdapter {
   readonly driver: StorageDriver;
   readonly capabilities: StorageCapabilities;
+
   getDataDir(): string;
   ensureDataDir(): Promise<void>;
+
   readCollection<T>(collection: string): Promise<T[]>;
   scanCollection<T>(
-    collection: string,
-    visitor: (item: T, index: number) => Promise<void> | void,
+      collection: string,
+      visitor: StorageScanVisitor<T>,
   ): Promise<StorageScanResult>;
+
   /**
    * Read a deliberately compact read model. Implementations must reject the
    * read before parsing when the configured byte bound can be checked.
    */
   readBoundedCollection<T>(
-    collection: string,
-    options: StorageBoundedCollectionOptions,
+      collection: string,
+      options: StorageBoundedCollectionOptions,
   ): Promise<T[]>;
   readBoundedCollectionSnapshot<T>(
-    collection: string,
-    options: StorageBoundedCollectionOptions,
+      collection: string,
+      options: StorageBoundedCollectionOptions,
   ): Promise<StorageBoundedCollectionResult<T>>;
-  readCollectionPage<T>(collection: string, options: StoragePageOptions): Promise<StoragePage<T>>;
+  readCollectionPage<T>(
+      collection: string,
+      options: StoragePageOptions,
+  ): Promise<StoragePage<T>>;
+
   writeCollection<T>(collection: string, data: T[]): Promise<void>;
   backupCollection?(collection: string, label: string): Promise<string>;
-  runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void>;
+
+  runTransaction<T>(
+      collection: string,
+      fn: StorageTransaction<T>,
+  ): Promise<void>;
   runStreamingTransaction<T>(
-    collection: string,
-    fn: StorageStreamingTransaction<T>,
-    options?: StorageStreamingTransactionOptions<T>,
-  ): Promise<{ changed: boolean; itemCount: number }>;
+      collection: string,
+      fn: StorageStreamingTransaction<T>,
+      options?: StorageStreamingTransactionOptions<T>,
+  ): Promise<StorageStreamingTransactionResult>;
+
   bulkMutateCollection?<T extends { id: string }>(
-    collection: string,
-    mutations: StorageBulkMutation<T>[],
-    options?: { optimized?: boolean },
+      collection: string,
+      mutations: StorageBulkMutation<T>[],
+      options?: StorageBulkMutationOptions,
   ): Promise<StorageBulkResult>;
+
   checkHealth(): Promise<StorageHealth>;
 }

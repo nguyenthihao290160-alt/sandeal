@@ -9,9 +9,10 @@ const root = process.cwd();
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-storage-migration-'));
 const actualDataDir = path.join(root, '.data');
 const actualDataMetadata = fs.existsSync(actualDataDir)
-  ? { mtimeMs: fs.statSync(actualDataDir).mtimeMs, count: fs.readdirSync(actualDataDir).length }
-  : null;
+    ? { mtimeMs: fs.statSync(actualDataDir).mtimeMs, count: fs.readdirSync(actualDataDir).length }
+    : null;
 const savedEnv = {
+  NODE_ENV: process.env.NODE_ENV,
   SANDEAL_DATA_DIR: process.env.SANDEAL_DATA_DIR,
   SANDEAL_STORAGE_DRIVER: process.env.SANDEAL_STORAGE_DRIVER,
   MONGODB_URI: process.env.MONGODB_URI,
@@ -52,6 +53,8 @@ const {
 let passed = 0;
 let failed = 0;
 let networkCalls = 0;
+const originalFetch = global.fetch;
+
 global.fetch = async () => {
   networkCalls += 1;
   throw new Error('NETWORK_FORBIDDEN_IN_MIGRATION_TESTS');
@@ -294,6 +297,7 @@ async function main() {
     assert.equal(serialized.includes(privateValue), false);
     assert.equal(serialized.includes('fixture-private-value'), false);
     assert.equal(serialized.includes('mongodb://'), false);
+    assert.equal(serialized.includes('connectionFingerprint'), false);
     assert.equal(Object.prototype.hasOwnProperty.call(manifest, 'uri'), false);
   });
 
@@ -329,6 +333,30 @@ async function main() {
   await test('undefined and non-finite numbers are not accepted as JSON checksum input', () => {
     assert.throws(() => checksumJson({ value: undefined }), error => error && error.code === 'INVALID_STORAGE_PAYLOAD');
     assert.throws(() => checksumJson({ value: Number.NaN }), error => error && error.code === 'INVALID_STORAGE_PAYLOAD');
+  });
+
+  await test('checksum input rejects lossy, executable, and sparse values', () => {
+    const sparse = [];
+    sparse[1] = 'value';
+
+    const getter = {};
+    Object.defineProperty(getter, 'value', {
+      enumerable: true,
+      get() { return 'executed'; },
+    });
+
+    assert.throws(
+        () => checksumJson({ value: Number.POSITIVE_INFINITY }),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+    assert.throws(
+        () => checksumJson(sparse),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+    assert.throws(
+        () => checksumJson(getter),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
   });
 
   await test('record checksums use ids or ordinals without mutating domain objects', () => {
@@ -384,7 +412,14 @@ async function main() {
     ], {
       cwd: root,
       encoding: 'utf8',
-      env: { ...process.env, SANDEAL_DATA_DIR: dataDir, SANDEAL_STORAGE_DRIVER: 'file', MONGODB_URI: '' },
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        SANDEAL_DATA_DIR: dataDir,
+        SANDEAL_STORAGE_DRIVER: 'file',
+        MONGODB_URI: '',
+        MONGODB_DATABASE: '',
+      },
     });
     assert.equal(result.status, 0, result.stderr);
     const report = JSON.parse(result.stdout);
@@ -461,6 +496,33 @@ async function main() {
     }), errorCode('MIGRATION_SOURCE_CHECKSUM_MISMATCH'));
   });
 
+  await test('execution rejects non-JSON source values before target writes', async () => {
+    const { manifest } = await manifestFixture([
+      { id: 'one', createdAt: '2026-07-18T00:00:00.000Z' },
+      { id: 'two', value: 2 },
+    ]);
+    const target = new FakeMigrationTarget(manifest.database);
+
+    await assert.rejects(
+        () => executeMigration({
+          mode: 'apply-isolated',
+          manifest,
+          migrationId: 'invalid-source-payload',
+          sourceCollections: {
+            products: [
+              { id: 'one', createdAt: new Date('2026-07-18T00:00:00.000Z') },
+              { id: 'two', value: 2 },
+            ],
+          },
+          target,
+          allowIsolatedWrite: true,
+        }),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+    assert.equal(target.writeCalls, 0);
+    assert.equal(target.checkpointWrites, 0);
+  });
+
   await test('isolated rerun is idempotent and completed batches do not duplicate records', async () => {
     const { manifest, items } = await manifestFixture();
     const target = new FakeMigrationTarget(manifest.database);
@@ -530,6 +592,7 @@ async function main() {
     const serialized = JSON.stringify(await target.readCheckpoint('safe-checkpoint', 'products'));
     assert.equal(serialized.includes('test-not-in-checkpoint'), false);
     assert.equal(serialized.includes('mongodb://'), false);
+    assert.equal(serialized.includes('connectionFingerprint'), false);
   });
 
   await test('test artifacts use SANDEAL_DATA_DIR temp and .test-tmp is ignored', () => {
@@ -567,5 +630,9 @@ main().catch(error => {
     if (savedPresence[key]) process.env[key] = value;
     else delete process.env[key];
   }
+
+  if (originalFetch === undefined) delete global.fetch;
+  else global.fetch = originalFetch;
+
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });

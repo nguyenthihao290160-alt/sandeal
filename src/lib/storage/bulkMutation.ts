@@ -1,4 +1,5 @@
 import { normalizeCollectionPayload } from './mongoSerialization';
+import { storageError } from './storageErrors';
 import type {
   StorageBulkItemResult,
   StorageBulkMutation,
@@ -21,53 +22,109 @@ function validId(value: unknown): value is string {
   return typeof value === 'string' && SAFE_ID.test(value);
 }
 
+function storageBulkSizeError(): Error {
+  const error = new Error('STORAGE_BULK_SIZE_INVALID') as Error & {
+    code?: string;
+  };
+  error.code = 'STORAGE_BULK_SIZE_INVALID';
+  return error;
+}
+
 function normalizedValue<T extends { id: string }>(
-  value: unknown,
-  expectedId: string,
+    value: unknown,
+    expectedId: string,
 ): T | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
   if ((value as { id?: unknown }).id !== expectedId) return undefined;
+
   try {
     const [normalized] = normalizeCollectionPayload([value]);
-    if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > MAX_ITEM_BYTES) return undefined;
+    const encoded = JSON.stringify(normalized);
+    if (
+        encoded === undefined
+        || Buffer.byteLength(encoded, 'utf8') > MAX_ITEM_BYTES
+    ) {
+      return undefined;
+    }
     return normalized as T;
   } catch {
     return undefined;
   }
 }
 
+function buildCurrentItemIndex<T extends { id: string }>(
+    current: T[],
+): {
+  items: Array<T | undefined>;
+  itemIndexes: Map<string, number>;
+} {
+  if (!Array.isArray(current)) {
+    throw storageError('INVALID_STORAGE_PAYLOAD');
+  }
+
+  const items: Array<T | undefined> = [...current];
+  const itemIndexes = new Map<string, number>();
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (
+        !item
+        || typeof item !== 'object'
+        || Array.isArray(item)
+        || typeof item.id !== 'string'
+        || item.id.length === 0
+        || itemIndexes.has(item.id)
+    ) {
+      // Bulk mutation cannot safely address a collection with missing or
+      // duplicate durable identities. Fail before applying any mutation.
+      throw storageError('INVALID_STORAGE_PAYLOAD');
+    }
+    itemIndexes.set(item.id, index);
+  }
+
+  return { items, itemIndexes };
+}
+
 export function validateStorageBulkSize(
-  mutations: unknown,
+    mutations: unknown,
 ): asserts mutations is StorageBulkMutation<{ id: string }>[] {
   if (
-    !Array.isArray(mutations)
-    || mutations.length === 0
-    || mutations.length > STORAGE_BULK_MAX_ITEMS
+      !Array.isArray(mutations)
+      || mutations.length === 0
+      || mutations.length > STORAGE_BULK_MAX_ITEMS
   ) {
-    throw new Error('STORAGE_BULK_SIZE_INVALID');
+    throw storageBulkSizeError();
   }
 }
 
 export function applyStorageBulkMutations<T extends { id: string }>(
-  current: T[],
-  mutations: StorageBulkMutation<T>[],
+    current: T[],
+    mutations: StorageBulkMutation<T>[],
 ): AppliedStorageBulk<T> {
   validateStorageBulkSize(mutations);
-  const items = [...current];
+
+  const { items, itemIndexes } = buildCurrentItemIndex(current);
   const results: StorageBulkItemResult[] = [];
   const mutationIds = new Set<string>();
   const targets = new Set<string>();
+  let applied = 0;
 
   for (const mutation of mutations) {
-    const mutationId = validId(mutation?.mutationId) ? mutation.mutationId : 'invalid';
-    const itemId = validId(mutation?.itemId) ? mutation.itemId : 'invalid';
+    const mutationId = validId(mutation?.mutationId)
+        ? mutation.mutationId
+        : 'invalid';
+    const itemId = validId(mutation?.itemId)
+        ? mutation.itemId
+        : 'invalid';
     let code: StorageBulkItemResult['code'] | undefined;
 
     if (
-      !mutation
-      || !validId(mutation.mutationId)
-      || !validId(mutation.itemId)
-      || !['UPSERT', 'DELETE'].includes(mutation.type)
+        !mutation
+        || !validId(mutation.mutationId)
+        || !validId(mutation.itemId)
+        || (mutation.type !== 'UPSERT' && mutation.type !== 'DELETE')
     ) {
       code = 'INVALID_MUTATION';
     } else if (mutationIds.has(mutation.mutationId)) {
@@ -76,37 +133,79 @@ export function applyStorageBulkMutations<T extends { id: string }>(
       code = 'DUPLICATE_TARGET';
     }
 
-    if (validId(mutation?.mutationId)) mutationIds.add(mutation.mutationId);
-    if (validId(mutation?.itemId)) targets.add(mutation.itemId);
+    // Reserve every syntactically valid mutation ID and target, including
+    // entries that later fail semantic validation. This keeps one batch
+    // deterministic and prevents a later entry from reusing the same identity.
+    if (validId(mutation?.mutationId)) {
+      mutationIds.add(mutation.mutationId);
+    }
+    if (validId(mutation?.itemId)) {
+      targets.add(mutation.itemId);
+    }
+
     if (code) {
-      results.push({ mutationId, itemId, status: 'FAILED', code });
+      results.push({
+        mutationId,
+        itemId,
+        status: 'FAILED',
+        code,
+      });
       continue;
     }
 
-    const index = items.findIndex(item => item.id === mutation.itemId);
+    const index = itemIndexes.get(mutation.itemId);
+
     if (mutation.type === 'DELETE') {
-      if (index < 0) {
-        results.push({ mutationId, itemId, status: 'FAILED', code: 'ITEM_NOT_FOUND' });
+      if (index === undefined) {
+        results.push({
+          mutationId,
+          itemId,
+          status: 'FAILED',
+          code: 'ITEM_NOT_FOUND',
+        });
       } else {
-        items.splice(index, 1);
-        results.push({ mutationId, itemId, status: 'APPLIED', code: 'DELETED' });
+        items[index] = undefined;
+        itemIndexes.delete(mutation.itemId);
+        applied += 1;
+        results.push({
+          mutationId,
+          itemId,
+          status: 'APPLIED',
+          code: 'DELETED',
+        });
       }
       continue;
     }
 
     const value = normalizedValue<T>(mutation.value, mutation.itemId);
     if (!value) {
-      results.push({ mutationId, itemId, status: 'FAILED', code: 'INVALID_VALUE' });
+      results.push({
+        mutationId,
+        itemId,
+        status: 'FAILED',
+        code: 'INVALID_VALUE',
+      });
       continue;
     }
-    if (index < 0) items.push(value);
-    else items[index] = value;
-    results.push({ mutationId, itemId, status: 'APPLIED', code: 'UPSERTED' });
+
+    if (index === undefined) {
+      itemIndexes.set(mutation.itemId, items.length);
+      items.push(value);
+    } else {
+      items[index] = value;
+    }
+
+    applied += 1;
+    results.push({
+      mutationId,
+      itemId,
+      status: 'APPLIED',
+      code: 'UPSERTED',
+    });
   }
 
-  const applied = results.filter(result => result.status === 'APPLIED').length;
   return {
-    items,
+    items: items.filter((item): item is T => item !== undefined),
     results,
     applied,
     failed: results.length - applied,

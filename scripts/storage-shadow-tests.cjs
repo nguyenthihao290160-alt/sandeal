@@ -9,10 +9,31 @@ const root = process.cwd();
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-storage-shadow-'));
 const actualDataDir = path.join(root, '.data');
 const actualDataMetadata = fs.existsSync(actualDataDir)
-  ? { mtimeMs: fs.statSync(actualDataDir).mtimeMs, count: fs.readdirSync(actualDataDir).length }
-  : null;
+    ? {
+      mtimeMs: fs.statSync(actualDataDir).mtimeMs,
+      count: fs.readdirSync(actualDataDir).length,
+    }
+    : null;
+const savedEnv = {
+  NODE_ENV: process.env.NODE_ENV,
+  SANDEAL_DATA_DIR: process.env.SANDEAL_DATA_DIR,
+  SANDEAL_STORAGE_DRIVER: process.env.SANDEAL_STORAGE_DRIVER,
+  MONGODB_URI: process.env.MONGODB_URI,
+  MONGODB_DATABASE: process.env.MONGODB_DATABASE,
+};
+const savedPresence = Object.fromEntries(
+    Object.keys(savedEnv).map(key => [
+      key,
+      Object.prototype.hasOwnProperty.call(process.env, key),
+    ]),
+);
+const originalFetch = global.fetch;
 
 process.env.NODE_ENV = 'test';
+process.env.SANDEAL_DATA_DIR = tempRoot;
+process.env.SANDEAL_STORAGE_DRIVER = 'file';
+delete process.env.MONGODB_URI;
+delete process.env.MONGODB_DATABASE;
 require('./register-typescript.cjs');
 
 const mongoClientPath = require.resolve('../src/lib/storage/mongoClient.ts');
@@ -30,6 +51,7 @@ let passed = 0;
 let failed = 0;
 let fixtureCounter = 0;
 let networkCalls = 0;
+
 global.fetch = async () => {
   networkCalls += 1;
   throw new Error('NETWORK_FORBIDDEN_IN_SHADOW_TESTS');
@@ -150,11 +172,22 @@ async function createBackupFixture(options = {}) {
 }
 
 function spawnTool(args) {
-  return spawnSync(process.execPath, [path.join(root, 'scripts', 'storage-shadow-tools.cjs'), ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    env: { ...process.env, MONGODB_URI: '', SANDEAL_STORAGE_DRIVER: 'file' },
-  });
+  return spawnSync(
+      process.execPath,
+      [path.join(root, 'scripts', 'storage-shadow-tools.cjs'), ...args],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          SANDEAL_DATA_DIR: tempRoot,
+          SANDEAL_STORAGE_DRIVER: 'file',
+          MONGODB_URI: '',
+          MONGODB_DATABASE: '',
+        },
+      },
+  );
 }
 
 async function main() {
@@ -168,8 +201,8 @@ async function main() {
 
   await test('equal counts with different checksums produce MISMATCH', async () => {
     const { report } = await shadow(
-      { products: [{ id: 'one', value: 1 }] },
-      { products: [{ id: 'one', value: 2 }] }
+        { products: [{ id: 'one', value: 1 }] },
+        { products: [{ id: 'one', value: 2 }] }
     );
     assert.equal(report.status, 'MISMATCH');
     assert.equal(report.collections[0].countMatches, true);
@@ -179,16 +212,16 @@ async function main() {
 
   await test('missing record is detected by stable identity', async () => {
     const { report } = await shadow(
-      { products: [{ id: 'one' }, { id: 'two' }] },
-      { products: [{ id: 'one' }] }
+        { products: [{ id: 'one' }, { id: 'two' }] },
+        { products: [{ id: 'one' }] }
     );
     assert.ok(report.differences.some(item => item.kind === 'RECORD_MISSING' && item.identity === 'id:two'));
   });
 
   await test('extra record is detected by stable identity', async () => {
     const { report } = await shadow(
-      { products: [{ id: 'one' }] },
-      { products: [{ id: 'one' }, { id: 'extra' }] }
+        { products: [{ id: 'one' }] },
+        { products: [{ id: 'one' }, { id: 'extra' }] }
     );
     assert.ok(report.differences.some(item => item.kind === 'RECORD_EXTRA' && item.identity === 'id:extra'));
   });
@@ -217,12 +250,26 @@ async function main() {
     assert.equal(report.status, 'MATCH');
   });
 
+  await test('shadow checksum rejects non-JSON values before comparison', () => {
+    assert.throws(
+        () => checksumCollection([{
+          id: 'one',
+          createdAt: new Date('2026-07-18T00:00:00.000Z'),
+        }]),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+    assert.throws(
+        () => checksumCollection([{ id: 'one', value: Number.POSITIVE_INFINITY }]),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+  });
+
   await test('sensitive values never appear in mismatch reports', async () => {
     const beforeSecret = 'test-before-secret-marker';
     const afterSecret = 'test-after-secret-marker';
     const { report } = await shadow(
-      { products: [{ id: 'one', credential: { secret: beforeSecret } }] },
-      { products: [{ id: 'one', credential: { secret: afterSecret } }] }
+        { products: [{ id: 'one', credential: { secret: beforeSecret } }] },
+        { products: [{ id: 'one', credential: { secret: afterSecret } }] }
     );
     const serialized = JSON.stringify(report);
     assert.equal(serialized.includes(beforeSecret), false);
@@ -355,6 +402,39 @@ async function main() {
     assert.equal(/mongodb(?:\+srv)?:\/\//i.test(serialized), false);
     assert.equal(/"password"\s*:/i.test(serialized), false);
     assert.equal(serialized.includes('test-must-never-be-read'), false);
+    assert.equal(serialized.includes('connectionFingerprint'), false);
+  });
+
+  await test('backup rejects non-JSON records before publishing an artifact', async () => {
+    const outputDir = path.join(
+        tempRoot,
+        `backup-invalid-payload-${fixtureCounter++}`,
+    );
+    const reader = new FakeShadowReader({
+      products: [{
+        id: 'one',
+        createdAt: new Date('2026-07-18T00:00:00.000Z'),
+      }],
+    });
+
+    await assert.rejects(
+        () => createBackupFixture({
+          reader,
+          collections: ['products'],
+          outputDir,
+        }),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+
+    if (fs.existsSync(outputDir)) {
+      assert.equal(
+          fs.readdirSync(outputDir)
+              .some(name =>
+                  name.endsWith('.mongo-logical-backup.json')
+                  || name.includes('.tmp.')),
+          false,
+      );
+    }
   });
 
   await test('backup atomic write verifies roundtrip and refuses overwrite', async () => {
@@ -363,8 +443,8 @@ async function main() {
     const verified = await readMongoLogicalBackup(first.filePath);
     assert.equal(verified.snapshotChecksum, first.backup.snapshotChecksum);
     await assert.rejects(
-      () => createBackupFixture({ outputDir, backupId: 'fixed-backup' }),
-      /MONGO_BACKUP_ALREADY_EXISTS/
+        () => createBackupFixture({ outputDir, backupId: 'fixed-backup' }),
+        /MONGO_BACKUP_ALREADY_EXISTS/
     );
     assert.equal(fs.readdirSync(outputDir).filter(name => name.includes('.tmp.')).length, 0);
   });
@@ -379,8 +459,8 @@ async function main() {
   await test('backup size limits are enforced before publishing an artifact', async () => {
     const reader = new FakeShadowReader({ products: [{ id: 'large', value: 'x'.repeat(2_000) }] });
     await assert.rejects(
-      () => createBackupFixture({ reader, collections: ['products'], maxBytes: 1_024 }),
-      /MONGO_BACKUP_SIZE_LIMIT_EXCEEDED/
+        () => createBackupFixture({ reader, collections: ['products'], maxBytes: 1_024 }),
+        /MONGO_BACKUP_SIZE_LIMIT_EXCEEDED/
     );
   });
 
@@ -476,8 +556,8 @@ async function main() {
     };
     await restoreMongoLogicalBackup(options);
     await assert.rejects(
-      () => restoreMongoLogicalBackup(options),
-      error => error instanceof MongoRestoreError && error.code === 'MONGO_RESTORE_TARGET_NOT_EMPTY'
+        () => restoreMongoLogicalBackup(options),
+        error => error instanceof MongoRestoreError && error.code === 'MONGO_RESTORE_TARGET_NOT_EMPTY'
     );
   });
 
@@ -519,6 +599,10 @@ async function main() {
     assert.equal(backupResult.status, 0, backupResult.stderr);
     const backupReport = JSON.parse(backupResult.stdout);
     assert.equal(backupReport.mode, 'fake-injected');
+    assert.equal(
+        JSON.stringify(backupReport).includes('connectionFingerprint'),
+        false,
+    );
     const snapshot = path.join(outputDir, 'cli-backup.mongo-logical-backup.json');
     const restoreResult = spawnTool([
       'restore', '--fake-target', '--allow-isolated-write', '--snapshot', snapshot,
@@ -528,6 +612,10 @@ async function main() {
     const restoreReport = JSON.parse(restoreResult.stdout);
     assert.equal(restoreReport.success, true);
     assert.equal(restoreReport.targetMode, 'fake-injected');
+    assert.equal(
+        JSON.stringify(restoreReport).includes('connectionFingerprint'),
+        false,
+    );
   });
 
   await test('backup CLI dry-run is zero-write and write mode requires an explicit flag', () => {
@@ -566,15 +654,32 @@ async function main() {
       assert.equal(fs.statSync(actualDataDir).mtimeMs, actualDataMetadata.mtimeMs);
       assert.equal(fs.readdirSync(actualDataDir).length, actualDataMetadata.count);
     }
-    const status = spawnSync('git', ['-c', 'safe.directory=C:/duan/sandeal', 'status', '--porcelain', '--', '.test-tmp', '.backups'], {
-      cwd: root, encoding: 'utf8', shell: false,
-    });
+    const status = spawnSync(
+        'git',
+        [
+          '-c',
+          `safe.directory=${root}`,
+          'status',
+          '--porcelain',
+          '--',
+          '.test-tmp',
+          '.backups',
+        ],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          shell: false,
+        },
+    );
     assert.equal(status.status, 0);
     assert.equal(status.stdout.trim(), '');
   });
 
-  await test('M4 tests make no network call and never initialize MongoClient', () => {
+  await test('M4 tests make no network call, use no credential, and never initialize MongoClient', () => {
     assert.equal(networkCalls, 0);
+    assert.equal(process.env.MONGODB_URI, undefined);
+    assert.equal(process.env.MONGODB_DATABASE, undefined);
+    assert.equal(path.resolve(process.env.SANDEAL_DATA_DIR), path.resolve(tempRoot));
     assert.equal(require.cache[mongoClientPath], undefined);
   });
 
@@ -587,5 +692,13 @@ main().catch(error => {
   console.error(`FAIL setup\n${error && error.stack ? error.stack : error}`);
   process.exitCode = 1;
 }).finally(() => {
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (savedPresence[key]) process.env[key] = value;
+    else delete process.env[key];
+  }
+
+  if (originalFetch === undefined) delete global.fetch;
+  else global.fetch = originalFetch;
+
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });

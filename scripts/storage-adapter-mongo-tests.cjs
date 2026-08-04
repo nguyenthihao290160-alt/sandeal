@@ -7,6 +7,7 @@ const path = require('node:path');
 const root = process.cwd();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-storage-mongo-'));
 const savedEnv = {
+  NODE_ENV: process.env.NODE_ENV,
   SANDEAL_STORAGE_DRIVER: process.env.SANDEAL_STORAGE_DRIVER,
   SANDEAL_DATA_DIR: process.env.SANDEAL_DATA_DIR,
   MONGODB_URI: process.env.MONGODB_URI,
@@ -23,6 +24,8 @@ require('./register-typescript.cjs');
 
 let passed = 0;
 let failed = 0;
+const originalFetch = global.fetch;
+
 async function test(name, work) {
   try {
     await work();
@@ -49,6 +52,27 @@ class FakeMongoError extends Error {
 
 function cloneCollections(collections) {
   return new Map([...collections].map(([name, documents]) => [name, structuredClone(documents)]));
+}
+
+function nestedValue(document, field) {
+  return String(field)
+      .split('.')
+      .reduce((value, segment) => (
+          value && typeof value === 'object' ? value[segment] : undefined
+      ), document);
+}
+
+function serializeIndexState(database) {
+  return JSON.stringify(
+      [...database.indexes.entries()]
+          .map(([collection, indexes]) => [
+            collection,
+            [...indexes.entries()]
+                .map(([name, definition]) => [name, definition])
+                .sort(([left], [right]) => left.localeCompare(right)),
+          ])
+          .sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
 
 function matches(document, filter) {
@@ -106,13 +130,60 @@ class FakeSession {
 }
 
 class FakeCursor {
-  constructor(documents) { this.documents = documents; }
+  constructor(documents) {
+    this.documents = documents;
+    this.position = 0;
+    this.closed = false;
+    this.requestedBatchSize = undefined;
+  }
   sort(specification) {
-    const [[key, direction]] = Object.entries(specification);
-    this.documents.sort((left, right) => (left[key] - right[key]) * direction);
+    const entries = Object.entries(specification);
+    this.documents.sort((left, right) => {
+      for (const [field, direction] of entries) {
+        const leftValue = nestedValue(left, field);
+        const rightValue = nestedValue(right, field);
+        let compared;
+        if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+          compared = leftValue - rightValue;
+        } else {
+          compared = String(leftValue ?? '').localeCompare(String(rightValue ?? ''));
+        }
+        if (compared !== 0) return compared * Number(direction);
+      }
+      return 0;
+    });
     return this;
   }
-  async toArray() { return structuredClone(this.documents); }
+  limit(maximum) {
+    this.documents = this.documents.slice(0, maximum);
+    return this;
+  }
+  batchSize(size) {
+    this.requestedBatchSize = size;
+    return this;
+  }
+  async hasNext() {
+    return !this.closed && this.position < this.documents.length;
+  }
+  async next() {
+    if (!await this.hasNext()) return null;
+    const value = this.documents[this.position];
+    this.position += 1;
+    return structuredClone(value);
+  }
+  async toArray() {
+    const remaining = this.documents.slice(this.position);
+    this.position = this.documents.length;
+    return structuredClone(remaining);
+  }
+  async close() {
+    this.closed = true;
+  }
+  async *[Symbol.asyncIterator]() {
+    while (await this.hasNext()) {
+      yield await this.next();
+    }
+  }
 }
 
 class FakeCollection {
@@ -182,18 +253,32 @@ class FakeCollection {
     return { acknowledged: true, deletedCount };
   }
   listIndexes() {
-    const names = this.database.indexes.get(this.name) || new Set(['_id_']);
-    return new FakeCursor([...names].map(name => ({ name })));
+    const indexes = this.database.indexes.get(this.name)
+        || new Map([['_id_', { name: '_id_', key: { _id: 1 }, unique: true }]]);
+    return new FakeCursor([...indexes.values()].map(index => structuredClone(index)));
   }
   async createIndex(keys, options = {}) {
     if (!this.database.collections.has(this.name)) {
       this.database.collections.set(this.name, []);
       this.database.collectionCreates += 1;
     }
-    const names = this.database.indexes.get(this.name) || new Set(['_id_']);
-    names.add(options.name);
-    this.database.indexes.set(this.name, names);
-    this.database.indexCreates += 1;
+
+    const indexes = this.database.indexes.get(this.name)
+        || new Map([['_id_', { name: '_id_', key: { _id: 1 }, unique: true }]]);
+    const definition = {
+      name: options.name,
+      key: structuredClone(keys),
+      ...structuredClone(options),
+    };
+    const existing = indexes.get(options.name);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(definition)) {
+      throw new FakeMongoError('index options conflict', [], 85);
+    }
+    if (!existing) {
+      indexes.set(options.name, definition);
+      this.database.indexCreates += 1;
+    }
+    this.database.indexes.set(this.name, indexes);
     return options.name;
   }
 }
@@ -220,7 +305,10 @@ class FakeDatabase {
       this.collections.set('sandeal_storage_metadata', [{
         _id: 'storage_schema', kind: 'schema', version: schemaVersion, updatedAt: new Date(0).toISOString(),
       }]);
-      this.indexes.set('sandeal_storage_metadata', new Set(['_id_']));
+      this.indexes.set(
+          'sandeal_storage_metadata',
+          new Map([['_id_', { name: '_id_', key: { _id: 1 }, unique: true }]]),
+      );
     }
   }
   collection(name) { return new FakeCollection(this, name); }
@@ -303,6 +391,20 @@ async function main() {
     assert.throws(() => getStorageConfig(), errorCode('MONGO_DATABASE_INVALID'));
   });
 
+  await test('mongo config exposes only a non-secret connection fingerprint', () => {
+    const privateUri = 'mongodb://fixture-user:fixture-password@fixture.invalid:27017';
+    process.env.SANDEAL_STORAGE_DRIVER = 'mongo';
+    process.env.MONGODB_URI = privateUri;
+    process.env.MONGODB_DATABASE = 'sandeal_test';
+
+    const configured = getStorageConfig();
+    assert.equal(configured.driver, 'mongo');
+    assert.equal(configured.database, 'sandeal_test');
+    assert.match(configured.connectionFingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.stringify(configured).includes(privateUri), false);
+    assert.equal(JSON.stringify(configured).includes('fixture-password'), false);
+  });
+
   await test('invalid driver fails instead of silently using file', () => {
     process.env.SANDEAL_STORAGE_DRIVER = 'other';
     assert.throws(() => getStorageConfig(), errorCode('INVALID_STORAGE_DRIVER'));
@@ -317,8 +419,39 @@ async function main() {
     assert.ok(require.cache[mongoClientPath]);
   });
 
+  await test('storage factory invalidates its Mongo adapter cache when URI identity changes', () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'mongo';
+    process.env.MONGODB_DATABASE = 'sandeal';
+
+    process.env.MONGODB_URI = 'mongodb://fixture-a.invalid:27017';
+    const first = getStorageAdapter();
+    process.env.MONGODB_URI = 'mongodb://fixture-b.invalid:27017';
+    const second = getStorageAdapter();
+
+    assert.equal(first.driver, 'mongo');
+    assert.equal(second.driver, 'mongo');
+    assert.notEqual(first, second);
+  });
+
+  await test('mongo client fails closed when adapter fingerprint and live environment disagree', async () => {
+    const { mongoConnection } = require('../src/lib/storage/mongoClient.ts');
+    process.env.MONGODB_URI = 'mongodb://fixture.invalid:27017';
+    await assert.rejects(
+        () => mongoConnection.getDatabase({
+          driver: 'mongo',
+          database: 'sandeal',
+          connectionFingerprint: '0'.repeat(64),
+        }),
+        errorCode('MONGO_CONNECTION_FAILED'),
+    );
+  });
+
   const { createMongoStorageAdapter } = require('../src/lib/storage/mongoStorageAdapter.ts');
-  const { validateCollectionName, normalizeCollectionPayload } = require('../src/lib/storage/mongoSerialization.ts');
+  const {
+    deserializeMongoItems,
+    normalizeCollectionPayload,
+    validateCollectionName,
+  } = require('../src/lib/storage/mongoSerialization.ts');
   const {
     MONGO_LOGICAL_COLLECTIONS,
     MONGO_STORAGE_METADATA_COLLECTION,
@@ -353,14 +486,44 @@ async function main() {
     }
   });
 
-  await test('serialization rejects non-array and unsafe values before database access', async () => {
+  await test('serialization rejects non-array and lossy or executable values before database access', async () => {
     const connection = new FakeConnection();
     const adapter = createMongoStorageAdapter(config, connection);
+    const sparse = [];
+    sparse[1] = 'value';
+    const getter = {};
+    Object.defineProperty(getter, 'value', {
+      enumerable: true,
+      get() { return 'executed'; },
+    });
+
     await assert.rejects(() => adapter.writeCollection('products', {}), errorCode('INVALID_STORAGE_PAYLOAD'));
     await assert.rejects(() => adapter.writeCollection('products', [{ value: undefined }]), errorCode('INVALID_STORAGE_PAYLOAD'));
     await assert.rejects(() => adapter.writeCollection('products', [{ value() {} }]), errorCode('INVALID_STORAGE_PAYLOAD'));
+    await assert.rejects(() => adapter.writeCollection('products', [{ value: Number.NaN }]), errorCode('INVALID_STORAGE_PAYLOAD'));
+    await assert.rejects(() => adapter.writeCollection('products', [{ value: Number.POSITIVE_INFINITY }]), errorCode('INVALID_STORAGE_PAYLOAD'));
+    await assert.rejects(() => adapter.writeCollection('products', [{ value: new Date() }]), errorCode('INVALID_STORAGE_PAYLOAD'));
+    await assert.rejects(() => adapter.writeCollection('products', sparse), errorCode('INVALID_STORAGE_PAYLOAD'));
+    await assert.rejects(() => adapter.writeCollection('products', [getter]), errorCode('INVALID_STORAGE_PAYLOAD'));
     assert.equal(connection.databaseCalls, 0);
     assert.throws(() => normalizeCollectionPayload([1n]), errorCode('INVALID_STORAGE_PAYLOAD'));
+  });
+
+  await test('deserialization rejects mixed revisions and duplicate durable order values', () => {
+    assert.throws(
+        () => deserializeMongoItems([
+          { revision: 1, order: 0, itemId: 'one', item: { id: 'one' } },
+          { revision: 2, order: 1, itemId: 'two', item: { id: 'two' } },
+        ]),
+        errorCode('INVALID_STORAGE_PAYLOAD'),
+    );
+    assert.throws(
+        () => deserializeMongoItems([
+          { revision: 1, order: 0, itemId: 'one', item: { id: 'one' } },
+          { revision: 1, order: 0, itemId: 'two', item: { id: 'two' } },
+        ]),
+        errorCode('INVALID_STORAGE_PAYLOAD'),
+    );
   });
 
   await test('missing logical collection reads empty without creating it', async () => {
@@ -371,10 +534,10 @@ async function main() {
     assert.equal(database.collectionCreates, 0);
   });
 
-  await test('round trip preserves order, nested JSON values, missing ids, and Date string semantics', async () => {
+  await test('round trip preserves order, nested JSON values, missing ids, and ISO date strings', async () => {
     const database = new FakeDatabase();
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
-    const date = new Date('2026-07-18T00:00:00.000Z');
+    const date = new Date('2026-07-18T00:00:00.000Z').toISOString();
     await adapter.writeCollection('products', [
       { id: 'second', nested: { array: [1, null, true, { value: 'ok' }] }, createdAt: date },
       { label: 'without-domain-id', enabled: false },
@@ -382,7 +545,7 @@ async function main() {
     ]);
     const result = await adapter.readCollection('products');
     assert.deepEqual(result, [
-      { id: 'second', nested: { array: [1, null, true, { value: 'ok' }] }, createdAt: date.toISOString() },
+      { id: 'second', nested: { array: [1, null, true, { value: 'ok' }] }, createdAt: date },
       { label: 'without-domain-id', enabled: false },
       null,
     ]);
@@ -460,6 +623,75 @@ async function main() {
     ]);
   });
 
+  await test('bounded Mongo snapshot uses cursor limits and verifies revision metadata', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    await adapter.writeCollection('products', [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+    ]);
+
+    const result = await adapter.readBoundedCollectionSnapshot('products', {
+      maximumItems: 10,
+      maximumBytes: 64 * 1024,
+    });
+    assert.deepEqual(result.items, [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+    ]);
+    assert.equal(result.metadata.collectionPresent, true);
+    assert.equal(result.metadata.itemCount, 2);
+    assert.equal(result.metadata.truncated, false);
+  });
+
+  await test('scan visitor errors remain exact and are never wrapped as Mongo failures', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    await adapter.writeCollection('products', [{ id: 'one' }]);
+    const callbackError = Object.assign(new Error('scan-fencing-rejected'), {
+      code: 'WORKER_FENCING_REJECTED',
+    });
+
+    await assert.rejects(
+        () => adapter.scanCollection('products', () => { throw callbackError; }),
+        error => error === callbackError,
+    );
+  });
+
+  await test('streaming append and beforeCommit callback errors remain exact', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    await adapter.writeCollection('products', [{ id: 'one', value: 1 }]);
+
+    const appendError = new Error('append-items-failed');
+    await assert.rejects(
+        () => adapter.runStreamingTransaction(
+            'products',
+            () => false,
+            { appendItems: () => { throw appendError; } },
+        ),
+        error => error === appendError,
+    );
+
+    const fencingError = Object.assign(new Error('worker-fencing-rejected'), {
+      code: 'WORKER_FENCING_REJECTED',
+    });
+    await assert.rejects(
+        () => adapter.runStreamingTransaction(
+            'products',
+            item => {
+              item.value = 2;
+              return true;
+            },
+            { beforeCommit: () => { throw fencingError; } },
+        ),
+        error => error === fencingError,
+    );
+    assert.deepEqual(await adapter.readCollection('products'), [
+      { id: 'one', value: 1 },
+    ]);
+  });
+
   await test('fenced projection candidates use generic revisions and publish through one atomic manifest pointer', async () => {
     const database = new FakeDatabase();
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
@@ -476,13 +708,13 @@ async function main() {
     await adapter.writeCollection(candidateCollection, [{ id: 'candidate-job', status: 'SUCCEEDED' }]);
 
     await assert.rejects(
-      () => adapter.runTransaction(manifestCollection, items => {
-        items[0].activeGeneration = 4;
-        items[0].activeSlot = 'A';
-        items[0].activeStorageRepairFence = 7;
-        throw new Error('SIMULATED_PROMOTION_CRASH');
-      }),
-      /SIMULATED_PROMOTION_CRASH/,
+        () => adapter.runTransaction(manifestCollection, items => {
+          items[0].activeGeneration = 4;
+          items[0].activeSlot = 'A';
+          items[0].activeStorageRepairFence = 7;
+          throw new Error('SIMULATED_PROMOTION_CRASH');
+        }),
+        /SIMULATED_PROMOTION_CRASH/,
     );
     assert.deepEqual(await adapter.readCollection(manifestCollection), [{
       id: 'automation-job-projection-manifest',
@@ -574,8 +806,8 @@ async function main() {
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
     let callbacks = 0;
     await assert.rejects(
-      () => adapter.runTransaction('products', items => { callbacks += 1; return [...items, { id: 'bounded' }]; }),
-      errorCode('MONGO_TRANSACTION_FAILED')
+        () => adapter.runTransaction('products', items => { callbacks += 1; return [...items, { id: 'bounded' }]; }),
+        errorCode('MONGO_TRANSACTION_FAILED')
     );
     assert.equal(callbacks, 1);
     assert.equal(database.transactionStarts, 3);
@@ -639,15 +871,25 @@ async function main() {
     assert.deepEqual(fs.readdirSync(tempDir), []);
   });
 
-  await test('schema plan is stable, generic, and dry-run has no database side effects', async () => {
+  await test('schema plan is stable, deeply cloned, generic, and side-effect free', async () => {
     const database = new FakeDatabase();
     const before = JSON.stringify([...database.collections]);
     const first = planMongoSchema();
     const second = planMongoSchema();
     assert.deepEqual(first, second);
+    assert.notEqual(first, second);
+    assert.notEqual(first[0].keys, second[0].keys);
+    assert.notEqual(first[0].options, second[0].options);
     assert.ok(first.some(index => index.name === 'sandeal_revision_order_unique'));
     assert.ok(first.every(index => index.action === 'ensure'));
     assert.equal(JSON.stringify(first).includes('fixture-password'), false);
+
+    const partial = first.find(index => index.name === 'sandeal_revision_item_id');
+    partial.options.partialFilterExpression.itemId.$type = 'number';
+    const fresh = planMongoSchema()
+        .find(index => index.name === 'sandeal_revision_item_id');
+    assert.equal(fresh.options.partialFilterExpression.itemId.$type, 'string');
+
     assert.equal(JSON.stringify([...database.collections]), before);
     assert.equal(database.indexCreates, 0);
   });
@@ -664,17 +906,45 @@ async function main() {
     assert.equal(database.writeOperations, 0);
   });
 
+  await test('schema inspection and apply reject a same-name index with wrong keys', async () => {
+    const database = new FakeDatabase();
+    database.collections.set('products', []);
+    database.indexes.set('products', new Map([
+      ['_id_', { name: '_id_', key: { _id: 1 }, unique: true }],
+      [
+        'sandeal_revision_order_unique',
+        {
+          name: 'sandeal_revision_order_unique',
+          key: { order: 1, revision: 1 },
+          unique: true,
+        },
+      ],
+    ]));
+
+    const inspection = await inspectMongoSchema(database);
+    assert.equal(inspection.ready, false);
+    assert.ok(inspection.missingIndexes.some(index =>
+        index.collection === 'products'
+        && index.name === 'sandeal_revision_order_unique'));
+
+    await assert.rejects(
+        () => applyMongoSchema(database),
+        errorCode('MONGO_SCHEMA_VERSION_MISMATCH'),
+    );
+    assert.equal(database.indexCreates, 0);
+  });
+
   await test('explicit schema apply is idempotent in fake storage and never runs implicitly', async () => {
     const database = new FakeDatabase();
     assert.equal(database.indexCreates, 0);
     const first = await applyMongoSchema(database);
     assert.equal(first.ready, true);
     const collectionCount = database.collections.size;
-    const indexState = JSON.stringify([...database.indexes].map(([name, values]) => [name, [...values].sort()]).sort());
+    const indexState = serializeIndexState(database);
     const second = await applyMongoSchema(database);
     assert.equal(second.ready, true);
     assert.equal(database.collections.size, collectionCount);
-    assert.equal(JSON.stringify([...database.indexes].map(([name, values]) => [name, [...values].sort()]).sort()), indexState);
+    assert.equal(serializeIndexState(database), indexState);
 
     const mismatch = new FakeDatabase(2);
     await assert.rejects(() => applyMongoSchema(mismatch), errorCode('MONGO_SCHEMA_VERSION_MISMATCH'));
@@ -695,8 +965,15 @@ async function main() {
     assert.equal(mongoAdapterSource.includes("from './fileStorageAdapter'"), false);
     assert.equal((source.match(/applyMongoSchema\s*\(/g) || []).length, 1);
     const factorySource = fs.readFileSync(path.join(storageDir, 'storageFactory.ts'), 'utf8');
-    assert.match(factorySource, /function loadMongoAdapter[\s\S]+require\('\.\/mongoStorageAdapter'\)/);
-    assert.match(factorySource, /return config\.driver === 'file' \? fileStorageAdapter : loadMongoAdapter\(config\)/);
+    assert.match(
+        factorySource,
+        /function loadMongoAdapter[\s\S]+require\(\s*['"]\.\/mongoStorageAdapter['"]\s*\)/,
+    );
+    assert.match(
+        factorySource,
+        /if\s*\(config\.driver === 'file'\)\s*return fileStorageAdapter;/,
+    );
+    assert.match(factorySource, /return loadMongoAdapter\(config\);/);
     const clientSource = fs.readFileSync(path.join(storageDir, 'mongoClient.ts'), 'utf8');
     assert.ok(clientSource.indexOf('async function connectedClient') < clientSource.indexOf('client.connect()'));
   });
@@ -721,5 +998,7 @@ main().catch(error => {
     if (savedPresence[key]) process.env[key] = value;
     else delete process.env[key];
   }
+  if (originalFetch === undefined) delete global.fetch;
+  else global.fetch = originalFetch;
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

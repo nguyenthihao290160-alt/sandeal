@@ -39,7 +39,7 @@ import type {
 const TRANSACTION_ATTEMPTS = 2;
 const COMMIT_ATTEMPTS = 2;
 const STREAMING_INSERT_BATCH_SIZE = 250;
-const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]*$/;
+const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 
 interface MongoCursorCompat<T> {
   toArray(): Promise<T[]>;
@@ -79,18 +79,18 @@ function boundedCollectionError(code: string, collection: string): Error {
 }
 
 function validateBoundedCollectionOptions(
-  collection: string,
-  options: StorageBoundedCollectionOptions,
+    collection: string,
+    options: StorageBoundedCollectionOptions,
 ): { maximumItems: number; maximumBytes: number } {
   if (
-    !Number.isFinite(options.maximumItems)
-    || !Number.isInteger(options.maximumItems)
-    || options.maximumItems <= 0
-    || options.maximumItems > STORAGE_MAX_BOUNDED_ITEMS
-    || !Number.isFinite(options.maximumBytes)
-    || !Number.isInteger(options.maximumBytes)
-    || options.maximumBytes <= 0
-    || options.maximumBytes > STORAGE_MAX_BOUNDED_BYTES
+      !Number.isFinite(options.maximumItems)
+      || !Number.isInteger(options.maximumItems)
+      || options.maximumItems <= 0
+      || options.maximumItems > STORAGE_MAX_BOUNDED_ITEMS
+      || !Number.isFinite(options.maximumBytes)
+      || !Number.isInteger(options.maximumBytes)
+      || options.maximumBytes <= 0
+      || options.maximumBytes > STORAGE_MAX_BOUNDED_BYTES
   ) {
     throw boundedCollectionError('BOUNDED_COLLECTION_OPTIONS_INVALID', collection);
   }
@@ -104,15 +104,15 @@ function validatePageOptions(options: StoragePageOptions): void {
   const filterEntries = Object.entries(options.filters || {});
   const sortField = options.sort?.field;
   if (
-    !Number.isInteger(options.page)
-    || options.page < 1
-    || !Number.isInteger(options.pageSize)
-    || options.pageSize < 1
-    || options.pageSize > STORAGE_MAX_PAGE_SIZE
-    || options.page > Math.floor(Number.MAX_SAFE_INTEGER / options.pageSize)
-    || filterEntries.some(([field]) => !SAFE_PAGE_FIELD.test(field))
-    || filterEntries.some(([, value]) => typeof value !== 'string')
-    || (sortField && !SAFE_PAGE_FIELD.test(sortField))
+      !Number.isInteger(options.page)
+      || options.page < 1
+      || !Number.isInteger(options.pageSize)
+      || options.pageSize < 1
+      || options.pageSize > STORAGE_MAX_PAGE_SIZE
+      || options.page > Math.floor(Number.MAX_SAFE_INTEGER / options.pageSize)
+      || filterEntries.some(([field]) => !SAFE_PAGE_FIELD.test(field))
+      || filterEntries.some(([, value]) => typeof value !== 'string')
+      || (sortField && !SAFE_PAGE_FIELD.test(sortField))
   ) {
     throw storageError('INVALID_STORAGE_QUERY');
   }
@@ -134,11 +134,11 @@ interface CollectionSnapshot<T> {
 
 function hasErrorLabel(error: unknown, label: string): boolean {
   return Boolean(
-    error
-    && typeof error === 'object'
-    && 'hasErrorLabel' in error
-    && typeof (error as { hasErrorLabel?: unknown }).hasErrorLabel === 'function'
-    && (error as { hasErrorLabel(value: string): boolean }).hasErrorLabel(label)
+      error
+      && typeof error === 'object'
+      && 'hasErrorLabel' in error
+      && typeof (error as { hasErrorLabel?: unknown }).hasErrorLabel === 'function'
+      && (error as { hasErrorLabel(value: string): boolean }).hasErrorLabel(label)
   );
 }
 
@@ -172,22 +172,22 @@ async function commitWithBoundedRetry(session: ClientSession): Promise<void> {
 async function readSnapshot<T>(db: Db, session: ClientSession, collection: string): Promise<CollectionSnapshot<T>> {
   await assertMongoSchema(db, session);
   const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
-    .findOne({ _id: collection, kind: 'collection' }, { session });
+      .findOne({ _id: collection, kind: 'collection' }, { session });
   if (!metadata) return { revision: 0, items: [] };
 
   const documents = await db.collection<MongoStoredItem>(collection)
-    .find({ revision: metadata.revision }, { session })
-    .sort({ order: 1 })
-    .toArray();
+      .find({ revision: metadata.revision }, { session })
+      .sort({ order: 1 })
+      .toArray();
   return { revision: metadata.revision, items: deserializeMongoItems<T>(documents) };
 }
 
 async function writeRevision(
-  db: Db,
-  session: ClientSession,
-  collection: string,
-  expectedRevision: number,
-  normalized: unknown[]
+    db: Db,
+    session: ClientSession,
+    collection: string,
+    expectedRevision: number,
+    normalized: unknown[]
 ): Promise<void> {
   await assertMongoSchema(db, session);
   const nextRevision = expectedRevision + 1;
@@ -212,9 +212,9 @@ async function writeRevision(
     }
   } else {
     const result = await metadata.updateOne(
-      { _id: collection, kind: 'collection', revision: expectedRevision },
-      { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
-      { session }
+        { _id: collection, kind: 'collection', revision: expectedRevision },
+        { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
+        { session }
     );
     if (result.matchedCount !== 1) throw storageError('MONGO_TRANSACTION_CONFLICT');
   }
@@ -242,8 +242,8 @@ export class MongoStorageAdapter implements StorageAdapter {
   };
 
   constructor(
-    private readonly config: MongoStorageConfig,
-    private readonly connection: MongoConnection = mongoConnection
+      private readonly config: MongoStorageConfig,
+      private readonly connection: MongoConnection = mongoConnection
   ) {}
 
   getDataDir(): never {
@@ -273,10 +273,10 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   private async commitPrepared(
-    db: Db,
-    collection: string,
-    expectedRevision: number,
-    normalized: unknown[]
+      db: Db,
+      collection: string,
+      expectedRevision: number,
+      normalized: unknown[]
   ): Promise<void> {
     for (let attempt = 0; attempt < TRANSACTION_ATTEMPTS; attempt += 1) {
       const session = await this.session();
@@ -317,6 +317,7 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   async readCollectionPage<T>(collection: string, options: StoragePageOptions) {
+    recordBoundedRead();
     const safeCollection = validateCollectionName(collection);
     validatePageOptions(options);
     const filterEntries = Object.entries(options.filters || {});
@@ -326,7 +327,7 @@ export class MongoStorageAdapter implements StorageAdapter {
       session.startTransaction();
       await assertMongoSchema(db, session);
       const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
-        .findOne({ _id: safeCollection, kind: 'collection' }, { session });
+          .findOne({ _id: safeCollection, kind: 'collection' }, { session });
       if (!metadata) {
         await commitWithBoundedRetry(session);
         return { items: [] as T[], totalItems: 0, queryCount: 2 };
@@ -334,8 +335,8 @@ export class MongoStorageAdapter implements StorageAdapter {
       const match: Record<string, unknown> = { revision: metadata.revision };
       for (const [field, expected] of filterEntries) match[`item.${field}`] = expected;
       const sort = options.sort
-        ? { [`item.${options.sort.field}`]: options.sort.direction === 'desc' ? -1 : 1, order: 1 }
-        : { order: 1 };
+          ? { [`item.${options.sort.field}`]: options.sort.direction === 'desc' ? -1 : 1, order: 1 }
+          : { order: 1 };
       const skip = (options.page - 1) * options.pageSize;
       const [facet] = await db.collection<MongoStoredItem>(safeCollection).aggregate<{
         rows: MongoStoredItem[];
@@ -433,9 +434,9 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   async runStreamingTransaction<T>(
-    collection: string,
-    fn: StorageStreamingTransaction<T>,
-    options: StorageStreamingTransactionOptions<T> = {},
+      collection: string,
+      fn: StorageStreamingTransaction<T>,
+      options: StorageStreamingTransactionOptions<T> = {},
   ): Promise<{ changed: boolean; itemCount: number }> {
     const safeCollection = validateCollectionName(collection);
     const db = await this.database();
@@ -471,8 +472,8 @@ export class MongoStorageAdapter implements StorageAdapter {
       const visitSource = async (visitor: StorageStreamingTransaction<T>): Promise<void> => {
         if (!metadata) return;
         const cursor = configureMongoCursor(
-          dataCollection.find({ revision: expectedRevision }, { session }).sort({ order: 1 }),
-          STREAMING_INSERT_BATCH_SIZE,
+            dataCollection.find({ revision: expectedRevision }, { session }).sort({ order: 1 }),
+            STREAMING_INSERT_BATCH_SIZE,
         );
         try {
           for await (const document of iterateMongoCursor(cursor)) {
@@ -495,8 +496,8 @@ export class MongoStorageAdapter implements StorageAdapter {
 
       if (options.prepare && metadata) {
         const cursor = configureMongoCursor(
-          dataCollection.find({ revision: expectedRevision }, { session }).sort({ order: 1 }),
-          STREAMING_INSERT_BATCH_SIZE,
+            dataCollection.find({ revision: expectedRevision }, { session }).sort({ order: 1 }),
+            STREAMING_INSERT_BATCH_SIZE,
         );
         try {
           let index = 0;
@@ -522,10 +523,16 @@ export class MongoStorageAdapter implements StorageAdapter {
         throw error;
       }
       await visitSource(fn);
-      for (const item of options.appendItems?.() || []) {
-        changed = true;
-        stage(item);
-        if (staged.length >= STREAMING_INSERT_BATCH_SIZE) await flush();
+      try {
+        for (const item of options.appendItems?.() || []) {
+          changed = true;
+          stage(item);
+          if (staged.length >= STREAMING_INSERT_BATCH_SIZE) await flush();
+        }
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
+        throw error;
       }
       if (!changed) {
         await abortIfActive(session);
@@ -535,7 +542,13 @@ export class MongoStorageAdapter implements StorageAdapter {
       // Staged documents are still transactional and invisible. Revalidate
       // authority after the last potentially expensive flush, immediately
       // before advancing the visible collection revision.
-      await options.beforeCommit?.();
+      try {
+        await options.beforeCommit?.();
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
+        throw error;
+      }
       const updatedAt = new Date().toISOString();
       if (expectedRevision === 0) {
         try {
@@ -553,9 +566,9 @@ export class MongoStorageAdapter implements StorageAdapter {
         }
       } else {
         const result = await metadataCollection.updateOne(
-          { _id: safeCollection, kind: 'collection', revision: expectedRevision },
-          { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
-          { session },
+            { _id: safeCollection, kind: 'collection', revision: expectedRevision },
+            { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
+            { session },
         );
         if (result.matchedCount !== 1) throw storageError('MONGO_TRANSACTION_CONFLICT');
       }
@@ -576,30 +589,41 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   async scanCollection<T>(
-    collection: string,
-    visitor: (item: T, index: number) => Promise<void> | void,
+      collection: string,
+      visitor: (item: T, index: number) => Promise<void> | void,
   ): Promise<StorageScanResult> {
     recordScanCollection();
     const safeCollection = validateCollectionName(collection);
     const db = await this.database();
     const session = await this.session();
+    let callbackFailed = false;
+    let callbackError: unknown;
     try {
       session.startTransaction();
       await assertMongoSchema(db, session);
       const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
-        .findOne({ _id: safeCollection, kind: 'collection' }, { session });
+          .findOne({ _id: safeCollection, kind: 'collection' }, { session });
       if (!metadata) {
         await commitWithBoundedRetry(session);
         return { itemCount: 0, observedBytes: 0, queryCount: 2 };
       }
-      const cursor = db.collection<MongoStoredItem>(safeCollection)
-        .find({ revision: metadata.revision }, { session })
-        .sort({ order: 1 });
+      const cursor = configureMongoCursor(
+          db.collection<MongoStoredItem>(safeCollection)
+              .find({ revision: metadata.revision }, { session })
+              .sort({ order: 1 }),
+          STREAMING_INSERT_BATCH_SIZE,
+      );
       let index = 0;
       try {
         for await (const document of iterateMongoCursor(cursor)) {
           const normalized = normalizeCollectionPayload([document.item])[0] as T;
-          await visitor(normalized, index);
+          try {
+            await visitor(normalized, index);
+          } catch (error) {
+            callbackFailed = true;
+            callbackError = error;
+            throw error;
+          }
           index += 1;
         }
       } finally {
@@ -613,6 +637,7 @@ export class MongoStorageAdapter implements StorageAdapter {
       };
     } catch (error) {
       await abortIfActive(session);
+      if (callbackFailed) throw callbackError;
       if (isStorageError(error)) throw error;
       throw storageError('MONGO_OPERATION_FAILED', error);
     } finally {
@@ -621,15 +646,15 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   async readBoundedCollection<T>(
-    collection: string,
-    options: StorageBoundedCollectionOptions,
+      collection: string,
+      options: StorageBoundedCollectionOptions,
   ): Promise<T[]> {
     return (await this.readBoundedCollectionSnapshot<T>(collection, options)).items;
   }
 
   async readBoundedCollectionSnapshot<T>(
-    collection: string,
-    options: StorageBoundedCollectionOptions,
+      collection: string,
+      options: StorageBoundedCollectionOptions,
   ): Promise<StorageBoundedCollectionResult<T>> {
     recordBoundedRead();
     const safeCollection = validateCollectionName(collection);
@@ -640,7 +665,7 @@ export class MongoStorageAdapter implements StorageAdapter {
       session.startTransaction();
       await assertMongoSchema(db, session);
       const metadata = await db.collection<MongoRevisionDocument>(MONGO_STORAGE_METADATA_COLLECTION)
-        .findOne({ _id: safeCollection, kind: 'collection' }, { session });
+          .findOne({ _id: safeCollection, kind: 'collection' }, { session });
       if (!metadata) {
         await commitWithBoundedRetry(session);
         return {
@@ -658,10 +683,10 @@ export class MongoStorageAdapter implements StorageAdapter {
         };
       }
       if (
-        !Number.isInteger(metadata.itemCount)
-        || Number(metadata.itemCount) < 0
-        || !Number.isInteger(metadata.serializedBytes)
-        || Number(metadata.serializedBytes) < 2
+          !Number.isInteger(metadata.itemCount)
+          || Number(metadata.itemCount) < 0
+          || !Number.isInteger(metadata.serializedBytes)
+          || Number(metadata.serializedBytes) < 2
       ) {
         throw boundedCollectionError('BOUNDED_COLLECTION_METADATA_INCOMPLETE', safeCollection);
       }
@@ -671,10 +696,13 @@ export class MongoStorageAdapter implements StorageAdapter {
       if (Number(metadata.serializedBytes) > maximumBytes) {
         throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', safeCollection);
       }
-      const cursor = db.collection<MongoStoredItem>(safeCollection)
-        .find({ revision: metadata.revision }, { session })
-        .sort({ order: 1 })
-        .limit(maximumItems + 1);
+      const cursor = configureMongoCursor(
+          db.collection<MongoStoredItem>(safeCollection)
+              .find({ revision: metadata.revision }, { session })
+              .sort({ order: 1 })
+              .limit(maximumItems + 1),
+          Math.min(STREAMING_INSERT_BATCH_SIZE, maximumItems + 1),
+      );
       const items: T[] = [];
       // Account for the JSON array delimiters up front, then admit one
       // normalized item at a time. This keeps client memory proportional to
@@ -685,9 +713,7 @@ export class MongoStorageAdapter implements StorageAdapter {
         if (observedBytes > maximumBytes) {
           throw boundedCollectionError('BOUNDED_COLLECTION_BYTE_LIMIT_EXCEEDED', safeCollection);
         }
-        while (await cursor.hasNext()) {
-          const document = await cursor.next();
-          if (!document) break;
+        for await (const document of iterateMongoCursor(cursor)) {
           if (items.length >= maximumItems) {
             throw boundedCollectionError('BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED', safeCollection);
           }
@@ -703,11 +729,11 @@ export class MongoStorageAdapter implements StorageAdapter {
           observedBytes = nextObservedBytes;
         }
       } finally {
-        await cursor.close().catch(() => undefined);
+        await closeMongoCursor(cursor);
       }
       if (
-        items.length !== metadata.itemCount
-        || observedBytes !== metadata.serializedBytes
+          items.length !== metadata.itemCount
+          || observedBytes !== metadata.serializedBytes
       ) {
         throw boundedCollectionError('BOUNDED_COLLECTION_METADATA_MISMATCH', safeCollection);
       }
@@ -728,12 +754,12 @@ export class MongoStorageAdapter implements StorageAdapter {
     } catch (error) {
       await abortIfActive(session);
       if (
-        isStorageError(error)
-        || (
-          error instanceof Error
-          && typeof (error as Error & { code?: unknown }).code === 'string'
-          && String((error as Error & { code?: string }).code).startsWith('BOUNDED_COLLECTION_')
-        )
+          isStorageError(error)
+          || (
+              error instanceof Error
+              && typeof (error as Error & { code?: unknown }).code === 'string'
+              && String((error as Error & { code?: string }).code).startsWith('BOUNDED_COLLECTION_')
+          )
       ) {
         throw error;
       }
@@ -744,9 +770,9 @@ export class MongoStorageAdapter implements StorageAdapter {
   }
 
   async bulkMutateCollection<T extends { id: string }>(
-    collection: string,
-    mutations: StorageBulkMutation<T>[],
-    options: { optimized?: boolean } = {},
+      collection: string,
+      mutations: StorageBulkMutation<T>[],
+      options: { optimized?: boolean } = {},
   ): Promise<StorageBulkResult> {
     let output!: StorageBulkResult;
     await this.runTransaction<T>(collection, items => {
@@ -803,8 +829,8 @@ export class MongoStorageAdapter implements StorageAdapter {
 }
 
 export function createMongoStorageAdapter(
-  config: MongoStorageConfig,
-  connection: MongoConnection = mongoConnection
+    config: MongoStorageConfig,
+    connection: MongoConnection = mongoConnection,
 ): MongoStorageAdapter {
-  return new MongoStorageAdapter(config, connection);
+  return new MongoStorageAdapter({ ...config }, connection);
 }

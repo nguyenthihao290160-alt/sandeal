@@ -5,15 +5,26 @@ const os = require('node:os');
 const path = require('node:path');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-storage-phase1a-'));
-const previousDataDir = process.env.SANDEAL_DATA_DIR;
-const hadStorageDriver = Object.prototype.hasOwnProperty.call(process.env, 'SANDEAL_STORAGE_DRIVER');
-const previousStorageDriver = process.env.SANDEAL_STORAGE_DRIVER;
-const hadMongoUri = Object.prototype.hasOwnProperty.call(process.env, 'MONGODB_URI');
-const previousMongoUri = process.env.MONGODB_URI;
+const savedEnv = {
+  NODE_ENV: process.env.NODE_ENV,
+  SANDEAL_DATA_DIR: process.env.SANDEAL_DATA_DIR,
+  SANDEAL_STORAGE_DRIVER: process.env.SANDEAL_STORAGE_DRIVER,
+  MONGODB_URI: process.env.MONGODB_URI,
+  MONGODB_DATABASE: process.env.MONGODB_DATABASE,
+};
+const savedPresence = Object.fromEntries(
+    Object.keys(savedEnv).map(key => [
+      key,
+      Object.prototype.hasOwnProperty.call(process.env, key),
+    ]),
+);
+const originalFetch = global.fetch;
 
 process.env.NODE_ENV = 'test';
 process.env.SANDEAL_DATA_DIR = tempDir;
 delete process.env.SANDEAL_STORAGE_DRIVER;
+delete process.env.MONGODB_URI;
+delete process.env.MONGODB_DATABASE;
 require('./register-typescript.cjs');
 
 let passed = 0;
@@ -44,10 +55,26 @@ async function main() {
 
   await test('the compatibility facade keeps every existing named export', () => {
     for (const name of [
-      'getDataDir', 'ensureDataDir', 'readCollection', 'readBoundedCollection',
-      'readBoundedCollectionSnapshot', 'readCollectionPage', 'writeCollection', 'runTransaction',
-      'getStorageCapabilities', 'bulkMutateCollection',
-      'findById', 'insertOne', 'updateOne', 'deleteOne', 'generateId',
+      'getDataDir',
+      'ensureDataDir',
+      'getStorageCapabilities',
+      'bulkMutateCollection',
+      'readCollection',
+      'scanCollection',
+      'readBoundedCollection',
+      'readBoundedCollectionSnapshot',
+      'readCollectionPage',
+      'writeCollection',
+      'backupCollection',
+      'runTransaction',
+      'runStreamingTransaction',
+      'findById',
+      'insertOne',
+      'updateOne',
+      'deleteOne',
+      'generateId',
+      'getStorageDiagnosticsSnapshot',
+      'resetStorageDiagnostics',
     ]) {
       assert.equal(typeof facade[name], 'function', `${name} must remain exported`);
     }
@@ -90,6 +117,19 @@ async function main() {
     assertErrorCode(() => getStorageAdapter(), 'MONGO_URI_REQUIRED');
   });
 
+  await test('file collection names cannot escape the isolated data directory', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    await assert.rejects(
+        () => facade.writeCollection('../outside-phase1a', [{ id: 'one' }]),
+        error => error instanceof Error
+            && error.code === 'INVALID_STORAGE_COLLECTION',
+    );
+    assert.equal(
+        fs.existsSync(path.join(path.dirname(tempDir), 'outside-phase1a.json')),
+        false,
+    );
+  });
+
   await test('the facade preserves missing, read, write, and undefined transaction behavior', async () => {
     process.env.SANDEAL_STORAGE_DRIVER = 'file';
     assert.equal(path.resolve(facade.getDataDir()), path.resolve(tempDir));
@@ -113,7 +153,33 @@ async function main() {
       { id: 'first', value: 1 },
       { id: 'second', value: 2 },
     ]);
-    assert.equal(fs.readdirSync(tempDir).some(name => name.includes('.tmp.')), false);
+
+    assert.deepEqual(
+        await facade.findById('facade-fixture', 'second'),
+        { id: 'second', value: 2 },
+    );
+    assert.equal(await facade.findById('facade-fixture', 'missing'), null);
+
+    const scanned = [];
+    const scanResult = await facade.scanCollection(
+        'facade-fixture',
+        (item, index) => scanned.push([item.id, index]),
+    );
+    assert.deepEqual(scanned, [['first', 0], ['second', 1]]);
+    assert.equal(scanResult.itemCount, 2);
+
+    await facade.insertOne('facade-fixture', { id: 'third', value: 3 });
+    assert.equal(await facade.deleteOne('facade-fixture', 'second'), true);
+    assert.equal(await facade.deleteOne('facade-fixture', 'missing'), false);
+    assert.deepEqual(await facade.readCollection('facade-fixture'), [
+      { id: 'first', value: 1 },
+      { id: 'third', value: 3 },
+    ]);
+
+    assert.equal(
+        fs.readdirSync(tempDir).some(name => name.includes('.tmp.')),
+        false,
+    );
   });
 
   await test('the facade preserves backup fallback, root validation, and updatedAt', async () => {
@@ -126,10 +192,30 @@ async function main() {
     fs.writeFileSync(path.join(tempDir, 'invalid-root.json'), '{"id":"not-an-array"}', 'utf8');
     await assert.rejects(() => facade.readCollection('invalid-root'), /collection_root_must_be_array/);
 
-    await facade.writeCollection('update-fixture', [{ id: 'item', value: 1, updatedAt: '2020-01-01T00:00:00.000Z' }]);
-    const updated = await facade.updateOne('update-fixture', 'item', { value: 2 });
-    assert.equal(updated.value, 2);
-    assert.notEqual(updated.updatedAt, '2020-01-01T00:00:00.000Z');
+    await facade.writeCollection('update-fixture', [{
+      id: 'item',
+      value: 1,
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    }]);
+    const updatedItem = await facade.updateOne(
+        'update-fixture',
+        'item',
+        { id: 'renamed', value: 2 },
+    );
+    assert.equal(updatedItem.id, 'item');
+    assert.equal(updatedItem.value, 2);
+    assert.notEqual(
+        updatedItem.updatedAt,
+        '2020-01-01T00:00:00.000Z',
+    );
+    assert.equal(await facade.findById('update-fixture', 'renamed'), null);
+
+    const manualBackup = await facade.backupCollection(
+        'update-fixture',
+        'phase1a',
+    );
+    assert.equal(fs.existsSync(manualBackup), true);
+    assert.equal(path.dirname(path.resolve(manualBackup)), path.resolve(tempDir));
   });
 
   await test('file transactions remain serialized under concurrency', async () => {
@@ -143,6 +229,41 @@ async function main() {
     assert.equal((await facade.readCollection('counter-fixture'))[0].value, 6);
   });
 
+  await test('append-only streaming preserves source count and valid JSON', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    await facade.writeCollection('append-only-fixture', [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+    ]);
+
+    const callbacks = [];
+    const result = await facade.runStreamingTransaction(
+        'append-only-fixture',
+        item => {
+          callbacks.push(item.id);
+          return false;
+        },
+        {
+          appendOnly: true,
+          appendItems: () => [{ id: 'three', value: 3 }],
+        },
+    );
+
+    assert.deepEqual(callbacks, []);
+    assert.deepEqual(result, { changed: true, itemCount: 3 });
+    assert.deepEqual(await facade.readCollection('append-only-fixture'), [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+      { id: 'three', value: 3 },
+    ]);
+    assert.doesNotThrow(() => JSON.parse(
+        fs.readFileSync(
+            path.join(tempDir, 'append-only-fixture.json'),
+            'utf8',
+        ),
+    ));
+  });
+
   await test('bounded projection reads enforce byte and item limits without consulting backups', async () => {
     process.env.SANDEAL_STORAGE_DRIVER = 'file';
     await facade.writeCollection('bounded-fixture', [{ id: 'one' }, { id: 'two' }]);
@@ -151,15 +272,15 @@ async function main() {
       maximumBytes: 1024,
     }), [{ id: 'one' }, { id: 'two' }]);
     await assert.rejects(
-      () => facade.readBoundedCollection('bounded-fixture', { maximumItems: 1, maximumBytes: 1024 }),
-      /BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED/,
+        () => facade.readBoundedCollection('bounded-fixture', { maximumItems: 1, maximumBytes: 1024 }),
+        /BOUNDED_COLLECTION_ITEM_LIMIT_EXCEEDED/,
     );
     await facade.writeCollection('bounded-backup-fixture', [{ id: 'version-one' }]);
     await facade.writeCollection('bounded-backup-fixture', [{ id: 'version-two' }]);
     fs.writeFileSync(path.join(tempDir, 'bounded-backup-fixture.json'), '{broken-main', 'utf8');
     await assert.rejects(
-      () => facade.readBoundedCollection('bounded-backup-fixture', { maximumItems: 5, maximumBytes: 1024 }),
-      /BOUNDED_COLLECTION_INVALID_JSON/,
+        () => facade.readBoundedCollection('bounded-backup-fixture', { maximumItems: 5, maximumBytes: 1024 }),
+        /BOUNDED_COLLECTION_INVALID_JSON/,
     );
     for (const options of [
       { maximumItems: Number.NaN, maximumBytes: 1024 },
@@ -171,8 +292,8 @@ async function main() {
       { maximumItems: 1, maximumBytes: 32 * 1024 * 1024 + 1 },
     ]) {
       await assert.rejects(
-        () => facade.readBoundedCollection('bounded-fixture', options),
-        error => error instanceof Error && error.code === 'BOUNDED_COLLECTION_OPTIONS_INVALID',
+          () => facade.readBoundedCollection('bounded-fixture', options),
+          error => error instanceof Error && error.code === 'BOUNDED_COLLECTION_OPTIONS_INVALID',
       );
     }
   });
@@ -215,12 +336,53 @@ async function main() {
     assert.deepEqual(page.items.map(item => item.id), ['first', 'second']);
     assert.equal(page.totalItems, 3);
     await assert.rejects(
-      () => facade.readCollectionPage('page-fixture', { page: 0, pageSize: 2 }),
-      error => error instanceof Error && error.code === 'INVALID_STORAGE_QUERY',
+        () => facade.readCollectionPage('page-fixture', { page: 0, pageSize: 2 }),
+        error => error instanceof Error && error.code === 'INVALID_STORAGE_QUERY',
     );
     await assert.rejects(
-      () => facade.readCollectionPage('page-fixture', { page: 1, pageSize: 10_001 }),
-      error => error instanceof Error && error.code === 'INVALID_STORAGE_QUERY',
+        () => facade.readCollectionPage(
+            'page-fixture',
+            { page: 1, pageSize: 10_001 },
+        ),
+        error => error instanceof Error
+            && error.code === 'INVALID_STORAGE_QUERY',
+    );
+    await assert.rejects(
+        () => facade.readCollectionPage('page-fixture', {
+          page: 1,
+          pageSize: 2,
+          sort: { field: `x${'y'.repeat(64)}`, direction: 'asc' },
+        }),
+        error => error instanceof Error
+            && error.code === 'INVALID_STORAGE_QUERY',
+    );
+
+    const manyRows = Array.from({ length: 250 }, (_, index) => ({
+      id: `item-${String(index).padStart(3, '0')}`,
+      value: index,
+    }));
+    await facade.writeCollection('later-page-fixture', manyRows);
+    const laterPage = await facade.readCollectionPage(
+        'later-page-fixture',
+        {
+          page: 2,
+          pageSize: 100,
+          sort: { field: 'id', direction: 'asc' },
+        },
+    );
+    assert.equal(laterPage.totalItems, 250);
+    assert.equal(laterPage.items.length, 100);
+    assert.equal(laterPage.items[0].id, 'item-100');
+    assert.equal(laterPage.items[99].id, 'item-199');
+
+    await assert.rejects(
+        () => facade.readCollectionPage('later-page-fixture', {
+          page: 2,
+          pageSize: 10_000,
+          sort: { field: 'id', direction: 'asc' },
+        }),
+        error => error instanceof Error
+            && error.code === 'INVALID_STORAGE_QUERY',
     );
   });
 
@@ -251,9 +413,59 @@ async function main() {
     ]);
     assert.deepEqual(await facade.readCollection('bulk-fixture'), [{ id: 'one', value: 10 }]);
     await assert.rejects(
-      () => facade.bulkMutateCollection('bulk-fixture', []),
-      /STORAGE_BULK_SIZE_INVALID/,
+        () => facade.bulkMutateCollection('bulk-fixture', []),
+        error => error instanceof Error
+            && error.code === 'STORAGE_BULK_SIZE_INVALID',
     );
+
+    await facade.writeCollection('bulk-duplicate-fixture', [
+      { id: 'duplicate', value: 1 },
+      { id: 'duplicate', value: 2 },
+    ]);
+    await assert.rejects(
+        () => facade.bulkMutateCollection('bulk-duplicate-fixture', [
+          {
+            mutationId: 'delete-duplicate',
+            type: 'DELETE',
+            itemId: 'duplicate',
+          },
+        ]),
+        error => error instanceof Error
+            && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+    assert.deepEqual(
+        await facade.readCollection('bulk-duplicate-fixture'),
+        [
+          { id: 'duplicate', value: 1 },
+          { id: 'duplicate', value: 2 },
+        ],
+    );
+  });
+
+  await test('diagnostics expose exact lease and heartbeat counters through the facade', () => {
+    facade.resetStorageDiagnostics();
+    const initial = facade.getStorageDiagnosticsSnapshot();
+    assert.equal(initial.jobLeaseRenewalCount, 0);
+    assert.equal(initial.roleHeartbeatRenewalCount, 0);
+    assert.equal(initial.fileLockHeartbeatCount, 0);
+    assert.equal(initial.lastOperationAt, null);
+
+    // Exercise bounded-read accounting through the adapter rather than
+    // reaching into diagnostics internals.
+    return facade.readBoundedCollectionSnapshot('missing-diagnostic-fixture', {
+      maximumItems: 5,
+      maximumBytes: 1024,
+    }).then(() => {
+      const snapshot = facade.getStorageDiagnosticsSnapshot();
+      assert.equal(snapshot.boundedReadCount, 1);
+      assert.equal(Number.isFinite(snapshot.boundedReadCount), true);
+      assert.equal(typeof snapshot.lastOperationAt, 'string');
+
+      facade.resetStorageDiagnostics();
+      const reset = facade.getStorageDiagnosticsSnapshot();
+      assert.equal(reset.boundedReadCount, 0);
+      assert.equal(reset.lastOperationAt, null);
+    });
   });
 
   await test('file storage health checks the isolated directory without changing data', async () => {
@@ -282,14 +494,13 @@ main().catch(error => {
   console.error(`FAIL setup\n${error && error.stack ? error.stack : error}`);
   process.exitCode = 1;
 }).finally(() => {
-  if (previousDataDir === undefined) delete process.env.SANDEAL_DATA_DIR;
-  else process.env.SANDEAL_DATA_DIR = previousDataDir;
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (savedPresence[key]) process.env[key] = value;
+    else delete process.env[key];
+  }
 
-  if (hadStorageDriver) process.env.SANDEAL_STORAGE_DRIVER = previousStorageDriver;
-  else delete process.env.SANDEAL_STORAGE_DRIVER;
-
-  if (hadMongoUri) process.env.MONGODB_URI = previousMongoUri;
-  else delete process.env.MONGODB_URI;
+  if (originalFetch === undefined) delete global.fetch;
+  else global.fetch = originalFetch;
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

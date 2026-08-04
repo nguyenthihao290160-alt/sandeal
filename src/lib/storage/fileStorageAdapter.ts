@@ -47,8 +47,33 @@ async function ensureDataDir(): Promise<void> {
   }
 }
 
+function validateFileCollectionName(collection: string): string {
+  if (
+      typeof collection !== 'string'
+      || collection.length === 0
+      || collection.length > 160
+      || collection.trim() !== collection
+      || collection === '.'
+      || collection === '..'
+      || /[\\/\u0000]/.test(collection)
+  ) {
+    const error = new Error('INVALID_STORAGE_COLLECTION') as Error & { code?: string };
+    error.code = 'INVALID_STORAGE_COLLECTION';
+    throw error;
+  }
+  return collection;
+}
+
 function getFilePath(collection: string): string {
-  return path.join(getDataDir(), `${collection}.json`);
+  const safeCollection = validateFileCollectionName(collection);
+  const dataDir = path.resolve(getDataDir());
+  const target = path.resolve(dataDir, `${safeCollection}.json`);
+  if (path.dirname(target) !== dataDir) {
+    const error = new Error('INVALID_STORAGE_COLLECTION') as Error & { code?: string };
+    error.code = 'INVALID_STORAGE_COLLECTION';
+    throw error;
+  }
+  return target;
 }
 
 interface FileLockMetadata {
@@ -61,11 +86,54 @@ interface FileLockMetadata {
   expiresAt: string;
 }
 
-const FILE_LOCK_LEASE_MS = Math.max(15_000, Number(process.env.SANDEAL_FILE_LOCK_LEASE_MS) || 60_000);
-const FILE_LOCK_WAIT_MS = Math.max(5_000, Number(process.env.SANDEAL_FILE_LOCK_WAIT_MS) || 30_000);
-const FILE_LOCK_HEARTBEAT_MS = Math.max(2_000, Math.min(10_000, Math.floor(FILE_LOCK_LEASE_MS / 3)));
-const BACKUP_REFRESH_MS = Math.max(60_000, Number(process.env.SANDEAL_FILE_BACKUP_REFRESH_MS) || 5 * 60_000);
-const TMP_STALE_MS = Math.max(5 * 60_000, Number(process.env.SANDEAL_FILE_TMP_STALE_MS) || 60 * 60_000);
+interface CollectionFileLockHandle {
+  assertHeld: () => Promise<void>;
+  release: () => Promise<void>;
+}
+
+function boundedEnvironmentDuration(
+    value: string | undefined,
+    fallback: number,
+    minimum: number,
+    maximum: number,
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(parsed)));
+}
+
+const FILE_LOCK_LEASE_MS = boundedEnvironmentDuration(
+    process.env.SANDEAL_FILE_LOCK_LEASE_MS,
+    60_000,
+    15_000,
+    5 * 60_000,
+);
+const FILE_LOCK_WAIT_MS = boundedEnvironmentDuration(
+    process.env.SANDEAL_FILE_LOCK_WAIT_MS,
+    30_000,
+    5_000,
+    2 * 60_000,
+);
+const FILE_LOCK_HEARTBEAT_MS = Math.max(
+    2_000,
+    Math.min(10_000, Math.floor(FILE_LOCK_LEASE_MS / 3)),
+);
+const FILE_LOCK_SAFETY_MARGIN_MS = Math.max(
+    1_000,
+    Math.min(10_000, Math.floor(FILE_LOCK_LEASE_MS / 6)),
+);
+const BACKUP_REFRESH_MS = boundedEnvironmentDuration(
+    process.env.SANDEAL_FILE_BACKUP_REFRESH_MS,
+    5 * 60_000,
+    60_000,
+    24 * 60 * 60_000,
+);
+const TMP_STALE_MS = boundedEnvironmentDuration(
+    process.env.SANDEAL_FILE_TMP_STALE_MS,
+    60 * 60_000,
+    5 * 60_000,
+    7 * 24 * 60 * 60_000,
+);
 const hostname = os.hostname();
 const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 1_000)).toISOString();
 
@@ -94,12 +162,12 @@ async function cleanupStaleTempFiles(collection: string): Promise<void> {
   const now = Date.now();
   const entries = await fs.readdir(getDataDir(), { withFileTypes: true }).catch(() => []);
   await Promise.all(entries
-    .filter(entry => entry.isFile() && entry.name.startsWith(prefix))
-    .map(async entry => {
-      const target = path.join(getDataDir(), entry.name);
-      const stat = await fs.stat(target).catch(() => null);
-      if (stat && now - stat.mtimeMs >= TMP_STALE_MS) await fs.unlink(target).catch(() => undefined);
-    }));
+      .filter(entry => entry.isFile() && entry.name.startsWith(prefix))
+      .map(async entry => {
+        const target = path.join(getDataDir(), entry.name);
+        const stat = await fs.stat(target).catch(() => null);
+        if (stat && now - stat.mtimeMs >= TMP_STALE_MS) await fs.unlink(target).catch(() => undefined);
+      }));
 }
 
 async function recoverStaleLock(lockPath: string, metadata: FileLockMetadata | null): Promise<boolean> {
@@ -113,8 +181,8 @@ async function recoverStaleLock(lockPath: string, metadata: FileLockMetadata | n
 
   const expiry = Date.parse(metadata?.expiresAt || '');
   const expired = Number.isFinite(expiry)
-    ? expiry <= now
-    : now - stat.mtimeMs >= FILE_LOCK_LEASE_MS;
+      ? expiry <= now
+      : now - stat.mtimeMs >= FILE_LOCK_LEASE_MS;
   // A conclusively dead same-host owner cannot release its lock, even when
   // the lease timestamp has not caught up. A live owner is never stolen;
   // hosts whose PID cannot be verified still require lease expiry.
@@ -140,7 +208,9 @@ async function recoverStaleLock(lockPath: string, metadata: FileLockMetadata | n
   }
 }
 
-async function acquireCollectionFileLock(collection: string): Promise<() => Promise<void>> {
+async function acquireCollectionFileLock(
+    collection: string,
+): Promise<CollectionFileLockHandle> {
   await ensureDataDir();
   const lockPath = `${getFilePath(collection)}.lock`;
   const startedAt = Date.now();
@@ -160,6 +230,7 @@ async function acquireCollectionFileLock(collection: string): Promise<() => Prom
     };
     let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
     let lockCreated = false;
+
     try {
       handle = await fs.open(lockPath, 'wx');
       lockCreated = true;
@@ -167,59 +238,136 @@ async function acquireCollectionFileLock(collection: string): Promise<() => Prom
       await handle.sync();
       await handle.close();
       handle = undefined;
+
       await cleanupStaleTempFiles(collection);
       recordLockWait(Date.now() - startedAt);
 
+      let lost = false;
+      let knownExpiresAtMs = Date.parse(metadata.expiresAt);
       let heartbeatInFlight: Promise<void> | undefined;
+
       const renewLock = async (): Promise<void> => {
-        const startedAt = Date.now();
+        const renewalStartedAt = Date.now();
         try {
           const current = await readLockMetadata(lockPath);
-          if (current?.token !== token) {
-            recordFileLockHeartbeat(Date.now() - startedAt, false);
+          if (
+              !current
+              || current.token !== token
+              || Date.parse(current.expiresAt) <= Date.now()
+          ) {
+            lost = true;
+            recordFileLockHeartbeat(Date.now() - renewalStartedAt, false);
             return;
           }
+
           const heartbeatAt = Date.now();
-          await fs.writeFile(lockPath, JSON.stringify({
+          const next: FileLockMetadata = {
             ...current,
             heartbeatAt: new Date(heartbeatAt).toISOString(),
             expiresAt: new Date(heartbeatAt + FILE_LOCK_LEASE_MS).toISOString(),
-          }), 'utf8');
-          recordFileLockHeartbeat(Date.now() - startedAt, true);
-        } catch (error) {
-          recordFileLockHeartbeat(Date.now() - startedAt, false);
-          throw error;
+          };
+
+          // Never use a path-based write that can recreate a lock after it was
+          // recovered or released. Opening r+ requires the lock to still exist.
+          const renewalHandle = await fs.open(lockPath, 'r+');
+          try {
+            const latestRaw = await renewalHandle.readFile('utf8');
+            const latest = JSON.parse(latestRaw) as Partial<FileLockMetadata>;
+            if (latest.token !== token) {
+              lost = true;
+              recordFileLockHeartbeat(Date.now() - renewalStartedAt, false);
+              return;
+            }
+            const encodedNext = JSON.stringify(next);
+            await renewalHandle.truncate(0);
+            await renewalHandle.write(encodedNext, 0, 'utf8');
+            await renewalHandle.truncate(Buffer.byteLength(encodedNext, 'utf8'));
+            await renewalHandle.sync();
+          } finally {
+            await renewalHandle.close().catch(() => undefined);
+          }
+
+          const confirmed = await readLockMetadata(lockPath);
+          if (!confirmed || confirmed.token !== token) {
+            lost = true;
+            recordFileLockHeartbeat(Date.now() - renewalStartedAt, false);
+            return;
+          }
+
+          knownExpiresAtMs = Date.parse(confirmed.expiresAt);
+          recordFileLockHeartbeat(Date.now() - renewalStartedAt, true);
+        } catch {
+          recordFileLockHeartbeat(Date.now() - renewalStartedAt, false);
+          if (Date.now() + FILE_LOCK_SAFETY_MARGIN_MS >= knownExpiresAtMs) {
+            lost = true;
+          }
         }
       };
-      const heartbeat = setInterval(() => {
-        // Track one renewal so release cannot unlink the lock and then have an
-        // already-running timer callback recreate it with writeFile. Skipping
-        // a tick also prevents an unbounded promise queue during I/O pressure.
-        if (heartbeatInFlight) return;
-        heartbeatInFlight = renewLock()
-          .catch(() => undefined)
-          .finally(() => {
-            heartbeatInFlight = undefined;
-          });
-      }, FILE_LOCK_HEARTBEAT_MS);
-      heartbeat.unref();
 
-      return async () => {
-        clearInterval(heartbeat);
-        await heartbeatInFlight?.catch(() => undefined);
+      const heartbeat = setInterval(() => {
+        if (heartbeatInFlight || lost) return;
+        heartbeatInFlight = renewLock().finally(() => {
+          heartbeatInFlight = undefined;
+        });
+        void heartbeatInFlight.catch(() => undefined);
+      }, FILE_LOCK_HEARTBEAT_MS);
+      heartbeat.unref?.();
+
+      const assertHeld = async (): Promise<void> => {
+        if (
+            lost
+            || Date.now() + FILE_LOCK_SAFETY_MARGIN_MS >= knownExpiresAtMs
+        ) {
+          lost = true;
+          const error = new Error(`Storage lock lost: ${collection}`) as Error & { code?: string };
+          error.code = 'STORAGE_LOCK_LOST';
+          throw error;
+        }
+
         const current = await readLockMetadata(lockPath);
-        if (current?.token === token) await fs.unlink(lockPath).catch(() => undefined);
+        if (
+            !current
+            || current.token !== token
+            || Date.parse(current.expiresAt) <= Date.now()
+        ) {
+          lost = true;
+          const error = new Error(`Storage lock lost: ${collection}`) as Error & { code?: string };
+          error.code = 'STORAGE_LOCK_LOST';
+          throw error;
+        }
+
+        knownExpiresAtMs = Date.parse(current.expiresAt);
+      };
+
+      return {
+        assertHeld,
+        release: async () => {
+          clearInterval(heartbeat);
+          await heartbeatInFlight?.catch(() => undefined);
+          const current = await readLockMetadata(lockPath);
+          if (current?.token === token) {
+            await fs.unlink(lockPath).catch(() => undefined);
+          }
+        },
       };
     } catch (error) {
       await handle?.close().catch(() => undefined);
       if (lockCreated) {
         const current = await readLockMetadata(lockPath);
-        if (!current || current.token === token) await fs.unlink(lockPath).catch(() => undefined);
+        if (!current || current.token === token) {
+          await fs.unlink(lockPath).catch(() => undefined);
+        }
       }
+
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+
       const current = await readLockMetadata(lockPath);
       if (await recoverStaleLock(lockPath, current)) continue;
-      await new Promise(resolve => setTimeout(resolve, delayMs + Math.floor(Math.random() * Math.max(10, delayMs / 2))));
+
+      await new Promise(resolve => setTimeout(
+          resolve,
+          delayMs + Math.floor(Math.random() * Math.max(10, delayMs / 2)),
+      ));
       delayMs = Math.min(500, Math.ceil(delayMs * 1.6));
     }
   }
@@ -367,8 +515,8 @@ async function* iterateJsonArrayMemberTexts(filePath: string): AsyncGenerator<st
 }
 
 async function scanJsonArrayFile<T>(
-  filePath: string,
-  visitor: (item: T, index: number) => Promise<void> | void,
+    filePath: string,
+    visitor: (item: T, index: number) => Promise<void> | void,
 ): Promise<number> {
   let itemIndex = 0;
   for await (const raw of iterateJsonArrayMemberTexts(filePath)) {
@@ -380,10 +528,11 @@ async function scanJsonArrayFile<T>(
 }
 
 async function transformJsonArrayFile<T>(
-  filePath: string,
-  collection: string,
-  visitor: StorageStreamingTransaction<T>,
-  options: StorageStreamingTransactionOptions<T> = {},
+    filePath: string,
+    collection: string,
+    visitor: StorageStreamingTransaction<T>,
+    options: StorageStreamingTransactionOptions<T> = {},
+    assertLockHeld?: () => Promise<void>,
 ): Promise<{ changed: boolean; itemCount: number }> {
   const tmpPath = `${getFilePath(collection)}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
@@ -428,6 +577,7 @@ async function transformJsonArrayFile<T>(
     // atomic replacement. A long backup copy must not widen the stale-writer
     // window after the authority check.
     await options.beforeCommit?.();
+    await assertLockHeld?.();
     await renameAtomicWithRetry(tmpPath, getFilePath(collection));
     await syncDirectory(path.dirname(getFilePath(collection)));
     return { changed: true, itemCount };
@@ -444,11 +594,12 @@ async function transformJsonArrayFile<T>(
  * promoted, so a crash leaves either the old file or the complete new file.
  */
 async function appendJsonArrayFile<T>(
-  sourcePath: string,
-  collection: string,
-  appended: T[],
-  sourceItemCount: number,
-  beforeCommit?: () => Promise<void> | void,
+    sourcePath: string,
+    collection: string,
+    appended: T[],
+    sourceItemCount: number,
+    beforeCommit?: () => Promise<void> | void,
+    assertLockHeld?: () => Promise<void>,
 ): Promise<{ changed: boolean; itemCount: number }> {
   if (!appended.length) return { changed: false, itemCount: sourceItemCount };
   const targetPath = getFilePath(collection);
@@ -489,6 +640,7 @@ async function appendJsonArrayFile<T>(
     // Keep the final authority check adjacent to the atomic rename; backup
     // maintenance can otherwise leave a large stale-writer window.
     await beforeCommit?.();
+    await assertLockHeld?.();
     await renameAtomicWithRetry(tmpPath, targetPath);
     await syncDirectory(path.dirname(targetPath));
     return { changed: true, itemCount: sourceItemCount + appended.length };
@@ -500,24 +652,35 @@ async function appendJsonArrayFile<T>(
 }
 
 async function scanCollection<T>(
-  collection: string,
-  visitor: (item: T, index: number) => Promise<void> | void,
+    collection: string,
+    visitor: (item: T, index: number) => Promise<void> | void,
 ): Promise<StorageScanResult> {
   recordScanCollection();
   await ensureDataDir();
   const primary = getFilePath(collection);
   const paths = [primary, `${primary}.bak`, `${primary}.bak.2`];
   let originalError: unknown;
+  let callbackError: unknown;
+
   for (const filePath of paths) {
     const stat = await fs.stat(filePath).catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     });
     if (!stat) continue;
+
     try {
-      const itemCount = await scanJsonArrayFile<T>(filePath, visitor);
+      const itemCount = await scanJsonArrayFile<T>(filePath, async (item, index) => {
+        try {
+          await visitor(item, index);
+        } catch (error) {
+          callbackError = error;
+          throw error;
+        }
+      });
       return { itemCount, observedBytes: stat.size, queryCount: 1 };
     } catch (error) {
+      if (callbackError !== undefined) throw callbackError;
       originalError = error;
       // A visitor may already have observed earlier members. Falling back to a
       // backup after a partial primary scan would replay those side effects and
@@ -526,8 +689,13 @@ async function scanCollection<T>(
       break;
     }
   }
+
   if (originalError) {
-    throw new Error(`Cannot scan collection ${collection}: ${originalError instanceof Error ? originalError.message : 'invalid_json'}`);
+    throw new Error(
+        `Cannot scan collection ${collection}: ${
+            originalError instanceof Error ? originalError.message : 'invalid_json'
+        }`,
+    );
   }
   return { itemCount: 0, observedBytes: 0, queryCount: 1 };
 }
@@ -539,18 +707,18 @@ function boundedCollectionError(code: string, collection: string): Error {
 }
 
 function validateBoundedCollectionOptions(
-  collection: string,
-  options: StorageBoundedCollectionOptions,
+    collection: string,
+    options: StorageBoundedCollectionOptions,
 ): { maximumItems: number; maximumBytes: number } {
   if (
-    !Number.isFinite(options.maximumItems)
-    || !Number.isInteger(options.maximumItems)
-    || options.maximumItems <= 0
-    || options.maximumItems > STORAGE_MAX_BOUNDED_ITEMS
-    || !Number.isFinite(options.maximumBytes)
-    || !Number.isInteger(options.maximumBytes)
-    || options.maximumBytes <= 0
-    || options.maximumBytes > STORAGE_MAX_BOUNDED_BYTES
+      !Number.isFinite(options.maximumItems)
+      || !Number.isInteger(options.maximumItems)
+      || options.maximumItems <= 0
+      || options.maximumItems > STORAGE_MAX_BOUNDED_ITEMS
+      || !Number.isFinite(options.maximumBytes)
+      || !Number.isInteger(options.maximumBytes)
+      || options.maximumBytes <= 0
+      || options.maximumBytes > STORAGE_MAX_BOUNDED_BYTES
   ) {
     throw boundedCollectionError('BOUNDED_COLLECTION_OPTIONS_INVALID', collection);
   }
@@ -566,8 +734,8 @@ function validateBoundedCollectionOptions(
  * durable collection recovery, normal read-model reads never consult backups.
  */
 async function readBoundedCollectionSnapshot<T>(
-  collection: string,
-  options: StorageBoundedCollectionOptions,
+    collection: string,
+    options: StorageBoundedCollectionOptions,
 ): Promise<StorageBoundedCollectionResult<T>> {
   recordBoundedRead();
   const { maximumItems, maximumBytes } = validateBoundedCollectionOptions(collection, options);
@@ -627,33 +795,39 @@ async function readBoundedCollectionSnapshot<T>(
 }
 
 async function readBoundedCollection<T>(
-  collection: string,
-  options: StorageBoundedCollectionOptions,
+    collection: string,
+    options: StorageBoundedCollectionOptions,
 ): Promise<T[]> {
   return (await readBoundedCollectionSnapshot<T>(collection, options)).items;
 }
 
-const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]*$/;
+const SAFE_PAGE_FIELD = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 
 function validatePageOptions(options: StoragePageOptions): void {
   const filterFields = Object.keys(options.filters || {});
   const filterValues = Object.values(options.filters || {});
   if (
-    !Number.isInteger(options.page)
-    || options.page < 1
-    || !Number.isInteger(options.pageSize)
-    || options.pageSize < 1
-    || options.pageSize > STORAGE_MAX_PAGE_SIZE
-    || options.page > Math.floor(Number.MAX_SAFE_INTEGER / options.pageSize)
-    || filterFields.some(field => !SAFE_PAGE_FIELD.test(field))
-    || filterValues.some(value => typeof value !== 'string')
-    || (options.sort?.field && !SAFE_PAGE_FIELD.test(options.sort.field))
+      !Number.isInteger(options.page)
+      || options.page < 1
+      || !Number.isInteger(options.pageSize)
+      || options.pageSize < 1
+      || options.pageSize > STORAGE_MAX_PAGE_SIZE
+      || options.page > Math.floor(Number.MAX_SAFE_INTEGER / options.pageSize)
+      || filterFields.some(field => !SAFE_PAGE_FIELD.test(field))
+      || filterValues.some(value => typeof value !== 'string')
+      || (options.sort?.field && !SAFE_PAGE_FIELD.test(options.sort.field))
+      || (
+          options.sort
+          && ((options.page - 1) * options.pageSize + options.pageSize)
+          > STORAGE_MAX_BOUNDED_ITEMS
+      )
   ) {
     throw boundedCollectionError('INVALID_STORAGE_QUERY', 'page');
   }
 }
 
 async function readCollectionPage<T>(collection: string, options: StoragePageOptions) {
+  recordBoundedRead();
   validatePageOptions(options);
   await ensureDataDir();
   const primary = getFilePath(collection);
@@ -662,27 +836,27 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
     throw error;
   });
   const sourcePath = stat ? primary : (
-    await fs.stat(`${primary}.bak`).then(() => `${primary}.bak`).catch(async error => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      return fs.stat(`${primary}.bak.2`).then(() => `${primary}.bak.2`).catch(error2 => {
-        if ((error2 as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw error2;
-      });
-    })
+      await fs.stat(`${primary}.bak`).then(() => `${primary}.bak`).catch(async error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        return fs.stat(`${primary}.bak.2`).then(() => `${primary}.bak.2`).catch(error2 => {
+          if ((error2 as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error2;
+        });
+      })
   );
   if (!sourcePath) return { items: [] as T[], totalItems: 0, queryCount: 1 };
 
   const pageStart = (options.page - 1) * options.pageSize;
   const retainedLimit = options.sort
-    ? Math.min(STORAGE_MAX_PAGE_SIZE, pageStart + options.pageSize)
-    : options.pageSize;
+      ? pageStart + options.pageSize
+      : options.pageSize;
   const matches: Array<{ item: T; order: number }> = [];
   let totalItems = 0;
   await scanJsonArrayFile<T>(sourcePath, (item, order) => {
     const matchesFilters = Object.entries(options.filters || {}).every(([field, expected]) => (
-      item !== null
-      && typeof item === 'object'
-      && String((item as unknown as Record<string, unknown>)[field] ?? '') === expected
+        item !== null
+        && typeof item === 'object'
+        && String((item as unknown as Record<string, unknown>)[field] ?? '') === expected
     ));
     if (!matchesFilters) return;
     totalItems += 1;
@@ -696,11 +870,11 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
       const multiplier = direction === 'desc' ? -1 : 1;
       matches.sort((left, right) => {
         const leftValue = left.item !== null && typeof left.item === 'object'
-          ? String((left.item as unknown as Record<string, unknown>)[field] ?? '')
-          : '';
+            ? String((left.item as unknown as Record<string, unknown>)[field] ?? '')
+            : '';
         const rightValue = right.item !== null && typeof right.item === 'object'
-          ? String((right.item as unknown as Record<string, unknown>)[field] ?? '')
-          : '';
+            ? String((right.item as unknown as Record<string, unknown>)[field] ?? '')
+            : '';
         return (leftValue.localeCompare(rightValue) * multiplier) || left.order - right.order;
       });
       matches.pop();
@@ -711,11 +885,11 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
     const multiplier = direction === 'desc' ? -1 : 1;
     matches.sort((left, right) => {
       const leftValue = left.item !== null && typeof left.item === 'object'
-        ? String((left.item as unknown as Record<string, unknown>)[field] ?? '')
-        : '';
+          ? String((left.item as unknown as Record<string, unknown>)[field] ?? '')
+          : '';
       const rightValue = right.item !== null && typeof right.item === 'object'
-        ? String((right.item as unknown as Record<string, unknown>)[field] ?? '')
-        : '';
+          ? String((right.item as unknown as Record<string, unknown>)[field] ?? '')
+          : '';
       return (leftValue.localeCompare(rightValue) * multiplier) || left.order - right.order;
     });
   }
@@ -772,11 +946,15 @@ async function renameAtomicWithRetry(source: string, target: string): Promise<vo
 
 function isTransientProjectionCandidateCollection(collection: string): boolean {
   return /^(automation-job-projections|automation-job-list-projections-v2|automation-job-health-summary-v1)-generation-[ab]-repair-[1-9][0-9]*$/
-    .test(collection);
+      .test(collection);
 }
 
 /** Write and fsync a compact snapshot, then atomically replace the collection. */
-async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promise<void> {
+async function writeCollectionUnlocked<T>(
+    collection: string,
+    data: T[],
+    beforeCommit?: () => Promise<void> | void,
+): Promise<void> {
   if (!Array.isArray(data)) throw new Error(`Invalid collection payload: ${collection}`);
   await ensureDataDir();
   const filePath = getFilePath(collection);
@@ -797,6 +975,7 @@ async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promis
     // from durable jobs. Backing it up would retain another large stale copy
     // after cleanup; the active legacy projection keeps normal rollback backups.
     if (!isTransientProjectionCandidateCollection(collection)) await refreshBackup(filePath);
+    await beforeCommit?.();
     await renameAtomicWithRetry(tmpPath, filePath);
     await syncDirectory(path.dirname(filePath));
   } catch (error) {
@@ -808,35 +987,43 @@ async function writeCollectionUnlocked<T>(collection: string, data: T[]): Promis
 
 const collectionLocks = new Map<string, Promise<void>>();
 
-async function withCollectionLock<T>(collection: string, work: () => Promise<T>): Promise<T> {
-  const previous = collectionLocks.get(collection) || Promise.resolve();
+async function withCollectionLock<T>(
+    collection: string,
+    work: (assertLockHeld: () => Promise<void>) => Promise<T>,
+): Promise<T> {
+  const safeCollection = validateFileCollectionName(collection);
+  const previous = collectionLocks.get(safeCollection) || Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>(resolve => { release = resolve; });
   const tail = previous.catch(() => undefined).then(() => current);
-  collectionLocks.set(collection, tail);
-  let releaseFileLock: (() => Promise<void>) | undefined;
+  collectionLocks.set(safeCollection, tail);
+
+  let fileLock: CollectionFileLockHandle | undefined;
   let lockStartedAt = 0;
   try {
     await previous.catch(() => undefined);
-    releaseFileLock = await acquireCollectionFileLock(collection);
+    fileLock = await acquireCollectionFileLock(safeCollection);
     lockStartedAt = Date.now();
     recordLockAcquisition();
-    return await work();
+    return await work(fileLock.assertHeld);
   } finally {
     if (lockStartedAt) recordLockHold(Date.now() - lockStartedAt);
-    if (releaseFileLock) await releaseFileLock();
+    await fileLock?.release();
     release();
-    if (collectionLocks.get(collection) === tail) collectionLocks.delete(collection);
+    if (collectionLocks.get(safeCollection) === tail) {
+      collectionLocks.delete(safeCollection);
+    }
   }
 }
 
 async function writeCollection<T>(collection: string, data: T[]): Promise<void> {
-  await withCollectionLock(collection, () => writeCollectionUnlocked(collection, data));
+  await withCollectionLock(collection, assertLockHeld =>
+      writeCollectionUnlocked(collection, data, assertLockHeld));
 }
 
 async function backupCollection(collection: string, label: string): Promise<string> {
   const safeLabel = label.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'manual';
-  return withCollectionLock(collection, async () => {
+  return withCollectionLock(collection, async assertLockHeld => {
     const filePath = getFilePath(collection);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const backupPath = `${filePath}.backup.${safeLabel}.${timestamp}`;
@@ -852,29 +1039,32 @@ async function backupCollection(collection: string, label: string): Promise<stri
     } finally {
       await handle.close();
     }
+    await assertLockHeld();
     const prefix = `${collection}.json.backup.${safeLabel}.`;
     const backups = (await fs.readdir(getDataDir(), { withFileTypes: true }))
-      .filter(entry => entry.isFile() && entry.name.startsWith(prefix))
-      .sort((left, right) => right.name.localeCompare(left.name));
+        .filter(entry => entry.isFile() && entry.name.startsWith(prefix))
+        .sort((left, right) => right.name.localeCompare(left.name));
     for (const old of backups.slice(3)) await fs.unlink(path.join(getDataDir(), old.name)).catch(() => undefined);
     return backupPath;
   });
 }
 
 async function runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void> {
-  await withCollectionLock(collection, async () => {
+  await withCollectionLock(collection, async assertLockHeld => {
     const items = await readCollectionUnlocked<T>(collection);
     const updated = await fn(items);
-    if (updated !== undefined) await writeCollectionUnlocked(collection, updated);
+    if (updated !== undefined) {
+      await writeCollectionUnlocked(collection, updated, assertLockHeld);
+    }
   });
 }
 
 async function runStreamingTransaction<T>(
-  collection: string,
-  fn: StorageStreamingTransaction<T>,
-  options: StorageStreamingTransactionOptions<T> = {},
+    collection: string,
+    fn: StorageStreamingTransaction<T>,
+    options: StorageStreamingTransactionOptions<T> = {},
 ): Promise<{ changed: boolean; itemCount: number }> {
-  return withCollectionLock(collection, async () => {
+  return withCollectionLock(collection, async assertLockHeld => {
     await ensureDataDir();
     const filePath = getFilePath(collection);
     const source = [filePath, `${filePath}.bak`, `${filePath}.bak.2`];
@@ -893,12 +1083,14 @@ async function runStreamingTransaction<T>(
       await options.beforeMutation?.();
       const appended = options.appendItems?.() || [];
       if (!appended.length) return { changed: false, itemCount: 0 };
-      await options.beforeCommit?.();
-      await writeCollectionUnlocked(collection, appended);
+      await writeCollectionUnlocked(collection, appended, async () => {
+        await options.beforeCommit?.();
+        await assertLockHeld();
+      });
       return { changed: true, itemCount: appended.length };
     }
     let preparedItemCount = 0;
-    if (options.prepare) {
+    if (options.prepare || options.appendOnly) {
       preparedItemCount = await scanJsonArrayFile<T>(sourcePath, async (item, index) => {
         await options.prepare?.(item, index);
       });
@@ -906,20 +1098,27 @@ async function runStreamingTransaction<T>(
     await options.beforeMutation?.();
     if (options.appendOnly) {
       return appendJsonArrayFile(
-        sourcePath,
-        collection,
-        options.appendItems?.() || [],
-        preparedItemCount,
-        options.beforeCommit,
+          sourcePath,
+          collection,
+          options.appendItems?.() || [],
+          preparedItemCount,
+          options.beforeCommit,
+          assertLockHeld,
       );
     }
-    return transformJsonArrayFile<T>(sourcePath, collection, fn, options);
+    return transformJsonArrayFile<T>(
+        sourcePath,
+        collection,
+        fn,
+        options,
+        assertLockHeld,
+    );
   });
 }
 
 async function bulkMutateCollection<T extends { id: string }>(
-  collection: string,
-  mutations: StorageBulkMutation<T>[],
+    collection: string,
+    mutations: StorageBulkMutation<T>[],
 ): Promise<StorageBulkResult> {
   let output!: StorageBulkResult;
   await runTransaction<T>(collection, items => {

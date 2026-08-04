@@ -9,9 +9,10 @@ const root = process.cwd();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandeal-storage-acceptance-'));
 const actualDataDir = path.join(root, '.data');
 const actualDataMetadata = fs.existsSync(actualDataDir)
-  ? { mtimeMs: fs.statSync(actualDataDir).mtimeMs, count: fs.readdirSync(actualDataDir).length }
-  : null;
+    ? { mtimeMs: fs.statSync(actualDataDir).mtimeMs, count: fs.readdirSync(actualDataDir).length }
+    : null;
 const savedEnv = {
+  NODE_ENV: process.env.NODE_ENV,
   SANDEAL_DATA_DIR: process.env.SANDEAL_DATA_DIR,
   SANDEAL_STORAGE_DRIVER: process.env.SANDEAL_STORAGE_DRIVER,
   MONGODB_URI: process.env.MONGODB_URI,
@@ -29,17 +30,29 @@ require('./register-typescript.cjs');
 
 const mongoClientPath = require.resolve('../src/lib/storage/mongoClient.ts');
 const { fileStorageAdapter } = require('../src/lib/storage/fileStorageAdapter.ts');
+const { applyStorageBulkMutations } = require('../src/lib/storage/bulkMutation.ts');
+const {
+  getStorageDiagnosticsSnapshot,
+  recordBoundedRead,
+  recordFileLockHeartbeat,
+  recordJobLeaseRenewal,
+  recordRoleHeartbeatRenewal,
+  resetStorageDiagnostics,
+} = require('../src/lib/storage/diagnostics.ts');
 const { checksumCollection } = require('../src/lib/storage/migrationChecksum.ts');
 const { createMigrationManifest } = require('../src/lib/storage/migrationManifest.ts');
 const { evaluateMongoAcceptanceSafety } = require('../src/lib/storage/mongoAcceptanceSafety.ts');
 const { createMongoLogicalBackup } = require('../src/lib/storage/mongoLogicalBackup.ts');
+const { planMongoSchema } = require('../src/lib/storage/mongoSchema.ts');
 const { getStorageConfig } = require('../src/lib/storage/storageConfig.ts');
 const { getStorageAdapter } = require('../src/lib/storage/storageFactory.ts');
+const { storageErrorCode } = require('../src/lib/storage/storageErrors.ts');
 const { validateShadow } = require('../src/lib/storage/shadowValidation.ts');
 
 let passed = 0;
 let failed = 0;
 let networkCalls = 0;
+const originalFetch = global.fetch;
 global.fetch = async () => {
   networkCalls += 1;
   throw new Error('NETWORK_FORBIDDEN_IN_ACCEPTANCE_TESTS');
@@ -58,10 +71,10 @@ async function test(name, work) {
 
 function storageSource() {
   return fs.readdirSync(path.join(root, 'src', 'lib', 'storage'))
-    .filter(name => name.endsWith('.ts'))
-    .sort()
-    .map(name => fs.readFileSync(path.join(root, 'src', 'lib', 'storage', name), 'utf8'))
-    .join('\n');
+      .filter(name => name.endsWith('.ts'))
+      .sort()
+      .map(name => fs.readFileSync(path.join(root, 'src', 'lib', 'storage', name), 'utf8'))
+      .join('\n');
 }
 
 function minimalInventory() {
@@ -97,6 +110,55 @@ async function main() {
     assert.equal(path.resolve(fileStorageAdapter.getDataDir()), path.resolve(tempDir));
   });
 
+  await test('File adapter rejects collection path traversal before filesystem access', async () => {
+    await assert.rejects(
+        () => fileStorageAdapter.writeCollection('../outside-data-dir', [{ id: 'one' }]),
+        error => error && error.code === 'INVALID_STORAGE_COLLECTION',
+    );
+    assert.equal(fs.existsSync(path.join(path.dirname(tempDir), 'outside-data-dir.json')), false);
+  });
+
+  await test('File append-only streaming preserves existing item count and valid JSON', async () => {
+    await fileStorageAdapter.writeCollection('acceptance-append-only', [
+      { id: 'one', value: 1 },
+      { id: 'two', value: 2 },
+    ]);
+    const result = await fileStorageAdapter.runStreamingTransaction(
+        'acceptance-append-only',
+        () => false,
+        {
+          appendOnly: true,
+          appendItems: () => [{ id: 'three', value: 3 }],
+        },
+    );
+    assert.deepEqual(result, { changed: true, itemCount: 3 });
+    assert.deepEqual(
+        await fileStorageAdapter.readCollection('acceptance-append-only'),
+        [
+          { id: 'one', value: 1 },
+          { id: 'two', value: 2 },
+          { id: 'three', value: 3 },
+        ],
+    );
+  });
+
+  await test('Sorted file pagination returns later pages without truncating retained rows', async () => {
+    const rows = Array.from({ length: 250 }, (_, index) => ({
+      id: `item-${String(index).padStart(3, '0')}`,
+      value: index,
+    }));
+    await fileStorageAdapter.writeCollection('acceptance-page', rows);
+    const page = await fileStorageAdapter.readCollectionPage('acceptance-page', {
+      page: 2,
+      pageSize: 100,
+      sort: { field: 'id', direction: 'asc' },
+    });
+    assert.equal(page.totalItems, 250);
+    assert.equal(page.items.length, 100);
+    assert.equal(page.items[0].id, 'item-100');
+    assert.equal(page.items[99].id, 'item-199');
+  });
+
   await test('Mode B explicit file needs no Mongo URI and does not load Mongo client', () => {
     process.env.SANDEAL_STORAGE_DRIVER = 'file';
     delete process.env.MONGODB_URI;
@@ -109,6 +171,25 @@ async function main() {
     delete process.env.MONGODB_URI;
     assert.throws(() => getStorageAdapter(), error => error && error.code === 'MONGO_URI_REQUIRED');
     assert.equal(require.cache[mongoClientPath], undefined);
+  });
+
+  await test('Mongo config carries only a non-secret connection fingerprint', () => {
+    const privateUri = 'mongodb://fixture-user:fixture-password@fixture.invalid:27017';
+    process.env.SANDEAL_STORAGE_DRIVER = 'mongo';
+    process.env.MONGODB_URI = privateUri;
+    process.env.MONGODB_DATABASE = 'sandeal_acceptance';
+
+    const config = getStorageConfig();
+    assert.equal(config.driver, 'mongo');
+    assert.equal(config.database, 'sandeal_acceptance');
+    assert.match(config.connectionFingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.stringify(config).includes(privateUri), false);
+    assert.equal(JSON.stringify(config).includes('fixture-password'), false);
+    assert.equal(require.cache[mongoClientPath], undefined);
+
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    delete process.env.MONGODB_URI;
+    delete process.env.MONGODB_DATABASE;
   });
 
   await test('M3-M5 tooling modules import without initializing MongoClient', () => {
@@ -156,6 +237,102 @@ async function main() {
     assert.ok(development.blockers.includes('MIGRATION_DATABASE_NOT_ISOLATED'));
   });
 
+  await test('Storage diagnostics record exact heartbeat counters without NaN fields', () => {
+    resetStorageDiagnostics();
+    recordFileLockHeartbeat(11, true);
+    recordFileLockHeartbeat(13, false);
+    recordJobLeaseRenewal(17, false);
+    recordRoleHeartbeatRenewal(19, true);
+    recordBoundedRead();
+
+    const snapshot = getStorageDiagnosticsSnapshot();
+    assert.equal(snapshot.fileLockHeartbeatCount, 2);
+    assert.equal(snapshot.fileLockHeartbeatFailureCount, 1);
+    assert.equal(snapshot.totalFileLockHeartbeatMs, 24);
+    assert.equal(snapshot.maximumFileLockHeartbeatMs, 13);
+    assert.equal(snapshot.jobLeaseRenewalCount, 1);
+    assert.equal(snapshot.jobLeaseRenewalFailureCount, 1);
+    assert.equal(snapshot.totalJobLeaseRenewalMs, 17);
+    assert.equal(snapshot.roleHeartbeatRenewalCount, 1);
+    assert.equal(snapshot.roleHeartbeatRenewalFailureCount, 0);
+    assert.equal(snapshot.totalRoleHeartbeatRenewalMs, 19);
+    assert.equal(snapshot.boundedReadCount, 1);
+    for (const value of Object.values(snapshot)) {
+      if (typeof value === 'number') assert.equal(Number.isFinite(value), true);
+    }
+  });
+
+  await test('Storage error code preserves raw FileStorage lock failures', () => {
+    const lost = Object.assign(new Error('lost'), { code: 'STORAGE_LOCK_LOST' });
+    const timeout = Object.assign(new Error('timeout'), { code: 'STORAGE_LOCK_TIMEOUT' });
+    assert.equal(storageErrorCode(lost, 'FILE_STORAGE_UNREACHABLE'), 'STORAGE_LOCK_LOST');
+    assert.equal(storageErrorCode(timeout, 'FILE_STORAGE_UNREACHABLE'), 'STORAGE_LOCK_TIMEOUT');
+  });
+
+  await test('Bulk mutation fails closed on duplicate durable IDs and preserves stable ordering', () => {
+    assert.throws(
+        () => applyStorageBulkMutations(
+            [{ id: 'duplicate', value: 1 }, { id: 'duplicate', value: 2 }],
+            [{ mutationId: 'm1', type: 'DELETE', itemId: 'duplicate' }],
+        ),
+        error => error && error.code === 'INVALID_STORAGE_PAYLOAD',
+    );
+
+    const applied = applyStorageBulkMutations(
+        [
+          { id: 'one', value: 1 },
+          { id: 'two', value: 2 },
+          { id: 'three', value: 3 },
+        ],
+        [
+          { mutationId: 'delete-two', type: 'DELETE', itemId: 'two' },
+          {
+            mutationId: 'update-three',
+            type: 'UPSERT',
+            itemId: 'three',
+            value: { id: 'three', value: 30 },
+          },
+          {
+            mutationId: 'insert-four',
+            type: 'UPSERT',
+            itemId: 'four',
+            value: { id: 'four', value: 4 },
+          },
+        ],
+    );
+    assert.equal(applied.applied, 3);
+    assert.equal(applied.failed, 0);
+    assert.deepEqual(applied.items, [
+      { id: 'one', value: 1 },
+      { id: 'three', value: 30 },
+      { id: 'four', value: 4 },
+    ]);
+  });
+
+  await test('Mongo schema plan is deeply cloned and contains no TTL indexes in schema v1', () => {
+    const first = planMongoSchema();
+    const second = planMongoSchema();
+    assert.notEqual(first, second);
+    assert.notEqual(first[0].keys, second[0].keys);
+    assert.notEqual(first[0].options, second[0].options);
+
+    const partial = first.find(item => item.name === 'sandeal_revision_item_id');
+    assert.ok(partial);
+    partial.options.partialFilterExpression.itemId.$type = 'number';
+
+    const fresh = planMongoSchema()
+        .find(item => item.name === 'sandeal_revision_item_id');
+    assert.equal(
+        fresh.options.partialFilterExpression.itemId.$type,
+        'string',
+    );
+    assert.equal(
+        planMongoSchema().some(item =>
+            Object.prototype.hasOwnProperty.call(item.options, 'expireAfterSeconds')),
+        false,
+    );
+  });
+
   await test('acceptance check CLI never connects and reports NOT_RUN by default', () => {
     const environment = { ...process.env };
     delete environment.MONGODB_URI;
@@ -174,8 +351,8 @@ async function main() {
 
   await test('migration batch-size hard limit rejects more than 1000', () => {
     assert.throws(
-      () => createMigrationManifest(minimalInventory(), { batchSize: 1_001 }),
-      /MIGRATION_BATCH_SIZE_INVALID/
+        () => createMigrationManifest(minimalInventory(), { batchSize: 1_001 }),
+        /MIGRATION_BATCH_SIZE_INVALID/
     );
   });
 
@@ -185,12 +362,12 @@ async function main() {
       inspectSchema: async () => ({ version: 1, expectedVersion: 1, ready: true, indexReady: true, missingIndexes: [] }),
     };
     await assert.rejects(
-      () => validateShadow({ source: reader, target: reader, collections: [], maxDifferences: 1_001 }),
-      /SHADOW_MAX_DIFFERENCES_INVALID/
+        () => validateShadow({ source: reader, target: reader, collections: [], maxDifferences: 1_001 }),
+        /SHADOW_MAX_DIFFERENCES_INVALID/
     );
     await assert.rejects(
-      () => validateShadow({ source: reader, target: reader, collections: [], timeoutMs: 60_001 }),
-      /SHADOW_TIMEOUT_INVALID/
+        () => validateShadow({ source: reader, target: reader, collections: [], timeoutMs: 60_001 }),
+        /SHADOW_TIMEOUT_INVALID/
     );
   });
 
@@ -212,7 +389,6 @@ async function main() {
     assert.equal(/\.dropCollection\s*\(/.test(source), false);
     assert.equal(/\.dropIndex(?:es)?\s*\(/.test(source), false);
     assert.equal((source.match(/applyMongoSchema\s*\(/g) || []).length, 1);
-    assert.equal(source.includes('expireAfterSeconds'), false);
   });
 
   await test('Mongo adapter has no file fallback or file write path', () => {
@@ -220,7 +396,8 @@ async function main() {
     const factory = fs.readFileSync(path.join(root, 'src', 'lib', 'storage', 'storageFactory.ts'), 'utf8');
     assert.equal(mongo.includes('fileStorageAdapter'), false);
     assert.equal(mongo.includes("from 'fs'"), false);
-    assert.match(factory, /config\.driver === 'file' \? fileStorageAdapter : loadMongoAdapter\(config\)/);
+    assert.match(factory, /if\s*\(config\.driver === 'file'\)\s*return fileStorageAdapter;/);
+    assert.match(factory, /return loadMongoAdapter\(config\);/);
   });
 
   await test('migration, shadow, backup, and restore are not imported by application startup', () => {
@@ -300,5 +477,7 @@ main().catch(error => {
     if (savedPresence[key]) process.env[key] = value;
     else delete process.env[key];
   }
+  if (originalFetch === undefined) delete global.fetch;
+  else global.fetch = originalFetch;
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

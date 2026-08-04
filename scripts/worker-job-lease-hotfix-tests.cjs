@@ -80,8 +80,8 @@ class FakeClock {
     const target = this.current + milliseconds;
     while (true) {
       const next = [...this.timers.values()]
-        .filter(timer => timer.dueAt <= target)
-        .sort((left, right) => left.dueAt - right.dueAt || left.handle.id - right.handle.id)[0];
+          .filter(timer => timer.dueAt <= target)
+          .sort((left, right) => left.dueAt - right.dueAt || left.handle.id - right.handle.id)[0];
       if (!next) break;
       this.current = next.dueAt;
       this.timers.delete(next.handle.id);
@@ -158,8 +158,8 @@ async function main() {
       renew: async () => {
         renewals += 1;
         return input.renew
-          ? input.renew(renewals)
-          : { renewed: true, leaseExpiresAt: new Date(clock.current + (input.leaseMs || 90)).toISOString() };
+            ? input.renew(renewals)
+            : { renewed: true, leaseExpiresAt: new Date(clock.current + (input.leaseMs || 90)).toISOString() };
       },
       onAuthorityLost: reason => controller.abort(reason),
       onEvent: (event, eventInput) => events.push({ event, at: clock.current, ...eventInput }),
@@ -248,20 +248,71 @@ async function main() {
     await lifecycle.handle.stop();
   });
 
-  await test('persistent storage failure aborts after two spaced attempts without a busy loop', async () => {
+  await test('persistent storage failure retries with bounded backoff until the safe lease window is exhausted', async () => {
     const clock = new FakeClock();
     const attempts = [];
     const lifecycle = startFakeRenewal(clock, {
       renew: async () => {
         attempts.push(clock.current);
-        throw new Error('PERSISTENT_STORAGE_FAILURE');
+        throw new Error('Storage lock timeout: automation-job-heartbeats');
       },
     });
     await clock.advance(80);
-    assert.deepEqual(attempts.length, 2);
-    assert.ok(attempts[1] > attempts[0]);
+    assert.equal(attempts.length, 3, JSON.stringify(attempts));
+    assert.ok(attempts[1] - attempts[0] >= 10, JSON.stringify(attempts));
+    assert.ok(attempts[2] - attempts[1] >= 20, JSON.stringify(attempts));
     assert.equal(lifecycle.handle.authorityLostReason, 'JOB_LEASE_RENEWAL_STORAGE_FAILURE');
     assert.equal(clock.timers.size, 0);
+    const failures = lifecycle.events.filter(event => event.event === 'job_lease_renewal_failed');
+    assert.equal(failures.length, 3);
+    assert.ok(failures.every(event => event.errorCode === 'STORAGE_LOCK_TIMEOUT'));
+  });
+
+  await test('diagnostic callback failure cannot change lease ownership or stop renewal', async () => {
+    const clock = new FakeClock();
+    let renewals = 0;
+    const controller = new AbortController();
+    const handle = lease.startAutomationJobLeaseRenewal({
+      leaseMs: 90,
+      initialLeaseExpiresAt: new Date(clock.current + 90).toISOString(),
+      parentSignal: controller.signal,
+      runtime: clock.runtime,
+      renew: async () => {
+        renewals += 1;
+        return { renewed: true, leaseExpiresAt: new Date(clock.current + 90).toISOString() };
+      },
+      onAuthorityLost: reason => controller.abort(reason),
+      onEvent: () => {
+        throw new Error('DIAGNOSTIC_SINK_FAILURE');
+      },
+      successLogEveryMs: 90,
+    });
+    await clock.advance(100);
+    assert.ok(renewals >= 3, `renewals=${renewals}`);
+    assert.equal(handle.authorityLost, false);
+    assert.equal(controller.signal.aborted, false);
+    await handle.stop();
+  });
+
+  await test('an already expired initial lease fails closed without scheduling a timer', async () => {
+    const clock = new FakeClock();
+    const controller = new AbortController();
+    const events = [];
+    const handle = lease.startAutomationJobLeaseRenewal({
+      leaseMs: 90,
+      initialLeaseExpiresAt: new Date(clock.current - 1).toISOString(),
+      parentSignal: controller.signal,
+      runtime: clock.runtime,
+      renew: async () => ({ renewed: true, leaseExpiresAt: new Date(clock.current + 90).toISOString() }),
+      onAuthorityLost: reason => controller.abort(reason),
+      onEvent: (event, eventInput) => events.push({ event, ...eventInput }),
+    });
+    assert.equal(handle.authorityLost, true);
+    assert.equal(handle.authorityLostReason, 'JOB_LEASE_EXPIRED');
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(clock.timers.size, 0);
+    assert.ok(events.some(event => event.event === 'job_ownership_lost' && event.reasonCode === 'JOB_LEASE_EXPIRED'));
+    await handle.stop();
   });
 
   await test('shutdown aborts the handler and removes renewal timers deterministically', async () => {
@@ -282,6 +333,30 @@ async function main() {
     assert.match(source, /process\.on\('SIGINT',[\s\S]*process\.on\('SIGTERM'/);
     assert.match(source, /shutdownController\.abort\('WORKER_SHUTDOWN_REQUESTED'\)[\s\S]*armShutdownDeadline\('WORKER_SHUTDOWN_DRAIN_TIMEOUT'\)/);
     assert.match(source, /SHUTDOWN_DRAIN_TIMEOUT_MS = 12_000[\s\S]*process\.exit\(1\)/);
+  });
+
+  await test('authoritative lease renewal excludes projection and health-summary maintenance', () => {
+    const storeSource = fs.readFileSync(path.join(process.cwd(), 'src', 'lib', 'automation', 'store.ts'), 'utf8');
+    const start = storeSource.indexOf('export async function renewAutomationJobClaimLease(');
+    const end = storeSource.indexOf('export async function heartbeatAutomationJob(', start);
+    assert.ok(start >= 0, 'renewAutomationJobClaimLease not found');
+    assert.ok(end > start, 'heartbeatAutomationJob boundary not found');
+    const renewalSource = storeSource.slice(start, end);
+    assert.match(renewalSource, /runTransaction<AutomationJobHeartbeat>\(JOB_HEARTBEATS/);
+    assert.match(renewalSource, /withRuntimeRoleAuthority/);
+    assert.doesNotMatch(
+        renewalSource,
+        /getAutomationJobActiveProjectionStorage|refreshAutomationJobHealthSummary|beginAutomationJobProjectionSync|AutomationJobStatusProjection|AutomationJobListProjection/,
+    );
+  });
+
+  await test('worker keeps projection materialization bounded and avoids health read-model scans in per-job finalization', () => {
+    const workerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'lib', 'automation', 'worker.ts'), 'utf8');
+    assert.match(workerSource, /maybeMaterializeJobHealthProjectionMaintenance/);
+    assert.match(workerSource, /jobHealthMaintenanceMaterializationFlight/);
+    assert.match(workerSource, /nextJobHealthMaintenanceMaterializationAt/);
+    assert.match(workerSource, /activeJobIds/);
+    assert.doesNotMatch(workerSource, /getAutomationJobHealthView/);
   });
 
   await test('durable renewal keeps a healthy job running past its original lease', async () => {
@@ -354,10 +429,10 @@ async function main() {
     assert.notEqual(durable.lastErrorCode, 'HANDLER_TIMEOUT');
     assert.notEqual(durable.lastErrorCode, 'PROVIDER_TIMEOUT');
     const heartbeat = (await adapter.readCollection('automation-job-heartbeats'))
-      .find(item => item.jobId === created.job.id);
+        .find(item => item.jobId === created.job.id);
     const recoverAt = Math.max(
-      Date.parse(durable.leaseExpiresAt),
-      Date.parse(heartbeat?.leaseExpiresAt || ''),
+        Date.parse(durable.leaseExpiresAt),
+        Date.parse(heartbeat?.leaseExpiresAt || ''),
     ) + 1;
     await store.claimAutomationJobs('shutdown-recovery-worker', 1, 300, recoverAt);
     assert.equal((await store.getAutomationJob(created.job.id)).status, 'RETRY_SCHEDULED');
@@ -396,11 +471,11 @@ async function main() {
     });
     assert.equal(replacement.event, 'TAKEN_OVER');
     const renewal = await store.renewAutomationJobClaimLease(
-      created.job.id,
-      'old-instance',
-      90,
-      { claimToken: claimed.claimToken, attemptCount: claimed.attemptCount, releaseId: claimed.releaseId, ownership: oldRole.ownership },
-      base + 6_001,
+        created.job.id,
+        'old-instance',
+        90,
+        { claimToken: claimed.claimToken, attemptCount: claimed.attemptCount, releaseId: claimed.releaseId, ownership: oldRole.ownership },
+        base + 6_001,
     );
     assert.equal(renewal.renewed, false);
     assert.equal(renewal.reasonCode, 'WORKER_ROLE_LOST');
@@ -498,14 +573,14 @@ async function main() {
 }
 
 main()
-  .catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => {
-    const resolved = path.resolve(testRoot);
-    if (path.dirname(resolved) !== allowedTempRoot || !path.basename(resolved).startsWith('worker-job-lease-hotfix-')) {
-      throw new Error(`REFUSING_UNSAFE_TEST_CLEANUP:${resolved}`);
-    }
-    fs.rmSync(resolved, { recursive: true, force: true });
-  });
+    .catch(error => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      const resolved = path.resolve(testRoot);
+      if (path.dirname(resolved) !== allowedTempRoot || !path.basename(resolved).startsWith('worker-job-lease-hotfix-')) {
+        throw new Error(`REFUSING_UNSAFE_TEST_CLEANUP:${resolved}`);
+      }
+      fs.rmSync(resolved, { recursive: true, force: true });
+    });

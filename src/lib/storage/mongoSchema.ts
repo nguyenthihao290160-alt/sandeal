@@ -1,4 +1,9 @@
-import type { ClientSession, Db, Document, IndexSpecification } from 'mongodb';
+import type {
+  ClientSession,
+  Db,
+  Document,
+  IndexSpecification,
+} from 'mongodb';
 
 import { storageError } from './storageErrors';
 
@@ -77,6 +82,21 @@ interface MongoSchemaDocument extends Document {
   updatedAt: string;
 }
 
+interface MongoExistingIndex extends Document {
+  name?: string;
+  key?: Record<string, unknown>;
+  unique?: boolean;
+  sparse?: boolean;
+  expireAfterSeconds?: number;
+  partialFilterExpression?: unknown;
+  collation?: unknown;
+}
+
+interface MongoIndexState {
+  existingCollections: string[];
+  indexesByCollection: Map<string, Map<string, MongoExistingIndex>>;
+}
+
 export interface MongoIndexPlan {
   readonly collection: string;
   readonly name: string;
@@ -90,6 +110,10 @@ export interface MongoSchemaInspection {
   readonly expectedVersion: number;
   readonly ready: boolean;
   readonly existingCollections: string[];
+  /**
+   * Includes indexes that are absent and indexes whose current definition does
+   * not match the manifest. Both conditions require operator attention.
+   */
   readonly missingIndexes: Array<{ collection: string; name: string }>;
 }
 
@@ -113,82 +137,253 @@ const INDEX_MANIFEST: readonly MongoIndexPlan[] = [
       collection,
       name: 'sandeal_revision_item_id',
       keys: { revision: 1, itemId: 1 },
-      options: { partialFilterExpression: { itemId: { $type: 'string' } } },
+      options: {
+        partialFilterExpression: {
+          itemId: { $type: 'string' },
+        },
+      },
       action: 'ensure' as const,
     },
   ]),
 ];
 
+const INDEX_OPTION_FIELDS = [
+  'unique',
+  'sparse',
+  'expireAfterSeconds',
+  'partialFilterExpression',
+  'collation',
+] as const;
+
+function cloneManifestValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(item => cloneManifestValue(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+            .map(([key, nested]) => [key, cloneManifestValue(nested)]),
+    );
+  }
+  return value;
+}
+
+function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(item => canonicalizeValue(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([key, nested]) => [key, canonicalizeValue(nested)]),
+    );
+  }
+  return value;
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonicalizeValue(left))
+      === JSON.stringify(canonicalizeValue(right));
+}
+
+function sameOrderedKeys(
+    actual: Record<string, unknown> | undefined,
+    expected: Readonly<Record<string, unknown>>,
+): boolean {
+  if (!actual) return false;
+  return JSON.stringify(Object.entries(actual))
+      === JSON.stringify(Object.entries(expected));
+}
+
+function indexMatchesPlan(
+    existing: MongoExistingIndex,
+    plan: MongoIndexPlan,
+): boolean {
+  if (!sameOrderedKeys(existing.key, plan.keys)) return false;
+
+  for (const field of INDEX_OPTION_FIELDS) {
+    const expected = plan.options[field];
+    const actual = existing[field];
+
+    if (field === 'unique' || field === 'sparse') {
+      if (Boolean(actual) !== Boolean(expected)) return false;
+      continue;
+    }
+
+    if (!sameValue(actual ?? null, expected ?? null)) return false;
+  }
+
+  return true;
+}
+
+function isIndexConflict(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; codeName?: unknown };
+  return candidate.code === 85
+      || candidate.code === 86
+      || candidate.codeName === 'IndexOptionsConflict'
+      || candidate.codeName === 'IndexKeySpecsConflict';
+}
+
+async function inspectIndexState(db: Db): Promise<MongoIndexState> {
+  const collectionInfo = await db
+      .listCollections({}, { nameOnly: true })
+      .toArray();
+  const existingCollections = collectionInfo
+      .map(item => item.name)
+      .sort();
+  const existingSet = new Set(existingCollections);
+  const indexesByCollection = new Map<
+      string,
+      Map<string, MongoExistingIndex>
+  >();
+
+  for (const collection of new Set(
+      INDEX_MANIFEST.map(item => item.collection),
+  )) {
+    if (!existingSet.has(collection)) continue;
+
+    const indexes = await db
+        .collection(collection)
+        .listIndexes()
+        .toArray() as MongoExistingIndex[];
+
+    indexesByCollection.set(
+        collection,
+        new Map(
+            indexes
+                .filter((index): index is MongoExistingIndex & { name: string } =>
+                    typeof index.name === 'string' && index.name.length > 0)
+                .map(index => [index.name, index]),
+        ),
+    );
+  }
+
+  return { existingCollections, indexesByCollection };
+}
+
 export function planMongoSchema(): MongoIndexPlan[] {
   return INDEX_MANIFEST.map(item => ({
     ...item,
-    keys: { ...item.keys },
-    options: { ...item.options },
+    keys: cloneManifestValue(item.keys) as Record<string, unknown>,
+    options: cloneManifestValue(item.options) as Record<string, unknown>,
   }));
 }
 
-export async function readMongoSchemaVersion(db: Db, session?: ClientSession): Promise<number | null> {
-  const document = await db.collection<MongoSchemaDocument>(MONGO_STORAGE_METADATA_COLLECTION)
-    .findOne({ _id: MONGO_STORAGE_SCHEMA_KEY }, session ? { session } : undefined);
-  return typeof document?.version === 'number' ? document.version : null;
+export async function readMongoSchemaVersion(
+    db: Db,
+    session?: ClientSession,
+): Promise<number | null> {
+  const document = await db
+      .collection<MongoSchemaDocument>(MONGO_STORAGE_METADATA_COLLECTION)
+      .findOne(
+          { _id: MONGO_STORAGE_SCHEMA_KEY, kind: 'schema' },
+          session ? { session } : undefined,
+      );
+
+  return Number.isSafeInteger(document?.version)
+  && Number(document?.version) > 0
+      ? Number(document?.version)
+      : null;
 }
 
-export async function assertMongoSchema(db: Db, session?: ClientSession): Promise<void> {
-  if (await readMongoSchemaVersion(db, session) !== EXPECTED_MONGO_SCHEMA_VERSION) {
+export async function assertMongoSchema(
+    db: Db,
+    session?: ClientSession,
+): Promise<void> {
+  if (
+      await readMongoSchemaVersion(db, session)
+      !== EXPECTED_MONGO_SCHEMA_VERSION
+  ) {
     throw storageError('MONGO_SCHEMA_VERSION_MISMATCH');
   }
 }
 
-export async function inspectMongoSchema(db: Db): Promise<MongoSchemaInspection> {
+export async function inspectMongoSchema(
+    db: Db,
+): Promise<MongoSchemaInspection> {
   const version = await readMongoSchemaVersion(db);
-  const collectionInfo = await db.listCollections({}, { nameOnly: true }).toArray();
-  const existingCollections = collectionInfo.map(item => item.name).sort();
-  const existingSet = new Set(existingCollections);
-  const indexNames = new Map<string, Set<string>>();
-
-  for (const collection of new Set(INDEX_MANIFEST.map(item => item.collection))) {
-    if (!existingSet.has(collection)) continue;
-    const indexes = await db.collection(collection).listIndexes().toArray();
-    indexNames.set(collection, new Set(indexes.map(index => index.name).filter((name): name is string => Boolean(name))));
-  }
+  const state = await inspectIndexState(db);
 
   const missingIndexes = INDEX_MANIFEST
-    .filter(item => !indexNames.get(item.collection)?.has(item.name))
-    .map(item => ({ collection: item.collection, name: item.name }));
+      .filter(plan => {
+        const existing = state.indexesByCollection
+            .get(plan.collection)
+            ?.get(plan.name);
+        return !existing || !indexMatchesPlan(existing, plan);
+      })
+      .map(plan => ({
+        collection: plan.collection,
+        name: plan.name,
+      }));
 
   return {
     version,
     expectedVersion: EXPECTED_MONGO_SCHEMA_VERSION,
-    ready: version === EXPECTED_MONGO_SCHEMA_VERSION && missingIndexes.length === 0,
-    existingCollections,
+    ready:
+        version === EXPECTED_MONGO_SCHEMA_VERSION
+        && missingIndexes.length === 0,
+    existingCollections: state.existingCollections,
     missingIndexes,
   };
 }
 
-export async function applyMongoSchema(db: Db): Promise<MongoSchemaInspection> {
+export async function applyMongoSchema(
+    db: Db,
+): Promise<MongoSchemaInspection> {
   const currentVersion = await readMongoSchemaVersion(db);
-  if (currentVersion !== null && currentVersion !== EXPECTED_MONGO_SCHEMA_VERSION) {
+  if (
+      currentVersion !== null
+      && currentVersion !== EXPECTED_MONGO_SCHEMA_VERSION
+  ) {
     throw storageError('MONGO_SCHEMA_VERSION_MISMATCH');
   }
 
-  for (const index of INDEX_MANIFEST) {
-    await db.collection(index.collection).createIndex(
-      index.keys as IndexSpecification,
-      { ...index.options, name: index.name }
-    );
+  const existingState = await inspectIndexState(db);
+  for (const plan of INDEX_MANIFEST) {
+    const existing = existingState.indexesByCollection
+        .get(plan.collection)
+        ?.get(plan.name);
+    if (existing && !indexMatchesPlan(existing, plan)) {
+      throw storageError('MONGO_SCHEMA_VERSION_MISMATCH');
+    }
   }
 
-  await db.collection<MongoSchemaDocument>(MONGO_STORAGE_METADATA_COLLECTION).updateOne(
-    { _id: MONGO_STORAGE_SCHEMA_KEY },
-    {
-      $set: {
-        kind: 'schema',
-        version: EXPECTED_MONGO_SCHEMA_VERSION,
-        updatedAt: new Date().toISOString(),
-      },
-    },
-    { upsert: true }
-  );
+  try {
+    for (const index of INDEX_MANIFEST) {
+      await db.collection(index.collection).createIndex(
+          index.keys as IndexSpecification,
+          {
+            ...(cloneManifestValue(index.options) as Record<string, unknown>),
+            name: index.name,
+          },
+      );
+    }
+  } catch (error) {
+    if (isIndexConflict(error)) {
+      throw storageError('MONGO_SCHEMA_VERSION_MISMATCH', error);
+    }
+    throw error;
+  }
 
-  return inspectMongoSchema(db);
+  await db
+      .collection<MongoSchemaDocument>(MONGO_STORAGE_METADATA_COLLECTION)
+      .updateOne(
+          { _id: MONGO_STORAGE_SCHEMA_KEY },
+          {
+            $set: {
+              kind: 'schema',
+              version: EXPECTED_MONGO_SCHEMA_VERSION,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+          { upsert: true },
+      );
+
+  const inspection = await inspectMongoSchema(db);
+  if (!inspection.ready) {
+    throw storageError('MONGO_SCHEMA_VERSION_MISMATCH');
+  }
+  return inspection;
 }

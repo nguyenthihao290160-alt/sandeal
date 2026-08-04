@@ -34,7 +34,6 @@ import {
   renewAutomationJobClaimLease,
 } from './store';
 import {
-  getAutomationJobHealthView,
   getAutomationJobProjectionManifestForMaintenance,
 } from './jobHealthSummary';
 import {
@@ -57,6 +56,7 @@ import { withAutomationCycleReadModel } from './cycleReadModel';
 import {
   normalizeAutomationJobLeaseMs,
   startAutomationJobLeaseRenewal,
+  type AutomationJobLeaseLossReason,
   type AutomationJobLeaseRenewalHandle,
   type AutomationJobLeaseRenewalRuntime,
 } from './jobLeaseRenewal';
@@ -78,6 +78,12 @@ export interface WorkerRunResult {
 }
 
 let lastWorkerDiagnosticAt = 0;
+const JOB_HEALTH_MAINTENANCE_MATERIALIZE_INTERVAL_MS = Math.max(
+    30_000,
+    Number(process.env.SANDEAL_JOB_HEALTH_MAINTENANCE_MATERIALIZE_MS) || 60_000,
+);
+let nextJobHealthMaintenanceMaterializationAt = 0;
+let jobHealthMaintenanceMaterializationFlight: Promise<void> | undefined;
 
 export interface WorkerBatchOptions {
   maximumInFlight?: number;
@@ -89,10 +95,48 @@ export interface WorkerBatchOptions {
   jobLeaseMs?: number;
   shutdownSignal?: AbortSignal;
   leaseRenewalRuntime?: AutomationJobLeaseRenewalRuntime;
+  /**
+   * Shared by every slot in one continuous worker pool. Standalone batches
+   * create their own registry, preserving the existing public behavior.
+   */
+  activityRegistry?: {
+    activeJobIds: Set<string>;
+    controlUpdateTail: Promise<void>;
+  };
   executeJobOverride?: (
-    job: AutomationJob,
-    context: { signal: AbortSignal; deadline: number },
+      job: AutomationJob,
+      context: { signal: AbortSignal; deadline: number },
   ) => Promise<Record<string, unknown>>;
+}
+
+type WorkerActivityRegistry = NonNullable<WorkerBatchOptions['activityRegistry']>;
+
+function createWorkerActivityRegistry(): WorkerActivityRegistry {
+  return {
+    activeJobIds: new Set<string>(),
+    controlUpdateTail: Promise.resolve(),
+  };
+}
+
+function queueWorkerActivityControlUpdate(
+    registry: WorkerActivityRegistry,
+    workerId: string,
+    preferredJobId?: string,
+): Promise<void> {
+  const update = registry.controlUpdateTail.then(async () => {
+    const workerCurrentJobId = preferredJobId && registry.activeJobIds.has(preferredJobId)
+        ? preferredJobId
+        : registry.activeJobIds.values().next().value;
+    await updateAutomationControl({
+      workerHeartbeatAt: new Date().toISOString(),
+      workerId,
+      workerCurrentJobId,
+    }, workerId);
+  });
+  // Keep the queue usable after a failed control write while returning the
+  // original promise so callers can preserve their existing error handling.
+  registry.controlUpdateTail = update.catch(() => undefined);
+  return update;
 }
 
 export interface ContinuousWorkerPoolResult extends WorkerRunResult {
@@ -111,11 +155,11 @@ export interface ContinuousWorkerPoolResult extends WorkerRunResult {
  */
 export function orderAutomationWorkerBatch(claimed: AutomationJob[]): AutomationJob[] {
   return claimed
-    .map((job, index) => ({ job, index }))
-    .sort((left, right) =>
-      Number(isCriticalAutomationJob(right.job)) - Number(isCriticalAutomationJob(left.job))
-      || left.index - right.index)
-    .map(item => item.job);
+      .map((job, index) => ({ job, index }))
+      .sort((left, right) =>
+          Number(isCriticalAutomationJob(right.job)) - Number(isCriticalAutomationJob(left.job))
+          || left.index - right.index)
+      .map(item => item.job);
 }
 
 function hashValue(value: unknown): string {
@@ -143,9 +187,9 @@ function assertWorkerPolicy(job: AutomationJob): void {
 }
 
 function disclosure(
-  job: AutomationJob,
-  executionMode: ActualExecutionMode,
-  input: Partial<AutomationExecutionDisclosure> = {},
+    job: AutomationJob,
+    executionMode: ActualExecutionMode,
+    input: Partial<AutomationExecutionDisclosure> = {},
 ): AutomationExecutionDisclosure {
   return {
     status: input.status || (executionMode === 'LOCAL_TEMPLATE' ? 'COMPLETED_WITH_LOCAL_TEMPLATE' : executionMode === 'MANUAL_INPUT' ? 'COMPLETED_WITH_MANUAL_INPUT' : executionMode === 'API' ? 'COMPLETED_WITH_API' : 'COMPLETED_WITH_LOCAL_RULES'),
@@ -172,8 +216,8 @@ function disclosure(
 
 function errorCode(error: unknown): string {
   const explicitCode = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
-    ? String((error as { code: string }).code).trim()
-    : '';
+      ? String((error as { code: string }).code).trim()
+      : '';
   if (explicitCode === 'ROLE_FENCE_LOST') return 'WORKER_FENCING_REJECTED';
   if (explicitCode === 'ROLE_FENCE_LOCK_TIMEOUT') return 'ROLE_FENCE_LOCK_TIMEOUT';
   if (explicitCode) return explicitCode.slice(0, 80);
@@ -220,6 +264,32 @@ function projectionMaintenanceErrorCode(error: unknown): string {
     return 'TEMPORARY_ERROR';
   }
   return errorCode(error);
+}
+
+async function maybeMaterializeJobHealthProjectionMaintenance(): Promise<void> {
+  const now = Date.now();
+  if (now < nextJobHealthMaintenanceMaterializationAt) return;
+  if (jobHealthMaintenanceMaterializationFlight) {
+    await jobHealthMaintenanceMaterializationFlight;
+    return;
+  }
+
+  nextJobHealthMaintenanceMaterializationAt = now + JOB_HEALTH_MAINTENANCE_MATERIALIZE_INTERVAL_MS;
+  const flight = materializeJobHealthProjectionMaintenanceRequest()
+      .then(() => undefined)
+      .catch(error => {
+        console.error(JSON.stringify({
+          type: 'job_health_projection_request_materialization_failed',
+          reasonCode: errorCode(error),
+        }));
+      })
+      .finally(() => {
+        if (jobHealthMaintenanceMaterializationFlight === flight) {
+          jobHealthMaintenanceMaterializationFlight = undefined;
+        }
+      });
+  jobHealthMaintenanceMaterializationFlight = flight;
+  await flight;
 }
 
 function claimMutationGuard(job: AutomationJob, ownership?: RuntimeRoleOwnership) {
@@ -275,10 +345,10 @@ async function countPublicProductsBounded(): Promise<number> {
   await scanCollection<Partial<Product>>('products', raw => {
     const product = normalizeCanonicalProduct(raw);
     if (product.status === 'published'
-      && product.publicHidden === false
-      && product.needsVerification === false
-      && product.publicBlocked !== true
-      && product.runtimeRecoveryCanaryObservationPending !== true) count += 1;
+        && product.publicHidden === false
+        && product.needsVerification === false
+        && product.publicBlocked !== true
+        && product.runtimeRecoveryCanaryObservationPending !== true) count += 1;
   });
   return count;
 }
@@ -289,9 +359,9 @@ async function assertKillSwitchInactive(): Promise<void> {
 }
 
 async function executeAutoPilotJob(
-  job: AutomationJob,
-  mode: 'source_scan' | 'full_safe_run',
-  execution?: AutomationExecutionBudget,
+    job: AutomationJob,
+    mode: 'source_scan' | 'full_safe_run',
+    execution?: AutomationExecutionBudget,
 ): Promise<Record<string, unknown>> {
   execution?.throwIfAborted();
   if (job.dryRun) return dryRunPreview(job);
@@ -302,8 +372,8 @@ async function executeAutoPilotJob(
     const settings = await getAutomationSettings();
     const operationMode = selectOperationMode(await countPublicProductsBounded());
     const deadline = Math.min(
-      Date.now() + settings.maxRunDurationMs,
-      execution?.deadline || Number.POSITIVE_INFINITY,
+        Date.now() + settings.maxRunDurationMs,
+        execution?.deadline || Number.POSITIVE_INFINITY,
     );
     const scan = await scanSourcesToQueue(operationMode, deadline, {
       runId: `automation-job:${job.id}:attempt:${job.attemptCount}`,
@@ -312,13 +382,13 @@ async function executeAutoPilotJob(
     execution?.throwIfAborted();
     await assertKillSwitchInactive();
     const bridge = mode === 'full_safe_run' && Date.now() < deadline
-      ? await bridgeCandidatesToDurableJobs({ parentJobId: job.id, requestedBy: 'autopilot-worker', limit: settings.maxItemsPerRun })
-      : null;
+        ? await bridgeCandidatesToDurableJobs({ parentJobId: job.id, requestedBy: 'autopilot-worker', limit: settings.maxItemsPerRun })
+        : null;
     const failed = scan.failed;
     const completedSteps = ['runtime-preflight', 'source-budget-check', 'source-discovery', 'candidate-ingestion'];
     const pendingSteps = bridge?.jobs.length
-      ? ['classification', 'normalization', 'evidence-capture', 'health-validation', 'duplicate-resolution', 'price-verification', 'scoring', 'content-preparation', 'editorial-validation', 'readiness-evaluation', 'autonomous-publish-or-quarantine', 'monitoring-schedule', 'cycle-summary']
-      : [];
+        ? ['classification', 'normalization', 'evidence-capture', 'health-validation', 'duplicate-resolution', 'price-verification', 'scoring', 'content-preparation', 'editorial-validation', 'readiness-evaluation', 'autonomous-publish-or-quarantine', 'monitoring-schedule', 'cycle-summary']
+        : [];
     const result = {
       executionStatus: failed > 0 || pendingSteps.length ? 'PARTIALLY_COMPLETED' : 'COMPLETED_WITH_LOCAL_RULES',
       executionMode: 'LOCAL_RULES',
@@ -368,27 +438,27 @@ async function executeAutoPilotJob(
 }
 
 async function executeLocalIntelligenceJob(
-  job: AutomationJob,
-  execution?: AutomationExecutionBudget,
+    job: AutomationJob,
+    execution?: AutomationExecutionBudget,
 ): Promise<Record<string, unknown>> {
   const output = await executeProductIntelligenceJob(job, {
     signal: execution?.signal,
     deadline: execution?.deadline,
   });
   const executionMode: ActualExecutionMode = job.dryRun
-    ? 'SHADOW_MODE'
-    : job.type === 'PREPARE_CONTENT_DRAFT'
-      ? 'LOCAL_TEMPLATE'
-      : 'LOCAL_RULES';
+      ? 'SHADOW_MODE'
+      : job.type === 'PREPARE_CONTENT_DRAFT'
+          ? 'LOCAL_TEMPLATE'
+          : 'LOCAL_RULES';
   return {
     ...output,
     executionStatus: output.executionStatus === 'PARTIALLY_COMPLETED'
-      ? 'PARTIALLY_COMPLETED'
-      : job.dryRun
-      ? 'COMPLETED_WITH_LOCAL_RULES'
-      : executionMode === 'LOCAL_TEMPLATE'
-        ? 'COMPLETED_WITH_LOCAL_TEMPLATE'
-        : 'COMPLETED_WITH_LOCAL_RULES',
+        ? 'PARTIALLY_COMPLETED'
+        : job.dryRun
+            ? 'COMPLETED_WITH_LOCAL_RULES'
+            : executionMode === 'LOCAL_TEMPLATE'
+                ? 'COMPLETED_WITH_LOCAL_TEMPLATE'
+                : 'COMPLETED_WITH_LOCAL_RULES',
     executionMode,
     provider: 'local',
     rulesVersion: executionMode === 'LOCAL_RULES' ? 'product-intelligence-v1' : undefined,
@@ -400,10 +470,10 @@ async function executeLocalIntelligenceJob(
 }
 
 async function executeEvidenceAnalysis(
-  job: AutomationJob,
-  workerId: string,
-  ownership?: RuntimeRoleOwnership,
-  execution?: AutomationExecutionBudget,
+    job: AutomationJob,
+    workerId: string,
+    ownership?: RuntimeRoleOwnership,
+    execution?: AutomationExecutionBudget,
 ): Promise<Record<string, unknown>> {
   execution?.throwIfAborted();
   if (job.dryRun) {
@@ -421,15 +491,15 @@ async function executeEvidenceAnalysis(
   await assertKillSwitchInactive();
   execution?.throwIfAborted();
   const evidenceProductIds = Array.isArray(job.payload.productIds)
-    ? job.payload.productIds.map(value => String(value || '')).filter(Boolean).slice(0, 100)
-    : typeof job.payload.productId === 'string' ? [job.payload.productId] : [];
+      ? job.payload.productIds.map(value => String(value || '')).filter(Boolean).slice(0, 100)
+      : typeof job.payload.productId === 'string' ? [job.payload.productId] : [];
   if (evidenceProductIds.length) {
     const evidenceProducts = await readProductsByIdsBounded(evidenceProductIds);
     execution?.throwIfAborted();
     const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
     if (evidenceProducts.some(product => product!.publicBlocked === true
-      || !goodHealth.has(String(product!.linkHealthStatus || product!.productHealthStatus || ''))
-      || !goodHealth.has(String(product!.affiliateHealthStatus || '')))) {
+        || !goodHealth.has(String(product!.linkHealthStatus || product!.productHealthStatus || ''))
+        || !goodHealth.has(String(product!.affiliateHealthStatus || '')))) {
       throw new Error('URL_HEALTH_BLOCKED_BEFORE_AI');
     }
   }
@@ -474,10 +544,10 @@ async function executeEvidenceAnalysis(
     });
     execution?.throwIfAborted();
     const updatedAnalysis = await updateAutomationJobExecution(
-      job.id,
-      workerId,
-      { executionMode: 'MANUAL_INPUT', outcomeStatus: 'PARTIALLY_COMPLETED', checkpoint, disclosure: completedDisclosure },
-      claimMutationGuard(job, ownership),
+        job.id,
+        workerId,
+        { executionMode: 'MANUAL_INPUT', outcomeStatus: 'PARTIALLY_COMPLETED', checkpoint, disclosure: completedDisclosure },
+        claimMutationGuard(job, ownership),
     );
     if (!updatedAnalysis) throw new Error('WORKER_FENCING_REJECTED');
     execution?.throwIfAborted();
@@ -533,10 +603,10 @@ async function executeEvidenceAnalysis(
     missingInformation: ['Phân tích có liên kết evidence fact rõ ràng.'],
     questions: ['Tóm tắt phân tích nào được dữ kiện hiện có hỗ trợ?', 'Những giới hạn nào cần hiển thị công khai?'],
     expectedInputSchema: { version: 1, fields: [
-      { name: 'analysisSummary', label: 'Bản nháp phân tích', type: 'string', required: true, maximumLength: 2_000 },
-      { name: 'evidenceFactIds', label: 'Mã dữ kiện bằng chứng', type: 'string_array', required: true, maximumLength: 120 },
-      { name: 'limitations', label: 'Giới hạn cần công bố', type: 'string_array', required: true, maximumLength: 300 },
-    ] },
+        { name: 'analysisSummary', label: 'Bản nháp phân tích', type: 'string', required: true, maximumLength: 2_000 },
+        { name: 'evidenceFactIds', label: 'Mã dữ kiện bằng chứng', type: 'string_array', required: true, maximumLength: 120 },
+        { name: 'limitations', label: 'Giới hạn cần công bố', type: 'string_array', required: true, maximumLength: 300 },
+      ] },
     validationRules: ['Claim quan trọng thiếu evidence sẽ giữ trạng thái UNVERIFIED.', 'Dữ liệu thủ công không tự phê duyệt hoặc đăng.'],
     risk: 'MEDIUM',
     approvalRequired: false,
@@ -568,22 +638,22 @@ async function executeEvidenceAnalysis(
   });
   execution?.throwIfAborted();
   const waiting = await waitAutomationJobForManual(
-    job.id,
-    workerId,
-    task.id,
-    checkpoint,
-    waitingDisclosure,
-    claimMutationGuard(job, ownership),
+      job.id,
+      workerId,
+      task.id,
+      checkpoint,
+      waitingDisclosure,
+      claimMutationGuard(job, ownership),
   );
   if (!waiting) throw new Error('MANUAL_WAIT_TRANSITION_FAILED');
   return { waitingForManualInput: true, taskId: task.id, executionStatus: 'WAITING_FOR_MANUAL_INPUT' };
 }
 
 async function executeJob(
-  job: AutomationJob,
-  workerId: string,
-  ownership?: RuntimeRoleOwnership,
-  execution?: AutomationExecutionBudget,
+    job: AutomationJob,
+    workerId: string,
+    ownership?: RuntimeRoleOwnership,
+    execution?: AutomationExecutionBudget,
 ): Promise<Record<string, unknown>> {
   execution?.throwIfAborted();
   switch (job.type) {
@@ -611,46 +681,46 @@ async function executeJob(
           sourceRevision: previousManifest?.sourceRevision || null,
         }).catch(() => null);
         const manifest = await rebuildAutomationJobReadModelsFromDurable(
-          null,
-          Date.now(),
-          {
-            owner: {
-              repairId: job.id,
-              ownerId: ownership?.ownerId || workerId,
-              ownerInstanceId: ownership?.instanceId || workerId,
-              workerFencingToken: ownership?.fencingToken || 0,
-              claimToken: job.claimToken || '',
-              attemptNumber: Math.max(1, job.attemptCount),
-              supersede: job.attemptCount > 1,
+            null,
+            Date.now(),
+            {
+              owner: {
+                repairId: job.id,
+                ownerId: ownership?.ownerId || workerId,
+                ownerInstanceId: ownership?.instanceId || workerId,
+                workerFencingToken: ownership?.fencingToken || 0,
+                claimToken: job.claimToken || '',
+                attemptNumber: Math.max(1, job.attemptCount),
+                supersede: job.attemptCount > 1,
+              },
+              authorizePublication: async () => {
+                if (execution?.signal.aborted) return false;
+                if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) return false;
+                const claimedRepair = await getAutomationJobAuthoritySnapshot(job.id);
+                return Boolean(
+                    claimedRepair
+                    && claimedRepair.status === 'RUNNING'
+                    && claimedRepair.claimedBy === workerId
+                    && claimedRepair.claimToken === job.claimToken
+                    && (!ownership || (
+                        claimedRepair.workerInstanceId === ownership.instanceId
+                        && claimedRepair.workerFencingToken === ownership.fencingToken
+                    ))
+                    && claimedRepair.attemptCount === job.attemptCount
+                    && (!job.releaseId || claimedRepair.releaseId === job.releaseId),
+                );
+              },
+              onPhase: async ({ phase, lastFailureReason }) => {
+                if (phase === 'COMPLETED' || phase === 'FAILED' || phase === 'SUPERSEDED') return;
+                await markJobHealthProjectionMaintenance({
+                  jobId: job.id,
+                  status: 'RUNNING',
+                  phase,
+                  attemptNumber: job.attemptCount,
+                  reasonCode: lastFailureReason || `JOB_HEALTH_PROJECTION_REPAIR_${phase}`,
+                }).catch(() => null);
+              },
             },
-            authorizePublication: async () => {
-              if (execution?.signal.aborted) return false;
-              if (ownership && !await isRuntimeRoleOwner('WORKER', ownership)) return false;
-              const claimedRepair = await getAutomationJobAuthoritySnapshot(job.id);
-              return Boolean(
-                claimedRepair
-                && claimedRepair.status === 'RUNNING'
-                && claimedRepair.claimedBy === workerId
-                && claimedRepair.claimToken === job.claimToken
-                && (!ownership || (
-                  claimedRepair.workerInstanceId === ownership.instanceId
-                  && claimedRepair.workerFencingToken === ownership.fencingToken
-                ))
-                && claimedRepair.attemptCount === job.attemptCount
-                && (!job.releaseId || claimedRepair.releaseId === job.releaseId),
-              );
-            },
-            onPhase: async ({ phase, lastFailureReason }) => {
-              if (phase === 'COMPLETED' || phase === 'FAILED' || phase === 'SUPERSEDED') return;
-              await markJobHealthProjectionMaintenance({
-                jobId: job.id,
-                status: 'RUNNING',
-                phase,
-                attemptNumber: job.attemptCount,
-                reasonCode: lastFailureReason || `JOB_HEALTH_PROJECTION_REPAIR_${phase}`,
-              }).catch(() => null);
-            },
-          },
         );
         execution?.throwIfAborted();
         return {
@@ -739,10 +809,10 @@ async function executeJob(
 }
 
 async function processAutomationBatchInternal(
-  workerId: string,
-  limit = 2,
-  ownership?: RuntimeRoleOwnership,
-  options: WorkerBatchOptions = {},
+    workerId: string,
+    limit = 2,
+    ownership?: RuntimeRoleOwnership,
+    options: WorkerBatchOptions = {},
 ): Promise<WorkerRunResult> {
   const cycleStartedAt = Date.now();
   const storageBefore = getStorageDiagnosticsSnapshot();
@@ -763,12 +833,7 @@ async function processAutomationBatchInternal(
     await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId }, workerId);
   }
   if (!ownership || await isRuntimeRoleOwner('WORKER', ownership)) {
-    await materializeJobHealthProjectionMaintenanceRequest().catch(error => {
-      console.error(JSON.stringify({
-        type: 'job_health_projection_request_materialization_failed',
-        reasonCode: errorCode(error),
-      }));
-    });
+    await maybeMaterializeJobHealthProjectionMaintenance();
   }
   const jobLeaseMs = normalizeAutomationJobLeaseMs(options.jobLeaseMs);
   const claimed = await claimAutomationJobs(workerId, limit, jobLeaseMs, Date.now(), ownership, options);
@@ -779,32 +844,57 @@ async function processAutomationBatchInternal(
   interface ClaimedJobLifecycle {
     execution: AutomationExecutionBudget;
     renewal: AutomationJobLeaseRenewalHandle;
+    readonly authorityLostReason?: AutomationJobLeaseLossReason;
   }
   const claimedJobLifecycles = new Map<string, ClaimedJobLifecycle>();
+  const activityRegistry = options.activityRegistry || createWorkerActivityRegistry();
+  const { activeJobIds } = activityRegistry;
   for (const job of claimed) {
     const execution = createAutomationExecutionBudget(job.type, options.shutdownSignal);
+    let authorityLostReason: AutomationJobLeaseLossReason | undefined;
     const renewal = startAutomationJobLeaseRenewal({
       leaseMs: jobLeaseMs,
       initialLeaseExpiresAt: job.leaseExpiresAt,
       parentSignal: execution.signal,
       runtime: options.leaseRenewalRuntime,
       renew: () => renewAutomationJobClaimLease(
-        job.id,
-        workerId,
-        jobLeaseMs,
-        claimMutationGuard(job, ownership),
-        options.leaseRenewalRuntime?.now() ?? Date.now(),
+          job.id,
+          workerId,
+          jobLeaseMs,
+          claimMutationGuard(job, ownership),
+          options.leaseRenewalRuntime?.now() ?? Date.now(),
       ),
-      onAuthorityLost: () => execution.abort('WORKER_FENCING_REJECTED'),
+      onAuthorityLost: reasonCode => {
+        authorityLostReason = reasonCode;
+        execution.abort('WORKER_FENCING_REJECTED');
+      },
       onEvent: (event, eventInput) => {
         logAutomationJobEvent(event, job, {
           workerId,
           reasonCode: eventInput.reasonCode,
           durationMs: eventInput.delayMs,
         });
+        if (eventInput.errorCode) {
+          console.error(JSON.stringify({
+            type: 'automation_job_lease_renewal_diagnostic',
+            jobId: job.id,
+            workerId,
+            event,
+            reasonCode: eventInput.reasonCode,
+            errorCode: eventInput.errorCode,
+            consecutiveFailures: eventInput.consecutiveFailures,
+            delayMs: eventInput.delayMs,
+          }));
+        }
       },
     });
-    claimedJobLifecycles.set(job.id, { execution, renewal });
+    claimedJobLifecycles.set(job.id, {
+      execution,
+      renewal,
+      get authorityLostReason() {
+        return authorityLostReason;
+      },
+    });
   }
 
   const runClaimedJob = async (job: AutomationJob): Promise<void> => {
@@ -823,12 +913,12 @@ async function processAutomationBatchInternal(
         result.skipped += 1;
         return;
       }
-      execution?.throwIfAborted();
+      execution.throwIfAborted();
       if (job.type === 'PROCESS_CANDIDATE') await releaseProductProcessingCapacity(productProcessingReservationKey(job));
       result.skipped += 1;
       return;
     }
-    await updateAutomationControl({ workerHeartbeatAt: new Date().toISOString(), workerId, workerCurrentJobId: job.id }, workerId);
+    await queueWorkerActivityControlUpdate(activityRegistry, workerId, job.id);
     let workerFencingRejected = false;
     let businessExecutionStarted = false;
     let infrastructureDeferred = false;
@@ -848,8 +938,8 @@ async function processAutomationBatchInternal(
       }
       businessExecutionStarted = job.type === 'PROCESS_CANDIDATE';
       const output = options.executeJobOverride
-        ? await options.executeJobOverride(job, { signal: execution.signal, deadline: execution.deadline })
-        : await executeJob(job, workerId, ownership, execution);
+          ? await options.executeJobOverride(job, { signal: execution.signal, deadline: execution.deadline })
+          : await executeJob(job, workerId, ownership, execution);
       execution.throwIfAborted();
       if (renewal.authorityLost || (ownership && !await isRuntimeRoleOwner('WORKER', ownership))) throw new Error('WORKER_FENCING_REJECTED');
       const latest = await getAutomationJobAuthoritySnapshot(job.id);
@@ -860,49 +950,49 @@ async function processAutomationBatchInternal(
       if (latest?.status === 'CANCELLED') { result.skipped += 1; return; }
       if (latest?.status === 'WAITING_FOR_MANUAL_INPUT') { result.waitingManual += 1; return; }
       if (!latest
-        || latest.claimedBy !== workerId
-        || latest.claimToken !== job.claimToken
-        || latest.attemptCount !== job.attemptCount
-        || (job.releaseId && latest.releaseId !== job.releaseId)
-        || (ownership && (
-          latest.workerOwnerId !== ownership.ownerId
-          || latest.workerInstanceId !== ownership.instanceId
-          || latest.workerFencingToken !== ownership.fencingToken
-        ))) {
+          || latest.claimedBy !== workerId
+          || latest.claimToken !== job.claimToken
+          || latest.attemptCount !== job.attemptCount
+          || (job.releaseId && latest.releaseId !== job.releaseId)
+          || (ownership && (
+              latest.workerOwnerId !== ownership.ownerId
+              || latest.workerInstanceId !== ownership.instanceId
+              || latest.workerFencingToken !== ownership.fencingToken
+          ))) {
         throw new Error('WORKER_FENCING_REJECTED');
       }
       const rawMode = output.executionMode;
       const executionMode: ActualExecutionMode = ['API', 'LOCAL_RULES', 'LOCAL_TEMPLATE', 'MANUAL_INPUT', 'SHADOW_MODE'].includes(String(rawMode))
-        ? rawMode as ActualExecutionMode
-        : job.dryRun
-          ? 'SHADOW_MODE'
-          : 'LOCAL_RULES';
+          ? rawMode as ActualExecutionMode
+          : job.dryRun
+              ? 'SHADOW_MODE'
+              : 'LOCAL_RULES';
       const rawStatus = String(output.executionStatus || '');
       const outcomeStatus = rawStatus === 'PARTIALLY_COMPLETED'
-        ? 'PARTIALLY_COMPLETED' as const
-        : executionMode === 'API'
-          ? 'COMPLETED_WITH_API' as const
-          : executionMode === 'LOCAL_TEMPLATE'
-            ? 'COMPLETED_WITH_LOCAL_TEMPLATE' as const
-            : executionMode === 'MANUAL_INPUT'
-              ? 'COMPLETED_WITH_MANUAL_INPUT' as const
-              : 'COMPLETED_WITH_LOCAL_RULES' as const;
+          ? 'PARTIALLY_COMPLETED' as const
+          : executionMode === 'API'
+              ? 'COMPLETED_WITH_API' as const
+              : executionMode === 'LOCAL_TEMPLATE'
+                  ? 'COMPLETED_WITH_LOCAL_TEMPLATE' as const
+                  : executionMode === 'MANUAL_INPUT'
+                      ? 'COMPLETED_WITH_MANUAL_INPUT' as const
+                      : 'COMPLETED_WITH_LOCAL_RULES' as const;
       const completedAt = new Date().toISOString();
       const reportedCompletedSteps = Array.isArray(output.completedSteps) ? output.completedSteps.filter((item): item is string => typeof item === 'string') : null;
       const reportedPendingSteps = Array.isArray(output.pendingSteps) ? output.pendingSteps.filter((item): item is string => typeof item === 'string') : null;
       const completedPlan = (job.executionPlan || startedPlan).map(step => ({
         ...step,
         status: reportedPendingSteps?.includes(step.id)
-          ? 'PENDING' as const
-          : reportedCompletedSteps
-            ? reportedCompletedSteps.includes(step.id) ? 'COMPLETED' as const : 'SKIPPED' as const
-            : step.status === 'SKIPPED' ? 'SKIPPED' as const : 'COMPLETED' as const,
+            ? 'PENDING' as const
+            : reportedCompletedSteps
+                ? reportedCompletedSteps.includes(step.id) ? 'COMPLETED' as const : 'SKIPPED' as const
+                : step.status === 'SKIPPED' ? 'SKIPPED' as const : 'COMPLETED' as const,
       }));
       const completedSteps = completedPlan.filter(step => step.status === 'COMPLETED').map(step => step.id);
       const pendingSteps = reportedPendingSteps
-        || (outcomeStatus === 'PARTIALLY_COMPLETED' && job.checkpoint?.pendingSteps.length
-          ? job.checkpoint.pendingSteps
-          : []);
+          || (outcomeStatus === 'PARTIALLY_COMPLETED' && job.checkpoint?.pendingSteps.length
+              ? job.checkpoint.pendingSteps
+              : []);
       const progressTotal = Math.max(1, completedSteps.length + pendingSteps.length);
       const progressPercentage = Math.floor((completedSteps.length / progressTotal) * 100);
       const finalExecution = await updateAutomationJobExecution(job.id, workerId, {
@@ -945,10 +1035,10 @@ async function processAutomationBatchInternal(
       await renewal.stop();
       if (outcomeStatus === 'PARTIALLY_COMPLETED' && pendingSteps.length) {
         const waiting = await waitAutomationJobForChildren(
-          job.id,
-          workerId,
-          output,
-          claimMutationGuard(job, ownership),
+            job.id,
+            workerId,
+            output,
+            claimMutationGuard(job, ownership),
         );
         if (waiting) result.waitingChildren += 1;
         else {
@@ -959,10 +1049,10 @@ async function processAutomationBatchInternal(
         return;
       }
       const completed = await completeAutomationJob(
-        job.id,
-        workerId,
-        output,
-        claimMutationGuard(job, ownership),
+          job.id,
+          workerId,
+          output,
+          claimMutationGuard(job, ownership),
       );
       if (completed) {
         result.succeeded += 1;
@@ -974,12 +1064,12 @@ async function processAutomationBatchInternal(
             attemptNumber: job.attemptCount,
             reasonCode: 'JOB_HEALTH_PROJECTION_REBUILD_SUCCEEDED',
             sourceRevision: typeof output.repairSourceRevision === 'string'
-              ? output.repairSourceRevision
-              : null,
+                ? output.repairSourceRevision
+                : null,
             resultRevision: typeof output.sourceRevision === 'string' ? output.sourceRevision : null,
             resultFingerprint: typeof output.projectionFingerprint === 'string'
-              ? output.projectionFingerprint
-              : null,
+                ? output.projectionFingerprint
+                : null,
           }).catch(error => {
             console.error(JSON.stringify({
               type: 'job_health_projection_maintenance_record_failed',
@@ -1007,10 +1097,18 @@ async function processAutomationBatchInternal(
       }
       const projectionMaintenance = job.payload.maintenanceTask === 'JOB_HEALTH_PROJECTION_REBUILD';
       const code = projectionMaintenance ? projectionMaintenanceErrorCode(effectiveError) : errorCode(effectiveError);
+      if (code === 'WORKER_FENCING_REJECTED' && lifecycle.authorityLostReason) {
+        console.error(JSON.stringify({
+          type: 'automation_job_lease_authority_lost',
+          jobId: job.id,
+          workerId,
+          reasonCode: lifecycle.authorityLostReason,
+        }));
+      }
       if (code === 'WORKER_FENCING_REJECTED'
-        || code === 'JOB_CANCELLED'
-        || code === 'KILL_SWITCH_ACTIVE'
-        || code === 'WORKER_SHUTDOWN_REQUESTED') {
+          || code === 'JOB_CANCELLED'
+          || code === 'KILL_SWITCH_ACTIVE'
+          || code === 'WORKER_SHUTDOWN_REQUESTED') {
         workerFencingRejected = true;
         execution.abort(code as 'WORKER_FENCING_REJECTED' | 'JOB_CANCELLED' | 'KILL_SWITCH_ACTIVE' | 'WORKER_SHUTDOWN_REQUESTED');
         await renewal.stop();
@@ -1025,14 +1123,14 @@ async function processAutomationBatchInternal(
         execution.abort('STORAGE_LOCK_CONTENTION');
         await renewal.stop();
         await deferAutomationJobForInfrastructure(job.id, workerId, code, effectiveError, claimMutationGuard(job, ownership))
-          .catch(deferError => {
-            if (errorCode(deferError) === 'WORKER_FENCING_REJECTED') workerFencingRejected = true;
-            console.error(JSON.stringify({
-              type: 'automation_job_infrastructure_defer_failed',
-              jobId: job.id,
-              reasonCode: errorCode(deferError),
-            }));
-          });
+            .catch(deferError => {
+              if (errorCode(deferError) === 'WORKER_FENCING_REJECTED') workerFencingRejected = true;
+              console.error(JSON.stringify({
+                type: 'automation_job_infrastructure_defer_failed',
+                jobId: job.id,
+                reasonCode: errorCode(deferError),
+              }));
+            });
         logAutomationJobEvent('job_skipped', job, { workerId, reasonCode: 'STORAGE_LOCK_CONTENTION' });
         result.skipped += 1;
         return;
@@ -1042,9 +1140,9 @@ async function processAutomationBatchInternal(
         errorCategory: errorCategory(code),
         nextRetryAt: effectiveError instanceof CandidateRetryScheduledError ? effectiveError.nextRetryAt : undefined,
         result: effectiveError && typeof effectiveError === 'object' && (effectiveError as { result?: unknown }).result
-          && typeof (effectiveError as { result?: unknown }).result === 'object'
-          ? (effectiveError as { result: Record<string, unknown> }).result
-          : undefined,
+        && typeof (effectiveError as { result?: unknown }).result === 'object'
+            ? (effectiveError as { result: Record<string, unknown> }).result
+            : undefined,
         ...claimMutationGuard(job, ownership),
       });
       if (!failedJob) {
@@ -1061,8 +1159,8 @@ async function processAutomationBatchInternal(
           attemptNumber: failedJob.attemptCount,
           nextRetryAt: failedJob.nextRetryAt || null,
           reasonCode: effectiveError instanceof Error
-            ? effectiveError.message
-            : 'JOB_HEALTH_PROJECTION_REBUILD_FAILED',
+              ? effectiveError.message
+              : 'JOB_HEALTH_PROJECTION_REBUILD_FAILED',
         }).catch(recordError => {
           console.error(JSON.stringify({
             type: 'job_health_projection_maintenance_record_failed',
@@ -1073,41 +1171,61 @@ async function processAutomationBatchInternal(
       }
       result.failed += 1;
     } finally {
-      if (job.type === 'PROCESS_CANDIDATE' && !workerFencingRejected) {
-        if (businessExecutionStarted) await commitProductProcessingCapacity(productProcessingReservationKey(job), 1);
-        else await releaseProductProcessingCapacity(productProcessingReservationKey(job));
-      }
-      if (!workerFencingRejected) {
-        const remainingJob = (await getAutomationJobHealthView()).runningJobs.find(item =>
-          item.claimedBy === workerId && item.id !== job.id);
-        await updateAutomationControl({
-          workerHeartbeatAt: new Date().toISOString(),
-          workerId,
-          workerCurrentJobId: remainingJob?.id,
-        }, workerId).catch(error => {
-          console.error(JSON.stringify({
-            type: 'automation_worker_control_heartbeat_failed',
-            workerId,
-            reasonCode: errorCode(error),
-            infrastructureDeferred,
-          }));
-        });
+      // Remove this job before calculating workerCurrentJobId. The registry may
+      // be shared by several pool slots, so another still-running job must stay
+      // visible when this slot completes.
+      activeJobIds.delete(job.id);
+      try {
+        if (job.type === 'PROCESS_CANDIDATE' && !workerFencingRejected) {
+          if (businessExecutionStarted) await commitProductProcessingCapacity(productProcessingReservationKey(job), 1);
+          else await releaseProductProcessingCapacity(productProcessingReservationKey(job));
+        }
+      } finally {
+        if (!workerFencingRejected) {
+          await queueWorkerActivityControlUpdate(activityRegistry, workerId).catch(error => {
+            console.error(JSON.stringify({
+              type: 'automation_worker_control_heartbeat_failed',
+              workerId,
+              reasonCode: errorCode(error),
+              infrastructureDeferred,
+            }));
+          });
+        }
       }
     }
   };
   const processJob = async (job: AutomationJob): Promise<void> => {
     const lifecycle = claimedJobLifecycles.get(job.id);
     if (!lifecycle) throw new Error('JOB_LEASE_LIFECYCLE_MISSING');
+    activeJobIds.add(job.id);
+    let runError: unknown;
     try {
       await runClaimedJob(job);
+    } catch (error) {
+      runError = error;
+      throw error;
     } finally {
+      // Paths before runClaimedJob's guarded try/finally (for example an
+      // ownership preflight rejection or kill-switch exit) still need to
+      // unregister this slot. Never write control state after fencing loss.
+      const activityWasStillRegistered = activeJobIds.delete(job.id);
+      if (activityWasStillRegistered && errorCode(runError) !== 'WORKER_FENCING_REJECTED') {
+        await queueWorkerActivityControlUpdate(activityRegistry, workerId).catch(error => {
+          console.error(JSON.stringify({
+            type: 'automation_worker_control_heartbeat_failed',
+            workerId,
+            reasonCode: errorCode(error),
+            infrastructureDeferred: false,
+          }));
+        });
+      }
       await lifecycle.renewal.stop();
       lifecycle.execution.dispose();
       claimedJobLifecycles.delete(job.id);
     }
   };
   // The legacy bounded batch remains intentionally sequential for mixed
-  // storage-sensitive work.  Execute the critical subset first so a critical
+  // storage-sensitive work. Execute the critical subset first so a critical
   // job already claimed alongside a long normal job never suffers local
   // head-of-line blocking. New-arrival isolation is handled by the pooled V3
   // critical lane below when that rollout is ACTIVE.
@@ -1162,10 +1280,10 @@ async function processAutomationBatchInternal(
 }
 
 export async function processAutomationBatch(
-  workerId: string,
-  limit = 2,
-  ownership?: RuntimeRoleOwnership,
-  options: WorkerBatchOptions = {},
+    workerId: string,
+    limit = 2,
+    ownership?: RuntimeRoleOwnership,
+    options: WorkerBatchOptions = {},
 ): Promise<WorkerRunResult> {
   return withAutomationCycleReadModel(() => processAutomationBatchInternal(workerId, limit, ownership, options));
 }
@@ -1205,23 +1323,23 @@ export async function runContinuousWorkerPool(options: {
    */
   priorityScheduling?: 'RUNTIME_GUARDIAN_ONLY' | 'ALL_CRITICAL';
   runBatch?: (
-    workerId: string,
-    ownership: RuntimeRoleOwnership | undefined,
-    batchOptions: WorkerBatchOptions,
+      workerId: string,
+      ownership: RuntimeRoleOwnership | undefined,
+      batchOptions: WorkerBatchOptions,
   ) => Promise<WorkerRunResult>;
 }): Promise<ContinuousWorkerPoolResult> {
   const maxConcurrency = boundedPoolValue(options.maxConcurrency, 1, 1, 32);
   const maximumClaims = boundedPoolValue(options.maximumClaims, maxConcurrency, 1, 1_000);
   const criticalReservedCapacity = maxConcurrency > 1
-    ? boundedPoolValue(options.criticalReservedCapacity, 1, 0, maxConcurrency - 1)
-    : 0;
+      ? boundedPoolValue(options.criticalReservedCapacity, 1, 0, maxConcurrency - 1)
+      : 0;
   const drainTimeoutMs = boundedPoolValue(options.drainTimeoutMs, 12_000, 1_000, 60_000);
   const stopPollMs = boundedPoolValue(options.stopPollMs, 250, 10, 1_000);
   const lanePollMs = boundedPoolValue(options.lanePollMs, 2_000, 100, 10_000);
   const laneMaximumPollMs = boundedPoolValue(options.laneMaximumPollMs, 10_000, lanePollMs, 30_000);
   const priorityScheduling = options.priorityScheduling === 'ALL_CRITICAL'
-    ? 'ALL_CRITICAL'
-    : 'RUNTIME_GUARDIAN_ONLY';
+      ? 'ALL_CRITICAL'
+      : 'RUNTIME_GUARDIAN_ONLY';
   const aggregate: ContinuousWorkerPoolResult = {
     workerId: options.workerId,
     claimed: 0,
@@ -1240,8 +1358,9 @@ export async function runContinuousWorkerPool(options: {
     stopRequested: false,
     priorityScheduling,
   };
+  const activityRegistry = createWorkerActivityRegistry();
   const runBatch = options.runBatch || ((workerId, ownership, batchOptions) =>
-    processAutomationBatch(workerId, 1, ownership, batchOptions));
+      processAutomationBatch(workerId, 1, ownership, batchOptions));
   type WorkerPoolLane = AutomationWorkerClaimLane;
   type ActiveWorkerSlot = {
     lane: WorkerPoolLane;
@@ -1253,7 +1372,7 @@ export async function runContinuousWorkerPool(options: {
     }>;
   };
   const lanes: Array<{ lane: WorkerPoolLane; capacity: number }> = criticalReservedCapacity > 0
-    ? [
+      ? [
         {
           lane: priorityScheduling === 'ALL_CRITICAL' ? 'CRITICAL' : 'RUNTIME_GUARDIAN',
           capacity: criticalReservedCapacity,
@@ -1263,7 +1382,7 @@ export async function runContinuousWorkerPool(options: {
           capacity: maxConcurrency - criticalReservedCapacity,
         },
       ]
-    : [{ lane: 'ANY', capacity: maxConcurrency }];
+      : [{ lane: 'ANY', capacity: maxConcurrency }];
   const active = new Map<number, ActiveWorkerSlot>();
   const laneObservedEmpty = new Map<WorkerPoolLane, boolean>(lanes.map(item => [item.lane, false]));
   const laneNextProbeAt = new Map<WorkerPoolLane, number>(lanes.map(item => [item.lane, 0]));
@@ -1274,7 +1393,7 @@ export async function runContinuousWorkerPool(options: {
   let stopObservedAt: number | undefined;
 
   const activeInLane = (lane: WorkerPoolLane) =>
-    [...active.values()].filter(slot => slot.lane === lane).length;
+      [...active.values()].filter(slot => slot.lane === lane).length;
 
   const startClaim = (lane: WorkerPoolLane) => {
     const slotId = nextSlotId;
@@ -1292,9 +1411,10 @@ export async function runContinuousWorkerPool(options: {
       preferCritical: priorityScheduling === 'ALL_CRITICAL',
       preferProductCritical: lane === 'NON_GUARDIAN' || lane === 'NON_CRITICAL',
       shutdownSignal: options.shutdownSignal,
+      activityRegistry,
     }).then(
-      result => ({ slotId, lane, result }),
-      error => ({ slotId, lane, error }),
+        result => ({ slotId, lane, result }),
+        error => ({ slotId, lane, error }),
     );
     active.set(slotId, { lane, promise });
     aggregate.peakInFlight = Math.max(aggregate.peakInFlight, active.size);
@@ -1313,7 +1433,7 @@ export async function runContinuousWorkerPool(options: {
         if (remainingClaimAttempts <= 0) break;
         const laneIsEmpty = laneObservedEmpty.get(lane.lane) === true;
         const canProbe = !laneIsEmpty
-          || (active.size > 0 && nowMs >= (laneNextProbeAt.get(lane.lane) || 0));
+            || (active.size > 0 && nowMs >= (laneNextProbeAt.get(lane.lane) || 0));
         if (!canProbe) continue;
         const availableLaneSlots = Math.max(0, lane.capacity - activeInLane(lane.lane));
         const launchCount = Math.min(availableLaneSlots, remainingClaimAttempts);
