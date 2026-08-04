@@ -598,6 +598,44 @@ async function main() {
     assert.equal(database.commits, 1);
   });
 
+  await test('commit guards span normal and streaming Mongo visibility commits', async () => {
+    const database = new FakeDatabase();
+    const adapter = createMongoStorageAdapter(config, new FakeConnection(database));
+    await adapter.writeCollection('products', [{ id: 'guarded', value: 1 }]);
+    const phases = [];
+    const withCommitGuard = async (commit, context) => {
+      context.authorityAcquired();
+      phases.push('authority-acquired');
+      const before = await adapter.readCollection('products');
+      phases.push(`before:${before[0].value}`);
+      await commit();
+      const after = await adapter.readCollection('products');
+      phases.push(`after:${after[0].value}`);
+    };
+    await adapter.runTransaction('products', items => {
+      items[0].value = 2;
+      return items;
+    }, { withCommitGuard });
+    await adapter.runStreamingTransaction('products', item => {
+      item.value = 3;
+      return true;
+    }, { withCommitGuard });
+    assert.deepEqual(phases, [
+      'authority-acquired', 'before:1', 'after:2',
+      'authority-acquired', 'before:2', 'after:3',
+    ]);
+
+    const authorityError = new Error('WORKER_FENCING_REJECTED');
+    await assert.rejects(
+        () => adapter.runTransaction('products', items => {
+          items[0].value = 4;
+          return items;
+        }, { withCommitGuard: async () => { throw authorityError; } }),
+        error => error === authorityError,
+    );
+    assert.deepEqual(await adapter.readCollection('products'), [{ id: 'guarded', value: 3 }]);
+  });
+
   await test('streaming transaction visits every item and preserves fake-Mongo semantics', async () => {
     const database = new FakeDatabase();
     const adapter = createMongoStorageAdapter(config, new FakeConnection(database));

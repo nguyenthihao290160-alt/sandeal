@@ -34,6 +34,7 @@ import type {
   StorageStreamingTransaction,
   StorageStreamingTransactionOptions,
   StorageTransaction,
+  StorageTransactionOptions,
 } from './types';
 
 const TRANSACTION_ATTEMPTS = 2;
@@ -393,7 +394,11 @@ export class MongoStorageAdapter implements StorageAdapter {
     }
   }
 
-  async runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void> {
+  async runTransaction<T>(
+      collection: string,
+      fn: StorageTransaction<T>,
+      options: StorageTransactionOptions = {},
+  ): Promise<void> {
     const safeCollection = validateCollectionName(collection);
     const db = await this.database();
     const session = await this.session();
@@ -418,12 +423,39 @@ export class MongoStorageAdapter implements StorageAdapter {
 
       prepared = { revision: snapshot.revision, normalized: normalizeCollectionPayload(updated) };
       await writeRevision(db, session, safeCollection, prepared.revision, prepared.normalized);
-      await commitWithBoundedRetry(session);
+      try {
+        await options.beforeCommit?.();
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
+        throw error;
+      }
+      if (options.withCommitGuard) {
+        let commitCalls = 0;
+        let commitStarted = false;
+        try {
+          await options.withCommitGuard(async () => {
+            commitCalls += 1;
+            if (commitCalls !== 1) throw new Error('STORAGE_COMMIT_GUARD_MULTIPLE_COMMIT');
+            commitStarted = true;
+            await commitWithBoundedRetry(session);
+          }, { authorityAcquired: () => undefined });
+          if (commitCalls !== 1) throw new Error('STORAGE_COMMIT_GUARD_DID_NOT_COMMIT');
+        } catch (error) {
+          if (!commitStarted) {
+            callbackFailed = true;
+            callbackError = error;
+          }
+          throw error;
+        }
+      } else {
+        await commitWithBoundedRetry(session);
+      }
     } catch (error) {
       await abortIfActive(session);
       if (callbackFailed) throw callbackError;
       if (isStorageError(error)) throw error;
-      if (prepared && isTransientTransactionError(error)) {
+      if (prepared && !options.withCommitGuard && isTransientTransactionError(error)) {
         await this.commitPrepared(db, safeCollection, prepared.revision, prepared.normalized);
         return;
       }
@@ -549,31 +581,52 @@ export class MongoStorageAdapter implements StorageAdapter {
         callbackError = error;
         throw error;
       }
-      const updatedAt = new Date().toISOString();
-      if (expectedRevision === 0) {
+      let commitCalls = 0;
+      let commitStarted = false;
+      const commit = async (): Promise<void> => {
+        commitCalls += 1;
+        if (commitCalls !== 1) throw new Error('STORAGE_COMMIT_GUARD_MULTIPLE_COMMIT');
+        commitStarted = true;
+        const updatedAt = new Date().toISOString();
+        if (expectedRevision === 0) {
+          try {
+            await metadataCollection.insertOne({
+              _id: safeCollection,
+              kind: 'collection',
+              revision: nextRevision,
+              itemCount,
+              serializedBytes,
+              updatedAt,
+            }, { session });
+          } catch (error) {
+            if (isDuplicateKeyError(error)) throw storageError('MONGO_TRANSACTION_CONFLICT', error);
+            throw error;
+          }
+        } else {
+          const result = await metadataCollection.updateOne(
+              { _id: safeCollection, kind: 'collection', revision: expectedRevision },
+              { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
+              { session },
+          );
+          if (result.matchedCount !== 1) throw storageError('MONGO_TRANSACTION_CONFLICT');
+        }
+        await dataCollection.deleteMany({ revision: { $ne: nextRevision } }, { session });
+        await commitWithBoundedRetry(session);
+      };
+      if (options.withCommitGuard) {
         try {
-          await metadataCollection.insertOne({
-            _id: safeCollection,
-            kind: 'collection',
-            revision: nextRevision,
-            itemCount,
-            serializedBytes,
-            updatedAt,
-          }, { session });
+          await options.withCommitGuard(commit, { authorityAcquired: () => undefined });
+          if (commitCalls !== 1) throw new Error('STORAGE_COMMIT_GUARD_DID_NOT_COMMIT');
         } catch (error) {
-          if (isDuplicateKeyError(error)) throw storageError('MONGO_TRANSACTION_CONFLICT', error);
+          if (!commitStarted) {
+            callbackFailed = true;
+            callbackError = error;
+          }
           throw error;
         }
       } else {
-        const result = await metadataCollection.updateOne(
-            { _id: safeCollection, kind: 'collection', revision: expectedRevision },
-            { $set: { revision: nextRevision, itemCount, serializedBytes, updatedAt } },
-            { session },
-        );
-        if (result.matchedCount !== 1) throw storageError('MONGO_TRANSACTION_CONFLICT');
+        await commit();
       }
-      await dataCollection.deleteMany({ revision: { $ne: nextRevision } }, { session });
-      await commitWithBoundedRetry(session);
       return { changed: true, itemCount };
     } catch (error) {
       await abortIfActive(session);

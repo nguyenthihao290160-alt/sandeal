@@ -15,6 +15,7 @@ import type {
   StorageStreamingTransaction,
   StorageStreamingTransactionOptions,
   StorageTransaction,
+  StorageTransactionOptions,
 } from './types';
 
 export {
@@ -106,8 +107,9 @@ export function backupCollection(
 export function runTransaction<T>(
     collection: string,
     fn: StorageTransaction<T>,
+    options?: StorageTransactionOptions,
 ): Promise<void> {
-  return getStorageAdapter().runTransaction(collection, fn);
+  return getStorageAdapter().runTransaction(collection, fn, options);
 }
 
 export function runStreamingTransaction<T>(

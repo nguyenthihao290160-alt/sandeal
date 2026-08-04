@@ -15,6 +15,7 @@ const {
   isContinuousWorkerPoolEnabled,
   isCriticalWorkerSchedulingEnabled,
 } = require('../src/lib/automation/featureRollout.ts');
+const { validateRuntimeRoleReleaseIdentity } = require('../src/lib/releaseIdentity.ts');
 
 const hostname = os.hostname();
 const workerId = `worker:${hostname}`;
@@ -150,7 +151,7 @@ async function drainActiveRoleHeartbeat() {
   return drained;
 }
 
-async function waitForWorkerRole() {
+async function waitForWorkerRole(releaseId) {
   let lastConflictLogAt = 0;
 
   while (!stopping) {
@@ -161,6 +162,7 @@ async function waitForWorkerRole() {
       hostname,
       pid: process.pid,
       processStartedAt,
+      releaseId,
     });
 
     if (result.acquired && result.ownership) return result;
@@ -196,7 +198,32 @@ async function waitForWorkerRole() {
 }
 
 (async () => {
-  const role = await waitForWorkerRole();
+  let releaseIdentity;
+  try {
+    releaseIdentity = validateRuntimeRoleReleaseIdentity('WORKER');
+    console.log(JSON.stringify({
+      type: 'runtime_release_identity_validated',
+      role: 'WORKER',
+      releaseId: releaseIdentity.releaseId,
+      releaseSource: releaseIdentity.releaseSource,
+      releaseMismatch: releaseIdentity.releaseMismatch,
+      reasonCode: 'RELEASE_IDENTITY_VALIDATED',
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      type: 'runtime_release_identity_rejected',
+      role: 'WORKER',
+      reasonCode: error && error.code ? error.code : 'RELEASE_IDENTITY_UNAVAILABLE',
+      releaseId: error && error.releaseId ? error.releaseId : 'unavailable',
+      releaseSource: error && error.releaseSource ? error.releaseSource : 'unavailable',
+      releaseMismatchReasons: error && Array.isArray(error.releaseMismatchReasons)
+        ? error.releaseMismatchReasons.slice(0, 12)
+        : [],
+    }));
+    throw error;
+  }
+
+  const role = await waitForWorkerRole(releaseIdentity.releaseId);
   if (!role?.ownership) {
     if (shutdownDeadlineTimer) clearTimeout(shutdownDeadlineTimer);
     return;

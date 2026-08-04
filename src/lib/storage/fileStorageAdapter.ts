@@ -33,6 +33,7 @@ import type {
   StorageStreamingTransaction,
   StorageStreamingTransactionOptions,
   StorageTransaction,
+  StorageTransactionOptions,
 } from './types';
 
 function getDataDir(): string {
@@ -527,12 +528,199 @@ async function scanJsonArrayFile<T>(
   return itemIndex;
 }
 
+type FileTransactionFailurePhase =
+    | 'COLLECTION_LOCK'
+    | 'PREPARATION'
+    | 'BEFORE_COMMIT'
+    | 'RUNTIME_COMMIT_AUTHORITY'
+    | 'RUNTIME_AUTHORITY_VALIDATION'
+    | 'ATOMIC_COMMIT';
+
+interface FileTransactionTiming {
+  startedAt: number;
+  collectionLockAcquiredAt?: number;
+  preparationCompletedAt?: number;
+  authorityWaitStartedAt?: number;
+  authorityAcquiredAt?: number;
+  atomicCommitStartedAt?: number;
+  atomicCommitCompletedAt?: number;
+  completedAt?: number;
+  failurePhase?: FileTransactionFailurePhase;
+}
+
+type FileStorageTransactionTestPhase =
+    | 'COLLECTION_LOCK_WAIT_STARTED'
+    | 'COLLECTION_LOCK_ACQUIRED'
+    | 'PREPARED_BEFORE_COMMIT_AUTHORITY';
+
+type FileStorageTransactionTestHook = (input: {
+  phase: FileStorageTransactionTestPhase;
+  collection: string;
+  operationCategory: string;
+}) => Promise<void> | void;
+
+let transactionTestHook: FileStorageTransactionTestHook | undefined;
+
+export function setFileStorageTransactionTestHookForTests(
+    hook: FileStorageTransactionTestHook | undefined,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('FILE_STORAGE_TEST_HOOK_FORBIDDEN');
+  }
+  transactionTestHook = hook;
+}
+
+async function invokeTransactionTestHook(
+    phase: FileStorageTransactionTestPhase,
+    collection: string,
+    options: StorageTransactionOptions,
+): Promise<void> {
+  if (process.env.NODE_ENV !== 'test' || !transactionTestHook) return;
+  await transactionTestHook({
+    phase,
+    collection,
+    operationCategory: safeOperationCategory(options.operationCategory),
+  });
+}
+
+function safeOperationCategory(value: string | undefined): string {
+  const normalized = String(value || 'uncategorized').trim();
+  return /^[a-zA-Z0-9._:-]{1,80}$/.test(normalized)
+      ? normalized
+      : 'uncategorized';
+}
+
+function safeTransactionReasonCode(error: unknown): string {
+  const explicit = error && typeof error === 'object'
+      && typeof (error as { code?: unknown }).code === 'string'
+      ? String((error as { code: string }).code)
+      : '';
+  if (/^[A-Z][A-Z0-9_]{1,95}$/.test(explicit)) return explicit;
+  const message = error instanceof Error ? error.message : String(error || '');
+  for (const reason of [
+    'WORKER_FENCING_REJECTED',
+    'ROLE_FENCE_LOCK_TIMEOUT',
+    'ROLE_FENCE_LOST',
+    'JOB_CLAIM_TOKEN_MISMATCH',
+    'JOB_WORKER_MISMATCH',
+    'JOB_FENCING_MISMATCH',
+    'JOB_ATTEMPT_MISMATCH',
+    'JOB_RELEASE_MISMATCH',
+    'JOB_LEASE_EXPIRED',
+    'STORAGE_COMMIT_GUARD_DID_NOT_COMMIT',
+  ]) {
+    if (message.includes(reason)) return reason;
+  }
+  return 'FILE_STORAGE_TRANSACTION_FAILED';
+}
+
+function inferFileTransactionFailurePhase(
+    timing: FileTransactionTiming,
+): FileTransactionFailurePhase {
+  if (timing.failurePhase) return timing.failurePhase;
+  if (!timing.collectionLockAcquiredAt) return 'COLLECTION_LOCK';
+  if (timing.atomicCommitStartedAt) return 'ATOMIC_COMMIT';
+  if (timing.authorityAcquiredAt) return 'RUNTIME_AUTHORITY_VALIDATION';
+  if (timing.authorityWaitStartedAt) return 'RUNTIME_COMMIT_AUTHORITY';
+  return 'PREPARATION';
+}
+
+function logFileTransactionTiming(
+    collection: string,
+    options: StorageTransactionOptions,
+    timing: FileTransactionTiming,
+    error?: unknown,
+): void {
+  const completedAt = timing.completedAt || Date.now();
+  const lockAcquiredAt = timing.collectionLockAcquiredAt || completedAt;
+  const preparationCompletedAt = timing.preparationCompletedAt || completedAt;
+  const authorityWaitStartedAt = timing.authorityWaitStartedAt || preparationCompletedAt;
+  const authorityAcquiredAt = timing.authorityAcquiredAt || authorityWaitStartedAt;
+  const atomicCommitStartedAt = timing.atomicCommitStartedAt || authorityAcquiredAt;
+  const atomicCommitCompletedAt = timing.atomicCommitCompletedAt || atomicCommitStartedAt;
+  const totalMs = Math.max(0, completedAt - timing.startedAt);
+
+  // Successful fast transactions stay silent. Slow work and every failure are
+  // emitted once per transaction, with no payload or unbounded dimensions.
+  if (!error && totalMs < 250) return;
+  const output = {
+    type: 'file_storage_transaction_timing',
+    collection,
+    operationCategory: safeOperationCategory(options.operationCategory),
+    status: error ? 'FAILED' : 'COMMITTED',
+    phase: error ? inferFileTransactionFailurePhase(timing) : 'COMPLETED',
+    collectionLockWaitMs: Math.max(0, lockAcquiredAt - timing.startedAt),
+    preparationMs: Math.max(0, preparationCompletedAt - lockAcquiredAt),
+    runtimeCommitAuthorityWaitMs: options.withCommitGuard
+        ? Math.max(0, authorityAcquiredAt - authorityWaitStartedAt)
+        : 0,
+    runtimeCommitAuthorityHoldMs: options.withCommitGuard
+        ? Math.max(0, completedAt - authorityAcquiredAt)
+        : 0,
+    atomicCommitMs: Math.max(0, atomicCommitCompletedAt - atomicCommitStartedAt),
+    totalMs,
+    ...(error ? { reasonCode: safeTransactionReasonCode(error) } : {}),
+  };
+  (error ? console.error : console.info)(JSON.stringify(output));
+}
+
+async function commitPreparedFile(
+    collection: string,
+    targetPath: string,
+    tmpPath: string,
+    options: StorageTransactionOptions,
+    timing: FileTransactionTiming | undefined,
+    assertLockHeld?: () => Promise<void>,
+): Promise<void> {
+  try {
+    await options.beforeCommit?.();
+  } catch (error) {
+    if (timing) timing.failurePhase = 'BEFORE_COMMIT';
+    throw error;
+  }
+  await assertLockHeld?.();
+  if (timing) {
+    timing.preparationCompletedAt = Date.now();
+    timing.authorityWaitStartedAt = timing.preparationCompletedAt;
+  }
+  await invokeTransactionTestHook(
+      'PREPARED_BEFORE_COMMIT_AUTHORITY',
+      collection,
+      options,
+  );
+
+  let commitCalls = 0;
+  const authorityAcquired = (): void => {
+    if (timing && timing.authorityAcquiredAt === undefined) {
+      timing.authorityAcquiredAt = Date.now();
+    }
+  };
+  const commit = async (): Promise<void> => {
+    commitCalls += 1;
+    if (commitCalls !== 1) throw new Error('STORAGE_COMMIT_GUARD_MULTIPLE_COMMIT');
+    authorityAcquired();
+    await assertLockHeld?.();
+    if (timing) timing.atomicCommitStartedAt = Date.now();
+    await renameAtomicWithRetry(tmpPath, targetPath);
+    await syncDirectory(path.dirname(targetPath));
+    if (timing) timing.atomicCommitCompletedAt = Date.now();
+  };
+
+  if (options.withCommitGuard) {
+    await options.withCommitGuard(commit, { authorityAcquired });
+    if (commitCalls !== 1) throw new Error('STORAGE_COMMIT_GUARD_DID_NOT_COMMIT');
+  } else {
+    await commit();
+  }
+}
+
 async function transformJsonArrayFile<T>(
     filePath: string,
     collection: string,
     visitor: StorageStreamingTransaction<T>,
     options: StorageStreamingTransactionOptions<T> = {},
     assertLockHeld?: () => Promise<void>,
+    timing?: FileTransactionTiming,
 ): Promise<{ changed: boolean; itemCount: number }> {
   const tmpPath = `${getFilePath(collection)}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
@@ -573,13 +761,14 @@ async function transformJsonArrayFile<T>(
     const stat = await fs.stat(tmpPath);
     if (stat.size < 2) throw new Error('atomic_streaming_write_validation_failed');
     if (!isTransientProjectionCandidateCollection(collection)) await refreshBackup(getFilePath(collection));
-    // Revalidate fencing after all preparatory I/O and immediately before the
-    // atomic replacement. A long backup copy must not widen the stale-writer
-    // window after the authority check.
-    await options.beforeCommit?.();
-    await assertLockHeld?.();
-    await renameAtomicWithRetry(tmpPath, getFilePath(collection));
-    await syncDirectory(path.dirname(getFilePath(collection)));
+    await commitPreparedFile(
+        collection,
+        getFilePath(collection),
+        tmpPath,
+        options,
+        timing,
+        assertLockHeld,
+    );
     return { changed: true, itemCount };
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -598,8 +787,9 @@ async function appendJsonArrayFile<T>(
     collection: string,
     appended: T[],
     sourceItemCount: number,
-    beforeCommit?: () => Promise<void> | void,
+    options: StorageTransactionOptions,
     assertLockHeld?: () => Promise<void>,
+    timing?: FileTransactionTiming,
 ): Promise<{ changed: boolean; itemCount: number }> {
   if (!appended.length) return { changed: false, itemCount: sourceItemCount };
   const targetPath = getFilePath(collection);
@@ -637,12 +827,7 @@ async function appendJsonArrayFile<T>(
     await handle.close();
     handle = undefined;
     await refreshBackup(targetPath);
-    // Keep the final authority check adjacent to the atomic rename; backup
-    // maintenance can otherwise leave a large stale-writer window.
-    await beforeCommit?.();
-    await assertLockHeld?.();
-    await renameAtomicWithRetry(tmpPath, targetPath);
-    await syncDirectory(path.dirname(targetPath));
+    await commitPreparedFile(collection, targetPath, tmpPath, options, timing, assertLockHeld);
     return { changed: true, itemCount: sourceItemCount + appended.length };
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -953,7 +1138,9 @@ function isTransientProjectionCandidateCollection(collection: string): boolean {
 async function writeCollectionUnlocked<T>(
     collection: string,
     data: T[],
-    beforeCommit?: () => Promise<void> | void,
+    options: StorageTransactionOptions = {},
+    assertLockHeld?: () => Promise<void>,
+    timing?: FileTransactionTiming,
 ): Promise<void> {
   if (!Array.isArray(data)) throw new Error(`Invalid collection payload: ${collection}`);
   await ensureDataDir();
@@ -975,9 +1162,7 @@ async function writeCollectionUnlocked<T>(
     // from durable jobs. Backing it up would retain another large stale copy
     // after cleanup; the active legacy projection keeps normal rollback backups.
     if (!isTransientProjectionCandidateCollection(collection)) await refreshBackup(filePath);
-    await beforeCommit?.();
-    await renameAtomicWithRetry(tmpPath, filePath);
-    await syncDirectory(path.dirname(filePath));
+    await commitPreparedFile(collection, filePath, tmpPath, options, timing, assertLockHeld);
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await fs.unlink(tmpPath).catch(() => undefined);
@@ -1018,7 +1203,7 @@ async function withCollectionLock<T>(
 
 async function writeCollection<T>(collection: string, data: T[]): Promise<void> {
   await withCollectionLock(collection, assertLockHeld =>
-      writeCollectionUnlocked(collection, data, assertLockHeld));
+      writeCollectionUnlocked(collection, data, {}, assertLockHeld));
 }
 
 async function backupCollection(collection: string, label: string): Promise<string> {
@@ -1049,14 +1234,30 @@ async function backupCollection(collection: string, label: string): Promise<stri
   });
 }
 
-async function runTransaction<T>(collection: string, fn: StorageTransaction<T>): Promise<void> {
-  await withCollectionLock(collection, async assertLockHeld => {
-    const items = await readCollectionUnlocked<T>(collection);
-    const updated = await fn(items);
-    if (updated !== undefined) {
-      await writeCollectionUnlocked(collection, updated, assertLockHeld);
-    }
-  });
+async function runTransaction<T>(
+    collection: string,
+    fn: StorageTransaction<T>,
+    options: StorageTransactionOptions = {},
+): Promise<void> {
+  const timing: FileTransactionTiming = { startedAt: Date.now() };
+  try {
+    await invokeTransactionTestHook('COLLECTION_LOCK_WAIT_STARTED', collection, options);
+    await withCollectionLock(collection, async assertLockHeld => {
+      timing.collectionLockAcquiredAt = Date.now();
+      await invokeTransactionTestHook('COLLECTION_LOCK_ACQUIRED', collection, options);
+      const items = await readCollectionUnlocked<T>(collection);
+      const updated = await fn(items);
+      if (updated !== undefined) {
+        await writeCollectionUnlocked(collection, updated, options, assertLockHeld, timing);
+      }
+    });
+    timing.completedAt = Date.now();
+    logFileTransactionTiming(collection, options, timing);
+  } catch (error) {
+    timing.completedAt = Date.now();
+    logFileTransactionTiming(collection, options, timing, error);
+    throw error;
+  }
 }
 
 async function runStreamingTransaction<T>(
@@ -1064,56 +1265,68 @@ async function runStreamingTransaction<T>(
     fn: StorageStreamingTransaction<T>,
     options: StorageStreamingTransactionOptions<T> = {},
 ): Promise<{ changed: boolean; itemCount: number }> {
-  return withCollectionLock(collection, async assertLockHeld => {
-    await ensureDataDir();
-    const filePath = getFilePath(collection);
-    const source = [filePath, `${filePath}.bak`, `${filePath}.bak.2`];
-    let sourcePath: string | undefined;
-    for (const candidate of source) {
-      const stat = await fs.stat(candidate).catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw error;
-      });
-      if (stat) {
-        sourcePath = candidate;
-        break;
+  const timing: FileTransactionTiming = { startedAt: Date.now() };
+  try {
+    await invokeTransactionTestHook('COLLECTION_LOCK_WAIT_STARTED', collection, options);
+    const result = await withCollectionLock(collection, async assertLockHeld => {
+      timing.collectionLockAcquiredAt = Date.now();
+      await invokeTransactionTestHook('COLLECTION_LOCK_ACQUIRED', collection, options);
+      await ensureDataDir();
+      const filePath = getFilePath(collection);
+      const source = [filePath, `${filePath}.bak`, `${filePath}.bak.2`];
+      let sourcePath: string | undefined;
+      for (const candidate of source) {
+        const stat = await fs.stat(candidate).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        if (stat) {
+          sourcePath = candidate;
+          break;
+        }
       }
-    }
-    if (!sourcePath) {
+      if (!sourcePath) {
+        await options.beforeMutation?.();
+        const appended = options.appendItems?.() || [];
+        if (!appended.length) return { changed: false, itemCount: 0 };
+        await writeCollectionUnlocked(collection, appended, options, assertLockHeld, timing);
+        return { changed: true, itemCount: appended.length };
+      }
+      let preparedItemCount = 0;
+      if (options.prepare || options.appendOnly) {
+        preparedItemCount = await scanJsonArrayFile<T>(sourcePath, async (item, index) => {
+          await options.prepare?.(item, index);
+        });
+      }
       await options.beforeMutation?.();
-      const appended = options.appendItems?.() || [];
-      if (!appended.length) return { changed: false, itemCount: 0 };
-      await writeCollectionUnlocked(collection, appended, async () => {
-        await options.beforeCommit?.();
-        await assertLockHeld();
-      });
-      return { changed: true, itemCount: appended.length };
-    }
-    let preparedItemCount = 0;
-    if (options.prepare || options.appendOnly) {
-      preparedItemCount = await scanJsonArrayFile<T>(sourcePath, async (item, index) => {
-        await options.prepare?.(item, index);
-      });
-    }
-    await options.beforeMutation?.();
-    if (options.appendOnly) {
-      return appendJsonArrayFile(
+      if (options.appendOnly) {
+        return appendJsonArrayFile(
+            sourcePath,
+            collection,
+            options.appendItems?.() || [],
+            preparedItemCount,
+            options,
+            assertLockHeld,
+            timing,
+        );
+      }
+      return transformJsonArrayFile<T>(
           sourcePath,
           collection,
-          options.appendItems?.() || [],
-          preparedItemCount,
-          options.beforeCommit,
+          fn,
+          options,
           assertLockHeld,
+          timing,
       );
-    }
-    return transformJsonArrayFile<T>(
-        sourcePath,
-        collection,
-        fn,
-        options,
-        assertLockHeld,
-    );
-  });
+    });
+    timing.completedAt = Date.now();
+    logFileTransactionTiming(collection, options, timing);
+    return result;
+  } catch (error) {
+    timing.completedAt = Date.now();
+    logFileTransactionTiming(collection, options, timing, error);
+    throw error;
+  }
 }
 
 async function bulkMutateCollection<T extends { id: string }>(

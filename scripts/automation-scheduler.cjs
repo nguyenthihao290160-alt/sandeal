@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { runOwnedSchedulerCycle } = require('../src/lib/automation/scheduler.ts');
 const { acquireRuntimeRole, heartbeatRuntimeRole, releaseRuntimeRole } = require('../src/lib/automation/runtimeRoles.ts');
+const { validateRuntimeRoleReleaseIdentity } = require('../src/lib/releaseIdentity.ts');
 const hostname = os.hostname();
 const processStartedAt = new Date(Date.now() - Math.floor(process.uptime() * 1000)).toISOString();
 const ownerId = `scheduler:${hostname}`;
@@ -56,8 +57,29 @@ process.on('SIGINT', () => requestShutdown('SIGINT'));
 process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 
 (async () => {
+  let releaseIdentity;
+  try {
+    releaseIdentity = validateRuntimeRoleReleaseIdentity('SCHEDULER');
+    log('runtime_release_identity_validated', {
+      releaseId: releaseIdentity.releaseId,
+      releaseSource: releaseIdentity.releaseSource,
+      releaseMismatch: releaseIdentity.releaseMismatch,
+      reasonCode: 'RELEASE_IDENTITY_VALIDATED',
+    });
+  } catch (error) {
+    log('runtime_release_identity_rejected', {
+      code: error && error.code ? error.code : 'RELEASE_IDENTITY_UNAVAILABLE',
+      releaseId: error && error.releaseId ? error.releaseId : 'unavailable',
+      releaseSource: error && error.releaseSource ? error.releaseSource : 'unavailable',
+      releaseMismatchReasons: error && Array.isArray(error.releaseMismatchReasons)
+        ? error.releaseMismatchReasons.slice(0, 12)
+        : [],
+    }, true);
+    throw error;
+  }
   const role = await acquireRuntimeRole({
     role: 'SCHEDULER', ownerId, instanceId, hostname, pid: process.pid, processStartedAt,
+    releaseId: releaseIdentity.releaseId,
   });
   if (!role.acquired || !role.ownership) {
     log('scheduler_role_rejected', {

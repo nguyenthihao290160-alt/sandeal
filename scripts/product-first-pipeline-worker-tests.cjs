@@ -309,7 +309,10 @@ function batchResult(workerId, overrides = {}) {
     assert.equal(result.peakInFlight, 4);
     assert.equal(peak, 4);
     const launcher = fs.readFileSync(path.join(process.cwd(), 'scripts/automation-worker.cjs'), 'utf8');
-    assert.match(launcher, /Math\.max\(1, Math\.min\(4, Number\(settings\.maxConcurrency\)/);
+    assert.match(
+      launcher,
+      /Math\.max\(\s*1,\s*Math\.min\(\s*4,\s*Number\(settings\.maxConcurrency\)/,
+    );
   });
 
   fs.rmSync(tempDir, { recursive: true, force: true });

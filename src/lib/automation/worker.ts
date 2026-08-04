@@ -220,6 +220,9 @@ function errorCode(error: unknown): string {
       : '';
   if (explicitCode === 'ROLE_FENCE_LOST') return 'WORKER_FENCING_REJECTED';
   if (explicitCode === 'ROLE_FENCE_LOCK_TIMEOUT') return 'ROLE_FENCE_LOCK_TIMEOUT';
+  if (/^JOB_(?:CLAIM|WORKER|FENCING|ATTEMPT|RELEASE|LEASE_EXPIRED|NOT_RUNNING)/.test(explicitCode)) {
+    return 'WORKER_FENCING_REJECTED';
+  }
   if (explicitCode) return explicitCode.slice(0, 80);
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes('WORKER_FENCING_REJECTED')) return 'WORKER_FENCING_REJECTED';
@@ -995,7 +998,7 @@ async function processAutomationBatchInternal(
               : []);
       const progressTotal = Math.max(1, completedSteps.length + pendingSteps.length);
       const progressPercentage = Math.floor((completedSteps.length / progressTotal) * 100);
-      const finalExecution = await updateAutomationJobExecution(job.id, workerId, {
+      const finalExecutionPatch = {
         executionMode,
         outcomeStatus,
         executionPlan: completedPlan,
@@ -1025,15 +1028,20 @@ async function processAutomationBatchInternal(
           pendingSteps,
           completedAt,
         }),
-      }, claimMutationGuard(job, ownership));
-      if (!finalExecution) {
-        logAutomationJobEvent('stale_completion_rejected', job, { workerId, reasonCode: 'JOB_FINALIZATION_AUTHORITY_REJECTED' });
-        throw new Error('WORKER_FENCING_REJECTED');
-      }
-      // Final state changes are fenced source transactions. Stop and join the
-      // renewal loop first so it cannot race the intentional claim removal.
-      await renewal.stop();
+      } satisfies Parameters<typeof updateAutomationJobExecution>[2];
       if (outcomeStatus === 'PARTIALLY_COMPLETED' && pendingSteps.length) {
+        const finalExecution = await updateAutomationJobExecution(
+            job.id,
+            workerId,
+            finalExecutionPatch,
+            claimMutationGuard(job, ownership),
+        );
+        if (!finalExecution) {
+          logAutomationJobEvent('stale_completion_rejected', job, { workerId, reasonCode: 'JOB_FINALIZATION_AUTHORITY_REJECTED' });
+          throw new Error('WORKER_FENCING_REJECTED');
+        }
+        // Stop and join renewal before the intentional claim removal.
+        await renewal.stop();
         const waiting = await waitAutomationJobForChildren(
             job.id,
             workerId,
@@ -1048,11 +1056,16 @@ async function processAutomationBatchInternal(
         }
         return;
       }
+      // The common success path folds the final execution snapshot into the
+      // fenced terminal mutation, avoiding a second full retained-history
+      // rewrite. Stop renewal first so it cannot recreate a cleared claim.
+      await renewal.stop();
       const completed = await completeAutomationJob(
           job.id,
           workerId,
           output,
           claimMutationGuard(job, ownership),
+          finalExecutionPatch,
       );
       if (completed) {
         result.succeeded += 1;

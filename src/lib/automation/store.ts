@@ -9,7 +9,13 @@ import {
   scanCollection,
   runTransaction,
 } from '@/lib/storage/adapter';
-import type { StorageStreamingTransaction, StorageTransaction } from '@/lib/storage/types';
+import type {
+  StorageCommitGuard,
+  StorageStreamingTransaction,
+  StorageStreamingTransactionOptions,
+  StorageTransaction,
+  StorageTransactionOptions,
+} from '@/lib/storage/types';
 import { sanitizeErrorMessage } from '@/lib/safety/operationGuard';
 import { recordFencingRejection, recordJobLeaseRenewal } from '@/lib/storage/diagnostics';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
@@ -3237,34 +3243,137 @@ async function assertClaimGuardOwnership(guard: AutomationJobClaimGuard): Promis
   }
 }
 
+function automationJobAuthorityError(code: string): Error & { code: string } {
+  recordFencingRejection();
+  const error = new Error(code) as Error & { code: string };
+  error.code = code;
+  return error;
+}
+
+async function assertAutomationJobHeartbeatAuthority(
+    id: string,
+    workerId: string,
+    guard: AutomationJobClaimGuard,
+): Promise<void> {
+  const heartbeat = (await readCollectionPage<AutomationJobHeartbeat>(JOB_HEARTBEATS, {
+    page: 1,
+    pageSize: 1,
+    filters: { jobId: id },
+  })).items[0];
+  if (!heartbeat) throw automationJobAuthorityError('JOB_CLAIM_MISSING');
+  if (heartbeat.status !== undefined && heartbeat.status !== 'RUNNING') {
+    throw automationJobAuthorityError('JOB_NOT_RUNNING');
+  }
+  if (heartbeat.workerId !== workerId) {
+    throw automationJobAuthorityError('JOB_WORKER_MISMATCH');
+  }
+  if (heartbeat.claimToken !== guard.claimToken) {
+    throw automationJobAuthorityError('JOB_CLAIM_TOKEN_MISMATCH');
+  }
+  if (guard.attemptCount !== undefined && heartbeat.attemptCount !== guard.attemptCount) {
+    throw automationJobAuthorityError('JOB_ATTEMPT_MISMATCH');
+  }
+  if (guard.releaseId !== undefined && heartbeat.releaseId !== guard.releaseId) {
+    throw automationJobAuthorityError('JOB_RELEASE_MISMATCH');
+  }
+  if (guard.ownership && (
+      heartbeat.workerOwnerId !== guard.ownership.ownerId
+      || heartbeat.workerInstanceId !== guard.ownership.instanceId
+      || heartbeat.workerFencingToken !== guard.ownership.fencingToken
+  )) {
+    throw automationJobAuthorityError('JOB_FENCING_MISMATCH');
+  }
+  if (Date.parse(heartbeat.leaseExpiresAt) <= Date.now()) {
+    throw automationJobAuthorityError('JOB_LEASE_EXPIRED');
+  }
+}
+
+function runtimeRoleCommitGuard(
+    ownership: RuntimeRoleOwnership,
+    validate?: () => Promise<void> | void,
+): StorageCommitGuard {
+  return (commit, context) => withRuntimeRoleAuthority(
+      'WORKER',
+      ownership,
+      async assertAuthority => {
+        await assertAuthority();
+        await validate?.();
+        await assertAuthority();
+        return commit();
+      },
+      Date.now(),
+      undefined,
+      context.authorityAcquired,
+  );
+}
+
 export interface AutomationJobCreateResult {
   job: AutomationJob;
   created: boolean;
   code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS';
 }
 
+// Normal-transaction counterpart retained for authority-protected callers that
+// cannot use item streaming; current job lifecycle mutations use the bounded
+// streaming variant below.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function runAutomationJobSourceTransactionWithAuthority(
+    id: string,
+    workerId: string,
     guard: AutomationJobClaimGuard,
-    work: StorageTransaction<AutomationJob>,
+    operationCategory: string,
+    work: (job: AutomationJob) => Promise<boolean | void> | boolean | void,
 ): Promise<AutomationJobProjectionMutationHandle> {
   await assertClaimGuardOwnership(guard);
-  if (!guard.ownership) return runAutomationJobSourceTransaction(work);
-  return withRuntimeRoleAuthority('WORKER', guard.ownership, assertAuthority => (
-      assertAuthority().then(() => runAutomationJobSourceTransaction(work, assertAuthority))
-  ));
+  let claimEvidence: AutomationJob | undefined;
+  return runAutomationJobSourceTransaction(async items => {
+    const job = items.find(item => item.id === id);
+    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
+    const evidence = structuredClone(job);
+    const changed = await work(job);
+    if (changed !== true) return undefined;
+    claimEvidence = evidence;
+    return items;
+  }, {
+    operationCategory,
+    withCommitGuard: guard.ownership
+        ? runtimeRoleCommitGuard(guard.ownership, async () => {
+          if (!claimEvidence || !activeClaimMatches(claimEvidence, workerId, guard)) {
+            throw automationJobAuthorityError('JOB_CLAIM_TOKEN_MISMATCH');
+          }
+          await assertAutomationJobHeartbeatAuthority(id, workerId, guard);
+        })
+        : undefined,
+  });
 }
 
 async function runAutomationJobSourceStreamingTransactionWithAuthority(
+    id: string,
+    workerId: string,
     guard: AutomationJobClaimGuard,
+    operationCategory: string,
     work: StorageStreamingTransaction<AutomationJob>,
 ): Promise<AutomationJobProjectionMutationHandle> {
   await assertClaimGuardOwnership(guard);
-  if (!guard.ownership) return runAutomationJobSourceStreamingTransaction(work);
-  return withRuntimeRoleAuthority(
-      'WORKER',
-      guard.ownership,
-      assertAuthority => runAutomationJobSourceStreamingTransaction(work, assertAuthority),
-  );
+  let claimEvidence: AutomationJob | undefined;
+  return runAutomationJobSourceStreamingTransaction(async (job, index) => {
+    if (job.id !== id || !activeClaimMatches(job, workerId, guard)) return false;
+    const evidence = structuredClone(job);
+    const changed = await work(job, index);
+    if (changed !== true) return false;
+    claimEvidence = evidence;
+    return true;
+  }, {
+    operationCategory,
+    withCommitGuard: guard.ownership
+        ? runtimeRoleCommitGuard(guard.ownership, async () => {
+          if (!claimEvidence || !activeClaimMatches(claimEvidence, workerId, guard)) {
+            throw automationJobAuthorityError('JOB_CLAIM_TOKEN_MISMATCH');
+          }
+          await assertAutomationJobHeartbeatAuthority(id, workerId, guard);
+        })
+        : undefined,
+  });
 }
 
 function clearAutomationJobClaim(job: AutomationJob): void {
@@ -3282,7 +3391,7 @@ function markAutomationJobProjectionSourceMutation(job: AutomationJob): void {
 
 async function runAutomationJobSourceTransaction(
     work: StorageTransaction<AutomationJob>,
-    beforeCommit?: () => Promise<void>,
+    options: StorageTransactionOptions = {},
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   try {
@@ -3293,7 +3402,6 @@ async function runAutomationJobSourceTransaction(
       }]));
       const result = await work(items);
       if (!result) return undefined;
-      await beforeCommit?.();
       const assignedVersions: Record<string, number> = {};
       for (const item of result) {
         const prior = previous.get(item.id);
@@ -3306,7 +3414,7 @@ async function runAutomationJobSourceTransaction(
       }
       mutation.jobSourceVersions = assignedVersions;
       return result;
-    });
+    }, options);
     return mutation;
   } catch (error) {
     await abortAutomationJobProjectionMutation(mutation).catch(() => undefined);
@@ -3316,7 +3424,7 @@ async function runAutomationJobSourceTransaction(
 
 async function runAutomationJobSourceStreamingTransaction(
     work: StorageStreamingTransaction<AutomationJob>,
-    beforeCommit?: () => Promise<void>,
+    options: StorageStreamingTransactionOptions<AutomationJob> = {},
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
   try {
@@ -3333,7 +3441,7 @@ async function runAutomationJobSourceStreamingTransaction(
         [item.id]: nextVersion,
       };
       return true;
-    }, { beforeCommit });
+    }, options);
     return mutation;
   } catch (error) {
     await abortAutomationJobProjectionMutation(mutation).catch(() => undefined);
@@ -3362,6 +3470,8 @@ async function runAutomationJobSourceBoundedTransaction(
       planItem?: (item: AutomationJob, planningItems: AutomationJob[]) => BoundedPlanningDecision;
       appendOnly?: boolean;
       beforeCommit?: () => Promise<void>;
+      withCommitGuard?: StorageCommitGuard;
+      operationCategory?: string;
     } = {},
 ): Promise<AutomationJobProjectionMutationHandle> {
   const mutation = await beginAutomationJobProjectionMutation();
@@ -3444,6 +3554,8 @@ async function runAutomationJobSourceBoundedTransaction(
           appendItems: () => appendedItems,
           appendOnly: options.appendOnly,
           beforeCommit: options.beforeCommit,
+          withCommitGuard: options.withCommitGuard,
+          operationCategory: options.operationCategory,
         },
     );
     return mutation;
@@ -3459,25 +3571,54 @@ export async function updateAutomationJobExecution(
     patch: Partial<ExecutionUpdate>,
     guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
-  await assertClaimGuardOwnership(guard);
   let updated: AutomationJob | null = null;
+  let durableChanged = false;
   const now = new Date().toISOString();
-  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
-    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
-    if (patch.executionMode) job.executionMode = patch.executionMode;
-    if (patch.outcomeStatus) job.outcomeStatus = patch.outcomeStatus;
-    if (patch.executionPlan) job.executionPlan = sanitizeAutomationData(patch.executionPlan) as AutomationExecutionPlanStep[];
-    if (patch.progress) job.progress = sanitizeAutomationData({ ...patch.progress, updatedAt: now }) as AutomationJob['progress'];
-    if (patch.checkpoint) job.checkpoint = sanitizeAutomationData({ ...patch.checkpoint, updatedAt: now }) as AutomationCheckpoint;
-    if (patch.disclosure) job.disclosure = sanitizeAutomationData(patch.disclosure) as AutomationExecutionDisclosure;
-    if (patch.manualTaskId) job.manualTaskId = patch.manualTaskId;
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(
+      id,
+      workerId,
+      guard,
+      'automation_job_execution_update',
+      job => {
+    let changed = false;
+    const assign = <K extends keyof ExecutionUpdate>(key: K, value: ExecutionUpdate[K]): void => {
+      if (JSON.stringify(job[key]) === JSON.stringify(value)) return;
+      (job as ExecutionUpdate)[key] = value;
+      changed = true;
+    };
+    if (patch.executionMode) assign('executionMode', patch.executionMode);
+    if (patch.outcomeStatus) assign('outcomeStatus', patch.outcomeStatus);
+    if (patch.executionPlan) {
+      assign('executionPlan', sanitizeAutomationData(patch.executionPlan) as AutomationExecutionPlanStep[]);
+    }
+    if (patch.progress) {
+      const progress = sanitizeAutomationData({ ...patch.progress, updatedAt: now }) as AutomationJob['progress'];
+      const currentComparable = job.progress ? { ...job.progress, updatedAt: undefined } : undefined;
+      const nextComparable = progress ? { ...progress, updatedAt: undefined } : undefined;
+      if (JSON.stringify(currentComparable) !== JSON.stringify(nextComparable)) assign('progress', progress);
+    }
+    if (patch.checkpoint) {
+      const checkpoint = sanitizeAutomationData({ ...patch.checkpoint, updatedAt: now }) as AutomationCheckpoint;
+      const currentComparable = job.checkpoint ? { ...job.checkpoint, updatedAt: undefined } : undefined;
+      const nextComparable = { ...checkpoint, updatedAt: undefined };
+      if (JSON.stringify(currentComparable) !== JSON.stringify(nextComparable)) assign('checkpoint', checkpoint);
+    }
+    if (patch.disclosure) {
+      assign('disclosure', sanitizeAutomationData(patch.disclosure) as AutomationExecutionDisclosure);
+    }
+    if (patch.manualTaskId) assign('manualTaskId', patch.manualTaskId);
+    if (!changed) {
+      updated = structuredClone(job);
+      return false;
+    }
     job.updatedAt = now;
     markAutomationJobProjectionSourceMutation(job);
+    durableChanged = true;
     updated = { ...job };
     return true;
   });
   const updatedJob = updated as AutomationJob | null;
-  if (updatedJob) await syncJobReadModelsBestEffort(updatedJob, false, projectionMutation);
+  if (updatedJob && durableChanged) await syncJobReadModelsBestEffort(updatedJob, false, projectionMutation);
   else await abortAutomationJobProjectionMutation(projectionMutation);
   return updatedJob;
 }
@@ -3490,11 +3631,10 @@ export async function waitAutomationJobForManual(
     disclosure: AutomationExecutionDisclosure,
     guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
-  await assertClaimGuardOwnership(guard);
   let waiting: AutomationJob | null = null;
   const now = new Date().toISOString();
-  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
-    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(
+      id, workerId, guard, 'automation_job_wait_manual', job => {
     job.status = 'WAITING_FOR_MANUAL_INPUT';
     job.manualTaskId = taskId;
     job.outcomeStatus = 'WAITING_FOR_MANUAL_INPUT';
@@ -3533,11 +3673,11 @@ export async function waitAutomationJobForChildren(
     result: Record<string, unknown>,
     guard: AutomationJobClaimGuard,
 ): Promise<AutomationJob | null> {
-  await assertClaimGuardOwnership(guard);
   let waiting: AutomationJob | null = null;
   const now = new Date().toISOString();
-  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
-    if (!job || !activeClaimMatches(job, workerId, guard) || !job.checkpoint?.pendingSteps.length) return undefined;
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(
+      id, workerId, guard, 'automation_job_wait_children', job => {
+    if (!job.checkpoint?.pendingSteps.length) return undefined;
     job.status = 'WAITING_CHILDREN';
     job.result = sanitizeAutomationData(result) as Record<string, unknown>;
     clearAutomationJobClaim(job);
@@ -4038,7 +4178,39 @@ export async function claimAutomationJobs(
       claimBlockReason = 'EXECUTION_RESOURCE_CONFLICT';
     },
     beforeCommit: () => invalidateExpiredAutomationJobHeartbeatsForRecovery(recoveryClaims, nowMs),
+    withCommitGuard: ownership ? runtimeRoleCommitGuard(ownership) : undefined,
+    operationCategory: 'automation_job_claim_recovery',
   });
+  if (claimed.length) {
+    const writeClaimHeartbeats = () => runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
+      const claimedIds = new Set(claimed.map(job => job.id));
+      const next = items.filter(item => !claimedIds.has(item.jobId) && Date.parse(item.leaseExpiresAt) > nowMs);
+      for (const job of claimed) next.push({
+        id: job.id,
+        jobId: job.id,
+        workerId,
+        claimToken: job.claimToken || '',
+        status: 'RUNNING',
+        workerOwnerId: job.workerOwnerId,
+        workerInstanceId: job.workerInstanceId,
+        workerFencingToken: job.workerFencingToken,
+        attemptCount: job.attemptCount,
+        releaseId: job.releaseId,
+        heartbeatAt: now,
+        leaseExpiresAt: job.leaseExpiresAt || now,
+      });
+      return next;
+    });
+    if (ownership) {
+      await withRuntimeRoleAuthority('WORKER', ownership, async assertAuthority => {
+        await assertAuthority();
+        await writeClaimHeartbeats();
+        await assertAuthority();
+      });
+    } else {
+      await writeClaimHeartbeats();
+    }
+  }
   if (claimed.length) {
     try {
       await runTransaction<AutomationJobAttempt>(JOB_ATTEMPTS, attempts => {
@@ -4099,27 +4271,6 @@ export async function claimAutomationJobs(
       timeoutOverflowCount,
       requeueOverflowCount,
     }));
-  }
-  if (claimed.length) {
-    await runTransaction<AutomationJobHeartbeat>(JOB_HEARTBEATS, items => {
-      const claimedIds = new Set(claimed.map(job => job.id));
-      const next = items.filter(item => !claimedIds.has(item.jobId) && Date.parse(item.leaseExpiresAt) > nowMs);
-      for (const job of claimed) next.push({
-        id: job.id,
-        jobId: job.id,
-        workerId,
-        claimToken: job.claimToken || '',
-        status: 'RUNNING',
-        workerOwnerId: job.workerOwnerId,
-        workerInstanceId: job.workerInstanceId,
-        workerFencingToken: job.workerFencingToken,
-        attemptCount: job.attemptCount,
-        releaseId: job.releaseId,
-        heartbeatAt: now,
-        leaseExpiresAt: job.leaseExpiresAt || now,
-      });
-      return next;
-    });
   }
   for (const job of requeued) logAutomationJobEvent('job_requeued', job, { workerId, reasonCode: 'LEASE_EXPIRED' });
   for (const job of timedOut) logAutomationJobEvent('job_terminal_timeout', job, { workerId, reasonCode: 'LEASE_EXPIRED_MAX_ATTEMPTS' });
@@ -4368,11 +4519,26 @@ export async function completeAutomationJob(
     workerId: string,
     result: Record<string, unknown>,
     guard: AutomationJobClaimGuard,
+    executionPatch?: Partial<ExecutionUpdate>,
 ): Promise<AutomationJob | null> {
-  await assertClaimGuardOwnership(guard);
   let completed: AutomationJob | null = null; const now = new Date().toISOString();
-  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
-    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(
+      id, workerId, guard, 'automation_job_complete', job => {
+    if (executionPatch?.executionMode) job.executionMode = executionPatch.executionMode;
+    if (executionPatch?.outcomeStatus) job.outcomeStatus = executionPatch.outcomeStatus;
+    if (executionPatch?.executionPlan) {
+      job.executionPlan = sanitizeAutomationData(executionPatch.executionPlan) as AutomationExecutionPlanStep[];
+    }
+    if (executionPatch?.progress) {
+      job.progress = sanitizeAutomationData({ ...executionPatch.progress, updatedAt: now }) as AutomationJob['progress'];
+    }
+    if (executionPatch?.checkpoint) {
+      job.checkpoint = sanitizeAutomationData({ ...executionPatch.checkpoint, updatedAt: now }) as AutomationCheckpoint;
+    }
+    if (executionPatch?.disclosure) {
+      job.disclosure = sanitizeAutomationData(executionPatch.disclosure) as AutomationExecutionDisclosure;
+    }
+    if (executionPatch?.manualTaskId) job.manualTaskId = executionPatch.manualTaskId;
     job.status = 'SUCCEEDED'; job.result = sanitizeAutomationData(result) as Record<string, unknown>; job.completedAt = now;
     job.lastErrorCode = undefined; job.lastErrorCategory = undefined; job.lastErrorMessage = undefined; job.retryable = undefined; job.deadLetterReason = undefined;
     if (job.progress) {
@@ -4423,12 +4589,11 @@ export async function deferAutomationJobForInfrastructure(
     attemptCount: options.attemptCount,
     releaseId: options.releaseId,
   };
-  await assertClaimGuardOwnership(guard);
   let deferred: AutomationJob | null = null;
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
-  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
-    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(
+      id, workerId, guard, 'automation_job_infrastructure_defer', job => {
     const retryCount = Math.max(0, Math.floor(job.infrastructureRetryCount || 0)) + 1;
     const paused = retryCount >= MAX_INFRASTRUCTURE_RETRIES;
     const nextRetryAt = paused
@@ -4501,10 +4666,9 @@ export async function failAutomationJob(
     attemptCount: options.attemptCount,
     releaseId: options.releaseId,
   };
-  await assertClaimGuardOwnership(guard);
   let failed: AutomationJob | null = null; const now = new Date().toISOString();
-  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(guard, job => {
-    if (!job || !activeClaimMatches(job, workerId, guard)) return undefined;
+  const projectionMutation = await runAutomationJobSourceStreamingTransactionWithAuthority(
+      id, workerId, guard, 'automation_job_fail', job => {
     const retry = isRetryableAutomationError(code, job.type) && job.attemptCount < Math.min(job.maxAttempts, getAutomationPolicy(job.type).retryPolicy.maxAttempts);
     const requestedRetryAt = Date.parse(options.nextRetryAt || '');
     job.status = retry ? 'RETRY_SCHEDULED' : 'FAILED';
@@ -4629,7 +4793,11 @@ export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRo
     markAutomationJobProjectionSourceMutation(job);
     recovered = structuredClone(job);
     return items;
-  }, () => invalidateExpiredAutomationJobHeartbeatsForRecovery(recoveryClaims, nowMs));
+  }, {
+    beforeCommit: () => invalidateExpiredAutomationJobHeartbeatsForRecovery(recoveryClaims, nowMs),
+    withCommitGuard: runtimeRoleCommitGuard(ownership),
+    operationCategory: 'automation_job_stale_recovery',
+  });
   const result = recovered as AutomationJob | null;
   if (result) {
     await syncJobReadModelsBestEffort(result, true, projectionMutation);

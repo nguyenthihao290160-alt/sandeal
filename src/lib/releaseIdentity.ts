@@ -88,3 +88,43 @@ export function getReleaseIdentity() {
     version: process.env.SANDEAL_VERSION,
   });
 }
+
+export type RuntimeRoleProcess = 'WORKER' | 'SCHEDULER';
+
+export interface RuntimeReleaseIdentityError extends Error {
+  code: 'RELEASE_IDENTITY_MISMATCH' | 'RELEASE_IDENTITY_UNAVAILABLE';
+  role: RuntimeRoleProcess;
+  releaseId: string;
+  releaseSource: ReturnType<typeof getReleaseIdentity>['releaseSource'];
+  releaseMismatchReasons: string[];
+}
+
+/**
+ * Resolve a role process identity exactly once before any durable role lease is
+ * acquired. Production role processes require one matching full Git SHA across
+ * the immutable artifact identity and every runtime identity variable.
+ */
+export function validateRuntimeRoleReleaseIdentity(role: RuntimeRoleProcess) {
+  const identity = getReleaseIdentity();
+  const validProductionRelease = Boolean(
+      identity.commitSha
+      && identity.releaseId === identity.commitSha
+      && GIT_SHA.test(identity.releaseId),
+  );
+  if (
+      process.env.NODE_ENV === 'production'
+      && (identity.releaseMismatch || !validProductionRelease)
+  ) {
+    const code = identity.releaseMismatch
+        ? 'RELEASE_IDENTITY_MISMATCH' as const
+        : 'RELEASE_IDENTITY_UNAVAILABLE' as const;
+    const error = new Error(code) as RuntimeReleaseIdentityError;
+    error.code = code;
+    error.role = role;
+    error.releaseId = identity.releaseId;
+    error.releaseSource = identity.releaseSource;
+    error.releaseMismatchReasons = identity.releaseMismatchReasons.slice(0, 12);
+    throw error;
+  }
+  return identity;
+}

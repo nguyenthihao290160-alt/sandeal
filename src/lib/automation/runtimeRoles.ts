@@ -530,8 +530,10 @@ export async function withRuntimeRoleAuthority<T>(
     work: (assertAuthority: RuntimeFenceAssertion) => Promise<T>,
     nowMs = Date.now(),
     maximumWaitMs?: number,
+    onFenceAcquired?: () => void,
 ): Promise<T> {
   return withRuntimeFence(role, `authority:${ownership.ownerId}`, ownership.instanceId, async assertFence => {
+    onFenceAcquired?.();
     let authorized = false;
     await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
       const lease = leases.find(item => item.role === role);

@@ -4,6 +4,25 @@ export type StorageTransaction<T> = (
     items: T[],
 ) => Promise<T[] | undefined> | T[] | undefined;
 
+/**
+ * Acquire an external authority boundary around the irreversible storage
+ * commit. Adapters must invoke the supplied commit callback exactly once and
+ * must not make the prepared mutation visible outside this guard.
+ */
+export type StorageCommitGuard = <T>(
+    commit: () => Promise<T>,
+    context: { authorityAcquired(): void },
+) => Promise<T>;
+
+export interface StorageTransactionOptions {
+  /** Runs after expensive preparation and before acquiring the commit guard. */
+  beforeCommit?: () => Promise<void> | void;
+  /** Holds caller authority through the adapter's irreversible commit window. */
+  withCommitGuard?: StorageCommitGuard;
+  /** Bounded, payload-free diagnostic category for the durable operation. */
+  operationCategory?: string;
+}
+
 export type StorageScanVisitor<T> = (
     item: T,
     index: number,
@@ -19,7 +38,7 @@ export type StorageStreamingTransaction<T> = (
     index: number,
 ) => Promise<boolean | void> | boolean | void;
 
-export interface StorageStreamingTransactionOptions<T> {
+export interface StorageStreamingTransactionOptions<T> extends StorageTransactionOptions {
   /**
    * Optional first pass executed under the same adapter-owned boundary.
    * Implementations must preserve callback errors instead of rewriting them as
@@ -28,11 +47,6 @@ export interface StorageStreamingTransactionOptions<T> {
   prepare?: StorageStreamingTransaction<T>;
   /** Runs after prepare and before the mutating pass, still under the boundary. */
   beforeMutation?: () => Promise<void> | void;
-  /**
-   * Runs after all preparatory I/O and immediately before the visible atomic
-   * replacement/commit. Adapters must propagate this callback's original error.
-   */
-  beforeCommit?: () => Promise<void> | void;
   /** Append bounded new records after the existing source has been transformed. */
   appendItems?: () => T[] | undefined;
   /**
@@ -214,6 +228,7 @@ export interface StorageAdapter {
   runTransaction<T>(
       collection: string,
       fn: StorageTransaction<T>,
+      options?: StorageTransactionOptions,
   ): Promise<void>;
   runStreamingTransaction<T>(
       collection: string,
