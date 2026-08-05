@@ -81,7 +81,7 @@ const BLOCKER_LABELS: Record<string, string> = {
   price_stale_or_unverified: 'Giá chưa được xác minh hoặc đã quá hạn.',
   price_aging: 'Giá sắp hết hạn freshness.',
   duplicate_unresolved: 'Bằng chứng trùng lặp chưa được giải quyết.',
-  merchant_quarantined_30shinestore: 'Merchant 30ShineStore đang bị quarantine theo chính sách.',
+  quarantined: 'Sản phẩm đang bị quarantine theo chính sách an toàn.',
   cooldown: 'Nguồn đang trong thời gian chờ kiểm tra lại.',
   review_quality_unready: 'Review chưa vượt cổng chất lượng.',
   claims_unverified: 'Các claim chưa có đủ bằng chứng xác minh.',

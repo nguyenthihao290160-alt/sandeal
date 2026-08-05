@@ -2,12 +2,11 @@ import type { AutomationJob } from '@/lib/automation/types';
 import { getAutomationControl, getAutomationJobAuthoritySnapshot } from '@/lib/automation/store';
 import { isRuntimeRoleOwner } from '@/lib/automation/runtimeRoles';
 import { throwIfExecutionAborted } from '@/lib/automation/executionBudget';
-import type { Product, ProductFieldProvenance } from '@/lib/types';
+import type { CommerceSourceEvidence, CommerceUrlProbeEvidence, Product, ProductFieldProvenance } from '@/lib/types';
 import { saveCanonicalProduct } from '@/lib/storage/products';
 import { readCollectionPage, runTransaction, scanCollection } from '@/lib/storage/adapter';
 import { normalizeCanonicalProduct } from '@/lib/canonicalProduct';
 import {
-  checkLinkHealth,
   productImageValidationState,
   resolveHealthyImageCandidate,
   type ImageCandidateResolution,
@@ -26,6 +25,14 @@ import {
 } from '@/lib/productBlockers';
 import { isPublicSafeProduct } from '@/lib/publicProductFilter';
 import { getDomainCircuitDecision, recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
+import {
+  commerceProbeBlockerCode,
+  commerceProbeToLegacyLinkResult,
+  probeCommerceUrl,
+  type CommerceUrlProbeResult,
+  type CommerceUrlProbeRole,
+} from '@/lib/commerce/urlProbe';
+import { sourceReliabilityEvent } from '@/lib/commerce/sourceReliability';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import { applyImportBatch, escapeCsvCell, getImportBatch } from './importer';
 import { detectDuplicateGroups, applyDuplicateMerge } from './dedupe';
@@ -244,34 +251,59 @@ interface ResilientLinkResult {
   result: LinkCheckResult;
   retryAt?: string;
   circuitSkipped: boolean;
+  probe?: CommerceUrlProbeResult;
 }
 
 async function checkLinkWithDomainCircuit(
   url: string,
+  probeRole: CommerceUrlProbeRole,
   now = Date.now(),
   options: ProductIntelligenceExecutionOptions = {},
+  identifiers: { jobId?: string; operationId?: string } = {},
 ): Promise<ResilientLinkResult> {
   throwIfExecutionAborted(options.signal);
-  const decision = await getDomainCircuitDecision(url, now);
-  if (!decision.allowed && decision.reason === 'circuit_open') {
+  const circuitRole = probeRole === 'AFFILIATE' ? 'AFFILIATE_GATEWAY' : 'MERCHANT';
+  const decision = await getDomainCircuitDecision(url, now, { role: circuitRole, ...identifiers });
+  if (!decision.allowed) {
     return {
       result: {
         status: 'timeout',
         ok: false,
         retryable: true,
-        reason: `Domain circuit open until ${decision.retryAt || 'the next retry window'}`,
+        reason: decision.reason === 'half_open_probe_in_flight'
+          ? 'One bounded half-open probe is already in flight.'
+          : `Domain circuit open until ${decision.retryAt || 'the next retry window'}`,
+        errorCode: probeRole === 'AFFILIATE' ? 'AFFILIATE_GATEWAY_CIRCUIT_OPEN' : 'MERCHANT_CIRCUIT_OPEN',
       },
       retryAt: decision.retryAt,
       circuitSkipped: true,
     };
   }
 
-  const result = await checkLinkHealth(url, { signal: options.signal });
-  const state = await recordDomainHealth(url, result.status, now, { retryAfter: result.retryAfter });
+  const probe = await probeCommerceUrl(url, {
+    role: probeRole,
+    signal: options.signal,
+    jobId: identifiers.jobId,
+    operationId: identifiers.operationId,
+    fetchImpl: process.env.NODE_ENV === 'test' ? globalThis.fetch : undefined,
+    resolveDns: process.env.NODE_ENV !== 'test',
+  });
+  const result = commerceProbeToLegacyLinkResult(probe);
+  const circuitStatus = probe.classification === 'HEALTHY'
+    ? 'healthy'
+    : probe.retryable && probe.classification === 'AFFILIATE_LINK_REJECTED'
+      ? 'network_error'
+      : probe.classification.toLowerCase();
+  const state = await recordDomainHealth(url, circuitStatus, now, {
+    role: circuitRole,
+    retryAfter: probe.retryAfter,
+    ...identifiers,
+  });
   return {
     result,
     retryAt: result.ok ? undefined : state?.nextRetryAt,
     circuitSkipped: false,
+    probe,
   };
 }
 
@@ -344,16 +376,43 @@ function finalDomain(value?: string): string | undefined {
   try { return new URL(value || '').hostname.toLowerCase().replace(/^www\./, '') || undefined; } catch { return undefined; }
 }
 
-function urlContainsDomain(value: string | undefined, domain: string): boolean {
-  try {
-    const host = new URL(value || '').hostname.toLowerCase();
-    if (host === domain || host.endsWith(`.${domain}`)) return true;
-    for (const key of ['url', 'deeplink', 'target', 'destination', 'redirect']) {
-      const nested = new URL(value || '').searchParams.get(key);
-      if (nested && urlContainsDomain(nested, domain)) return true;
-    }
-  } catch { /* malformed URLs are handled by the health checker */ }
-  return false;
+function persistedCommerceProbe(result: CommerceUrlProbeResult): CommerceUrlProbeEvidence {
+  return {
+    classification: result.classification,
+    httpStatus: result.httpStatus,
+    normalizedFinalUrl: result.normalizedFinalUrl,
+    affiliateGatewayDomain: result.affiliateGatewayDomain,
+    merchantDomain: result.merchantDomain,
+    redirectCount: result.redirectCount,
+    elapsedMs: result.elapsedTimeMs,
+    retryable: result.retryable,
+    reasonCode: result.reasonCode,
+    checkedAt: result.checkedAt,
+    retryAfter: result.retryAfter,
+    queryParameterNames: result.diagnostics.requested.queryParameterNames,
+  };
+}
+
+function mergedCommerceSourceEvidence(
+  product: Product,
+  affiliateProbe?: CommerceUrlProbeResult,
+  merchantProbe?: CommerceUrlProbeResult,
+): CommerceSourceEvidence | undefined {
+  const affiliate = affiliateProbe ? persistedCommerceProbe(affiliateProbe) : product.sourceEvidence?.affiliate;
+  const merchant = merchantProbe ? persistedCommerceProbe(merchantProbe) : product.sourceEvidence?.merchant;
+  if (!affiliate || !merchant) return undefined;
+  const checkedTimes = [affiliate.checkedAt, merchant.checkedAt].map(value => Date.parse(value));
+  if (checkedTimes.some(value => !Number.isFinite(value))) return undefined;
+  return {
+    schemaVersion: 1,
+    ruleVersion: 'commerce-source-v1',
+    checkedAt: new Date(Math.max(...checkedTimes)).toISOString(),
+    // Partial rechecks must not make older evidence fresh. Expire from the
+    // older of the two independently verified links.
+    expiresAt: new Date(Math.min(...checkedTimes) + 6 * 60 * 60_000).toISOString(),
+    affiliate,
+    merchant,
+  };
 }
 
 export function accessTradeAffiliateSupport(product: Partial<Product>): { supported: boolean; reason?: string } {
@@ -654,6 +713,9 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
       await startReprocessAudit(job, product);
       const retryTimes: string[] = [];
       const failureReasons: string[] = [];
+      const sourceReasonCodes: string[] = [];
+      let merchantCommerceProbe: CommerceUrlProbeResult | undefined;
+      let affiliateCommerceProbe: CommerceUrlProbeResult | undefined;
       const normalizationIssues = new Set(product.sourceNormalizationIssues || []);
       const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
       let affiliateUrlHealthy = !checkAffiliate && goodHealth.has(String(product.affiliateHealthStatus || ''));
@@ -681,7 +743,11 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
       const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
       const canonicalSupport = accessTradeCanonicalSupport(product);
       if (checkLinks && canonicalUrl) {
-        const checkedLink = await checkLinkWithDomainCircuit(canonicalUrl, Date.now(), execution);
+        const checkedLink = await checkLinkWithDomainCircuit(canonicalUrl, 'MERCHANT', Date.now(), execution, {
+          jobId: job.id,
+          operationId: job.operationId,
+        });
+        merchantCommerceProbe = checkedLink.probe;
         const linkResult = checkedLink.result;
         const canonicalDestinationSupported = !isAccessTradeTrackingUrl(linkResult.finalUrl || canonicalUrl);
         const canonicalDomainAllowed = canonicalFinalDomainAllowed(product, canonicalUrl, linkResult.finalUrl);
@@ -716,6 +782,15 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
         });
         if (!canonicalHealthy) {
           failureReasons.push(`link:${canonicalSupport.supported ? linkResult.status : 'provenance_required'}`);
+          sourceReasonCodes.push(!canonicalSupport.supported
+            ? 'CANONICAL_PROVENANCE_REQUIRED'
+            : !canonicalDestinationSupported
+              ? 'MERCHANT_RESOLVED_TO_AFFILIATE_GATEWAY'
+              : !canonicalDomainAllowed
+                ? 'MERCHANT_FINAL_DOMAIN_REJECTED'
+                : checkedLink.probe
+                  ? commerceProbeBlockerCode(checkedLink.probe, 'MERCHANT')
+                  : linkResult.errorCode || 'MERCHANT_CIRCUIT_OPEN');
           if (linkResult.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
@@ -739,11 +814,16 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
           verificationReason: updates.productUrlHealthReason,
         });
         failureReasons.push(invalidSourceUrl ? 'link:invalid' : 'link:missing');
+        sourceReasonCodes.push(invalidSourceUrl ? 'INVALID_MERCHANT_URL' : 'MISSING_MERCHANT_URL');
       }
 
       const support = accessTradeAffiliateSupport(product);
       if (checkAffiliate && product.affiliateUrl && support.supported) {
-        const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl, Date.now(), execution);
+        const checkedLink = await checkLinkWithDomainCircuit(product.affiliateUrl, 'AFFILIATE', Date.now(), execution, {
+          jobId: job.id,
+          operationId: job.operationId,
+        });
+        affiliateCommerceProbe = checkedLink.probe;
         const linkResult = checkedLink.result;
         const finalDomainAllowed = affiliateFinalDomainAllowed(product, linkResult.finalUrl || product.affiliateUrl);
         affiliateUrlHealthy = linkResult.ok && finalDomainAllowed;
@@ -769,6 +849,11 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
         });
         if (!affiliateUrlHealthy) {
           failureReasons.push(`affiliate:${finalDomainAllowed ? linkResult.status : 'final_domain_not_allowed'}`);
+          sourceReasonCodes.push(!finalDomainAllowed
+            ? 'AFFILIATE_FINAL_DOMAIN_REJECTED'
+            : checkedLink.probe
+              ? commerceProbeBlockerCode(checkedLink.probe, 'AFFILIATE')
+              : linkResult.errorCode || 'AFFILIATE_GATEWAY_CIRCUIT_OPEN');
           if (linkResult.retryable && checkedLink.retryAt) retryTimes.push(checkedLink.retryAt);
         }
         if (checkedLink.circuitSkipped) circuitSkipped += 1;
@@ -805,6 +890,7 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
           verificationReason: updates.affiliateUrlHealthReason,
         });
         failureReasons.push('affiliate:provenance_required');
+        sourceReasonCodes.push('AFFILIATE_PROVENANCE_REQUIRED');
       } else if (checkAffiliate) {
         const invalidSourceAffiliate = normalizationIssues.has('INVALID_AFFILIATE_URL')
           || product.fieldProvenance?.affiliateUrl?.verificationStatus === 'INVALID';
@@ -825,6 +911,7 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
           verificationReason: updates.affiliateUrlHealthReason,
         });
         failureReasons.push(invalidSourceAffiliate ? 'affiliate:invalid' : 'affiliate:missing');
+        sourceReasonCodes.push(invalidSourceAffiliate ? 'INVALID_AFFILIATE_URL' : 'MISSING_AFFILIATE_URL');
       } else if (!support.supported) {
         affiliateUrlHealthy = false;
       }
@@ -886,8 +973,14 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
         failureReasons.push(invalidSourceImage ? 'image:invalid' : 'image:missing');
       }
 
-      const isThirtyShine = urlContainsDomain(canonicalUrl, '30shinestore.com')
-        || urlContainsDomain(product.affiliateUrl, '30shinestore.com');
+      const sourceEvidence = mergedCommerceSourceEvidence(product, affiliateCommerceProbe, merchantCommerceProbe);
+      if (sourceEvidence) {
+        updates.sourceReliabilityVersion = 'commerce-source-v1';
+        updates.sourceEvidence = sourceEvidence;
+        updates.affiliateGatewayDomain = sourceEvidence.affiliate.affiliateGatewayDomain || product.affiliateGatewayDomain;
+        updates.merchantDomain = sourceEvidence.merchant?.merchantDomain || product.merchantDomain;
+      }
+      const uniqueSourceReasonCodes = [...new Set(sourceReasonCodes)];
       const eligibility = evaluateProductEligibility({ ...product, ...updates }, Date.now());
       const blockers = eligibility.criticalBlockers;
       const operationalBlockers = blockers.filter(reason => ![
@@ -912,7 +1005,7 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
       updates.eligibility = eligibility;
       updates.reviewQuality = eligibility.reviewQuality;
       const blockersCheckedAt = new Date().toISOString();
-      const reconciledBlockers = preserveFailClosedProductBlockers(product, blockers, blockersCheckedAt);
+      const reconciledBlockers = preserveFailClosedProductBlockers(product, [...blockers, ...uniqueSourceReasonCodes], blockersCheckedAt);
       updates.currentBlockers = reconciledBlockers.map(blocker => ({
         ...blocker,
         source: isFailClosedProductBlocker(blocker) ? blocker.source : 'PRODUCT_HEALTH_RULES',
@@ -937,21 +1030,52 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
           updates.publicHidden = true;
           updates.needsVerification = true;
           updates.autoPublishEligible = false;
-          updates.publicDecision = isThirtyShine ? 'archived' : 'blocked';
+          updates.publicDecision = 'blocked';
           updates.unpublishedReason = healthReason;
         }
-        if (healthUnsafe && !isThirtyShine && (product.status === 'published' || ['PUBLISHED', 'DEGRADED', 'RECHECKING'].includes(String(product.lifecycleState || '')))) {
+        if (healthUnsafe && (product.status === 'published' || ['PUBLISHED', 'DEGRADED', 'RECHECKING'].includes(String(product.lifecycleState || '')))) {
           updates.lifecycleState = permanentFailure ? 'CONFIRMED_BROKEN' : 'DEGRADED';
           updates.lifecycleUpdatedAt = new Date().toISOString();
         }
       }
 
-      if (isThirtyShine) {
-        updates.status = 'archived';
+      if (uniqueSourceReasonCodes.length > 0 && !wasPublicSafe) {
+        updates.status = product.status === 'archived' ? 'archived' : 'needs_review';
         updates.lifecycleState = 'QUARANTINED';
-        updates.lifecycleUpdatedAt = new Date().toISOString();
-        updates.archivedReason = 'merchant_quarantined_30shinestore';
-        updates.quarantineReasons = [...new Set([...(product.quarantineReasons || []), 'merchant_quarantined_30shinestore'])];
+        updates.lifecycleUpdatedAt = blockersCheckedAt;
+        updates.quarantineReasons = [...new Set([
+          ...(product.quarantineReasons || []),
+          ...uniqueSourceReasonCodes,
+        ])];
+        updates.publicHidden = true;
+        updates.publicBlocked = true;
+        updates.publicDecision = 'quarantined';
+        updates.publicBlockReason = uniqueSourceReasonCodes.join(',');
+        updates.autoPublishEligible = false;
+        updates.needsVerification = true;
+        updates.nextAutomaticAction = retryTimes.length > 0
+          ? 'VERIFY_PRODUCT_HEALTH'
+          : 'RECHECK_QUARANTINED_PRODUCT';
+        updates.lastEligibilityDecision = {
+          eligible: false,
+          reasonCodes: uniqueSourceReasonCodes,
+          checkedAt: blockersCheckedAt,
+          ruleVersion: 'commerce-source-v1',
+          jobId: job.id,
+        };
+        if (product.lifecycleState !== 'QUARANTINED'
+          || uniqueSourceReasonCodes.some(code => !product.quarantineReasons?.includes(code))) {
+          sourceReliabilityEvent('product_quarantined_source_unhealthy', {
+            provider: String(product.source || product.platform || 'unknown'),
+            campaign: product.campaignName,
+            domain: updates.merchantDomain || finalDomain(product.canonicalProductUrl || product.originalUrl),
+            role: 'MERCHANT',
+            reasonCode: uniqueSourceReasonCodes.join(',').slice(0, 160),
+            correlationId: product.id,
+            operationId: job.operationId,
+            jobId: job.id,
+          });
+        }
       }
 
       if (failureReasons.length) {
@@ -1008,7 +1132,7 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
       if (operationalHealthSignature(persisted) === beforeSignature) unchanged += 1;
        if (healthUnsafe || failClosedCodes.length > 0) unhealthy += 1;
        else healthy += 1;
-      if (isThirtyShine) quarantined += 1;
+       if (persisted.lifecycleState === 'QUARANTINED') quarantined += 1;
       processed += 1;
     } catch (error) {
       if (isJobStop(error)) throw error;

@@ -31,6 +31,11 @@ export interface AutomationSettings {
   maxRunDurationMs: number;
   sourceRequestBudgetPerDay: number;
   networkCheckBudgetPerDay: number;
+  sourceMaxPerMerchant: number;
+  sourceMaxPerCampaign: number;
+  sourceDiscoveryPoolMultiplier: number;
+  pausedSourceDomains: string[];
+  pausedSourceCampaigns: string[];
   generationConcurrency: number;
   bulkBudgetPercent: number;
   editorialBudgetPercent: number;
@@ -84,6 +89,11 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   maxRunDurationMs: 240_000,
   sourceRequestBudgetPerDay: 300,
   networkCheckBudgetPerDay: 900,
+  sourceMaxPerMerchant: 5,
+  sourceMaxPerCampaign: 15,
+  sourceDiscoveryPoolMultiplier: 3,
+  pausedSourceDomains: [],
+  pausedSourceCampaigns: [],
   generationConcurrency: 1,
   bulkBudgetPercent: 45,
   editorialBudgetPercent: 45,
@@ -133,6 +143,11 @@ export function sanitizeAutomationSettings(settings: Record<string, unknown>): A
     maxRunDurationMs: Math.max(60_000, Math.min(Number(settings.maxRunDurationMs) || 240_000, 10 * 60_000)),
     sourceRequestBudgetPerDay: Math.max(10, Math.min(Number(settings.sourceRequestBudgetPerDay) || 300, 2_000)),
     networkCheckBudgetPerDay: Math.max(30, Math.min(Number(settings.networkCheckBudgetPerDay) || 900, 5_000)),
+    sourceMaxPerMerchant: Math.max(1, Math.min(Number(settings.sourceMaxPerMerchant) || 5, 25)),
+    sourceMaxPerCampaign: Math.max(1, Math.min(Number(settings.sourceMaxPerCampaign) || 15, 50)),
+    sourceDiscoveryPoolMultiplier: Math.max(1, Math.min(Number(settings.sourceDiscoveryPoolMultiplier) || 3, 4)),
+    pausedSourceDomains: sanitizeSourceControlList(settings.pausedSourceDomains, true),
+    pausedSourceCampaigns: sanitizeSourceControlList(settings.pausedSourceCampaigns, false),
     generationConcurrency: Math.max(1, Math.min(Number(settings.generationConcurrency) || 1, 2)),
     bulkBudgetPercent: Math.max(0, Math.min(Number(settings.bulkBudgetPercent) || 45, 60)),
     editorialBudgetPercent: Math.max(0, Math.min(Number(settings.editorialBudgetPercent) || 45, 60)),
@@ -158,6 +173,15 @@ export function sanitizeAutomationSettings(settings: Record<string, unknown>): A
   }
 
   return sanitized as AutomationSettings;
+}
+
+function sanitizeSourceControlList(value: unknown, domain: boolean): string[] {
+  if (!Array.isArray(value)) return [];
+  const normalized = value
+    .map(item => String(item || '').trim().toLowerCase().replace(/\.$/, ''))
+    .filter(item => item.length > 0 && item.length <= 160)
+    .filter(item => !domain || /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(item));
+  return [...new Set(normalized)].slice(0, 100);
 }
 
 export async function getAutomationSettings(): Promise<AutomationSettings> {

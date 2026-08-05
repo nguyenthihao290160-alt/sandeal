@@ -69,6 +69,7 @@
     "test:prompt12": "node scripts/prompt12-operational-truth-tests.cjs",
     "test:production-readiness": "node scripts/prompt13-production-readiness-tests.cjs",
     "test:operator-intelligence": "node scripts/operator-intelligence-regression-tests.cjs",
+    "test:source-reliability": "node scripts/source-reliability-tests.cjs && node scripts/prompt10-zero-touch-tests.cjs",
     "accesstrade:cleanup:prompt12": "node scripts/prompt12-accesstrade-cleanup.cjs",
     "test:stabilization": "node scripts/stabilization-tests.cjs",
     "test:storage": "node scripts/storage-adapter-phase1a-tests.cjs",
@@ -110,7 +111,8 @@
     "smoke:autonomous": "node scripts/autonomous-pipeline-smoke.cjs",
     "smoke:prompt09": "node scripts/prompt09-runtime-smoke.cjs",
     "smoke:prompt10:fullstack": "node scripts/prompt10-fullstack-shadow-smoke.cjs",
-    "verify:production:readonly": "node scripts/production-readonly-audit.cjs"
+    "verify:production:readonly": "node scripts/production-readonly-audit.cjs",
+    "source-reliability:reconcile": "node scripts/reconcile-source-reliability.cjs"
   },
   "engines": {
     "node": ">=20.9.0 <25"

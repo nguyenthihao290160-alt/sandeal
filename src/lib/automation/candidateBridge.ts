@@ -1,6 +1,7 @@
 import { AutomationJobEnqueueError, createAutomationJob } from './store';
 import { ensureOperationJournal, completeJournalEffect } from './operationJournal';
 import { listCandidateQueue, markCandidateBridged } from '@/lib/storage/candidateQueue';
+import { listDomainCircuitStates } from '@/lib/bots/domainCircuitBreaker';
 
 export interface CandidateBridgeResult {
   inspected: number;
@@ -10,8 +11,8 @@ export interface CandidateBridgeResult {
   jobs: Array<{ candidateId: string; jobId: string; created: boolean }>;
 }
 
-function candidateJobKey(candidateId: string, sourceHash: string): string {
-  return `candidate:${candidateId}:${sourceHash}`.slice(0, 160);
+function candidateJobKey(candidateId: string, sourceHash: string, generation = 0): string {
+  return `candidate:${candidateId}:${sourceHash}:g${Math.max(0, Math.floor(generation))}`.slice(0, 160);
 }
 
 export async function bridgeCandidatesToDurableJobs(input: {
@@ -22,15 +23,33 @@ export async function bridgeCandidatesToDurableJobs(input: {
 } = {}): Promise<CandidateBridgeResult> {
   const limit = Math.max(1, Math.min(100, Math.floor(input.limit || 25)));
   const requestedIds = input.candidateIds?.length ? new Set(input.candidateIds.slice(0, 100)) : null;
+  const now = Date.now();
+  const circuits = await listDomainCircuitStates();
+  const blockedMerchants = new Set(circuits
+    .filter(item => item.role === 'MERCHANT' && (item.state === 'OPEN' || item.state === 'HALF_OPEN' && item.halfOpenProbeInFlight))
+    .map(item => item.domain));
   const candidates = (await listCandidateQueue())
-    .filter(item => ['pending', 'delayed', 'needs_review', 'failed'].includes(item.status) && (!requestedIds || requestedIds.has(item.id)))
+    .filter(item => ['pending', 'delayed'].includes(item.status)
+      && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now)
+      && (!requestedIds || requestedIds.has(item.id)))
     .sort((a, b) => b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
-    .slice(0, limit);
+    .slice(0, Math.min(100, limit * 4));
   const result: CandidateBridgeResult = { inspected: candidates.length, created: 0, existing: 0, skipped: 0, jobs: [] };
 
   for (const candidate of candidates) {
-    const key = candidateJobKey(candidate.id, candidate.sourceHash);
-    const operationId = `candidate-operation:${candidate.id}:${candidate.sourceHash}`.slice(0, 160);
+    if (result.jobs.length >= limit) break;
+    let merchantDomain = candidate.merchantDomain || candidate.payload.merchantDomain || '';
+    if (!merchantDomain) {
+      try { merchantDomain = new URL(candidate.payload.canonicalProductUrl || candidate.payload.originalUrl).hostname.toLowerCase().replace(/^www\./, ''); }
+      catch { merchantDomain = 'invalid'; }
+    }
+    if (blockedMerchants.has(merchantDomain)) {
+      result.skipped += 1;
+      continue;
+    }
+    const generation = Math.max(0, Math.floor(Number(candidate.durableJobGeneration) || 0));
+    const key = candidateJobKey(candidate.id, candidate.sourceHash, generation);
+    const operationId = `candidate-operation:${candidate.id}:${candidate.sourceHash}:g${generation}`.slice(0, 160);
     let created;
     try {
       created = await createAutomationJob({

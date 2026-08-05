@@ -613,7 +613,7 @@ async function main() {
 
   await test('Product detail blocker summary separates merchant, affiliate, image, price and duplicate concerns', () => {
     const blockers = [
-      'merchant_quarantined_30shinestore',
+      'merchant_connection_reset',
       'affiliate_provenance_missing',
       'missing_image',
       'price_stale',

@@ -122,12 +122,13 @@ export async function runAutomationSchedulerTick(now = Date.now()): Promise<Sche
   if (capacity.remaining <= 0) return { status: 'limit_reached' };
 
   const nextRunAt = new Date(now + intervalMs).toISOString();
+  const scheduleBucket = bucketKey(now, settings.intervalHours);
   const policy = getAutomationPolicy('AUTO_PILOT');
   const created = await createAutomationJob({
     type: 'AUTO_PILOT',
-    payload: { mode: settings.mode, autonomousMode: control.effectiveMode, source: settings.source, limit: Math.min(settings.maxItemsPerRun, capacity.remaining) },
+    payload: { mode: settings.mode, autonomousMode: control.effectiveMode, source: settings.source, limit: Math.min(settings.maxItemsPerRun, capacity.remaining), scheduleBucket },
     priority: 60,
-    idempotencyKey: `scheduler:auto:${bucketKey(now, settings.intervalHours)}`,
+    idempotencyKey: `scheduler:auto:${scheduleBucket}`,
     requestedBy: 'scheduler',
     riskLevel: policy.defaultRisk,
     dryRun: control.effectiveMode === 'OBSERVE',

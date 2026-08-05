@@ -11,6 +11,7 @@ import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/da
 import type { Product, ProductKind } from '@/lib/types';
 import { pollScanJob, type ScanJobResult, type ScanJobSnapshot } from '@/lib/dashboard/scanPolling';
 import { buildIdempotencyKey } from '@/lib/automation/idempotency';
+import { SourceReliabilityPanel } from '@/components/dashboard/source-reliability-panel';
 
 // ---- Tab IDs ----
 const TABS = [
@@ -1845,6 +1846,8 @@ export default function ProductSourcesPage() {
             </div>
           </div>
         </section>
+
+        <SourceReliabilityPanel />
 
         {/* Safe Source Rules */}
         <div

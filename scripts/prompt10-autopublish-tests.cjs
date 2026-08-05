@@ -73,7 +73,7 @@ async function main() {
   async function reset(mode = 'AUTONOMOUS') {
     delete process.env.RECOVERY_CANARY;
     for (const collection of ['products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-canary', 'operation-journal', 'automation-outbound-events', 'publication-audit', 'source-quality', 'runtime-role-leases', 'runtime-recovery-state', 'runtime-recovery-canary-permits']) await adapter.writeCollection(collection, []);
-    await settings.updateAutomationSettings({ launchEnabled: true });
+    await settings.updateAutomationSettings({ enabled: true, safePublish: true, launchEnabled: true });
     await store.updateAutomationControl({ mode, effectiveMode: mode, publishPaused: false, ingestionPaused: false, workerPaused: false, schedulerPaused: false, killSwitch: false }, 'autopublish-test');
     const initial = await canary.getCanaryState();
     const now = new Date().toISOString();
@@ -185,6 +185,88 @@ async function main() {
     assert.ok(audits[0].productReasonCodes.includes('risk_not_low'));
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 0);
     assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR').length, 0);
+  });
+
+  await test('broken affiliate evidence blocks publication with an explicit reason', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('broken-affiliate', {
+      affiliateHealthStatus: 'broken', affiliateUrlStatus: 'unverified',
+    }));
+    await adapter.writeCollection('products', [product]);
+    await publishJob(store, product, 'broken-affiliate');
+    const run = await worker.processAutomationBatch('auto-publish-broken-link-worker', 1);
+    assert.equal(run.succeeded, 1);
+    const blocked = await products.getProductById(product.id);
+    assert.equal(blocked.publicHidden, true);
+    assert.equal(blocked.lifecycleState, 'QUARANTINED');
+    assert.ok(blocked.lastEligibilityDecision.reasonCodes.includes('affiliate_url_unhealthy'));
+    assert.equal((await products.getPublicProducts()).some(item => item.id === product.id), false);
+  });
+
+  await test('missing verified image evidence blocks publication', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('missing-image-evidence', {
+      imageHealthStatus: 'unknown', imageUrlHttpStatus: undefined, imageContentType: undefined,
+    }));
+    await adapter.writeCollection('products', [product]);
+    await publishJob(store, product, 'missing-image-evidence');
+    const run = await worker.processAutomationBatch('auto-publish-missing-image-worker', 1);
+    assert.equal(run.succeeded, 1);
+    const blocked = await products.getProductById(product.id);
+    assert.equal(blocked.publicHidden, true);
+    assert.equal(blocked.lifecycleState, 'QUARANTINED');
+    assert.ok(blocked.lastEligibilityDecision.reasonCodes.some(reason => ['image_unhealthy', 'image_http_not_200', 'image_content_type_invalid'].includes(reason)));
+    assert.equal((await products.getPublicProducts()).some(item => item.id === product.id), false);
+  });
+
+  await test('disabled automation mode records a precise execution blocker', async () => {
+    await reset();
+    await settings.updateAutomationSettings({ enabled: false });
+    const product = await hydratePersistedEvidence(readyProduct('mode-disabled'));
+    await adapter.writeCollection('products', [product]);
+    await publishJob(store, product, 'mode-disabled');
+    const run = await worker.processAutomationBatch('auto-publish-disabled-mode-worker', 1);
+    assert.equal(run.succeeded, 1);
+    const blocked = await products.getProductById(product.id);
+    assert.equal(blocked.publicHidden, true);
+    assert.ok(blocked.lastEligibilityDecision.reasonCodes.includes('mode_disallows_publish'));
+    assert.equal((await products.getPublicProducts()).some(item => item.id === product.id), false);
+  });
+
+  await test('two confirmed broken post-publish probes remove public discoverability without a monitor flood', async () => {
+    await reset();
+    const product = await hydratePersistedEvidence(readyProduct('post-publish-broken'));
+    await adapter.writeCollection('products', [product]);
+    await publishJob(store, product, 'post-publish-broken');
+    assert.equal((await worker.processAutomationBatch('post-publish-initial-worker', 1)).succeeded, 1);
+    let monitor = (await store.getAllAutomationJobs()).find(job => job.type === 'POST_PUBLISH_MONITOR');
+    assert.ok(monitor);
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const item = jobs.find(job => job.id === monitor.id);
+      item.scheduledAt = new Date(0).toISOString();
+      item.payload.healthOutcome = 'CONFIRMED_BROKEN';
+      item.payload.publicPageStatus = 200;
+      item.payload.publicPageIdentity = 'expected';
+      return jobs;
+    });
+    assert.equal((await worker.processAutomationBatch('post-publish-confirmation-worker-1', 1)).succeeded, 1);
+    monitor = (await store.getAllAutomationJobs()).find(job => job.type === 'POST_PUBLISH_MONITOR' && job.status === 'PENDING');
+    assert.ok(monitor);
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const item = jobs.find(job => job.id === monitor.id);
+      item.scheduledAt = new Date(0).toISOString();
+      item.payload.healthOutcome = 'CONFIRMED_BROKEN';
+      item.payload.publicPageStatus = 200;
+      item.payload.publicPageIdentity = 'expected';
+      return jobs;
+    });
+    assert.equal((await worker.processAutomationBatch('post-publish-confirmation-worker-2', 1)).succeeded, 1);
+    const hidden = await products.getProductById(product.id);
+    assert.equal(hidden.publicHidden, true);
+    assert.notEqual(hidden.status, 'published');
+    assert.equal((await products.getPublicProducts()).some(item => item.id === product.id), false);
+    const activeMonitors = (await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR' && ['PENDING', 'RETRY_SCHEDULED', 'RUNNING'].includes(job.status));
+    assert.ok(activeMonitors.length <= 1);
   });
 
   await test('blocked publication state resumes after a crash and writes exactly one audit', async () => {

@@ -1,9 +1,11 @@
-import { generateId, readCollection, runTransaction, writeCollection } from './adapter';
-import type { CandidateLane, Product } from '../types';
+import { findById, generateId, readBoundedCollection, runTransaction } from './adapter';
+import type { CandidateLane, CommerceSourceEvidence, Product } from '../types';
 import { LANE_PRIORITY } from '../bots/candidateReadiness';
 
 const COLLECTION = 'candidate-queue';
 const PROCESSING_TTL_MS = 15 * 60_000;
+const MAX_ACTIVE_CANDIDATES = 10_000;
+const MAX_ACTIVE_CANDIDATE_BYTES = 32 * 1024 * 1024;
 
 export type CandidateQueueStatus = 'pending' | 'processing' | 'completed' | 'needs_review' | 'delayed' | 'failed' | 'discarded';
 
@@ -72,6 +74,12 @@ export interface CandidateQueueItem {
   attempts: number;
   nextAttemptAt?: string;
   delayReason?: string;
+  terminalReason?: string;
+  retryable?: boolean;
+  lastProbeAt?: string;
+  affiliateGatewayDomain?: string;
+  merchantDomain?: string;
+  sourceEvidence?: CommerceSourceEvidence;
   createdAt: string;
   updatedAt: string;
   processingStartedAt?: string;
@@ -80,25 +88,22 @@ export interface CandidateQueueItem {
   keyword?: string;
   durableJobId?: string;
   durableJobKey?: string;
+  /** Monotonic generation used only after a bound durable job is terminal. */
+  durableJobGeneration?: number;
   bridgedAt?: string;
   payload: CandidatePayload;
 }
 
-let writeChain: Promise<unknown> = Promise.resolve();
-function mutate<T>(work: () => Promise<T>): Promise<T> {
-  const next = writeChain.then(work, work);
-  writeChain = next.then(() => undefined, () => undefined);
-  return next;
-}
-
 export async function listCandidateQueue(): Promise<CandidateQueueItem[]> {
-  return readCollection<CandidateQueueItem>(COLLECTION);
+  return readBoundedCollection<CandidateQueueItem>(COLLECTION, {
+    maximumItems: MAX_ACTIVE_CANDIDATES,
+    maximumBytes: MAX_ACTIVE_CANDIDATE_BYTES,
+  });
 }
 
 export async function recoverStaleProcessing(now = Date.now(), ttlMs = PROCESSING_TTL_MS): Promise<number> {
-  return mutate(async () => {
-    const items = await listCandidateQueue();
-    let recovered = 0;
+  let recovered = 0;
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
     for (const item of items) {
       if (item.status !== 'processing') continue;
       const started = Date.parse(item.processingStartedAt || item.updatedAt);
@@ -109,39 +114,49 @@ export async function recoverStaleProcessing(now = Date.now(), ttlMs = PROCESSIN
       item.updatedAt = new Date(now).toISOString();
       recovered++;
     }
-    if (recovered) await writeCollection(COLLECTION, items);
-    return recovered;
+    return recovered ? items : undefined;
   });
+  return recovered;
 }
 
 export async function enqueueCandidate(input: Omit<CandidateQueueItem, 'id' | 'status' | 'attempts' | 'createdAt' | 'updatedAt'>): Promise<{ item: CandidateQueueItem; queued: boolean; unchanged: boolean }> {
-  return mutate(async () => {
-    const items = await listCandidateQueue();
+  let output!: { item: CandidateQueueItem; queued: boolean; unchanged: boolean };
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
     const existing = items.find((item) => item.source === input.source && item.sourceId === input.sourceId);
-    if (existing && existing.sourceHash === input.sourceHash && !['failed', 'discarded'].includes(existing.status)) {
-      return { item: existing, queued: false, unchanged: true };
+    // Terminal outcomes are durable for the same exact source snapshot. A new
+    // provider sourceHash is required before the item may re-enter automation.
+    if (existing && existing.sourceHash === input.sourceHash) {
+      output = { item: structuredClone(existing), queued: false, unchanged: true };
+      return undefined;
     }
     const now = new Date().toISOString();
     if (existing) {
       const sourceChanged = existing.sourceHash !== input.sourceHash;
-      Object.assign(existing, input, { schemaVersion: 2, status: 'pending', attempts: 0, updatedAt: now, processingStartedAt: undefined, delayReason: undefined });
+      Object.assign(existing, input, {
+        schemaVersion: 3, status: 'pending', attempts: 0, updatedAt: now,
+        processingStartedAt: undefined, delayReason: undefined,
+        terminalReason: undefined, retryable: undefined, nextAttemptAt: undefined,
+        lastProbeAt: undefined, sourceEvidence: undefined,
+      });
       if (sourceChanged) {
         existing.durableJobId = undefined;
         existing.durableJobKey = undefined;
+        existing.durableJobGeneration = 0;
         existing.bridgedAt = undefined;
       }
-      await writeCollection(COLLECTION, items);
-      return { item: existing, queued: true, unchanged: false };
+      output = { item: structuredClone(existing), queued: true, unchanged: false };
+      return items;
     }
-    const item: CandidateQueueItem = { ...input, schemaVersion: 2, id: generateId(), status: 'pending', attempts: 0, createdAt: now, updatedAt: now };
+    const item: CandidateQueueItem = { ...input, schemaVersion: 3, id: generateId(), status: 'pending', attempts: 0, createdAt: now, updatedAt: now };
     items.push(item);
-    await writeCollection(COLLECTION, items);
-    return { item, queued: true, unchanged: false };
+    output = { item: structuredClone(item), queued: true, unchanged: false };
+    return items;
   });
+  return output;
 }
 
 export async function getCandidateById(id: string): Promise<CandidateQueueItem | null> {
-  return (await listCandidateQueue()).find(item => item.id === id) || null;
+  return findById<CandidateQueueItem>(COLLECTION, id);
 }
 
 export async function markCandidateBridged(id: string, jobId: string, durableJobKey: string): Promise<CandidateQueueItem | null> {
@@ -150,7 +165,7 @@ export async function markCandidateBridged(id: string, jobId: string, durableJob
     const item = items.find(entry => entry.id === id);
     if (!item) return undefined;
     if (item.durableJobId && item.durableJobId !== jobId) throw new Error('CANDIDATE_ALREADY_BRIDGED');
-    item.schemaVersion = 2;
+    item.schemaVersion = 3;
     item.durableJobId = jobId;
     item.durableJobKey = durableJobKey;
     item.bridgedAt ||= new Date().toISOString();
@@ -201,8 +216,8 @@ export async function claimCandidateForDurableJob(id: string, jobId: string, now
 
 export async function claimCandidateBatch(limit: number, now = Date.now()): Promise<CandidateQueueItem[]> {
   await recoverStaleProcessing(now);
-  return mutate(async () => {
-    const items = await listCandidateQueue();
+  let claimed: CandidateQueueItem[] = [];
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
     const due = items
       .filter((item) => ['pending', 'delayed'].includes(item.status) && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now))
       .sort((a, b) => (LANE_PRIORITY[b.lane || (b.status === 'delayed' ? 'RETRY_LANE' : 'NORMAL_LANE')] - LANE_PRIORITY[a.lane || (a.status === 'delayed' ? 'RETRY_LANE' : 'NORMAL_LANE')]) || b.priority - a.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt))
@@ -214,18 +229,45 @@ export async function claimCandidateBatch(limit: number, now = Date.now()): Prom
       item.updatedAt = timestamp;
       item.attempts += 1;
     }
-    if (due.length) await writeCollection(COLLECTION, items);
-    return due.map((item) => ({ ...item, payload: { ...item.payload } }));
+    claimed = due.map((item) => structuredClone(item));
+    return due.length ? items : undefined;
   });
+  return claimed;
 }
 
-export async function finishCandidate(id: string, update: Pick<CandidateQueueItem, 'status'> & Partial<Pick<CandidateQueueItem, 'nextAttemptAt' | 'delayReason'>>): Promise<void> {
-  await mutate(async () => {
-    const items = await listCandidateQueue();
+/**
+ * Release a delayed candidate from one exact terminal durable job. The CAS on
+ * job id prevents an old worker from clearing a newer bridge. Incrementing the
+ * generation gives the next cooldown attempt a distinct durable idempotency
+ * key without weakening sourceHash identity.
+ */
+export async function advanceCandidateBridgeGeneration(id: string, terminalJobId: string): Promise<boolean> {
+  let advanced = false;
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
+    const item = items.find(entry => entry.id === id);
+    if (!item || item.durableJobId !== terminalJobId || item.status !== 'delayed' || !item.nextAttemptAt) return undefined;
+    item.durableJobGeneration = Math.max(0, Math.floor(Number(item.durableJobGeneration) || 0)) + 1;
+    item.durableJobId = undefined;
+    item.durableJobKey = undefined;
+    item.bridgedAt = undefined;
+    item.updatedAt = new Date().toISOString();
+    advanced = true;
+    return items;
+  });
+  return advanced;
+}
+
+export async function finishCandidate(
+  id: string,
+  update: Pick<CandidateQueueItem, 'status'> & Partial<Pick<CandidateQueueItem,
+    'nextAttemptAt' | 'delayReason' | 'terminalReason' | 'retryable' | 'lastProbeAt'
+    | 'affiliateGatewayDomain' | 'merchantDomain' | 'sourceEvidence'>>,
+): Promise<void> {
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
     const item = items.find((entry) => entry.id === id);
-    if (!item) return;
+    if (!item) return undefined;
     Object.assign(item, update, { processingStartedAt: undefined, updatedAt: new Date().toISOString() });
-    await writeCollection(COLLECTION, items);
+    return items;
   });
 }
 
@@ -237,10 +279,11 @@ export async function getQueueStats(): Promise<Record<CandidateQueueStatus | 'to
 }
 
 export async function cleanupCandidateQueue(now = Date.now(), retentionMs = 7 * 24 * 60 * 60_000): Promise<number> {
-  return mutate(async () => {
-    const items = await listCandidateQueue();
+  let removed = 0;
+  await runTransaction<CandidateQueueItem>(COLLECTION, items => {
     const kept = items.filter((item) => !['completed', 'discarded'].includes(item.status) || now - Date.parse(item.updatedAt) < retentionMs);
-    if (kept.length !== items.length) await writeCollection(COLLECTION, kept);
-    return items.length - kept.length;
+    removed = items.length - kept.length;
+    return removed ? kept : undefined;
   });
+  return removed;
 }

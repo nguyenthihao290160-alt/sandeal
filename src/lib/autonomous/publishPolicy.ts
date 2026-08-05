@@ -216,10 +216,27 @@ export function readinessSnapshotHash(product: Partial<Product>): string {
     duplicateStatus: product.duplicateStatus,
     claimValidationStatus: product.claimValidationStatus,
     health: [product.linkHealthStatus, product.affiliateHealthStatus, product.imageHealthStatus],
+    sourceReliability: product.sourceReliabilityVersion === 'commerce-source-v1' ? {
+      affiliate: product.sourceEvidence?.affiliate ? [
+        product.sourceEvidence.affiliate.classification,
+        product.sourceEvidence.affiliate.checkedAt,
+        product.sourceEvidence.affiliate.affiliateGatewayDomain,
+      ] : null,
+      merchant: product.sourceEvidence?.merchant ? [
+        product.sourceEvidence.merchant.classification,
+        product.sourceEvidence.merchant.checkedAt,
+        product.sourceEvidence.merchant.merchantDomain,
+      ] : null,
+      expiresAt: product.sourceEvidence?.expiresAt,
+    } : null,
     price: product.salePrice || product.price,
     riskLevel: product.riskLevel,
     reviewHash: product.reviewContent?.reviewContentHash,
   })).digest('hex');
+}
+
+export function autoSafePublishJobKey(product: Partial<Product>): string {
+  return `auto-safe-publish:${String(product.id || 'missing')}:${readinessSnapshotHash(product)}`.slice(0, 160);
 }
 
 export function evaluateAutonomousPublish(

@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  checkLinkHealth,
   resolveHealthyImageCandidate,
-  type LinkCheckResult,
 } from '@/lib/bots/productHealthCheck';
 import { calculateProductConfidences } from '@/lib/autonomous/confidenceEngine';
 import { captureProductHealthEvidence } from '@/lib/autonomous/evidenceGraph';
@@ -11,6 +9,7 @@ import {
   persistLifecycleTransition,
 } from '@/lib/autonomous/lifecycleStore';
 import {
+  autoSafePublishJobKey,
   readinessSnapshotHash,
   verifyAutonomousPublishEvidence,
 } from '@/lib/autonomous/publishPolicy';
@@ -20,12 +19,15 @@ import { canonicalBlockerCodes, preserveFailClosedProductBlockers } from '@/lib/
 import { evaluateSafePublish } from '@/lib/safePublish';
 import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
-import type { LinkHealthStatus, Product, ProductLifecycleState, ProductOffer } from '@/lib/types';
+import type { LinkHealthStatus, Product, ProductLifecycleState } from '@/lib/types';
+import type { CommerceSourceEvidence, CommerceUrlProbeEvidence } from '@/lib/types';
 import { getFeatureRolloutState } from './featureRollout';
 import { createAutomationJob, getAutomationControl } from './store';
 import { throwIfExecutionAborted } from './executionBudget';
 import { finalizeRuntimeRecoveryCanaryPermit } from './runtimeRecoveryCanary';
 import type { AutomationJob } from './types';
+import { commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '@/lib/commerce/urlProbe';
+import { recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 
 const RULES_VERSION = 'post-publish-monitor-v2';
 const MINUTE = 60_000;
@@ -56,11 +58,13 @@ interface MonitorProbeResult {
   selectedImageUrl: string;
   selectedOfferId?: string;
   publicPageUrl: string;
+  affiliateProbe?: CommerceUrlProbeResult;
+  merchantProbe?: CommerceUrlProbeResult;
 }
 
-interface LinkCandidateResolution {
+interface LinkProbeResolution {
   selectedUrl: string;
-  result: LinkCheckResult;
+  result: { status: string; ok: boolean; retryable?: boolean; reason: string };
   attempts: number;
 }
 
@@ -106,38 +110,6 @@ function classifyPublicStatus(status: number): string {
 
 function linkCheckOptions() {
   return { resolveDns: process.env.NODE_ENV !== 'test' };
-}
-
-async function resolveHealthyLinkCandidate(
-  candidates: Array<string | undefined>,
-  options: PostPublishMonitorExecutionOptions = {},
-): Promise<LinkCandidateResolution> {
-  const urls = [...new Set(candidates.map(value => String(value || '').trim()).filter(Boolean))];
-  const checked: Array<{ url: string; result: LinkCheckResult }> = [];
-  for (const url of urls) {
-    throwIfExecutionAborted(options.signal);
-    const result = await checkLinkHealth(url, { ...linkCheckOptions(), signal: options.signal });
-    checked.push({ url, result });
-    if (result.ok) return { selectedUrl: url, result, attempts: checked.length };
-  }
-  const preferred = checked.find(item => item.result.retryable === true) || checked[0];
-  return {
-    selectedUrl: preferred?.url || urls[0] || '',
-    result: preferred?.result || { status: 'error', ok: false, retryable: false, reason: 'No URL candidate' },
-    attempts: checked.length,
-  };
-}
-
-function alternateOffers(product: Product): ProductOffer[] {
-  return [...(product.offers || [])]
-    .filter(offer => offer.affiliateUrl && offer.affiliateUrl !== product.affiliateUrl)
-    .sort((left, right) => {
-      const healthRank = (offer: ProductOffer) => offer.health === 'HEALTHY' ? 2 : offer.health === 'DEGRADED' ? 1 : 0;
-      return healthRank(right) - healthRank(left)
-        || right.confidence - left.confidence
-        || Date.parse(right.observedAt) - Date.parse(left.observedAt)
-        || left.id.localeCompare(right.id);
-    });
 }
 
 function configuredPublicPageUrl(product: Product): { url: string; loopback: boolean; configured: boolean } {
@@ -235,8 +207,8 @@ async function probe(
 ): Promise<MonitorProbeResult> {
   throwIfExecutionAborted(options.signal);
   const fixture = fixtureOutcome(job);
-  let productResolution: LinkCandidateResolution;
-  let affiliateResolution: LinkCandidateResolution;
+  let productResolution: LinkProbeResolution;
+  let affiliateResolution: LinkProbeResolution;
   let imageResolution: Awaited<ReturnType<typeof resolveHealthyImageCandidate>>;
   let selectedOfferId: string | undefined;
   let sourceRequests = 0;
@@ -261,18 +233,74 @@ async function probe(
       attempts: 0,
     };
   } else {
-    productResolution = await resolveHealthyLinkCandidate([
-      product.originalUrl,
-      product.identity?.canonicalUrl,
-    ], options);
-    const offers = alternateOffers(product);
-    affiliateResolution = await resolveHealthyLinkCandidate([
-      product.affiliateUrl,
-      ...offers.map(offer => offer.affiliateUrl),
-    ], options);
-    selectedOfferId = offers.find(offer => offer.affiliateUrl === affiliateResolution.selectedUrl)?.id;
+    const probeOptions = {
+      signal: options.signal,
+      operationId: job.operationId,
+      jobId: job.id,
+      correlationId: product.id,
+      resolveDns: process.env.NODE_ENV !== 'test',
+    };
+    const [merchantProbe, affiliateProbe] = await Promise.all([
+      probeCommerceUrl(product.canonicalProductUrl || product.originalUrl || '', { ...probeOptions, role: 'MERCHANT' }),
+      probeCommerceUrl(product.affiliateUrl || '', { ...probeOptions, role: 'AFFILIATE' }),
+    ]);
+    throwIfExecutionAborted(options.signal);
+    const merchantResult = commerceProbeToLegacyLinkResult(merchantProbe);
+    const affiliateResult = commerceProbeToLegacyLinkResult(affiliateProbe);
+    productResolution = {
+      selectedUrl: String(product.canonicalProductUrl || product.originalUrl || ''),
+      result: merchantResult,
+      attempts: 1,
+    };
+    affiliateResolution = {
+      selectedUrl: String(product.affiliateUrl || ''),
+      result: affiliateResult,
+      attempts: 1,
+    };
+    await Promise.all([
+      recordDomainHealth(productResolution.selectedUrl, merchantProbe.classification === 'HEALTHY' ? 'healthy' : merchantProbe.classification.toLowerCase(), Date.now(), {
+        role: 'MERCHANT', retryAfter: merchantProbe.retryAfter, operationId: job.operationId, jobId: job.id,
+      }),
+      recordDomainHealth(affiliateResolution.selectedUrl, affiliateProbe.classification === 'HEALTHY' ? 'healthy'
+        : affiliateProbe.retryable && affiliateProbe.classification === 'AFFILIATE_LINK_REJECTED' ? 'network_error'
+          : affiliateProbe.classification.toLowerCase(), Date.now(), {
+        role: 'AFFILIATE_GATEWAY', retryAfter: affiliateProbe.retryAfter, operationId: job.operationId, jobId: job.id,
+      }),
+    ]);
     imageResolution = await resolveHealthyImageCandidate([product.imageUrl, ...(product.gallery || [])], { ...linkCheckOptions(), signal: options.signal });
     sourceRequests = productResolution.attempts + affiliateResolution.attempts + imageResolution.attempts;
+    const publicPage = await probePublicPage(job, product, expectedPublic, options);
+    const statuses: MonitorStatuses = {
+      product: productResolution.result.status,
+      affiliate: affiliateResolution.result.status,
+      image: imageResolution.result.status,
+      publicPage: publicPage.status,
+      publicPageIdentity: publicPage.identity,
+    };
+    const sourcePermanent = PERMANENT_LINK_STATUSES.has(statuses.product)
+      || PERMANENT_LINK_STATUSES.has(statuses.affiliate)
+      || PERMANENT_IMAGE_STATUSES.has(statuses.image);
+    const publicPermanent = expectedPublic && PERMANENT_LINK_STATUSES.has(statuses.publicPage);
+    const sourceHealthy = productResolution.result.ok && affiliateResolution.result.ok && imageResolution.result.ok;
+    const publicationEvidenceMode = getFeatureRolloutState('PUBLICATION_EVIDENCE_V2').mode;
+    const publicIdentityRequired = publicationEvidenceMode !== 'OFF'
+      || statuses.publicPageIdentity === 'EXPECTED_PRODUCT_MISMATCH';
+    const publicHealthy = !expectedPublic || (
+      HEALTHY_STATUSES.has(statuses.publicPage)
+      && (!publicIdentityRequired || statuses.publicPageIdentity === 'EXPECTED_PRODUCT_CONFIRMED')
+    );
+    return {
+      outcome: sourceHealthy && publicHealthy ? 'HEALTHY' : sourcePermanent || publicPermanent ? 'CONFIRMED_BROKEN' : 'TEMPORARY_FAILURE',
+      statuses,
+      externalRequests: sourceRequests + publicPage.externalRequests,
+      selectedProductUrl: productResolution.selectedUrl,
+      selectedAffiliateUrl: affiliateResolution.selectedUrl,
+      selectedImageUrl: imageResolution.selectedUrl || String(product.imageUrl || ''),
+      selectedOfferId,
+      publicPageUrl: publicPage.url,
+      affiliateProbe,
+      merchantProbe,
+    };
   }
 
   const publicPage = await probePublicPage(job, product, expectedPublic, options);
@@ -331,6 +359,37 @@ async function transitionProduct(
   });
   throwIfExecutionAborted(options.signal);
   return result.product;
+}
+
+function monitorProbeEvidence(result: CommerceUrlProbeResult): CommerceUrlProbeEvidence {
+  return {
+    classification: result.classification,
+    httpStatus: result.httpStatus,
+    normalizedFinalUrl: result.normalizedFinalUrl,
+    affiliateGatewayDomain: result.affiliateGatewayDomain,
+    merchantDomain: result.merchantDomain,
+    redirectCount: result.redirectCount,
+    elapsedMs: result.elapsedTimeMs,
+    retryable: result.retryable,
+    reasonCode: result.reasonCode,
+    checkedAt: result.checkedAt,
+    retryAfter: result.retryAfter,
+    queryParameterNames: result.diagnostics.requested.queryParameterNames,
+  };
+}
+
+function monitoredSourceEvidence(result: MonitorProbeResult): CommerceSourceEvidence | undefined {
+  if (!result.affiliateProbe || !result.merchantProbe) return undefined;
+  const checkedAt = Date.parse(result.affiliateProbe.checkedAt) >= Date.parse(result.merchantProbe.checkedAt)
+    ? result.affiliateProbe.checkedAt : result.merchantProbe.checkedAt;
+  return {
+    schemaVersion: 1,
+    ruleVersion: 'commerce-source-v1',
+    checkedAt,
+    expiresAt: new Date(Date.parse(checkedAt) + 6 * HOUR).toISOString(),
+    affiliate: monitorProbeEvidence(result.affiliateProbe),
+    merchant: monitorProbeEvidence(result.merchantProbe),
+  };
 }
 
 async function scheduleNextMonitor(
@@ -441,6 +500,12 @@ async function persistObservation(
     evidenceSnapshotAt: evidence.snapshot.createdAt,
     evidenceSnapshotHash: evidence.snapshot.snapshotHash,
     confidences,
+    ...(monitoredSourceEvidence(result) ? {
+      sourceReliabilityVersion: 'commerce-source-v1' as const,
+      sourceEvidence: monitoredSourceEvidence(result),
+      affiliateGatewayDomain: result.affiliateProbe?.affiliateGatewayDomain,
+      merchantDomain: result.merchantProbe?.merchantDomain || product.merchantDomain,
+    } : {}),
   }, { verifiedHealthUpdate: true });
   throwIfExecutionAborted(options.signal);
   if (!saved) throw new Error('POST_PUBLISH_MONITOR_PRODUCT_WRITE_FAILED');
@@ -485,7 +550,7 @@ async function ensureRepublishChild(
   const child = await createAutomationJob({
     type: 'AUTO_SAFE_PUBLISH',
     payload: { productId: product.id, readinessSnapshotHash: snapshot, recovery: true },
-    idempotencyKey: `republish:${identity}:${job.id}:${snapshot.slice(0, 32)}`.slice(0, 160),
+    idempotencyKey: autoSafePublishJobKey(product),
     operationId: `republish:${identity}:${job.id}`.slice(0, 160),
     parentJobId: job.id,
     requestedBy: 'autopilot-worker',

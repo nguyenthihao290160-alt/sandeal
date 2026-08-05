@@ -141,7 +141,7 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     assert.equal(terminal.result.processed, 1);
     assert.equal(terminal.result.healthy, 0);
     assert.equal(terminal.result.unhealthy, 1);
-    assert.equal(terminal.result.quarantined, 0);
+    assert.equal(terminal.result.quarantined, 1);
     assert.equal(terminal.result.unchanged, 0);
     assert.equal(terminal.result.skipped, 0);
     assert.equal(terminal.result.failed, 0);
@@ -152,6 +152,9 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     assert.equal(stored.imageHealthStatus, 'error');
     assert.equal(stored.publicHidden, true);
     assert.equal(stored.publicBlocked, true);
+    assert.equal(stored.lifecycleState, 'QUARANTINED');
+    assert.ok(stored.quarantineReasons.includes('MISSING_MERCHANT_URL'));
+    assert.ok(stored.quarantineReasons.includes('MISSING_AFFILIATE_URL'));
     assert.ok(stored.publicBlockReasons.includes('missing_affiliate_url'));
     const transitions = (await adapter.readCollection('automation-audit')).filter(item => item.jobId === jobId).map(item => item.nextState);
     assert.ok(transitions.includes('PENDING'));
@@ -206,13 +209,21 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
     assert.equal(eligibility.evaluateProductEligibility(published).eligibleForPublic, true);
   });
 
-  await test('quarantine 30shinestore là mềm, chính xác merchant và khóa Safe Publish', () => {
-    const quarantined = approvedProduct({ originalUrl: 'https://30shinestore.com/products/x200' });
+  await test('quarantine nguồn là mềm, dựa trên bằng chứng và khóa Safe Publish', () => {
+    const quarantined = approvedProduct({
+      originalUrl: 'https://temporarily-unreachable.example/products/x200',
+      lifecycleState: 'QUARANTINED',
+      linkHealthStatus: 'timeout',
+      quarantineReasons: ['MERCHANT_CONNECTION_RESET'],
+      publicHidden: true,
+      publicBlocked: true,
+    });
     const decision = eligibility.evaluateProductEligibility(quarantined);
-    assert.ok(decision.criticalBlockers.includes('merchant_quarantined_30shinestore'));
+    assert.ok(decision.criticalBlockers.includes('quarantined'));
+    assert.ok(decision.criticalBlockers.includes('product_url_unhealthy'));
     assert.equal(safePublish.evaluateSafePublish(quarantined).eligible, false);
     const unrelated = eligibility.evaluateProductEligibility(approvedProduct({ originalUrl: 'https://30shine-example.com/products/x200' }));
-    assert.equal(unrelated.criticalBlockers.includes('merchant_quarantined_30shinestore'), false);
+    assert.equal(unrelated.criticalBlockers.includes('quarantined'), false);
   });
 
   await test('health stale và URL affiliate thiếu đều fail-closed độc lập', () => {

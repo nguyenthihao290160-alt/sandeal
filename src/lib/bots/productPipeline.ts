@@ -9,19 +9,19 @@ import {
   type NormalizedAccessTradeItem,
 } from '../integrations/accesstrade';
 import { getAutomationSettings } from '../storage/automationSettings';
-import { claimCandidateBatch, claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
-import { getAllProducts, publicationIdempotencyKey, repairSourceCandidateEvidence, saveCanonicalProduct, upsertCanonicalProduct, upsertSourceCandidateProduct } from '../storage/products';
+import { claimCandidateForDurableJob, enqueueCandidate, finishCandidate, getCandidateById, getQueueStats, listCandidateQueue, type CandidatePayload, type CandidateQueueItem, type CandidateQueueStatus } from '../storage/candidateQueue';
+import { getAllProducts, repairSourceCandidateEvidence, saveCanonicalProduct, upsertSourceCandidateProduct } from '../storage/products';
 import { readCollection, runTransaction, scanCollection, writeCollection } from '../storage/adapter';
-import { createAutomationJob, getAutomationControl } from '../automation/store';
+import { AutomationJobEnqueueError, createAutomationJob, getAutomationControl } from '../automation/store';
 import { completeJournalEffect } from '../automation/operationJournal';
 import { checkImageHealth, checkLinkHealth, productImageValidationState, type ImageCheckResult, type LinkCheckResult } from './productHealthCheck';
-import type { Product, ProductLifecycleState, ProductOffer, ReviewContent } from '../types';
+import type { CommerceSourceEvidence, CommerceUrlProbeEvidence, Product, ProductLifecycleState, ProductOffer, ReviewContent } from '../types';
 import { normalizeCanonicalProduct } from '../canonicalProduct';
-import { generateEditorialReview, isReviewIndexable, shouldRegenerateReview, textSimilarity, validateReviewClaims } from '../editorialReview';
+import { generateEditorialReview, isReviewIndexable, textSimilarity, validateReviewClaims } from '../editorialReview';
 import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
 import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
 import { scoreCandidateReadiness } from './candidateReadiness';
-import { isDomainCircuitOpen, recordDomainHealth } from './domainCircuitBreaker';
+import { getDomainCircuitDecision, listDomainCircuitStates, recordDomainHealth } from './domainCircuitBreaker';
 import { evaluateSafePublish } from '../safePublish';
 import { canonicalBlockerCodes, preserveFailClosedProductBlockers } from '../productBlockers';
 import { classifyRecord } from '../autonomous/recordClassification';
@@ -30,21 +30,20 @@ import { captureProductEvidence, validateClaimsAgainstEvidence, type EvidenceFac
 import { buildOffer, deriveProductIdentity, identityMatchConfidence, mergeOffers, selectBestPublicOffer } from '../autonomous/productIdentityGraph';
 import { evaluatePriceTruth, offerPriceObservations, priceTruthProductPatch } from '../autonomous/priceTruthEngine';
 import { persistLifecycleTransition } from '../autonomous/lifecycleStore';
-import { readinessSnapshotHash } from '../autonomous/publishPolicy';
+import { autoSafePublishJobKey, readinessSnapshotHash } from '../autonomous/publishPolicy';
 import { createDefaultSourceAdapterRegistry, type SourceAdapterRegistry, type SourceProviderStatus } from '../autonomous/sourceAdapterPlatform';
 import { applySourceQualityPriority, getSourceQualitySnapshot, recordSourceQualityObservation } from '../autonomous/sourceQuality';
-import { vietnamDayKey } from '../automation/timezone';
 import {
-  commitProductProcessingCapacity,
   getDailyBusinessUsage,
   recordPipelineUsageMetrics,
-  reserveProductProcessingCapacity,
   type DailyBusinessUsage,
 } from '../automation/businessUsage';
 import { throwIfExecutionAborted } from '../automation/executionBudget';
+import { selectDiversifiedSources, type SourceSelectionCandidate } from '../commerce/sourceSelection';
+import { recordSourceIngestionState, sourceReliabilityEvent } from '../commerce/sourceReliability';
+import { commerceProbeBlockerCode, commerceProbeIsPermanent, commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '../commerce/urlProbe';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
-const RUNTIME_COLLECTION = 'pipeline-runtime';
 const MAX_PRODUCT_COMPARISON_ITEMS = 2_000;
 
 async function findProductForSource(source: string, sourceId: string, signal?: AbortSignal): Promise<Product | undefined> {
@@ -116,7 +115,6 @@ export interface KeywordYieldStat {
   nextEligibleAt?: string;
   outcomeKeys?: string[];
 }
-interface RuntimeState { id: string; currentConcurrency: number; rateLimitUntil?: string; timeoutStreak: number; updatedAt: string; }
 export type DailyPipelineUsage = DailyBusinessUsage;
 
 export interface SourceRunMetrics {
@@ -133,6 +131,7 @@ export interface SourceRunMetrics {
 export interface SourceScanOptions {
   registry?: SourceAdapterRegistry;
   runId?: string;
+  scheduleBucket?: string;
   signal?: AbortSignal;
 }
 
@@ -146,7 +145,6 @@ function emptyCounters(): PipelineCounters {
     claimValidationFailed: 0, duplicateContentSkipped: 0, seoReady: 0, seoBlocked: 0, indexable: 0, noindex: 0, sitemapIncluded: 0 };
 }
 
-function todayInVietnam(): string { return vietnamDayKey(); }
 export async function getDailyPipelineUsage(now = Date.now()): Promise<DailyPipelineUsage> {
   return getDailyBusinessUsage(now);
 }
@@ -433,6 +431,13 @@ export async function scanSourcesToQueue(
   }
   const products = await getAllProducts();
   const queuedCandidates = await listCandidateQueue();
+  const circuitStates = await listDomainCircuitStates();
+  const openMerchantDomains = new Set(circuitStates
+    .filter(state => state.role === 'MERCHANT' && (state.state === 'OPEN' || state.state === 'HALF_OPEN' && state.halfOpenProbeInFlight))
+    .map(state => state.domain));
+  const pausedDomains = new Set(settings.pausedSourceDomains);
+  const pausedCampaigns = new Set(settings.pausedSourceCampaigns);
+  const domainPaused = (domain: string) => [...pausedDomains].some(paused => domain === paused || domain.endsWith(`.${paused}`));
   const merchantCounts = new Map<string, number>();
   const categoryCounts = new Map<string, number>();
   for (const merchant of [
@@ -444,14 +449,23 @@ export async function scanSourcesToQueue(
     ...queuedCandidates.map(candidate => String(candidate.payload.category || 'uncategorized').toLowerCase()),
   ]) categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
   const qualitySnapshot = await getSourceQualitySnapshot(adapter.id);
+  const poolLimit = Math.min(240, candidateLimit * settings.sourceDiscoveryPoolMultiplier);
+  const perKeywordLimit = Math.max(10, Math.min(50, Math.ceil(poolLimit / selected.length)));
+  const discoveryPool: Array<SourceSelectionCandidate<{
+    item: NormalizedAccessTradeItem;
+    payload: CandidatePayload;
+    priority: number;
+    readiness: ReturnType<typeof scoreCandidateReadiness>;
+    keyword: string;
+  }>> = [];
   let timeoutStreak = 0;
 
   for (const stat of selected) {
     throwIfExecutionAborted(options.signal);
-    if (Date.now() >= deadlineMs || counters.found >= candidateLimit || counters.sourceRequests >= sourceBudgetRemaining) break;
+    if (Date.now() >= deadlineMs || discoveryPool.length >= poolLimit || counters.sourceRequests >= sourceBudgetRemaining) break;
     stat.lastUsedAt = new Date().toISOString();
     try {
-      const result = await adapter.discover({ keyword: stat.keyword, limit: Math.min(50, candidateLimit - counters.found) });
+      const result = await adapter.discover({ keyword: stat.keyword, limit: Math.min(perKeywordLimit, poolLimit - discoveryPool.length) });
       throwIfExecutionAborted(options.signal);
       counters.sourceRequests += result.requests;
       stat.requests += result.requests;
@@ -476,7 +490,17 @@ export async function scanSourcesToQueue(
         stat.normalized += 1;
         const payload = toPayload(item);
         const earlyReason = fastReject(payload);
-        if (!earlyReason) { stat.valid++; validCandidates++; } else { rejected++; stat.fastRejected += 1; }
+        if (!earlyReason) { stat.valid++; validCandidates++; } else {
+          rejected++; stat.fastRejected += 1;
+          sourceReliabilityEvent('candidate_skipped_unhealthy_source', {
+            provider: adapter.id,
+            campaign: payload.campaignName,
+            domain: payload.merchantDomain || merchantFromUrl(payload.originalUrl),
+            reasonCode: earlyReason.toUpperCase(),
+            operationId: options.runId,
+          });
+          continue;
+        }
         if (Number(payload.salePrice || payload.price || 0) > 0) pricesAvailable++;
         const sourceHash = hashPayload(payload);
         const existing = products.find((product) =>
@@ -485,20 +509,39 @@ export async function scanSourcesToQueue(
         );
         if (existing?.sourceHash === sourceHash) { counters.duplicate++; counters.unchanged++; stat.duplicate += 1; continue; }
         if (existing?.sourceHealthCooldownUntil && Date.parse(existing.sourceHealthCooldownUntil) > Date.now()) { counters.skippedCooldown++; continue; }
+        const existingCandidate = queuedCandidates.find(candidate => candidate.source === adapter.id && candidate.sourceId === item.id && candidate.sourceHash === sourceHash);
+        if (existingCandidate && ['discarded', 'completed'].includes(existingCandidate.status)) {
+          counters.duplicate++; counters.unchanged++; stat.duplicate += 1;
+          continue;
+        }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.affiliateUrl, payload.imageUrl].filter(Boolean).length;
-        const merchant = payload.merchant || 'unknown';
+        const merchant = payload.merchantDomain || merchantFromUrl(payload.originalUrl);
         const category = String(payload.category || 'uncategorized').toLowerCase();
         const merchantPenalty = Math.min(40, (merchantCounts.get(merchant) || 0) * 4);
         const categoryBoost = Math.max(0, 12 - Math.min(12, categoryCounts.get(category) || 0));
         const basePriority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) + categoryBoost - merchantPenalty - (earlyReason ? 25 : 0));
         const priority = applySourceQualityPriority(basePriority, qualitySnapshot).effectivePriority;
         const readiness = scoreCandidateReadiness(payload);
-        const queued = await enqueueCandidate({ source: adapter.id as CandidateQueueItem['source'], sourceId: item.id, priority, readinessScore: readiness.score, lane: readiness.lane, contentHash: sourceHash, sourceHash, keyword: stat.keyword, payload });
-        if (queued.queued) {
-          counters.queued++; counters.reviewQueued++;
-          merchantCounts.set(merchant, (merchantCounts.get(merchant) || 0) + 1);
-          categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
-        } else { counters.duplicate++; counters.unchanged++; stat.duplicate += 1; }
+        const campaign = String(payload.campaignName || payload.affiliateUrlCampaignId || 'uncategorized').toLowerCase();
+        const pauseReason = domainPaused(merchant) ? 'SOURCE_DOMAIN_PAUSED'
+          : pausedCampaigns.has(campaign) ? 'SOURCE_CAMPAIGN_PAUSED'
+            : openMerchantDomains.has(merchant) ? 'MERCHANT_CIRCUIT_OPEN'
+              : undefined;
+        discoveryPool.push({
+          value: { item, payload, priority, readiness, keyword: stat.keyword },
+          provider: adapter.id,
+          sourceId: item.id,
+          sourceHash,
+          merchantUrl: payload.canonicalProductUrl || payload.originalUrl,
+          merchantDomain: merchant,
+          campaign,
+          category,
+          keyword: stat.keyword,
+          priority,
+          eligible: !pauseReason,
+          skipReason: pauseReason,
+        });
+        if (discoveryPool.length >= poolLimit) break;
       }
       stat.costPerValidCandidate = stat.valid > 0 ? Number((stat.requests / stat.valid).toFixed(4)) : null;
     } catch (error) {
@@ -525,6 +568,58 @@ export async function scanSourcesToQueue(
       stat.costPerValidCandidate = stat.valid > 0 ? Number((stat.requests / stat.valid).toFixed(4)) : null;
     }
   }
+  const diversified = selectDiversifiedSources(discoveryPool, {
+    limit: candidateLimit,
+    scheduleBucket: options.scheduleBucket || options.runId || `${mode}:${Math.floor(startedMs / (settings.intervalHours * 60 * 60_000))}`,
+    maximumPerMerchant: settings.sourceMaxPerMerchant,
+    maximumPerCampaign: settings.sourceMaxPerCampaign,
+  });
+  for (const skipped of diversified.skipped) {
+    if (!['SOURCE_DOMAIN_PAUSED', 'SOURCE_CAMPAIGN_PAUSED', 'MERCHANT_CIRCUIT_OPEN'].includes(skipped.reason)) continue;
+    counters.skippedCooldown++;
+    sourceReliabilityEvent('candidate_skipped_unhealthy_source', {
+      provider: skipped.candidate.provider,
+      campaign: skipped.candidate.campaign,
+      domain: skipped.candidate.merchantDomain,
+      reasonCode: skipped.reason,
+      operationId: options.runId,
+      nextProbeAt: circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skipped.candidate.merchantDomain)?.nextProbeAt,
+    });
+  }
+  for (const selectedCandidate of diversified.selected) {
+    const { item, payload, priority, readiness, keyword } = selectedCandidate.value;
+    const queued = await enqueueCandidate({
+      source: adapter.id as CandidateQueueItem['source'], sourceId: item.id,
+      priority, readinessScore: readiness.score, lane: readiness.lane,
+      contentHash: selectedCandidate.sourceHash, sourceHash: selectedCandidate.sourceHash,
+      keyword, payload,
+      merchantDomain: selectedCandidate.merchantDomain,
+      affiliateGatewayDomain: merchantFromUrl(payload.affiliateUrl),
+    });
+    if (queued.queued) {
+      counters.queued++; counters.reviewQueued++;
+      merchantCounts.set(selectedCandidate.merchantDomain || 'unknown', (merchantCounts.get(selectedCandidate.merchantDomain || 'unknown') || 0) + 1);
+      categoryCounts.set(selectedCandidate.category || 'uncategorized', (categoryCounts.get(selectedCandidate.category || 'uncategorized') || 0) + 1);
+    } else {
+      counters.duplicate++; counters.unchanged++;
+      const stat = stats.find(entry => entry.keyword === keyword);
+      if (stat) stat.duplicate += 1;
+    }
+  }
+  const noHealthySource = normalized > 0 && diversified.selected.length === 0;
+  const sourceNextEligibleAt = retryAfter
+    || diversified.skipped.map(skip => circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skip.candidate.merchantDomain)?.nextProbeAt)
+      .filter((value): value is string => Boolean(value)).sort()[0];
+  await recordSourceIngestionState({
+    provider: adapter.id,
+    ingestionSkipped: noHealthySource,
+    reasonCode: noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE' : 'SOURCE_SCAN_COMPLETED',
+    observed: discoveryPool.length,
+    selected: diversified.selected.length,
+    skipped: diversified.skipped.length,
+    nextEligibleAt: sourceNextEligibleAt,
+    operationId: options.runId,
+  });
   await writeCollection(KEYWORD_COLLECTION, stats);
   counters.queueSize = (await getQueueStats()).total;
   await recordDailyUsage(counters);
@@ -539,12 +634,13 @@ export async function scanSourcesToQueue(
     externalRequests: counters.sourceRequests,
   });
   const durationMs = Date.now() - startedMs;
-  const reason = rateLimited > 0 ? 'source_rate_limited'
+  const reason = noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE'
+    : rateLimited > 0 ? 'source_rate_limited'
     : timeout > 0 && counters.found === 0 ? 'source_timeout'
     : counters.failed > 0 ? 'source_partial_failure'
     : counters.found === 0 ? 'source_no_results'
     : 'source_scan_completed';
-  const nextEligibleAt = retryAfter || (counters.found === 0 ? new Date(startedMs + 15 * 60_000).toISOString() : undefined);
+  const nextEligibleAt = sourceNextEligibleAt || (counters.found === 0 ? new Date(startedMs + 15 * 60_000).toISOString() : undefined);
   return { ...counters, normalized, rejected, timeout, rateLimited, durationMs, sourceStatus, reason, nextEligibleAt, resultTypes, retryAfter };
 }
 
@@ -675,6 +771,162 @@ async function reviewAutonomousCandidate(
     sourceId: item.sourceId,
   });
   const existingForSource = await findProductForSource(item.source, item.sourceId, execution.signal);
+  const incompleteProduct = classification.recordType === 'PRODUCT' && classification.action !== 'ACCEPT';
+  if (classification.recordType !== 'PRODUCT' || incompleteProduct) {
+    const reasons = classification.recordType !== 'PRODUCT'
+      ? [`RECORD_TYPE_${String(classification.recordType).toUpperCase()}`, ...classification.reasons.map(reason => reason.toUpperCase())]
+      : ['CLASSIFICATION_CROSS_CHECK_FAILED', ...classification.reasons.map(reason => reason.toUpperCase())];
+    const existing = await quarantineExistingSourceProduct(existingForSource, item, workerId, reasons);
+    const status: CandidateQueueStatus = classification.recordType === 'UNKNOWN' || incompleteProduct ? 'needs_review' : 'discarded';
+    await finishCandidate(item.id, {
+      status,
+      delayReason: reasons.join(','),
+      terminalReason: reasons[0],
+      retryable: false,
+    });
+    counters.reviewed += 1;
+    counters.needsReview += status === 'needs_review' ? 1 : 0;
+    counters.discarded += status === 'discarded' ? 1 : 0;
+    counters.noindex += 1;
+    return { status, terminal: true, reason: reasons.join(','), productId: existing?.id };
+  }
+
+  const minimumBlockers: string[] = [];
+  if (payload.title.trim().length < 8) minimumBlockers.push('TITLE_INVALID');
+  if (!(Number(payload.salePrice || payload.price || 0) > 0) || payload.currency !== 'VND') minimumBlockers.push('PRICE_UNVERIFIED');
+  if (!validHttpUrl(payload.imageUrl)) minimumBlockers.push('IMAGE_UNVERIFIED');
+  if (!validHttpUrl(payload.affiliateUrl)) minimumBlockers.push('INVALID_AFFILIATE_URL');
+  if (!validHttpUrl(payload.canonicalProductUrl || payload.originalUrl)) minimumBlockers.push('INVALID_MERCHANT_URL');
+  const requiresAccessTradeProvenance = item.source === 'accesstrade';
+  const canonicalProvenanceValid = !requiresAccessTradeProvenance || (
+    payload.canonicalUrlSource === 'provider_api'
+    && payload.canonicalUrlProvider === 'accesstrade'
+    && payload.canonicalUrlSourceEndpoint === 'datafeed'
+    && Boolean(payload.canonicalUrlSourceField)
+    && (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(payload.canonicalUrlSourceField || '')
+  );
+  const affiliateProvenanceValid = !requiresAccessTradeProvenance || (
+    payload.affiliateUrlSource === 'provider_api'
+    && payload.affiliateUrlProvider === 'accesstrade'
+    && payload.affiliateUrlSourceEndpoint === 'datafeed'
+    && Boolean(payload.affiliateUrlSourceField)
+    && (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(payload.affiliateUrlSourceField || '')
+  );
+  if (!canonicalProvenanceValid) minimumBlockers.push('CANONICAL_PROVENANCE_REQUIRED');
+  if (!affiliateProvenanceValid) minimumBlockers.push('AFFILIATE_PROVENANCE_REQUIRED');
+  if (minimumBlockers.length) {
+    const existing = await quarantineExistingSourceProduct(existingForSource, item, workerId, minimumBlockers);
+    await finishCandidate(item.id, {
+      status: 'discarded', delayReason: minimumBlockers.join(','), terminalReason: minimumBlockers[0], retryable: false,
+    });
+    counters.reviewed += 1;
+    counters.discarded += 1;
+    counters.noindex += 1;
+    return { status: 'discarded', terminal: true, reason: minimumBlockers.join(','), productId: existing?.id };
+  }
+
+  const operationId = `candidate-operation:${item.id}:${item.sourceHash}`.slice(0, 160);
+  const probeOptions = { operationId, jobId: item.durableJobId, correlationId: item.id, signal: execution.signal };
+  const affiliateCircuit = await getDomainCircuitDecision(payload.affiliateUrl, Date.now(), { ...probeOptions, role: 'AFFILIATE_GATEWAY' });
+  if (!affiliateCircuit.allowed) {
+    const nextRetryAt = affiliateCircuit.retryAt || new Date(Date.now() + 30 * 60_000).toISOString();
+    await quarantineExistingSourceProduct(existingForSource, item, workerId, ['AFFILIATE_GATEWAY_CIRCUIT_OPEN'], undefined, nextRetryAt);
+    await finishCandidate(item.id, {
+      status: 'delayed', delayReason: 'AFFILIATE_GATEWAY_CIRCUIT_OPEN', retryable: true,
+      nextAttemptAt: nextRetryAt, terminalReason: undefined, affiliateGatewayDomain: affiliateCircuit.domain,
+    });
+    sourceReliabilityEvent('candidate_delayed_for_domain_cooldown', {
+      provider: item.source, campaign: payload.campaignName, domain: affiliateCircuit.domain,
+      role: 'AFFILIATE_GATEWAY', reasonCode: 'AFFILIATE_GATEWAY_CIRCUIT_OPEN', operationId, jobId: item.durableJobId, nextProbeAt: nextRetryAt,
+    });
+    return { status: 'delayed', terminal: false, nextRetryAt, reason: 'AFFILIATE_GATEWAY_CIRCUIT_OPEN', productId: existingForSource?.id };
+  }
+  const fixture = process.env.NODE_ENV === 'test' ? payload.isolatedHealthFixture : undefined;
+  const affiliateProbe = fixture
+    ? fixtureCommerceProbe(payload, 'AFFILIATE', now)
+    : await probeCommerceUrl(payload.affiliateUrl, { ...probeOptions, role: 'AFFILIATE' });
+  if (!fixture) counters.networkChecks += 1;
+  throwIfExecutionAborted(execution.signal);
+  const affiliateCircuitState = await recordDomainHealth(payload.affiliateUrl, circuitStatusForProbe(affiliateProbe), Date.now(), {
+    ...probeOptions, role: 'AFFILIATE_GATEWAY', retryAfter: affiliateProbe.retryAfter,
+  });
+  if (affiliateProbe.classification !== 'HEALTHY') {
+    const reasonCode = commerceProbeBlockerCode(affiliateProbe, 'AFFILIATE');
+    const evidence = affiliateOnlySourceEvidence(affiliateProbe);
+    if (commerceProbeIsPermanent(affiliateProbe)) {
+      const existing = await quarantineExistingSourceProduct(existingForSource, item, workerId, [reasonCode], evidence);
+      await finishCandidate(item.id, {
+        status: 'discarded', delayReason: reasonCode, terminalReason: reasonCode, retryable: false,
+        lastProbeAt: affiliateProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain, sourceEvidence: evidence,
+      });
+      counters.discarded += 1;
+      sourceReliabilityEvent('affiliate_link_permanently_rejected', {
+        provider: item.source, campaign: payload.campaignName, domain: affiliateProbe.affiliateGatewayDomain,
+        role: 'AFFILIATE_GATEWAY', reasonCode, operationId, jobId: item.durableJobId, elapsedMs: affiliateProbe.elapsedTimeMs,
+      });
+      return { status: 'discarded', terminal: true, reason: reasonCode, productId: existing?.id };
+    }
+    const nextRetryAt = affiliateProbe.retryAfter || affiliateCircuitState?.nextProbeAt || new Date(Date.now() + 30 * 60_000).toISOString();
+    const existing = await quarantineExistingSourceProduct(existingForSource, item, workerId, [reasonCode], evidence, nextRetryAt);
+    await finishCandidate(item.id, {
+      status: 'delayed', delayReason: reasonCode, retryable: true, nextAttemptAt: nextRetryAt,
+      lastProbeAt: affiliateProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain, sourceEvidence: evidence,
+    });
+    return { status: 'delayed', terminal: false, nextRetryAt, reason: reasonCode, productId: existing?.id };
+  }
+
+  const merchantUrl = payload.canonicalProductUrl || payload.originalUrl;
+  const merchantCircuit = await getDomainCircuitDecision(merchantUrl, Date.now(), { ...probeOptions, role: 'MERCHANT' });
+  if (!merchantCircuit.allowed) {
+    const nextRetryAt = merchantCircuit.retryAt || new Date(Date.now() + 30 * 60_000).toISOString();
+    const partialEvidence = affiliateOnlySourceEvidence(affiliateProbe);
+    await quarantineExistingSourceProduct(existingForSource, item, workerId, ['MERCHANT_CIRCUIT_OPEN'], partialEvidence, nextRetryAt);
+    await finishCandidate(item.id, {
+      status: 'delayed', delayReason: 'MERCHANT_CIRCUIT_OPEN', retryable: true, nextAttemptAt: nextRetryAt,
+      lastProbeAt: affiliateProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+      merchantDomain: merchantCircuit.domain, sourceEvidence: partialEvidence,
+    });
+    sourceReliabilityEvent('candidate_delayed_for_domain_cooldown', {
+      provider: item.source, campaign: payload.campaignName, domain: merchantCircuit.domain,
+      role: 'MERCHANT', reasonCode: 'MERCHANT_CIRCUIT_OPEN', operationId, jobId: item.durableJobId, nextProbeAt: nextRetryAt,
+    });
+    return { status: 'delayed', terminal: false, nextRetryAt, reason: 'MERCHANT_CIRCUIT_OPEN', productId: existingForSource?.id };
+  }
+  const merchantProbe = fixture
+    ? fixtureCommerceProbe(payload, 'MERCHANT', now)
+    : await probeCommerceUrl(merchantUrl, { ...probeOptions, role: 'MERCHANT' });
+  if (!fixture) counters.networkChecks += 1;
+  throwIfExecutionAborted(execution.signal);
+  const merchantCircuitState = await recordDomainHealth(merchantUrl, circuitStatusForProbe(merchantProbe), Date.now(), {
+    ...probeOptions, role: 'MERCHANT', retryAfter: merchantProbe.retryAfter,
+  });
+  const sourceEvidence = sourceEvidenceFor(affiliateProbe, merchantProbe);
+  if (merchantProbe.classification !== 'HEALTHY') {
+    const reasonCode = commerceProbeBlockerCode(merchantProbe, 'MERCHANT');
+    if (commerceProbeIsPermanent(merchantProbe)) {
+      const existing = await quarantineExistingSourceProduct(existingForSource, item, workerId, [reasonCode], sourceEvidence);
+      await finishCandidate(item.id, {
+        status: 'discarded', delayReason: reasonCode, terminalReason: reasonCode, retryable: false,
+        lastProbeAt: merchantProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+        merchantDomain: merchantProbe.merchantDomain, sourceEvidence,
+      });
+      counters.discarded += 1;
+      return { status: 'discarded', terminal: true, reason: reasonCode, productId: existing?.id };
+    }
+    const nextRetryAt = merchantProbe.retryAfter || merchantCircuitState?.nextProbeAt || new Date(Date.now() + 30 * 60_000).toISOString();
+    const existing = await quarantineExistingSourceProduct(existingForSource, item, workerId, [reasonCode], sourceEvidence, nextRetryAt);
+    await finishCandidate(item.id, {
+      status: 'delayed', delayReason: reasonCode, retryable: true, nextAttemptAt: nextRetryAt,
+      lastProbeAt: merchantProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+      merchantDomain: merchantProbe.merchantDomain, sourceEvidence,
+    });
+    sourceReliabilityEvent('merchant_temporarily_unreachable', {
+      provider: item.source, campaign: payload.campaignName, domain: merchantProbe.merchantDomain,
+      role: 'MERCHANT', reasonCode, operationId, jobId: item.durableJobId,
+      elapsedMs: merchantProbe.elapsedTimeMs, nextProbeAt: nextRetryAt,
+    });
+    return { status: 'delayed', terminal: false, nextRetryAt, reason: reasonCode, productId: existing?.id };
+  }
   const classifiedKind = kindForRecordType(classification.recordType);
   const mapped = mapAccessTradeToProduct({
     id: item.sourceId,
@@ -732,6 +984,10 @@ async function reviewAutonomousCandidate(
     sourceId: item.sourceId,
     sourceHash: item.sourceHash,
     contentHash: item.contentHash,
+    sourceReliabilityVersion: 'commerce-source-v1',
+    sourceEvidence,
+    affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+    merchantDomain: merchantProbe.merchantDomain || payload.merchantDomain,
     kind: classifiedKind,
     recordType: classification.recordType,
     classification: { ...classification, classifiedAt: now },
@@ -758,46 +1014,6 @@ async function reviewAutonomousCandidate(
   let product = canonical.product;
 
   if (product.lifecycleState === 'DISCOVERED') product = await transitionCandidateLifecycle(product, 'STAGED', item, workerId, 'staged');
-
-  const incompleteProduct = classification.recordType === 'PRODUCT' && classification.action !== 'ACCEPT';
-  if (classification.recordType !== 'PRODUCT' || incompleteProduct) {
-    const reasons = classification.recordType !== 'PRODUCT'
-      ? [`record_type_${String(classification.recordType).toLowerCase()}`, ...classification.reasons]
-      : ['classification_cross_check_failed', ...classification.reasons];
-    if (product.lifecycleState === 'STAGED' || product.lifecycleState === 'DISCOVERED') {
-      product = await transitionCandidateLifecycle(product, 'QUARANTINED', item, workerId, 'classification-quarantine', reasons);
-    }
-    const confidences = calculateProductConfidences(product, { classificationConfidence: classification.confidence, evidenceCoverage: 0, now: Date.parse(now) });
-    product = (await saveCanonicalProduct(product.id, {
-      recordType: classification.recordType,
-      classification: { ...classification, classifiedAt: now },
-      confidences,
-      quarantineReasons: [...new Set([...(product.quarantineReasons || []), ...reasons])],
-      nextAutomaticAction: 'RECHECK_QUARANTINED_PRODUCT',
-      claimValidationStatus: 'MISSING_EVIDENCE',
-      duplicateStatus: 'UNRESOLVED',
-      publicHidden: true,
-      publicDecision: 'quarantined',
-      publicBlockReasons: reasons,
-      needsVerification: true,
-      autoPublishEligible: false,
-    })) || product;
-    const evidence = await captureProductEvidence(product, now, { signal: execution.signal });
-    throwIfExecutionAborted(execution.signal);
-    await saveCanonicalProduct(product.id, {
-      evidenceFactIds: evidence.facts.map(fact => fact.id),
-      evidenceCoverage: evidence.coverage,
-      evidenceSnapshotAt: evidence.snapshot.createdAt,
-      evidenceSnapshotHash: evidence.snapshot.snapshotHash,
-    });
-    counters.reviewed += 1;
-    counters.needsReview += 1;
-    counters.noindex += 1;
-    if (canonical.created) counters.created += 1; else counters.updated += 1;
-    const status: CandidateQueueStatus = classification.recordType === 'UNKNOWN' || incompleteProduct ? 'needs_review' : 'discarded';
-    await finishCandidate(item.id, { status, delayReason: reasons.join(',') });
-    return { status, terminal: true, reason: reasons.join(','), productId: product.id };
-  }
 
   if (product.lifecycleState === 'STAGED') product = await transitionCandidateLifecycle(product, 'CLASSIFIED', item, workerId, 'classified');
   if (product.lifecycleState === 'CLASSIFIED') product = await transitionCandidateLifecycle(product, 'NORMALIZED', item, workerId, 'normalized');
@@ -854,60 +1070,31 @@ async function reviewAutonomousCandidate(
     product = await transitionCandidateLifecycle(product, 'VERIFYING', item, workerId, 'verifying');
   }
 
-  if (await isDomainCircuitOpen(payload.originalUrl) || await isDomainCircuitOpen(payload.affiliateUrl) || await isDomainCircuitOpen(payload.imageUrl)) {
-    const nextRetryAt = new Date(Date.now() + 30 * 60_000).toISOString();
-    if (product.lifecycleState === 'VERIFYING') product = await transitionCandidateLifecycle(product, 'RETRY_SCHEDULED', item, workerId, `domain-retry-${item.attempts}`, ['domain_circuit_open']);
-    await saveCanonicalProduct(product.id, { sourceHealthCooldownUntil: nextRetryAt, sourceHealthReason: 'domain_circuit_open', nextRetryAt, nextAutomaticAction: 'VERIFY_PRODUCT_HEALTH' });
-    await finishCandidate(item.id, { status: 'delayed', delayReason: 'domain_circuit_open', nextAttemptAt: nextRetryAt });
-    return { status: 'delayed', terminal: false, nextRetryAt, reason: 'domain_circuit_open', productId: product.id };
-  }
-
-  const fixture = process.env.NODE_ENV === 'test' ? payload.isolatedHealthFixture : undefined;
-  const fixtureLink = fixture === 'healthy'
-    ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', statusCode: 200, finalUrl: payload.canonicalProductUrl || payload.originalUrl }
-    : fixture === 'confirmed_broken'
-      ? { status: 'broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
-      : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
+  const productHealth = commerceProbeToLegacyLinkResult(merchantProbe);
+  const affiliateHealth = commerceProbeToLegacyLinkResult(affiliateProbe);
   const fixtureImage: ImageCheckResult = fixture === 'healthy'
     ? { status: 'ok' as const, ok: true, reason: 'isolated_fixture', statusCode: 200, contentType: 'image/jpeg', finalUrl: payload.imageUrl }
     : fixture === 'confirmed_broken'
       ? { status: 'image_broken' as const, ok: false, reason: 'isolated_fixture', retryable: false }
       : { status: 'timeout' as const, ok: false, reason: 'isolated_fixture', retryable: true };
-  const productHealth = fixture ? fixtureLink : await checkCandidateLink(payload.originalUrl, execution.signal); counters.networkChecks += 1;
-  throwIfExecutionAborted(execution.signal);
-  const affiliateHealth = fixture ? fixtureLink : await checkCandidateLink(payload.affiliateUrl, execution.signal); counters.networkChecks += 1;
-  throwIfExecutionAborted(execution.signal);
   let imageUrl = payload.imageUrl;
   const primaryImageUrl = imageUrl;
-  let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl, execution.signal); counters.networkChecks += 1;
+  let imageHealth = fixture ? fixtureImage : await checkCandidateImage(imageUrl, execution.signal);
+  if (!fixture) counters.networkChecks += 1;
   throwIfExecutionAborted(execution.signal);
   let imageChecks = 1;
   if (!imageHealth.ok) {
     for (const candidate of payload.imageCandidates || []) {
       if (candidate === imageUrl) continue;
-      const fallback = fixture ? fixtureImage : await checkCandidateImage(candidate, execution.signal); counters.networkChecks += 1;
+      const fallback = fixture ? fixtureImage : await checkCandidateImage(candidate, execution.signal);
+      if (!fixture) counters.networkChecks += 1;
       throwIfExecutionAborted(execution.signal);
       imageChecks += 1;
       if (fallback.ok) { imageUrl = candidate; imageHealth = fallback; break; }
     }
   }
-  const requiresAccessTradeProvenance = item.source === 'accesstrade';
-  const canonicalProvenanceValid = !requiresAccessTradeProvenance || (
-    payload.canonicalUrlSource === 'provider_api'
-    && payload.canonicalUrlProvider === 'accesstrade'
-    && payload.canonicalUrlSourceEndpoint === 'datafeed'
-    && Boolean(payload.canonicalUrlSourceField)
-    && (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(payload.canonicalUrlSourceField || '')
-    && !isAccessTradeTrackingUrl(productHealth.finalUrl || payload.canonicalProductUrl || payload.originalUrl)
-  );
-  const affiliateProvenanceValid = !requiresAccessTradeProvenance || (
-    payload.affiliateUrlSource === 'provider_api'
-    && payload.affiliateUrlProvider === 'accesstrade'
-    && payload.affiliateUrlSourceEndpoint === 'datafeed'
-    && Boolean(payload.affiliateUrlSourceField)
-    && (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(payload.affiliateUrlSourceField || '')
-  );
-  const canonicalVerified = productHealth.ok && canonicalProvenanceValid;
+  const canonicalVerified = productHealth.ok && canonicalProvenanceValid
+    && !isAccessTradeTrackingUrl(productHealth.finalUrl || payload.canonicalProductUrl || payload.originalUrl);
   const affiliateVerified = affiliateHealth.ok && affiliateProvenanceValid;
   const imageVerified = imageHealth.ok && imageHealth.statusCode === 200
     && String(imageHealth.contentType || '').toLowerCase().startsWith('image/');
@@ -927,14 +1114,18 @@ async function reviewAutonomousCandidate(
     externalRequests: fixture ? 0 : 2 + imageChecks,
   });
   throwIfExecutionAborted(execution.signal);
-  await recordDomainHealth(payload.originalUrl, productHealth.status);
-  throwIfExecutionAborted(execution.signal);
-  await recordDomainHealth(payload.affiliateUrl, affiliateHealth.status);
-  throwIfExecutionAborted(execution.signal);
-  await recordDomainHealth(imageUrl, imageHealth.status);
   const healthy = canonicalVerified && affiliateVerified && imageVerified;
   const confirmedBroken = statuses.some(status => ['broken', 'image_broken', 'invalid_image', 'not_found', 'too_small', 'too_large', 'dark_image_suspected', 'placeholder'].includes(status));
+  const healthReasonCodes = [
+    ...(!canonicalVerified ? [commerceProbeBlockerCode(merchantProbe, 'MERCHANT')] : []),
+    ...(!affiliateVerified ? [commerceProbeBlockerCode(affiliateProbe, 'AFFILIATE')] : []),
+    ...(!imageVerified ? ['IMAGE_UNVERIFIED', `IMAGE_${String(imageHealth.status || 'UNKNOWN').toUpperCase()}`] : []),
+  ];
   const healthPatch: Partial<Product> = {
+    sourceReliabilityVersion: 'commerce-source-v1',
+    sourceEvidence,
+    affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+    merchantDomain: merchantProbe.merchantDomain || payload.merchantDomain,
     imageUrl,
     linkHealthStatus: canonicalVerified ? productHealth.status === 'ok' ? 'ok' : productHealth.status : 'unknown',
     productHealthStatus: canonicalVerified ? productHealth.status : 'unknown',
@@ -951,6 +1142,7 @@ async function reviewAutonomousCandidate(
     canonicalUrlStatus: canonicalVerified ? 'verified' : 'unverified',
     productUrlHttpStatus: productHealth.statusCode,
     productUrlFinalUrl: productHealth.finalUrl,
+    productUrlFinalDomain: merchantProbe.merchantDomain,
     productUrlHealthReason: canonicalProvenanceValid ? productHealth.reason : 'Canonical URL requires valid AccessTrade provenance.',
     productUrlErrorCode: canonicalProvenanceValid
       ? ('errorCode' in productHealth ? productHealth.errorCode : undefined)
@@ -959,6 +1151,7 @@ async function reviewAutonomousCandidate(
     affiliateUrlStatus: affiliateVerified ? 'verified' : 'unverified',
     affiliateUrlHttpStatus: affiliateHealth.statusCode,
     affiliateUrlFinalUrl: affiliateHealth.finalUrl,
+    affiliateUrlFinalDomain: merchantProbe.merchantDomain,
     affiliateUrlHealthReason: affiliateProvenanceValid ? affiliateHealth.reason : 'Affiliate URL requires valid AccessTrade provenance.',
     affiliateUrlErrorCode: affiliateProvenanceValid
       ? ('errorCode' in affiliateHealth ? affiliateHealth.errorCode : undefined)
@@ -988,7 +1181,7 @@ async function reviewAutonomousCandidate(
     affiliateUrl: payload.affiliateUrl,
     imageUrl,
     merchant: payload.merchant,
-    merchantDomain: payload.merchantDomain,
+    merchantDomain: merchantProbe.merchantDomain || payload.merchantDomain,
     shopId: payload.shopId,
     shopName: payload.shopName,
     sourceEndpoint: payload.sourceEndpoint,
@@ -1008,14 +1201,33 @@ async function reviewAutonomousCandidate(
   throwIfExecutionAborted(execution.signal);
   if (!healthy) {
     const retryExhausted = item.attempts >= 6;
-    const reasons = [confirmedBroken ? 'confirmed_broken' : retryExhausted ? 'retry_budget_exhausted' : 'health_check_temporary_failure', ...statuses];
+    const reasons = [confirmedBroken ? 'CONFIRMED_BROKEN' : retryExhausted ? 'RETRY_BUDGET_EXHAUSTED' : 'HEALTH_CHECK_TEMPORARY_FAILURE', ...healthReasonCodes];
     if (product.lifecycleState === 'VERIFYING') {
       product = await transitionCandidateLifecycle(product, confirmedBroken || retryExhausted ? 'QUARANTINED' : 'RETRY_SCHEDULED', item, workerId, `${confirmedBroken || retryExhausted ? 'health-quarantine' : 'health-retry'}-${item.attempts}`, reasons);
     }
     const nextRetryAt = confirmedBroken || retryExhausted ? undefined : product.sourceHealthCooldownUntil;
-    await saveCanonicalProduct(product.id, { quarantineReasons: confirmedBroken || retryExhausted ? reasons : product.quarantineReasons, nextRetryAt, nextAutomaticAction: confirmedBroken || retryExhausted ? 'RECHECK_QUARANTINED_PRODUCT' : 'VERIFY_PRODUCT_HEALTH', publicHidden: true });
+    const blockers = preserveFailClosedProductBlockers(product, reasons, now);
+    await saveCanonicalProduct(product.id, {
+      quarantineReasons: confirmedBroken || retryExhausted ? [...new Set([...(product.quarantineReasons || []), ...reasons])] : product.quarantineReasons,
+      currentBlockers: blockers,
+      publicBlockReasons: canonicalBlockerCodes(blockers),
+      publicBlockReason: reasons.join(','),
+      publicBlocked: true,
+      blockersCheckedAt: now,
+      lastEligibilityDecision: { eligible: false, reasonCodes: reasons, checkedAt: now, ruleVersion: 'commerce-source-v1', jobId: item.durableJobId },
+      nextRetryAt,
+      nextAutomaticAction: confirmedBroken || retryExhausted ? 'RECHECK_QUARANTINED_PRODUCT' : 'VERIFY_PRODUCT_HEALTH',
+      publicHidden: true,
+    });
     const status: CandidateQueueStatus = confirmedBroken ? 'discarded' : retryExhausted ? 'needs_review' : 'delayed';
-    await finishCandidate(item.id, { status, delayReason: reasons.join(','), nextAttemptAt: nextRetryAt });
+    await finishCandidate(item.id, {
+      status, delayReason: reasons.join(','), nextAttemptAt: nextRetryAt,
+      terminalReason: status === 'discarded' ? healthReasonCodes[0] || reasons[0] : undefined,
+      retryable: status === 'delayed', lastProbeAt: sourceEvidence.checkedAt,
+      affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+      merchantDomain: merchantProbe.merchantDomain,
+      sourceEvidence,
+    });
     return { status, terminal: status !== 'delayed', nextRetryAt, reason: reasons.join(','), productId: product.id };
   }
 
@@ -1192,25 +1404,209 @@ async function reviewAutonomousCandidate(
 
   const publishSettings = await getAutomationSettings();
   const control = await getAutomationControl();
-  if (ready && publishSettings.safePublish && ['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode)) {
-    const snapshotHash = readinessSnapshotHash(product);
-    const child = await createAutomationJob({
-      type: 'AUTO_SAFE_PUBLISH',
-      payload: { productId: product.id, candidateId: item.id, readinessSnapshotHash: snapshotHash },
-      idempotencyKey: `auto-safe-publish:${product.id}:${snapshotHash}`.slice(0, 160),
-      operationId: `pipeline:${item.id}:${snapshotHash}`.slice(0, 160),
-      requestedBy: 'autopilot-worker',
-      parentJobId: item.durableJobId,
-      dryRun: false,
+  const publicationUsage = await getDailyPipelineUsage();
+  const publicationGateReasons = !ready ? uniqueReadinessReasons : [
+    ...(!publishSettings.enabled ? ['MODE_DISABLED'] : []),
+    ...(!publishSettings.safePublish ? ['PUBLICATION_POLICY_BLOCKED'] : []),
+    ...(!['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode)
+      ? [control.effectiveMode === 'SHADOW' || control.effectiveMode === 'OBSERVE' ? 'SAFE_MODE_ACTIVE' : 'MODE_DISABLED'] : []),
+    ...(control.killSwitch ? ['KILL_SWITCH_ACTIVE'] : []),
+    ...(control.publishPaused ? ['PUBLICATION_LANE_PAUSED'] : []),
+    ...(control.publishBlockedByPolicy ? ['PUBLICATION_POLICY_BLOCKED'] : []),
+    ...(control.publishBlockedByRuntime ? ['RUNTIME_SAFETY_BLOCKED'] : []),
+    ...(publicationUsage.productsPublished >= publishSettings.maxItemsPerDay ? ['BUDGET_EXHAUSTED'] : []),
+  ];
+  const snapshotHash = readinessSnapshotHash(product);
+  product = (await saveCanonicalProduct(product.id, {
+    lastEligibilityDecision: {
+      eligible: ready && publicationGateReasons.length === 0,
+      reasonCodes: publicationGateReasons,
+      checkedAt: now,
+      ruleVersion: 'guarded-auto-publish-v1',
+      readinessSnapshotHash: snapshotHash,
+      jobId: item.durableJobId,
+    },
+    nextAutomaticAction: ready && publicationGateReasons.length === 0 ? 'AUTO_SAFE_PUBLISH'
+      : ready ? 'WAIT_FOR_PUBLICATION_POLICY' : 'RECHECK_QUARANTINED_PRODUCT',
+  })) || product;
+  if (ready && publicationGateReasons.length === 0) {
+    try {
+      const child = await createAutomationJob({
+        type: 'AUTO_SAFE_PUBLISH',
+        payload: { productId: product.id, candidateId: item.id, readinessSnapshotHash: snapshotHash },
+        idempotencyKey: autoSafePublishJobKey(product),
+        operationId: `pipeline:${item.id}:${snapshotHash}`.slice(0, 160),
+        requestedBy: 'autopilot-worker',
+        parentJobId: item.durableJobId,
+        dryRun: false,
+      });
+      product = (await saveCanonicalProduct(product.id, {
+        relatedJobId: child.job.id,
+        nextAutomaticAction: 'AUTO_SAFE_PUBLISH',
+        lastEligibilityDecision: { ...product.lastEligibilityDecision!, jobId: child.job.id },
+      })) || product;
+    } catch (error) {
+      if (!(error instanceof AutomationJobEnqueueError && error.code === 'DAILY_PRODUCT_LIMIT_REACHED')) throw error;
+      publicationGateReasons.push('BUDGET_EXHAUSTED');
+      product = (await saveCanonicalProduct(product.id, {
+        nextAutomaticAction: 'WAIT_FOR_PUBLICATION_BUDGET',
+        lastEligibilityDecision: {
+          eligible: false, reasonCodes: ['BUDGET_EXHAUSTED'], checkedAt: now,
+          ruleVersion: 'guarded-auto-publish-v1', readinessSnapshotHash: snapshotHash,
+        },
+      })) || product;
+    }
+  }
+  if (publicationGateReasons.length) {
+    sourceReliabilityEvent('safe_publish_blocked', {
+      provider: item.source, campaign: payload.campaignName,
+      domain: merchantProbe.merchantDomain, reasonCode: publicationGateReasons.join(','),
+      operationId, jobId: item.durableJobId,
     });
-    product = (await saveCanonicalProduct(product.id, { relatedJobId: child.job.id, nextAutomaticAction: 'AUTO_SAFE_PUBLISH' })) || product;
   }
   counters.reviewed += 1;
   if (canonical.created) counters.created += 1; else if (canonical.unchanged) counters.unchanged += 1; else counters.updated += 1;
-  await finishCandidate(item.id, { status: 'completed', delayReason: ready ? undefined : uniqueReadinessReasons.join(',') });
-  return { status: 'completed', terminal: true, reason: ready ? undefined : uniqueReadinessReasons.join(','), productId: product.id };
+  await finishCandidate(item.id, {
+    status: 'completed', delayReason: ready ? undefined : uniqueReadinessReasons.join(','), retryable: false,
+    lastProbeAt: sourceEvidence.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
+    merchantDomain: merchantProbe.merchantDomain, sourceEvidence,
+  });
+  return { status: 'completed', terminal: true, reason: ready ? publicationGateReasons[0] : uniqueReadinessReasons.join(','), productId: product.id };
 }
 
+function persistedProbe(result: CommerceUrlProbeResult): CommerceUrlProbeEvidence {
+  return {
+    classification: result.classification,
+    httpStatus: result.httpStatus,
+    normalizedFinalUrl: result.normalizedFinalUrl,
+    affiliateGatewayDomain: result.affiliateGatewayDomain,
+    merchantDomain: result.merchantDomain,
+    redirectCount: result.redirectCount,
+    elapsedMs: result.elapsedTimeMs,
+    retryable: result.retryable,
+    reasonCode: result.reasonCode,
+    checkedAt: result.checkedAt,
+    retryAfter: result.retryAfter,
+    queryParameterNames: result.diagnostics.requested.queryParameterNames,
+  };
+}
+
+function sourceEvidenceFor(affiliate: CommerceUrlProbeResult, merchant: CommerceUrlProbeResult): CommerceSourceEvidence {
+  const checkedAt = Date.parse(affiliate.checkedAt) >= Date.parse(merchant.checkedAt) ? affiliate.checkedAt : merchant.checkedAt;
+  return {
+    schemaVersion: 1,
+    ruleVersion: 'commerce-source-v1',
+    checkedAt,
+    expiresAt: new Date(Date.parse(checkedAt) + 6 * 60 * 60_000).toISOString(),
+    affiliate: persistedProbe(affiliate),
+    merchant: persistedProbe(merchant),
+  };
+}
+
+function affiliateOnlySourceEvidence(affiliate: CommerceUrlProbeResult): CommerceSourceEvidence {
+  return {
+    schemaVersion: 1,
+    ruleVersion: 'commerce-source-v1',
+    checkedAt: affiliate.checkedAt,
+    expiresAt: new Date(Date.parse(affiliate.checkedAt) + 6 * 60 * 60_000).toISOString(),
+    affiliate: persistedProbe(affiliate),
+  };
+}
+
+function fixtureCommerceProbe(payload: CandidatePayload, role: 'AFFILIATE' | 'MERCHANT', now: string): CommerceUrlProbeResult {
+  const gateway = merchantFromUrl(payload.affiliateUrl);
+  const merchant = payload.merchantDomain || merchantFromUrl(payload.canonicalProductUrl || payload.originalUrl);
+  const common = {
+    redirectCount: role === 'AFFILIATE' ? 1 : 0,
+    elapsedTimeMs: 0,
+    checkedAt: now,
+    affiliateGatewayDomain: role === 'AFFILIATE' ? gateway : undefined,
+    merchantDomain: merchant,
+    diagnostics: {
+      probeVersion: 'commerce-url-probe-v1',
+      requested: { scheme: 'https' as const, domain: role === 'AFFILIATE' ? gateway : merchant, pathSegmentCount: 1, queryParameterNames: [] },
+    },
+  };
+  if (payload.isolatedHealthFixture === 'healthy') return {
+    ...common, classification: 'HEALTHY', httpStatus: 200, retryable: false,
+    reasonCode: 'ISOLATED_FIXTURE', normalizedFinalUrl: `https://${merchant}/fixture`,
+  };
+  if (payload.isolatedHealthFixture === 'confirmed_broken') return role === 'AFFILIATE' ? {
+    ...common, classification: 'AFFILIATE_LINK_NOT_FOUND', httpStatus: 404, retryable: false,
+    reasonCode: 'AFFILIATE_HTTP_404', normalizedFinalUrl: `https://${gateway}/fixture`, merchantDomain: undefined,
+  } : {
+    ...common, classification: 'MERCHANT_NOT_FOUND', httpStatus: 404, retryable: false,
+    reasonCode: 'MERCHANT_HTTP_404', normalizedFinalUrl: `https://${merchant}/fixture`,
+  };
+  return role === 'AFFILIATE' ? {
+    ...common, classification: 'HEALTHY', httpStatus: 200, retryable: false,
+    reasonCode: 'ISOLATED_FIXTURE', normalizedFinalUrl: `https://${merchant}/fixture`,
+  } : {
+    ...common, classification: 'CONNECT_TIMEOUT', retryable: true,
+    reasonCode: 'UND_ERR_CONNECT_TIMEOUT', normalizedFinalUrl: `https://${merchant}/fixture`,
+  };
+}
+
+function circuitStatusForProbe(result: CommerceUrlProbeResult): string {
+  if (result.classification === 'HEALTHY') return 'healthy';
+  if (result.retryable && result.classification === 'AFFILIATE_LINK_REJECTED') return 'network_error';
+  return result.classification.toLowerCase();
+}
+
+async function quarantineExistingSourceProduct(
+  existing: Product | undefined,
+  item: CandidateQueueItem,
+  workerId: string,
+  reasonCodes: string[],
+  sourceEvidence?: CommerceSourceEvidence,
+  nextRetryAt?: string,
+): Promise<Product | undefined> {
+  if (!existing) return undefined;
+  let product = existing;
+  const transitionable = new Set<ProductLifecycleState>([
+    'DISCOVERED', 'STAGED', 'CLASSIFIED', 'NORMALIZED', 'VERIFYING',
+    'RETRY_SCHEDULED', 'CONTENT_PREPARING', 'READY_FOR_PUBLISH',
+  ]);
+  if (product.lifecycleState && transitionable.has(product.lifecycleState)) {
+    product = await transitionCandidateLifecycle(product, 'QUARANTINED', item, workerId, `source-preflight-${item.attempts}`, reasonCodes);
+  }
+  const blockers = preserveFailClosedProductBlockers(product, reasonCodes, new Date().toISOString());
+  return (await saveCanonicalProduct(product.id, {
+    sourceReliabilityVersion: sourceEvidence ? 'commerce-source-v1' : product.sourceReliabilityVersion,
+    sourceEvidence: sourceEvidence || product.sourceEvidence,
+    affiliateGatewayDomain: sourceEvidence?.affiliate.affiliateGatewayDomain || product.affiliateGatewayDomain,
+    merchantDomain: sourceEvidence?.merchant?.merchantDomain || product.merchantDomain,
+    linkHealthStatus: reasonCodes.some(code => /MERCHANT_(?:CONNECT|REQUEST|CONNECTION|DNS|TLS)|MERCHANT_UNREACHABLE|RATE_LIMITED|PROVIDER_SERVER_ERROR/.test(code)) ? 'timeout' : product.linkHealthStatus,
+    affiliateHealthStatus: reasonCodes.some(code => code.startsWith('AFFILIATE_')) ? 'broken' : product.affiliateHealthStatus,
+    quarantineReasons: [...new Set([...(product.quarantineReasons || []), ...reasonCodes])],
+    publicHidden: true,
+    publicBlocked: true,
+    publicDecision: 'quarantined',
+    publicBlockReason: reasonCodes.join(','),
+    publicBlockReasons: canonicalBlockerCodes(blockers),
+    currentBlockers: blockers,
+    blockersCheckedAt: new Date().toISOString(),
+    sourceHealthReason: reasonCodes.join(','),
+    sourceHealthCooldownUntil: nextRetryAt,
+    nextRetryAt,
+    nextAutomaticAction: nextRetryAt ? 'VERIFY_PRODUCT_HEALTH' : 'RECHECK_QUARANTINED_PRODUCT',
+    autoPublishEligible: false,
+    needsVerification: true,
+    lastEligibilityDecision: {
+      eligible: false,
+      reasonCodes,
+      checkedAt: new Date().toISOString(),
+      ruleVersion: 'commerce-source-v1',
+      jobId: item.durableJobId,
+    },
+  }, { verifiedHealthUpdate: true })) || product;
+}
+
+/*
+ * Retained temporarily as migration archaeology only. The executable legacy
+ * in-process review path was removed in favor of reviewAutonomousCandidate,
+ * which performs exact-link preflight under a fenced durable job.
+ *
 async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): Promise<CandidateReviewOutcome> {
   const { payload } = item;
   try {
@@ -1393,6 +1789,7 @@ async function reviewOne(item: CandidateQueueItem, counters: PipelineCounters): 
     return { status, terminal: status === 'failed', nextRetryAt, reason };
   }
 }
+*/
 
 export async function processCandidateFromDurableJob(input: {
   candidateId: string;
@@ -1429,42 +1826,16 @@ export async function processCandidateFromDurableJob(input: {
 export async function processReviewQueue(mode: OperationMode, deadlineMs = Date.now() + 240_000, batchOverride?: number): Promise<PipelineCounters & { currentConcurrency: number }> {
   const counters = emptyCounters();
   const settings = await getAutomationSettings();
-  const usage = await getDailyPipelineUsage();
-  const remainingNetworkChecks = Math.max(0, settings.networkCheckBudgetPerDay - usage.networkChecks);
-  const runtime = (await readCollection<RuntimeState>(RUNTIME_COLLECTION))[0] || { id: 'runtime', currentConcurrency: 3, timeoutStreak: 0, updatedAt: new Date().toISOString() };
   const batchLimit = batchOverride || (mode === 'bootstrap' ? settings.bootstrapReviewBatch : settings.steadyReviewBatch);
-  const requested = Math.min(batchLimit, Math.floor(remainingNetworkChecks / 8));
-  const reservationKey = `legacy-review:${todayInVietnam()}:${randomUUID()}`;
-  const reservation = await reserveProductProcessingCapacity(reservationKey, requested, settings.maxItemsPerDay);
-  if (!reservation.allowed && reservation.units === 0) return { ...counters, currentConcurrency: 0 };
-  const batch = await claimCandidateBatch(reservation.units);
-  const concurrency = Math.max(1, Math.min(3, settings.maxConcurrency, runtime.currentConcurrency || 3, batch.length || 1));
-  let cursor = 0;
-  let budgetExhausted = false;
-  await Promise.all(Array.from({ length: concurrency }, async () => {
-    while (cursor < batch.length && Date.now() < deadlineMs) {
-      if (counters.networkChecks >= remainingNetworkChecks) {
-        budgetExhausted = true;
-        break;
-      }
-      const item = batch[cursor++];
-      await reviewOne(item, counters);
-    }
-  }));
-  for (; cursor < batch.length; cursor++) await finishCandidate(batch[cursor].id, { status: 'pending', delayReason: budgetExhausted ? 'network_budget_exhausted' : 'run_deadline_reached' });
-  const processedIds = new Set(batch.map((item) => item.id));
-  const recentReasons = (await listCandidateQueue()).filter((item) => processedIds.has(item.id)).map((item) => item.delayReason || '').join(',');
-  const rateLimited = recentReasons.includes('rate_limited');
-  const timeoutHeavy = recentReasons.split('timeout').length - 1 >= 2;
-  runtime.currentConcurrency = rateLimited ? 1
-    : timeoutHeavy ? 2
-    : Math.min(settings.maxConcurrency, Math.max(3, concurrency + (counters.failed === 0 ? 1 : -1)));
-  runtime.updatedAt = new Date().toISOString();
-  await writeCollection(RUNTIME_COLLECTION, [runtime]);
+  if (Date.now() >= deadlineMs) return { ...counters, currentConcurrency: 0 };
+  // Compatibility entry point: enqueue through the same durable bridge used by
+  // AUTO_PILOT. Direct in-process review had no job lease/fencing and could
+  // create products before source preflight; it is intentionally no longer run.
+  const { bridgeCandidatesToDurableJobs } = await import('../automation/candidateBridge');
+  const bridge = await bridgeCandidatesToDurableJobs({ requestedBy: 'legacy-review-bridge', limit: batchLimit });
+  counters.reviewQueued = bridge.created;
   counters.queueSize = (await getQueueStats()).total;
-  await commitProductProcessingCapacity(reservationKey, counters.reviewed);
-  await recordDailyUsage(counters);
-  return { ...counters, currentConcurrency: runtime.currentConcurrency };
+  return { ...counters, currentConcurrency: 0 };
 }
 
 export async function recheckPublishedProducts(limit: number, deadlineMs: number): Promise<PipelineCounters> {

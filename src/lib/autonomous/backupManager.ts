@@ -151,6 +151,8 @@ export async function createStorageSnapshot(options: {
   reason: BackupManifest['reason'];
   retention?: number;
   now?: number;
+  /** Optional maintenance allowlist; omitted collections are recorded as excluded. */
+  includeCollections?: readonly string[];
 }): Promise<{ directory: string; manifest: BackupManifest; retentionCandidates: string[] }> {
   const sourceDir = path.resolve(options.sourceDir || getDataDir());
   const outputDir = path.resolve(options.outputDir || path.join(sourceDir, '..', 'sandeal-backups'));
@@ -166,12 +168,18 @@ export async function createStorageSnapshot(options: {
   await fs.mkdir(dataDir, { recursive: true });
   const files: BackupManifest['files'] = [];
   const excluded: string[] = [];
+  const included = options.includeCollections
+    ? new Set(options.includeCollections.map(name => {
+      if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) throw new Error('BACKUP_COLLECTION_NAME_INVALID');
+      return `${name}.json`;
+    }))
+    : null;
   const entries = (await fs.readdir(sourceDir, { withFileTypes: true }))
     .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
     .sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     assertSafeJsonName(entry.name);
-    if (isSensitiveStorageFile(entry.name)) { excluded.push(entry.name); continue; }
+    if (isSensitiveStorageFile(entry.name) || included && !included.has(entry.name)) { excluded.push(entry.name); continue; }
     const source = path.join(sourceDir, entry.name);
     const parsed = await parseJsonFile(source);
     const content = await fs.readFile(source);

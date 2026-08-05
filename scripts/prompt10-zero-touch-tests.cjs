@@ -130,7 +130,11 @@ async function main() {
 
   async function reset(mode = 'CANARY') {
     for (const collection of collections) await adapter.writeCollection(collection, []);
-    await settings.updateAutomationSettings({ launchEnabled: mode === 'CANARY' || mode === 'AUTONOMOUS' });
+    await settings.updateAutomationSettings({
+      enabled: mode === 'CANARY' || mode === 'AUTONOMOUS',
+      safePublish: true,
+      launchEnabled: mode === 'CANARY' || mode === 'AUTONOMOUS',
+    });
     await store.updateAutomationControl({
       mode,
       effectiveMode: mode,
@@ -152,7 +156,7 @@ async function main() {
     }
   }
 
-  async function bridgeAndProcess(input, workerId) {
+  async function bridgeAndProcess(input, workerId, expectProduct = true) {
     const queued = await queue.enqueueCandidate(input);
     assert.equal(queued.queued, true);
     const bridged = await bridge.bridgeCandidatesToDurableJobs({ requestedBy: 'autopilot-worker', limit: 10 });
@@ -165,7 +169,8 @@ async function main() {
     const run = await worker.processAutomationBatch(workerId, 1);
     assert.equal(run.succeeded, 1, JSON.stringify({ run, job: await store.getAutomationJob(processJob.id) }));
     const product = (await products.getAllProducts()).find(item => item.sourceId === input.sourceId);
-    assert.ok(product, 'durable candidate worker must create a canonical product');
+    if (expectProduct) assert.ok(product, 'a verified product candidate must create one canonical product');
+    else assert.equal(product, undefined, 'a rejected preflight candidate must not create a canonical product');
     return { queued: queued.item, processJob, product };
   }
 
@@ -239,7 +244,7 @@ async function main() {
     assert.equal((await adapter.readCollection('automation-manual-tasks')).length, 0);
   });
 
-  await test('non-product staging record is quarantined without a publish job', async () => {
+  await test('non-product staging record is discarded before canonical creation', async () => {
     await reset('CANARY');
     const input = candidate('voucher-record', {
       title: 'Voucher freeship for orders from fixture merchant',
@@ -247,13 +252,7 @@ async function main() {
       rawSourceKind: 'voucher',
       autoPublishEligible: true,
     });
-    const processed = await bridgeAndProcess(input, 'zero-touch-non-product-worker');
-    const canonical = await products.getProductById(processed.product.id);
-    assert.equal(canonical.recordType, 'VOUCHER');
-    assert.equal(canonical.lifecycleState, 'QUARANTINED');
-    assert.equal(canonical.publicHidden, true);
-    assert.equal(canonical.autoPublishEligible, false);
-    assert.ok(canonical.quarantineReasons.some(reason => reason.includes('record_type_voucher')));
+    const processed = await bridgeAndProcess(input, 'zero-touch-non-product-worker', false);
     assert.equal((await queue.getCandidateById(processed.queued.id)).status, 'discarded');
     const jobs = await store.getAllAutomationJobs();
     assert.equal(jobs.some(job => job.type === 'AUTO_SAFE_PUBLISH'), false);

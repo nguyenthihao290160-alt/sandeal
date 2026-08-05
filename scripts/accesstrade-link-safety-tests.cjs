@@ -18,6 +18,7 @@ Module._resolveFilename = function resolve(request, parent, isMain, options) {
 const tempDir = path.join(process.cwd(), '.test-tmp', `accesstrade-link-safety-${process.pid}-${Date.now()}`);
 fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
+process.env.NODE_ENV = 'test';
 process.env.ACCESS_TRADE_API_KEY = 'isolated-access-trade-test-key';
 
 let passed = 0;
@@ -527,11 +528,11 @@ function product(overrides = {}) {
     assert(changed.publicBlockReasons.includes('affiliate_url_unhealthy'));
   });
 
-  await test('record 30shinestore được quarantine mềm, không bị xóa', async () => {
+  await test('record từ merchant không khả dụng được quarantine chung, không bị xóa', async () => {
     await adapter.writeCollection('products', [product({
-      originalUrl: 'https://30shinestore.com/products/item-1',
-      canonicalProductUrl: 'https://30shinestore.com/products/item-1',
-      affiliateUrl: 'https://go.isclix.com/deep_link/legacy?url=https%3A%2F%2F30shinestore.com%2Fproducts%2Fitem-1',
+      originalUrl: 'https://unhealthy-merchant.example/products/item-1',
+      canonicalProductUrl: 'https://unhealthy-merchant.example/products/item-1',
+      affiliateUrl: 'https://go.isclix.com/provider-link?target=https%3A%2F%2Funhealthy-merchant.example%2Fproducts%2Fitem-1',
       affiliateUrlSource: undefined, affiliateUrlProvider: undefined, affiliateUrlSourceField: undefined, affiliateUrlStatus: 'unverified', deepLinkSupported: undefined,
     })]);
     const originalFetch = global.fetch;
@@ -542,11 +543,13 @@ function product(overrides = {}) {
       await jobs.executeProductIntelligenceJob({ id: 'health-job', type: 'RECHECK_PRODUCT_HEALTH', payload: { limit: 10, healthTarget: 'all' }, dryRun: false });
     } finally { global.fetch = originalFetch; }
     const stored = await products.getProductById('at-product');
-    assert(stored, 'record must remain stored'); equal(stored.status, 'archived'); equal(stored.lifecycleState, 'QUARANTINED');
-    equal(stored.canonicalProductUrl, 'https://30shinestore.com/products/item-1');
+    assert(stored, 'record must remain stored'); equal(stored.status, 'needs_review'); equal(stored.lifecycleState, 'QUARANTINED');
+    equal(stored.canonicalProductUrl, 'https://unhealthy-merchant.example/products/item-1');
     equal(stored.publicHidden, true); equal(stored.publicBlocked, true);
     assert(stored.publicBlockReasons.includes('product_url_unhealthy'));
     assert(stored.publicBlockReasons.includes('affiliate_url_unhealthy'));
+    assert(stored.quarantineReasons.includes('MERCHANT_CONNECTION_RESET'));
+    assert(stored.quarantineReasons.includes('AFFILIATE_PROVENANCE_REQUIRED'));
   });
 
   console.log(`\nAccessTrade link safety: ${passed} passed, ${failed} failed`);

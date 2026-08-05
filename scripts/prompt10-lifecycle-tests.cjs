@@ -88,7 +88,7 @@ async function main() {
     return { queued: await queue.getCandidateById(queued.item.id), job, product };
   }
 
-  await test('disguised voucher is classified and quarantined before any network probe', async () => {
+  await test('disguised voucher is discarded before canonical creation or network probe', async () => {
     const before = networkCalls;
     const result = await run(candidate('voucher-one', {
       title: 'Mã giảm 10K cho đơn hàng từ 99K',
@@ -102,11 +102,9 @@ async function main() {
     }), 'gate4-voucher-worker');
     assert.equal(result.job.status, 'SUCCEEDED');
     assert.equal(result.queued.status, 'discarded');
-    assert.equal(result.product.recordType, 'VOUCHER');
-    assert.equal(result.product.lifecycleState, 'QUARANTINED');
-    assert.equal(result.product.publicHidden, true);
+    assert.equal(result.product, undefined);
     assert.equal(networkCalls, before);
-    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'AUTO_SAFE_PUBLISH' && job.payload.productId === result.product.id).length, 0);
+    assert.equal((await store.getAllAutomationJobs()).filter(job => job.type === 'AUTO_SAFE_PUBLISH').length, 0);
   });
 
   await test('incomplete claimed product is quarantined without probing or blocking the batch', async () => {
@@ -114,11 +112,7 @@ async function main() {
     const result = await run(candidate('missing-price-two', { price: undefined, salePrice: undefined, isolatedHealthFixture: undefined }), 'gate4-incomplete-worker');
     assert.equal(result.job.status, 'SUCCEEDED');
     assert.equal(result.queued.status, 'needs_review');
-    assert.equal(result.product.recordType, 'UNKNOWN');
-    assert.equal(result.product.lifecycleState, 'QUARANTINED');
-    assert.ok(result.product.quarantineReasons.includes('record_type_unknown'));
-    assert.ok(result.product.quarantineReasons.includes('insufficient_verified_product_fields'));
-    assert.equal(result.product.publicHidden, true);
+    assert.equal(result.product, undefined);
     assert.equal(networkCalls, before);
   });
 
@@ -152,8 +146,8 @@ async function main() {
     await worker.processAutomationBatch('gate4-retry-worker', 10);
     const job = (await store.getAllAutomationJobs()).find(item => item.payload.candidateId === queued.item.id);
     assert.equal(job.status, 'RETRY_SCHEDULED');
-    const product = (await products.getAllProducts()).find(item => item.sourceId === input.sourceId);
-    assert.equal(product.lifecycleState, 'RETRY_SCHEDULED');
+    const productBeforeRetry = (await products.getAllProducts()).find(item => item.sourceId === input.sourceId);
+    assert.equal(productBeforeRetry, undefined, 'temporary preflight failure must not create a canonical product');
     const past = new Date(Date.now() - 1000).toISOString();
     await adapter.runTransaction('candidate-queue', items => {
       const item = items.find(entry => entry.id === queued.item.id);
@@ -171,6 +165,8 @@ async function main() {
     const completed = await store.getAutomationJob(job.id);
     assert.equal(completed.status, 'SUCCEEDED');
     assert.equal(completed.attemptCount, 2);
+    const product = (await products.getAllProducts()).find(item => item.sourceId === input.sourceId);
+    assert.ok(product);
     const events = await lifecycle.listLifecycleTransitionEvents(product.id);
     assert.equal(new Set(events.map(event => event.transitionKey)).size, events.length);
     const facts = await evidence.listProductEvidence(product.id);

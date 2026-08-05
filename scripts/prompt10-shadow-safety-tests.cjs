@@ -100,7 +100,7 @@ async function main() {
     assert.equal(networkCalls, 0, 'isolated health fixture must not call a live provider');
   });
 
-  await test('unsafe candidate is quarantined and does not stop the following valid candidate', async () => {
+  await test('unsafe candidate is discarded before canonical creation and does not stop the following valid candidate', async () => {
     await reset();
     const unsafe = await queue.enqueueCandidate(candidate('shadow-unsafe', {
       title: 'Mã giảm 50K toàn sàn', kind: 'product', rawSourceKind: 'voucher',
@@ -113,7 +113,7 @@ async function main() {
     const allProducts = await products.getAllProducts();
     const unsafeProduct = allProducts.find(product => product.sourceId === 'shadow-unsafe');
     const healthyProduct = allProducts.find(product => product.sourceId === 'shadow-after-unsafe');
-    assert.equal(unsafeProduct.lifecycleState, 'QUARANTINED'); assert.equal(unsafeProduct.publicHidden, true);
+    assert.equal(unsafeProduct, undefined);
     assert.equal((await queue.getCandidateById(unsafe.item.id)).status, 'discarded');
     assert.equal(healthyProduct.lifecycleState, 'READY_FOR_PUBLISH'); assert.equal(healthyProduct.publicHidden, true);
     assert.equal((await products.getPublicProducts()).length, 0);

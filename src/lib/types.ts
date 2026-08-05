@@ -322,6 +322,57 @@ export interface CanonicalProductBlocker {
   checkedAt: string;
 }
 
+export type CommerceUrlProbeClassification =
+  | 'HEALTHY'
+  | 'AFFILIATE_LINK_NOT_FOUND'
+  | 'AFFILIATE_LINK_REJECTED'
+  | 'MERCHANT_NOT_FOUND'
+  | 'MERCHANT_UNREACHABLE'
+  | 'RATE_LIMITED'
+  | 'PROVIDER_SERVER_ERROR'
+  | 'DNS_FAILURE'
+  | 'TLS_FAILURE'
+  | 'CONNECT_TIMEOUT'
+  | 'REQUEST_TIMEOUT'
+  | 'CONNECTION_RESET'
+  | 'REDIRECT_LOOP'
+  | 'UNSAFE_URL'
+  | 'INVALID_URL';
+
+/** Sanitized, persistable subset of an exact commerce URL probe. */
+export interface CommerceUrlProbeEvidence {
+  classification: CommerceUrlProbeClassification;
+  httpStatus?: number;
+  normalizedFinalUrl?: string;
+  affiliateGatewayDomain?: string;
+  merchantDomain?: string;
+  redirectCount: number;
+  elapsedMs: number;
+  retryable: boolean;
+  reasonCode: string;
+  checkedAt: string;
+  retryAfter?: string;
+  queryParameterNames?: string[];
+}
+
+export interface CommerceSourceEvidence {
+  schemaVersion: 1;
+  ruleVersion: 'commerce-source-v1';
+  checkedAt: string;
+  expiresAt: string;
+  affiliate: CommerceUrlProbeEvidence;
+  merchant?: CommerceUrlProbeEvidence;
+}
+
+export interface ProductEligibilityDecisionRecord {
+  eligible: boolean;
+  reasonCodes: string[];
+  checkedAt: string;
+  ruleVersion: string;
+  readinessSnapshotHash?: string;
+  jobId?: string;
+}
+
 export interface Product {
   schemaVersion?: number;
   id: string;
@@ -472,6 +523,10 @@ export interface Product {
   sourceHealthCooldownUntil?: string; // ISO timestamp when item is safe to recheck
   sourceHealthReason?: string; // reason for cooldown (e.g. "image_404_stale", "timeout", "affiliate_unverified")
   sourceHealthSkipUntil?: string; // ISO timestamp to skip duplicate checks
+  sourceReliabilityVersion?: 'commerce-source-v1';
+  sourceEvidence?: CommerceSourceEvidence;
+  affiliateGatewayDomain?: string;
+  lastEligibilityDecision?: ProductEligibilityDecisionRecord;
 
   // Canonical automation/publication fields. Legacy JSON is normalized safely.
   sourceId?: string;

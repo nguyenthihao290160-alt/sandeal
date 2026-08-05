@@ -447,7 +447,7 @@ async function main() {
       'review:low_originality',
       'image_http_not_200',
       'affiliate_url_unverified',
-      'merchant_quarantined_30shinestore',
+      'merchant_connection_reset',
       'price_unverified',
       'product_url_unhealthy',
       'claims_unverified',

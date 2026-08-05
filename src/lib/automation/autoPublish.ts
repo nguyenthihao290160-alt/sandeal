@@ -37,6 +37,8 @@ import { createAutomationJob, getAutomationControl } from './store';
 import type { AutomationJob } from './types';
 import { vietnamDayKey } from './timezone';
 import { throwIfExecutionAborted } from './executionBudget';
+import { peekDomainCircuitDecision } from '@/lib/bots/domainCircuitBreaker';
+import { sourceReliabilityEvent } from '@/lib/commerce/sourceReliability';
 
 const OUTBOUND_COLLECTION = 'automation-outbound-events';
 const CONTROL_BLOCK_REASONS = new Set([
@@ -240,6 +242,14 @@ async function applyBlockedDecision(
     publicHidden: true,
     ...(quarantined ? { status: 'needs_review' as const } : {}),
     lastBlockedPublicationDecision: record,
+    lastEligibilityDecision: {
+      eligible: false,
+      reasonCodes: record.reasonCodes,
+      checkedAt: recordedAt,
+      ruleVersion: decision.ruleVersion,
+      readinessSnapshotHash: decision.snapshotHash,
+      jobId: job.id,
+    },
   });
   if (!saved?.lastBlockedPublicationDecision || saved.lastBlockedPublicationDecision.effectKey !== effectKey) {
     throw new Error('BLOCKED_PUBLICATION_STATE_NOT_DURABLE');
@@ -490,7 +500,12 @@ export async function executeAutoSafePublish(
   }
   const product = await getProductById(productId);
   if (!product) throw new Error('VALIDATION_PRODUCT_NOT_FOUND');
-  const control = await getAutomationControl();
+  const [control, settings, affiliateCircuit, merchantCircuit] = await Promise.all([
+    getAutomationControl(),
+    getAutomationSettings(),
+    peekDomainCircuitDecision(product.affiliateUrl || '', Date.now(), { role: 'AFFILIATE_GATEWAY', jobId: job.id, operationId: job.operationId }),
+    peekDomainCircuitDecision(product.canonicalProductUrl || product.originalUrl || '', Date.now(), { role: 'MERCHANT', jobId: job.id, operationId: job.operationId }),
+  ]);
   throwIfExecutionAborted(options.signal);
   const currentSnapshot = readinessSnapshotHash(product);
   const requestedSnapshot = typeof job.payload.readinessSnapshotHash === 'string' ? job.payload.readinessSnapshotHash : undefined;
@@ -540,6 +555,19 @@ export async function executeAutoSafePublish(
     });
     decision = evaluated.decision;
     evidenceVerification = evaluated.evidence;
+  }
+  if (!replayingCompletedProductWrite) {
+    const executionReasons = [
+      ...(!settings.enabled ? ['mode_disallows_publish'] : []),
+      ...(!settings.safePublish ? ['publish_blocked_by_policy'] : []),
+      ...(affiliateCircuit.state !== 'CLOSED' ? ['affiliate_gateway_circuit_open'] : []),
+      ...(merchantCircuit.state !== 'CLOSED' ? ['merchant_circuit_open'] : []),
+    ];
+    if (executionReasons.length) decision = {
+      ...decision,
+      eligible: false,
+      reasons: [...new Set([...decision.reasons, ...executionReasons])],
+    };
   }
 
   if (!decision.eligible
@@ -633,6 +661,14 @@ export async function executeAutoSafePublish(
     const journalOperationId = existingJournal?.operationType === 'AUTO_SAFE_PUBLISH'
       ? blockedJournalOperationId(job.operationId, productId)
       : job.operationId;
+    sourceReliabilityEvent('safe_publish_blocked', {
+      provider: product.source,
+      campaign: product.campaignName,
+      domain: product.merchantDomain || product.sourceEvidence?.merchant?.merchantDomain,
+      reasonCode: blockedDecision.reasons.join(','),
+      operationId: job.operationId,
+      jobId: job.id,
+    });
     return executeBlockedDecision(job, workerId, productId, blockedDecision, journalOperationId);
   }
   if (!replayingCompletedProductWrite) {
@@ -817,6 +853,24 @@ export async function executeAutoSafePublish(
       idempotencyKey: `source-publish:${effectKey}`.slice(0, 200),
       observedAt: published.publishedAt || job.createdAt,
       publishedProducts: 1,
+    });
+    await saveCanonicalProduct(productId, {
+      lastEligibilityDecision: {
+        eligible: true,
+        reasonCodes: [],
+        checkedAt: new Date().toISOString(),
+        ruleVersion: decision.ruleVersion,
+        readinessSnapshotHash: effectSnapshot,
+        jobId: job.id,
+      },
+    });
+    sourceReliabilityEvent('safe_publish_completed', {
+      provider: published.source,
+      campaign: published.campaignName,
+      domain: published.merchantDomain || published.sourceEvidence?.merchant?.merchantDomain,
+      reasonCode: 'SAFE_PUBLISH_COMPLETED',
+      operationId: job.operationId,
+      jobId: job.id,
     });
     const eventCount = (await readCollection<PublicationEvent>(OUTBOUND_COLLECTION)).filter(event => event.effectKey === effectKey).length;
     return {

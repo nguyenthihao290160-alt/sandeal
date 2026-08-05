@@ -205,7 +205,7 @@ export async function fetchExternalSafely(
     allowPartialBody?: boolean;
     signal?: AbortSignal;
   } = {},
-): Promise<{ response: Response; finalUrl: string; body: Uint8Array }> {
+): Promise<{ response: Response; finalUrl: string; body: Uint8Array; redirectCount: number }> {
   const timeoutMs = Math.max(500, Math.min(options.timeoutMs || 8_000, 20_000));
   const maxBytes = Math.max(1_024, Math.min(options.maxBytes || 512 * 1_024, 2 * 1024 * 1024));
   const maxRedirects = Math.max(0, Math.min(options.maxRedirects ?? 4, 5));
@@ -218,6 +218,7 @@ export async function fetchExternalSafely(
   const fetchImpl = options.fetchImpl;
   let current = value;
   const visited = new Set<string>();
+  let redirectCount = 0;
   const deadline = Date.now() + timeoutMs;
   for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
     if (options.signal?.aborted) throw new DOMException('External request aborted', 'AbortError');
@@ -264,6 +265,7 @@ export async function fetchExternalSafely(
     if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
       if (redirect === maxRedirects) throw new Error('TOO_MANY_REDIRECTS');
       current = new URL(response.headers.get('location')!, current).toString();
+      redirectCount += 1;
       try {
         await response.body?.cancel();
       } catch {
@@ -273,7 +275,7 @@ export async function fetchExternalSafely(
     }
     const declared = Number(response.headers.get('content-length') || 0);
     if (!options.allowPartialBody && declared > maxBytes) throw new Error('RESPONSE_TOO_LARGE');
-    if (!response.body) return { response, finalUrl: current, body: new Uint8Array() };
+    if (!response.body) return { response, finalUrl: current, body: new Uint8Array(), redirectCount };
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
@@ -306,7 +308,7 @@ export async function fetchExternalSafely(
       headers: response.headers,
     });
     Object.defineProperty(replayable, 'url', { value: current });
-    return { response: replayable, finalUrl: current, body };
+    return { response: replayable, finalUrl: current, body, redirectCount };
   }
   throw new Error('TOO_MANY_REDIRECTS');
 }

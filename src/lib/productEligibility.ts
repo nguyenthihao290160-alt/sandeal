@@ -8,7 +8,7 @@ import {
 import { evaluateReviewQuality } from './reviewQuality';
 import { canonicalBlockerCodes } from './productBlockers';
 
-export const PRODUCT_ELIGIBILITY_POLICY_VERSION = 'product-eligibility-v2';
+export const PRODUCT_ELIGIBILITY_POLICY_VERSION = 'product-eligibility-v3';
 
 const GOOD_HEALTH = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
 const PROHIBITED_TERMS = /(?:thuoc\s+ke\s+don|nicotine|vu\s+khi|chat\s+cam|hang\s+gia|co\s+bac)/i;
@@ -50,7 +50,10 @@ const RECALCULATED_REASONS = new Set([
   'review_quality_unready',
   'image_http_not_200',
   'image_content_type_invalid',
-  'merchant_quarantined_30shinestore',
+  'quarantined',
+  'source_evidence_missing',
+  'source_evidence_stale',
+  'source_unhealthy',
   'review_missing',
   'review_not_approved',
   'review_source_stale',
@@ -98,22 +101,6 @@ function checkedRecently(value: string | undefined, days: number, now: number): 
   return Number.isFinite(parsed) && parsed <= now + 60_000 && now - parsed <= days * 86_400_000;
 }
 
-function urlContainsDomain(value: string | undefined, domain: string, depth = 0): boolean {
-  if (depth > 4) return false;
-  try {
-    const parsed = new URL(value || '');
-    const host = parsed.hostname.toLowerCase();
-    if (host === domain || host.endsWith(`.${domain}`)) return true;
-    for (const key of ['url', 'deeplink', 'target', 'destination', 'redirect']) {
-      const nested = parsed.searchParams.get(key);
-      if (nested && urlContainsDomain(nested, domain, depth + 1)) return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
 function isAccessTrade(product: Partial<Product>): boolean {
   return product.source === 'accesstrade' || product.platform === 'accesstrade';
 }
@@ -139,7 +126,10 @@ function dataQualityScore(product: Partial<Product>): number {
 export function eligibilityBlockerMessage(reason: string): string {
   const messages: Record<string, string> = {
     not_product: 'Record chưa được phân loại là sản phẩm.',
-    merchant_quarantined_30shinestore: 'Merchant 30shinestore đang được quarantine mềm.',
+    quarantined: 'Sản phẩm đang được quarantine theo chính sách an toàn.',
+    source_evidence_missing: 'Thiếu bằng chứng kiểm tra nguồn affiliate và merchant.',
+    source_evidence_stale: 'Bằng chứng kiểm tra nguồn đã stale.',
+    source_unhealthy: 'Nguồn affiliate hoặc merchant không khỏe.',
     source_unverified: 'Nguồn sản phẩm chưa được xác minh.',
     missing_product_url: 'Thiếu Product URL hợp lệ.',
     invalid_product_url_source: 'Nguồn có Product URL nhưng định dạng không hợp lệ.',
@@ -186,11 +176,8 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   const reviewQuality = evaluateReviewQuality(product, now);
   const canonicalProductUrl = product.canonicalProductUrl || product.originalUrl;
   const normalizationIssues = new Set(product.sourceNormalizationIssues || []);
-  const isThirtyShine = urlContainsDomain(canonicalProductUrl, '30shinestore.com')
-    || urlContainsDomain(product.affiliateUrl, '30shinestore.com');
-
   if (product.kind !== 'product' || (product.recordType && product.recordType !== 'PRODUCT') || looksLikeVoucherOrCampaign(product as Product)) dataBlockers.push('not_product');
-  if (isThirtyShine || product.lifecycleState === 'QUARANTINED' || product.quarantineReasons?.includes('merchant_quarantined_30shinestore')) dataBlockers.push('merchant_quarantined_30shinestore');
+  if (product.lifecycleState === 'QUARANTINED') dataBlockers.push('quarantined');
   if (product.status === 'archived') dataBlockers.push('archived');
   if (title.length < 8) dataBlockers.push('invalid_title');
   if (!String(product.slug || '').trim()) dataBlockers.push('invalid_slug');
@@ -227,6 +214,15 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
     || !(ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(product.affiliateUrlSourceField)
     || product.deepLinkSupported === false
   )) dataBlockers.push('affiliate_provenance_missing');
+
+  if (product.sourceReliabilityVersion === 'commerce-source-v1') {
+    if (!product.sourceEvidence?.affiliate || !product.sourceEvidence.merchant) dataBlockers.push('source_evidence_missing');
+    else {
+      if (Date.parse(product.sourceEvidence.expiresAt || '') <= now) dataBlockers.push('source_evidence_stale');
+      if (product.sourceEvidence.affiliate.classification !== 'HEALTHY'
+        || product.sourceEvidence.merchant.classification !== 'HEALTHY') dataBlockers.push('source_unhealthy');
+    }
+  }
 
   if (!validHttpUrl(product.imageUrl)) {
     dataBlockers.push(normalizationIssues.has('INVALID_IMAGE_URL')

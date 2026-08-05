@@ -1,6 +1,6 @@
-import { readinessSnapshotHash } from '@/lib/autonomous/publishPolicy';
+import { autoSafePublishJobKey, readinessSnapshotHash } from '@/lib/autonomous/publishPolicy';
 import { clearOrphanedCandidateBridge, listCandidateQueue, recoverStaleProcessing } from '@/lib/storage/candidateQueue';
-import { getAllProducts, publicationIdempotencyKey, saveCanonicalProduct } from '@/lib/storage/products';
+import { getAllProducts, saveCanonicalProduct } from '@/lib/storage/products';
 import { bridgeCandidatesToDurableJobs } from './candidateBridge';
 import { completeJournalEffect, listInconsistentJournals } from './operationJournal';
 import {
@@ -8,6 +8,7 @@ import {
   cancelAutomationJob,
   completeAutomationParentJob,
   createAutomationJob,
+  getAllAutomationJobs,
   getAllActiveAutomationJobs,
   getAutomationJob,
   getAutomationControl,
@@ -110,7 +111,11 @@ export async function runAutonomousReconciler(
   result.bridgeJobs = bridge.created;
   result.repaired += bridge.created;
 
-  const [products, jobs] = await Promise.all([getAllProducts(), getAllActiveAutomationJobs()]);
+  // Parent lineage may span the active file and immutable history segments:
+  // terminal children are archived immediately. This is the explicit
+  // maintenance reconciler (never a claim/recovery hot path), so resolve the
+  // complete graph once and close WAITING_CHILDREN parents deterministically.
+  const [products, jobs] = await Promise.all([getAllProducts(), getAllAutomationJobs()]);
   const jobsById = new Map(jobs.map(job => [job.id, job]));
   result.inspected += products.length + jobs.length;
 
@@ -173,7 +178,7 @@ export async function runAutonomousReconciler(
   for (const product of products) {
     throwIfExecutionAborted(options.signal);
     if (product.lifecycleState === 'READY_FOR_PUBLISH' && ['CANARY', 'AUTONOMOUS'].includes(control.effectiveMode) && !control.publishPaused && !control.killSwitch) {
-      const key = `auto-safe-publish:${publicationIdempotencyKey(product)}:${control.effectiveMode}`.slice(0, 160);
+      const key = autoSafePublishJobKey(product);
       const created = await createAutomationJob({
         type: 'AUTO_SAFE_PUBLISH',
         payload: { productId: product.id, readinessSnapshotHash: readinessSnapshotHash(product), reconciled: true },

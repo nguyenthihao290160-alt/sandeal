@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { CandidateRetryScheduledError, processCandidateFromDurableJob, scanSourcesToQueue, selectOperationMode } from '@/lib/bots/productPipeline';
+import { advanceCandidateBridgeGeneration } from '@/lib/storage/candidateQueue';
 import { buildDashboardProducts } from '@/lib/dashboard/products';
 import { executeProductIntelligenceJob } from '@/lib/product-intelligence/jobs';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
@@ -380,6 +381,7 @@ async function executeAutoPilotJob(
     );
     const scan = await scanSourcesToQueue(operationMode, deadline, {
       runId: `automation-job:${job.id}:attempt:${job.attemptCount}`,
+      scheduleBucket: String(job.payload.scheduleBucket || job.id),
       signal: execution?.signal,
     });
     execution?.throwIfAborted();
@@ -1163,6 +1165,10 @@ async function processAutomationBatchInternal(
         logAutomationJobEvent('stale_completion_rejected', job, { workerId, reasonCode: 'JOB_FAILURE_AUTHORITY_REJECTED' });
         result.skipped += 1;
         return;
+      }
+      if (job.type === 'PROCESS_CANDIDATE' && failedJob.status === 'FAILED') {
+        const candidateId = typeof job.payload.candidateId === 'string' ? job.payload.candidateId : '';
+        if (candidateId) await advanceCandidateBridgeGeneration(candidateId, job.id);
       }
       if (projectionMaintenance && failedJob) {
         await markJobHealthProjectionMaintenance({
