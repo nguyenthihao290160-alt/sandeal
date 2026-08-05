@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "npm run test:claim-cpu && npm run test:worker-lease && node --expose-gc scripts/product-first-bounded-accesstrade-tests.cjs && node scripts/product-first-pipeline-worker-tests.cjs && node scripts/test-runner.cjs && node scripts/accesstrade-link-safety-tests.cjs && node scripts/gemini-provider-diagnostics-tests.cjs && node scripts/prompt13-production-readiness-tests.cjs && node scripts/production-health-readiness-regression-tests.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs && node scripts/sandeal-end-to-end-hardening-tests.cjs && node scripts/sandeal-durable-health-regression-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
+    "test": "npm run test:claim-cpu && npm run test:job-archive && npm run test:worker-lease && node --expose-gc scripts/product-first-bounded-accesstrade-tests.cjs && node scripts/product-first-pipeline-worker-tests.cjs && node scripts/test-runner.cjs && node scripts/accesstrade-link-safety-tests.cjs && node scripts/gemini-provider-diagnostics-tests.cjs && node scripts/prompt13-production-readiness-tests.cjs && node scripts/production-health-readiness-regression-tests.cjs && node scripts/prompt05b-dashboard-tests.cjs && node scripts/prompt06-automation-tests.cjs && node scripts/sandeal-stabilization-tests.cjs && node scripts/sandeal-end-to-end-hardening-tests.cjs && node scripts/sandeal-durable-health-regression-tests.cjs && node scripts/prompt07-release-ui-tests.cjs && npm run test:prompt08 && npm run test:prompt09",
     "test:claim-cpu": "node scripts/claim-recovery-cpu-tests.cjs",
+    "test:job-archive": "node scripts/active-job-history-archive-tests.cjs",
     "test:product-first": "node --expose-gc scripts/product-first-bounded-accesstrade-tests.cjs && node scripts/product-first-pipeline-worker-tests.cjs",
     "test:worker-lease": "node scripts/worker-job-lease-hotfix-tests.cjs",
     "test:runtime-fence": "node scripts/runtime-fence-commit-window-tests.cjs",

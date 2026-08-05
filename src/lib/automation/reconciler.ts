@@ -8,7 +8,8 @@ import {
   cancelAutomationJob,
   completeAutomationParentJob,
   createAutomationJob,
-  getAllAutomationJobs,
+  getAllActiveAutomationJobs,
+  getAutomationJob,
   getAutomationControl,
 } from './store';
 import type { AutomationJob } from './types';
@@ -94,11 +95,12 @@ export async function runAutonomousReconciler(
   result.repaired += lifecycleRepair.repaired;
   result.skipped += lifecycleRepair.failed.length;
 
-  const initialJobs = await getAllAutomationJobs();
+  const initialJobs = await getAllActiveAutomationJobs();
   const initialJobIds = new Set(initialJobs.map(job => job.id));
   for (const candidate of await listCandidateQueue()) {
     throwIfExecutionAborted(options.signal);
     if (!candidate.durableJobId || initialJobIds.has(candidate.durableJobId)) continue;
+    if (await getAutomationJob(candidate.durableJobId)) continue;
     result.orphans += 1;
     if (await clearOrphanedCandidateBridge(candidate.id, candidate.durableJobId)) result.repaired += 1;
   }
@@ -108,7 +110,7 @@ export async function runAutonomousReconciler(
   result.bridgeJobs = bridge.created;
   result.repaired += bridge.created;
 
-  const [products, jobs] = await Promise.all([getAllProducts(), getAllAutomationJobs()]);
+  const [products, jobs] = await Promise.all([getAllProducts(), getAllActiveAutomationJobs()]);
   const jobsById = new Map(jobs.map(job => [job.id, job]));
   result.inspected += products.length + jobs.length;
 

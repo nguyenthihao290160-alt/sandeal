@@ -58,6 +58,16 @@ async function test(name, work) {
 
 async function reset() {
   for (const collection of collections) await adapter.writeCollection(collection, []);
+  for (const fileName of fs.readdirSync(tempDir)) {
+    const collection = fileName.endsWith('.json') ? fileName.slice(0, -5) : '';
+    if (
+      collection === 'automation-job-history-manifest-v1'
+      || collection.startsWith('automation-job-history-v1-')
+      || collection.startsWith('automation-job-history-idempotency-v1-')
+    ) {
+      await adapter.writeCollection(collection, []);
+    }
+  }
   await store.updateAutomationControl({
     mode: 'SHADOW', effectiveMode: 'SHADOW', publishPaused: false, ingestionPaused: false,
     workerPaused: false, schedulerPaused: false, killSwitch: false,
@@ -412,7 +422,7 @@ function jobEnvelope(job) {
     assert.equal((await adapter.readCollection(collection))[0].count, 1);
   });
 
-  await test('queue compaction preview không ghi và apply giữ active + workflow refs + 100 terminal audit + backup', async () => {
+  await test('queue compaction preview không ghi và apply giữ active + workflow refs + terminal projections + backup', async () => {
     await reset();
     const now = Date.now();
     const old = now - 40 * 24 * 60 * 60_000;
@@ -438,7 +448,9 @@ function jobEnvelope(job) {
     assert.equal(retained.length, 102);
     assert.ok(retained.some(job => job.id === active.id && job.status === 'PENDING'));
     assert.ok(retained.some(job => job.id === terminal[102].id && job.parentJobId === active.id));
-    assert.equal((await adapter.readCollection('automation-job-projections')).length, 102);
+    assert.equal((await adapter.readCollection('automation-job-projections')).length, 104);
+    assert.equal((await store.getAutomationJob(terminal[100].id)).id, terminal[100].id);
+    assert.equal((await store.getAutomationJob(terminal[101].id)).id, terminal[101].id);
     const backupSnapshot = JSON.parse(fs.readFileSync(applied.backupRef, 'utf8'));
     assert.equal(backupSnapshot.length, 104);
     assert.ok(backupSnapshot.some(job => job.id === active.id && job.status === 'PENDING'));

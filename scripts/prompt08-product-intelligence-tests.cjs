@@ -6,6 +6,7 @@ const path = require('node:path');
 const tempDir = path.join(process.cwd(), '.test-tmp', `sandeal-prompt08-tests-${process.pid}-${Date.now()}`);
 fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
+process.env.NODE_ENV = 'test';
 process.env.BASIC_AUTH_ENABLED = 'true';
 process.env.BASIC_AUTH_USER = 'prompt08-test';
 process.env.BASIC_AUTH_PASSWORD = 'local-test-password';

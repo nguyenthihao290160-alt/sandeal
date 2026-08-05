@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
 import {
   backupCollection,
   generateId,
+  getStorageCapabilities,
   readBoundedCollectionSnapshot,
   readCollection,
   readCollectionPage,
@@ -23,7 +25,12 @@ import { getJobRegistryDefaults } from './botRegistry';
 import { approvalStatusForPolicy, getAutomationPolicy, initialStatusForPolicy, listAutomationPolicies } from './policyRegistry';
 import { buildAutoPilotExecutionPlan } from './autoPilotGraph';
 import { vietnamDayKey } from './timezone';
-import { isRuntimeRoleOwner, withRuntimeRoleAuthority, type RuntimeRoleOwnership } from './runtimeRoles';
+import {
+  isRuntimeRoleOwner,
+  listRuntimeRoleLeases,
+  withRuntimeRoleAuthority,
+  type RuntimeRoleOwnership,
+} from './runtimeRoles';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
 import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
@@ -52,7 +59,6 @@ import {
   getAutomationJobHealthView,
   getAutomationJobProjectionManifestForMaintenance,
   getAutomationJobProjectionLimit,
-  invalidateAutomationJobProjectionMutation,
   deterministicProjectionFingerprint,
   readBoundedAutomationJobProjections,
   readBoundedAutomationJobStatuses,
@@ -79,6 +85,20 @@ import {
   type AutomationWorkerClaimLane,
 } from './executionPolicy';
 import type { AutomationJobLeaseRenewalAttempt } from './jobLeaseRenewal';
+import {
+  archiveAutomationJobHistory,
+  archiveAutomationJobHistoryBatch,
+  assertAutomationJobHistoryArchived,
+  assertAutomationJobHistoryBatchArchived,
+  assertAutomationJobHistoryArchivable,
+  automationJobHistoryBatchFingerprint,
+  automationJobHistoryFingerprint,
+  getAllArchivedAutomationJobs,
+  getArchivedAutomationJob,
+  getArchivedSuccessfulAutomationJob,
+  readAutomationJobHistoryManifest,
+  scanLatestArchivedAutomationJobs,
+} from './jobHistoryArchive';
 import type {
   AiUsageRecord,
   ApprovalStatus,
@@ -921,11 +941,14 @@ async function scanAutomationJobProjectionSource(
 ): Promise<AutomationJobProjectionSourceSnapshot> {
   const active: AutomationJob[] = [];
   const terminal: AutomationJob[] = [];
+  const activeIds = new Set<string>();
   let durableJobCount = 0;
   let activeJobCount = 0;
-  await scanCollection<AutomationJob>(JOBS, job => {
+  const observe = (job: AutomationJob, source: 'ACTIVE' | 'ARCHIVE'): void => {
     const sequence = Number(job.projectionSourceSequence);
     if (maximumSequence !== undefined && Number.isFinite(sequence) && sequence > maximumSequence) return;
+    if (source === 'ARCHIVE' && activeIds.has(job.id)) return;
+    if (source === 'ACTIVE') activeIds.add(job.id);
     durableJobCount += 1;
     if (!TERMINAL.has(job.status)) {
       activeJobCount += 1;
@@ -937,7 +960,9 @@ async function scanAutomationJobProjectionSource(
     terminal.push(job);
     terminal.sort(newerJobFirst);
     if (terminal.length > MAX_JOB_PROJECTIONS) terminal.pop();
-  });
+  };
+  await scanCollection<AutomationJob>(JOBS, job => observe(job, 'ACTIVE'));
+  await scanLatestArchivedAutomationJobs(job => observe(job, 'ARCHIVE'));
   const retainedTerminalLimit = Math.max(0, MAX_JOB_PROJECTIONS - active.length);
   return {
     jobs: [...active, ...terminal.slice(0, retainedTerminalLimit)],
@@ -1768,27 +1793,6 @@ async function syncJobListProjections(
     return bounded.items;
   });
   if (!output) throw new Error('JOB_LIST_PROJECTION_SYNC_RESULT_MISSING');
-  return output;
-}
-
-async function removeJobProjections<T extends Pick<AutomationJob, 'id' | 'status' | 'updatedAt'>>(
-    jobIds: ReadonlySet<string>,
-    collection: string,
-): Promise<ProjectionMutationStats> {
-  let output: ProjectionMutationStats | undefined;
-  await runTransaction<T>(collection, items => {
-    const filtered = items.filter(item => !jobIds.has(item.id));
-    const removedCount = items.length - filtered.length;
-    const bounded = boundedProjectionItems(filtered);
-    output = {
-      inserted: false,
-      insertedCount: 0,
-      sourceAffected: removedCount > 0,
-      ...bounded.stats,
-    };
-    return removedCount > 0 ? bounded.items : undefined;
-  });
-  if (!output) throw new Error('JOB_PROJECTION_REMOVE_RESULT_MISSING');
   return output;
 }
 
@@ -2771,12 +2775,17 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
   let response!: { job: AutomationJob; created: boolean; code: 'CREATED' | 'ALREADY_PROCESSED' | 'IN_PROGRESS' };
   let enqueueBoundExceeded = false;
   try {
-    const projectionMutation = await runAutomationJobSourceBoundedTransaction(items => {
+    const projectionMutation = await runAutomationJobSourceBoundedTransaction(async items => {
       const sameKey = items
           .filter(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey)
           .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+      const archivedSuccess = await getArchivedSuccessfulAutomationJob(
+          job.type,
+          job.idempotencyKey,
+      );
       const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
-          || sameKey.find(item => item.status === 'SUCCEEDED');
+          || sameKey.find(item => item.status === 'SUCCEEDED')
+          || archivedSuccess;
       if (existing) {
         response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
         return undefined;
@@ -2812,6 +2821,7 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       } catch (error) {
         console.error(JSON.stringify({ type: 'automation_job_created_audit_failed', jobId: response.job.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') }));
       }
+      await archiveTerminalJobAfterMutationBestEffort(response.job);
     }
   } catch (error) {
     if (quotaReserved) await releaseProductProcessingCapacity(reservationKey);
@@ -2856,14 +2866,19 @@ export async function createAutomationJobsBatch(
   let enqueueBoundExceeded = false;
   let mutation: AutomationJobProjectionMutationHandle | undefined;
   try {
-    mutation = await runAutomationJobSourceBoundedTransaction(items => {
+    mutation = await runAutomationJobSourceBoundedTransaction(async items => {
       const known = [...items];
       for (const job of jobs) {
         const sameKey = known
             .filter(item => item.type === job.type && item.idempotencyKey === job.idempotencyKey)
             .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+        const archivedSuccess = await getArchivedSuccessfulAutomationJob(
+            job.type,
+            job.idempotencyKey,
+        );
         const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
-            || sameKey.find(item => item.status === 'SUCCEEDED');
+            || sameKey.find(item => item.status === 'SUCCEEDED')
+            || archivedSuccess;
         const equivalentActive = existing || known.find(item => isEquivalentActiveScan(item, job));
         if (equivalentActive) {
           responses.set(job.id, {
@@ -2918,6 +2933,7 @@ export async function createAutomationJobsBatch(
         reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
       }));
     }
+    await archiveTerminalJobAfterMutationBestEffort(job);
     logAutomationJobEvent('job_created', job, { workerId: job.requestedBy, reasonCode: 'CREATED_BATCH' });
   }
   for (const result of responses.values()) {
@@ -2964,7 +2980,7 @@ export async function getAutomationJob(id: string): Promise<AutomationJob | null
     pageSize: 1,
     filters: { id },
   });
-  return page.items[0] || null;
+  return page.items[0] || getArchivedAutomationJob(id);
 }
 
 /** Lightweight status read for browser polling; falls back once for legacy jobs. */
@@ -3026,7 +3042,55 @@ export async function getAutomationJobProjection(id: string): Promise<Automation
  * must use compact projections or getAutomationJobHealthView().
  */
 export async function getAllAutomationJobs(): Promise<AutomationJob[]> {
+  const active = await readCollection<AutomationJob>(JOBS);
+  const activeIds = new Set(active.map(job => job.id));
+  const archived = await getAllArchivedAutomationJobs();
+  return [...active, ...archived.filter(job => !activeIds.has(job.id))];
+}
+
+/**
+ * Active/recoverable source only. Worker maintenance that reasons about live
+ * execution graphs must use this instead of materialising archived history.
+ */
+export async function getAllActiveAutomationJobs(): Promise<AutomationJob[]> {
   return readCollection<AutomationJob>(JOBS);
+}
+
+/**
+ * Bounded historical lookup for correlation APIs. Compact projections locate
+ * candidate IDs; each full record then uses the active file or one deterministic
+ * history segment. No archive-wide scan occurs on the request path.
+ */
+export async function findAutomationJobsForCorrelation(input: {
+  operationId?: string;
+  parentJobId?: string;
+  limit?: number;
+}): Promise<AutomationJob[]> {
+  const limit = Math.max(1, Math.min(50, Math.floor(input.limit || 50)));
+  const matches = (job: Pick<AutomationJob, 'operationId' | 'parentJobId'>): boolean => (
+    (!input.operationId || job.operationId === input.operationId)
+    && (!input.parentJobId || job.parentJobId === input.parentJobId)
+  );
+  const activePage = await readCollectionPage<AutomationJob>(JOBS, {
+    page: 1,
+    pageSize: limit,
+    filters: {
+      ...(input.operationId ? { operationId: input.operationId } : {}),
+      ...(input.parentJobId ? { parentJobId: input.parentJobId } : {}),
+    },
+    sort: { field: 'createdAt', direction: 'asc' },
+  });
+  const ids = new Set(activePage.items.filter(matches).map(job => job.id));
+  const projections = await readBoundedAutomationJobStatuses();
+  for (const projection of projections.items) {
+    if (ids.size >= limit) break;
+    if (matches(projection)) ids.add(projection.id);
+  }
+  const resolved = await Promise.all([...ids].slice(0, limit).map(id => getAutomationJob(id)));
+  return resolved
+      .filter((job): job is AutomationJob => Boolean(job && matches(job)))
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+      .slice(0, limit);
 }
 
 export interface AutomationJobAuthoritySnapshot {
@@ -3306,6 +3370,253 @@ function runtimeRoleCommitGuard(
       undefined,
       context.authorityAcquired,
   );
+}
+
+export type AutomationJobArchiveTestPhase =
+  | 'ARCHIVE_DURABLE_BEFORE_ACTIVE_REMOVAL'
+  | 'ACTIVE_REMOVAL_COMMITTED';
+
+type AutomationJobArchiveTestHook = (input: {
+  phase: AutomationJobArchiveTestPhase;
+  jobId: string;
+}) => Promise<void> | void;
+
+let automationJobArchiveTestHook: AutomationJobArchiveTestHook | undefined;
+
+export function setAutomationJobArchiveTestHookForTests(
+    hook: AutomationJobArchiveTestHook | undefined,
+): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('AUTOMATION_JOB_ARCHIVE_TEST_HOOK_FORBIDDEN');
+  automationJobArchiveTestHook = hook;
+}
+
+async function invokeAutomationJobArchiveTestHook(
+    phase: AutomationJobArchiveTestPhase,
+    jobId: string,
+): Promise<void> {
+  if (process.env.NODE_ENV !== 'test' || !automationJobArchiveTestHook) return;
+  await automationJobArchiveTestHook({ phase, jobId });
+}
+
+function automaticAutomationJobArchivalEnabled(): boolean {
+  // This split is deliberately FileStorage-specific. Mongo retains its
+  // established single-collection behavior until a separately versioned
+  // schema/migration is approved.
+  if (getStorageCapabilities().driver !== 'file') return false;
+  if (process.env.NODE_ENV !== 'test') return true;
+  // Existing deterministic suites intentionally reset only their legacy
+  // collections. The dedicated archive suite opts in explicitly; production
+  // is not allowed to disable the active/history invariant.
+  return process.env.SANDEAL_AUTOMATION_JOB_ARCHIVE_ENABLED?.trim().toLowerCase() === 'true';
+}
+
+function workflowProtectedJobIds(jobs: readonly AutomationJob[]): Set<string> {
+  const jobsById = new Map(jobs.map(job => [job.id, job]));
+  const childrenByParent = new Map<string, AutomationJob[]>();
+  for (const job of jobs) {
+    if (!job.parentJobId) continue;
+    const children = childrenByParent.get(job.parentJobId) || [];
+    children.push(job);
+    childrenByParent.set(job.parentJobId, children);
+  }
+  const protectedIds = new Set(jobs.filter(job => !TERMINAL.has(job.status)).map(job => job.id));
+  const pending = [...protectedIds];
+  for (let index = 0; index < pending.length; index += 1) {
+    const id = pending[index];
+    const parentId = jobsById.get(id)?.parentJobId;
+    if (parentId && jobsById.has(parentId) && !protectedIds.has(parentId)) {
+      protectedIds.add(parentId);
+      pending.push(parentId);
+    }
+    for (const child of childrenByParent.get(id) || []) {
+      if (protectedIds.has(child.id)) continue;
+      protectedIds.add(child.id);
+      pending.push(child.id);
+    }
+  }
+  return protectedIds;
+}
+
+export interface AutomationJobArchiveTransitionResult {
+  jobId: string;
+  status:
+    | 'ARCHIVED_AND_REMOVED'
+    | 'ARCHIVED_RETAINED_FOR_WORKFLOW'
+    | 'ALREADY_ARCHIVED';
+  archiveCreated: boolean;
+  activeRemoved: boolean;
+}
+
+async function activeAutomationJobById(id: string): Promise<AutomationJob | null> {
+  const page = await readCollectionPage<AutomationJob>(JOBS, {
+    page: 1,
+    pageSize: 1,
+    filters: { id },
+  });
+  return page.items[0] || null;
+}
+
+async function archiveTerminalAutomationJobRecord(
+    expected: AutomationJob,
+    options: { ownership?: RuntimeRoleOwnership; nowMs?: number } = {},
+): Promise<AutomationJobArchiveTransitionResult> {
+  if (!TERMINAL.has(expected.status)) throw new Error('AUTOMATION_JOB_HISTORY_JOB_NOT_TERMINAL');
+  const nowMs = options.nowMs ?? Date.now();
+  const expectedFingerprint = automationJobHistoryFingerprint(expected);
+  if (options.ownership && !await isRuntimeRoleOwner('WORKER', options.ownership, nowMs)) {
+    throw automationJobAuthorityError('WORKER_FENCING_REJECTED');
+  }
+  const current = await activeAutomationJobById(expected.id);
+  if (!current) {
+    await assertAutomationJobHistoryArchived(expected);
+    return {
+      jobId: expected.id,
+      status: 'ALREADY_ARCHIVED',
+      archiveCreated: false,
+      activeRemoved: false,
+    };
+  }
+  if (
+    !TERMINAL.has(current.status)
+    || automationJobHistoryFingerprint(current) !== expectedFingerprint
+  ) {
+    throw new Error('AUTOMATION_JOB_HISTORY_ACTIVE_STATE_CHANGED');
+  }
+  const assertActiveState = async (): Promise<void> => {
+    const latest = await activeAutomationJobById(expected.id);
+    if (
+      !latest
+      || !TERMINAL.has(latest.status)
+      || automationJobHistoryFingerprint(latest) !== expectedFingerprint
+    ) {
+      throw new Error('AUTOMATION_JOB_HISTORY_ACTIVE_STATE_CHANGED');
+    }
+  };
+  const archiveGuard = options.ownership
+      ? runtimeRoleCommitGuard(options.ownership, assertActiveState)
+      : undefined;
+  const archived = await archiveAutomationJobHistory(current, {
+    nowMs,
+    withCommitGuard: archiveGuard,
+  });
+  await invokeAutomationJobArchiveTestHook('ARCHIVE_DURABLE_BEFORE_ACTIVE_REMOVAL', expected.id);
+
+  let removed = false;
+  let workflowProtected = false;
+  await runTransaction<AutomationJob>(JOBS, items => {
+    const latest = items.find(job => job.id === expected.id);
+    if (!latest) return undefined;
+    if (
+      !TERMINAL.has(latest.status)
+      || automationJobHistoryFingerprint(latest) !== expectedFingerprint
+    ) {
+      throw new Error('AUTOMATION_JOB_HISTORY_ACTIVE_STATE_CHANGED');
+    }
+    if (workflowProtectedJobIds(items).has(latest.id)) {
+      workflowProtected = true;
+      return undefined;
+    }
+    removed = true;
+    return items.filter(job => job.id !== expected.id);
+  }, {
+    beforeCommit: () => assertAutomationJobHistoryArchived(expected),
+    withCommitGuard: options.ownership ? runtimeRoleCommitGuard(options.ownership) : undefined,
+    operationCategory: 'automation_job_history_active_removal',
+  });
+  if (removed) {
+    await invokeAutomationJobArchiveTestHook('ACTIVE_REMOVAL_COMMITTED', expected.id);
+    await removeJobHeartbeats([expected.id]).catch(error => {
+      console.error(JSON.stringify({
+        type: 'automation_job_history_heartbeat_cleanup_failed',
+        jobId: expected.id,
+        reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+      }));
+    });
+  }
+  return {
+    jobId: expected.id,
+    status: removed
+        ? 'ARCHIVED_AND_REMOVED'
+        : workflowProtected
+          ? 'ARCHIVED_RETAINED_FOR_WORKFLOW'
+          : 'ALREADY_ARCHIVED',
+    archiveCreated: archived.created,
+    activeRemoved: removed,
+  };
+}
+
+export async function archiveTerminalAutomationJob(
+    id: string,
+    options: { ownership?: RuntimeRoleOwnership; nowMs?: number } = {},
+): Promise<AutomationJobArchiveTransitionResult | null> {
+  const active = await activeAutomationJobById(id);
+  if (active) return archiveTerminalAutomationJobRecord(active, options);
+  const archived = await getArchivedAutomationJob(id);
+  if (!archived) return null;
+  await assertAutomationJobHistoryArchived(archived);
+  return {
+    jobId: id,
+    status: 'ALREADY_ARCHIVED',
+    archiveCreated: false,
+    activeRemoved: false,
+  };
+}
+
+async function archiveTerminalJobAfterMutationBestEffort(
+    job: AutomationJob,
+    ownership?: RuntimeRoleOwnership,
+): Promise<void> {
+  if (!automaticAutomationJobArchivalEnabled() || !TERMINAL.has(job.status)) return;
+  try {
+    // The source transaction assigns its projection sequence/version after the
+    // handler callback captures `job`. Resolve the just-committed record again
+    // so archival fingerprints the exact durable terminal representation.
+    const result = await archiveTerminalAutomationJob(job.id, { ownership });
+    if (!result) throw new Error('AUTOMATION_JOB_HISTORY_TERMINAL_SOURCE_MISSING');
+    console.info(JSON.stringify({
+      type: 'automation_job_history_archived',
+      jobId: job.id,
+      jobStatus: job.status,
+      result: result.status,
+      archiveCreated: result.archiveCreated,
+    }));
+  } catch (error) {
+    // The authoritative terminal state remains in the active collection. A
+    // later idempotent compaction resumes from this exact durable record.
+    console.error(JSON.stringify({
+      type: 'automation_job_history_archival_deferred',
+      jobId: job.id,
+      jobStatus: job.status,
+      reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+    }));
+  }
+}
+
+export async function archiveEligibleTerminalAutomationJobs(options: {
+  limit?: number;
+  ownership?: RuntimeRoleOwnership;
+  nowMs?: number;
+} = {}): Promise<{ archived: number; retainedForWorkflow: number; failed: number }> {
+  const maximum = Math.max(1, Math.min(100, Math.floor(options.limit || 25)));
+  const snapshot = await readCollection<AutomationJob>(JOBS);
+  const protectedIds = workflowProtectedJobIds(snapshot);
+  const candidates = snapshot
+      .filter(job => TERMINAL.has(job.status) && !protectedIds.has(job.id))
+      .sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt))
+      .slice(0, maximum);
+  let archived = 0;
+  let retainedForWorkflow = 0;
+  let failed = 0;
+  for (const job of candidates) {
+    try {
+      const result = await archiveTerminalAutomationJobRecord(job, options);
+      if (result.activeRemoved) archived += 1;
+      else retainedForWorkflow += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { archived, retainedForWorkflow, failed };
 }
 
 export interface AutomationJobCreateResult {
@@ -3762,6 +4073,12 @@ export async function completeAutomationParentJob(
     dryRun: completedJob.dryRun,
     attempts: completedJob.attemptCount,
   });
+  if (completedJob) {
+    await archiveTerminalJobAfterMutationBestEffort(completedJob);
+    if (automaticAutomationJobArchivalEnabled()) {
+      await archiveEligibleTerminalAutomationJobs({ limit: 100 }).catch(() => undefined);
+    }
+  }
   return completedJob;
 }
 
@@ -4613,6 +4930,9 @@ async function claimAutomationJobsExclusive(
       reasonCode: job.status === 'FAILED' ? 'LEASE_EXPIRED_MAX_ATTEMPTS' : 'LEASE_EXPIRED_RETRY_SCHEDULED',
     });
   }
+  for (const job of timedOut) {
+    await archiveTerminalJobAfterMutationBestEffort(job, ownership);
+  }
   const notRunnable = oldestNotRunnable as AutomationJob | undefined;
   if (notRunnable && nowMs - (notRunnableLogTimes.get(notRunnable.id) || 0) >= 60_000) {
     notRunnableLogTimes.set(notRunnable.id, nowMs);
@@ -4660,6 +4980,15 @@ async function claimAutomationJobsExclusive(
       dryRun: rejected.job.dryRun === true,
       attempts: Number(rejected.job.attemptCount || 0),
     });
+    await archiveTerminalJobAfterMutationBestEffort(rejected.job, ownership);
+  }
+  const alreadyArchivedTerminalIds = new Set([
+    ...timedOut.map(job => job.id),
+    ...rejectedBeforeClaim.map(item => item.job.id),
+  ]);
+  for (const job of projectionChanges) {
+    if (!TERMINAL.has(job.status) || alreadyArchivedTerminalIds.has(job.id)) continue;
+    await archiveTerminalJobAfterMutationBestEffort(job, ownership);
   }
   for (const job of claimed) {
     logAutomationJobEvent('job_claim_attempt', job, { workerId, reasonCode: 'RUNNABLE_SELECTED' });
@@ -4894,6 +5223,7 @@ export async function completeAutomationJob(
     } catch (error) {
       console.error(JSON.stringify({ type: 'automation_job_completion_audit_failed', jobId: completedJob.id, reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error') }));
     }
+    await archiveTerminalJobAfterMutationBestEffort(completedJob, guard.ownership);
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return completedJob;
 }
@@ -5034,6 +5364,9 @@ export async function failAutomationJob(
     } catch (auditError) {
       console.error(JSON.stringify({ type: 'automation_job_failure_audit_failed', jobId: failedJob.id, reasonCode: sanitizeErrorMessage(auditError instanceof Error ? auditError.message : 'unknown_error') }));
     }
+    if (TERMINAL.has(failedJob.status)) {
+      await archiveTerminalJobAfterMutationBestEffort(failedJob, guard.ownership);
+    }
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return failedJob;
 }
@@ -5054,20 +5387,36 @@ export async function cancelAutomationJob(id: string, actor: string, reason: str
     await syncJobReadModelsBestEffort(cancelledJob, true, projectionMutation);
     await appendAutomationAudit({ correlationId: cancelledJob.operationId, operationId: cancelledJob.operationId, jobId: cancelledJob.id, operationType: 'JOB_CANCELLED', actor,
       previousState: String(cancelledJob.result?.previousState || ''), nextState: 'CANCELLED', risk: cancelledJob.riskLevel, reasons: [reason], dryRun: cancelledJob.dryRun, attempts: cancelledJob.attemptCount });
+    await archiveTerminalJobAfterMutationBestEffort(cancelledJob);
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return cancelledJob;
 }
 
 export async function retryAutomationJob(id: string, actor: string): Promise<AutomationJob | null> {
-  let retried: AutomationJob | null = null; const now = new Date().toISOString();
-  const projectionMutation = await runAutomationJobSourceTransaction(items => {
-    const job = items.find(item => item.id === id);
+  let retried: AutomationJob | null = null;
+  let restoredFromArchive: AutomationJob | null = null;
+  const now = new Date().toISOString();
+  const projectionMutation = await runAutomationJobSourceTransaction(async items => {
+    let job = items.find(item => item.id === id);
+    if (!job) {
+      const archived = await getArchivedAutomationJob(id);
+      if (archived) {
+        job = structuredClone(archived);
+        restoredFromArchive = structuredClone(archived);
+        items.push(job);
+      }
+    }
     if (!job || job.status !== 'FAILED' || job.attemptCount >= job.maxAttempts) return undefined;
     job.status = 'PENDING'; job.scheduledAt = now; job.nextRetryAt = undefined; job.runnableAt = now; job.runnableReason = 'RETRY_ELIGIBLE_AT';
     job.completedAt = undefined; job.retryable = undefined; job.deadLetterReason = undefined; job.updatedAt = now;
     clearAutomationJobClaim(job);
     markAutomationJobProjectionSourceMutation(job);
     retried = { ...job }; return items;
+  }, {
+    beforeCommit: async () => {
+      if (restoredFromArchive) await assertAutomationJobHistoryArchived(restoredFromArchive);
+    },
+    operationCategory: 'automation_job_retry',
   });
   const retriedJob = retried as AutomationJob | null;
   if (retriedJob) {
@@ -5139,6 +5488,9 @@ export async function recoverStaleAutomationJob(id: string, ownership: RuntimeRo
       reasonCode: result.status === 'FAILED' ? 'LEASE_EXPIRED_MAX_ATTEMPTS' : 'LEASE_EXPIRED_RETRY_SCHEDULED',
     });
     await appendAutomationAudit({ correlationId: result.operationId, operationId: `${result.operationId}:stale-recovery:${ownership.fencingToken}`.slice(0, 160), jobId: result.id, operationType: 'STALE_JOB_RECOVERED', actor, previousState: 'RUNNING', nextState: result.status, risk: 'MEDIUM', reasons: ['LEASE_EXPIRED', `fencing:${ownership.fencingToken}`], dryRun: result.dryRun, attempts: result.attemptCount });
+    if (TERMINAL.has(result.status)) {
+      await archiveTerminalJobAfterMutationBestEffort(result, ownership);
+    }
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return result;
 }
@@ -5162,6 +5514,7 @@ export async function approveAutomationJob(id: string, actor: string, reason: st
     await syncJobReadModelsBestEffort(changedJob, TERMINAL.has(changedJob.status), projectionMutation);
     await appendAutomationAudit({ correlationId: changedJob.operationId, operationId: changedJob.operationId, jobId: changedJob.id, operationType: approve ? 'JOB_APPROVED' : 'JOB_REJECTED', actor,
       previousState: 'WAITING_APPROVAL', nextState: changedJob.status, risk: changedJob.riskLevel, reasons: [reason], dryRun: changedJob.dryRun, attempts: changedJob.attemptCount });
+    if (TERMINAL.has(changedJob.status)) await archiveTerminalJobAfterMutationBestEffort(changedJob);
   } else await abortAutomationJobProjectionMutation(projectionMutation);
   return changedJob;
 }
@@ -5260,13 +5613,43 @@ export interface AutomationJobCompactionPlan {
   totalJobs: number;
   activeJobs: number;
   terminalJobs: number;
+  eligibleTerminalJobs: number;
   removableJobs: number;
   retainedJobs: number;
   retentionDays: number;
   minimumTerminalJobs: number;
   cutoffAt: string;
+  batchSize: number;
+  maximumBatches: number;
+  batchesProcessed: number;
+  remainingEligibleJobs: number;
+  sourceStatusCounts: Record<AutomationJobStatus, number>;
+  archiveStatusCounts: {
+    SUCCEEDED: number;
+    FAILED: number;
+    CANCELLED: number;
+    BLOCKED: number;
+  };
+  archivedJobsBefore: number;
+  archivedJobsAfter: number;
+  archivedVersionsBefore: number;
+  archivedVersionsAfter: number;
+  sourceFingerprintBefore: string;
+  sourceFingerprintAfter: string;
+  selectedFingerprint: string;
+  archiveFingerprintBefore: string;
+  archiveFingerprintAfter: string;
+  archiveVerified: boolean;
+  recordCountsVerified: boolean;
+  backupVerified: boolean;
+  backupFingerprint?: string;
   backupRef?: string;
   removedJobIdsSample: string[];
+  rollback: {
+    activeSourceBackup?: string;
+    archiveIsAppendOnly: true;
+    strategy: string;
+  };
 }
 
 function buildCompactionSelection(
@@ -5279,38 +5662,9 @@ function buildCompactionSelection(
   const terminalJobs = jobs
       .filter(job => TERMINAL.has(job.status))
       .sort((left, right) => Date.parse(right.completedAt || right.updatedAt) - Date.parse(left.completedAt || left.updatedAt));
-  const jobsById = new Map(jobs.map(job => [job.id, job]));
-  const childrenByParent = new Map<string, AutomationJob[]>();
-  for (const job of jobs) {
-    if (!job.parentJobId) continue;
-    const children = childrenByParent.get(job.parentJobId) || [];
-    children.push(job);
-    childrenByParent.set(job.parentJobId, children);
-  }
-
-  // Retention may remove old terminal history, but never a job connected to an
-  // active workflow. Protect both ancestors and descendants so reconciliation
-  // can still prove the complete durable execution tree after a long manual wait.
-  const workflowProtectedIds = new Set(jobs.filter(job => !TERMINAL.has(job.status)).map(job => job.id));
-  const pending = [...workflowProtectedIds];
-  let pendingIndex = 0;
-  while (pendingIndex < pending.length) {
-    const id = pending[pendingIndex++];
-    const parentId = jobsById.get(id)?.parentJobId;
-    if (parentId && jobsById.has(parentId) && !workflowProtectedIds.has(parentId)) {
-      workflowProtectedIds.add(parentId);
-      pending.push(parentId);
-    }
-    for (const child of childrenByParent.get(id) || []) {
-      if (workflowProtectedIds.has(child.id)) continue;
-      workflowProtectedIds.add(child.id);
-      pending.push(child.id);
-    }
-  }
-
   const protectedIds = new Set([
     ...terminalJobs.slice(0, minimumTerminalJobs).map(job => job.id),
-    ...workflowProtectedIds,
+    ...workflowProtectedJobIds(jobs),
   ]);
   const removable = new Set(terminalJobs
       .filter(job => !protectedIds.has(job.id) && Date.parse(job.completedAt || job.updatedAt) < Date.parse(cutoffAt))
@@ -5318,104 +5672,208 @@ function buildCompactionSelection(
   return { removable, cutoffAt, terminalJobs };
 }
 
-/** Preview by default. Apply is explicit and always snapshots FileStorage first. */
+function automationJobStatusCounts(jobs: readonly AutomationJob[]): Record<AutomationJobStatus, number> {
+  const counts = Object.fromEntries([...ALL_JOB_STATUSES].map(status => [status, 0])) as Record<AutomationJobStatus, number>;
+  for (const job of jobs) {
+    if (!ALL_JOB_STATUSES.has(job.status)) throw new Error('AUTOMATION_JOB_COMPACTION_STATUS_INVALID');
+    counts[job.status] += 1;
+  }
+  return counts;
+}
+
+async function verifyAutomationJobBackup(
+    backupRef: string,
+    expectedFingerprint: string,
+): Promise<string> {
+  const raw = await fs.readFile(backupRef, 'utf8');
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('AUTOMATION_JOB_COMPACTION_BACKUP_INVALID');
+  const jobs = parsed as AutomationJob[];
+  const fingerprint = automationJobHistoryBatchFingerprint(jobs);
+  if (fingerprint !== expectedFingerprint) {
+    throw new Error('AUTOMATION_JOB_COMPACTION_BACKUP_FINGERPRINT_MISMATCH');
+  }
+  return fingerprint;
+}
+
+/**
+ * Preview by default. Apply is FileStorage-only, snapshots and verifies the
+ * active source, archives in bounded resumable batches, then performs one
+ * final active-file removal only after every selected record is verified.
+ */
 export async function compactAutomationJobs(options: {
   apply?: boolean;
   nowMs?: number;
   retentionDays?: number;
   minimumTerminalJobs?: number;
+  batchSize?: number;
+  maximumBatches?: number;
   actor?: string;
 } = {}): Promise<AutomationJobCompactionPlan> {
   const nowMs = options.nowMs ?? Date.now();
-  const retentionDays = Math.max(7, Math.floor(options.retentionDays ?? (Number(process.env.SANDEAL_JOB_RETENTION_DAYS) || 30)));
-  const minimumTerminalJobs = Math.max(100, Math.floor(options.minimumTerminalJobs ?? (Number(process.env.SANDEAL_JOB_MIN_TERMINAL_AUDIT) || 1_000)));
+  const retentionDays = Math.max(0, Math.floor(options.retentionDays ?? 0));
+  const minimumTerminalJobs = Math.max(0, Math.floor(options.minimumTerminalJobs ?? 0));
+  const batchSize = Math.max(1, Math.min(250, Math.floor(options.batchSize || 100)));
+  const maximumBatches = Math.max(1, Math.min(100, Math.floor(options.maximumBatches || 100)));
   const initial = await readCollection<AutomationJob>(JOBS);
-  const preview = buildCompactionSelection(initial, nowMs, retentionDays, minimumTerminalJobs);
-  let backupRef: string | undefined;
-  let removedIds = [...preview.removable];
-
-  if (options.apply && removedIds.length) {
-    backupRef = await backupCollection(JOBS, 'pre-compaction');
-    const projectionMutation = await runAutomationJobSourceTransaction(jobs => {
-      const current = buildCompactionSelection(jobs, nowMs, retentionDays, minimumTerminalJobs);
-      removedIds = [...current.removable];
-      const retainedAfterCompaction = jobs.filter(job => !current.removable.has(job.id));
-      return removedIds.length ? retainedAfterCompaction : undefined;
-    });
-    try {
-      if (!removedIds.length) {
-        await abortAutomationJobProjectionMutation(projectionMutation);
-      } else {
-        const removedSet = new Set(removedIds);
-        const collections = automationJobProjectionStorageCollections(
-            projectionMutation.targetSlot,
-            projectionMutation.targetRepairFence,
-        );
-        const [statusStats, listStats] = await Promise.all([
-          removeJobProjections<AutomationJobStatusProjection>(removedSet, collections.status),
-          removeJobProjections<AutomationJobListProjection>(removedSet, collections.list),
-          removeJobHeartbeats(removedIds),
-        ]);
-        await finishAutomationJobProjectionSync(projectionMutation, {
-          success: true,
-          inserted: false,
-          insertedCount: 0,
-          removedCount: removedIds.length,
-          sourceAffected: true,
-          projectionChanged: statusStats.sourceAffected || listStats.sourceAffected,
-          listProjectionCount: listStats.count,
-          statusProjectionCount: statusStats.count,
-          listProjectionFingerprint: listStats.fingerprint,
-          statusProjectionFingerprint: statusStats.fingerprint,
-          listProjectionContentFingerprint: listStats.contentFingerprint,
-          statusProjectionContentFingerprint: statusStats.contentFingerprint,
-          activeJobCount: Math.max(statusStats.activeCount, listStats.activeCount),
-          retainedTerminalCount: Math.min(statusStats.terminalCount, listStats.terminalCount),
-          retentionLimitReached: statusStats.retentionLimitReached || listStats.retentionLimitReached,
-          currentStateTruncated: statusStats.currentStateTruncated || listStats.currentStateTruncated,
-          sourceUpdatedAt: [statusStats.sourceUpdatedAt, listStats.sourceUpdatedAt]
-              .filter((value): value is string => Boolean(value))
-              .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null,
-          retentionBoundary: statusStats.retentionBoundary || listStats.retentionBoundary,
-        }, nowMs);
-        await refreshAutomationJobHealthSummary(nowMs).catch(error => {
-          console.error(JSON.stringify({
-            type: 'automation_job_health_summary_compaction_failed',
-            reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
-          }));
-        });
-      }
-    } catch (error) {
-      await invalidateAutomationJobProjectionMutation(projectionMutation, nowMs).catch(() => undefined);
-      throw error;
+  const sourceIds = new Set<string>();
+  for (const job of initial) {
+    if (!job || typeof job.id !== 'string' || !job.id || sourceIds.has(job.id)) {
+      throw new Error(sourceIds.has(job?.id)
+          ? 'AUTOMATION_JOB_COMPACTION_DUPLICATE_ID'
+          : 'AUTOMATION_JOB_COMPACTION_SOURCE_INVALID');
     }
-    await appendAutomationAudit({
-      correlationId: generateId(),
-      operationId: generateId(),
-      operationType: 'AUTOMATION_QUEUE_COMPACTED',
-      actor: options.actor || 'queue-compaction',
-      target: JOBS,
-      previousState: String(initial.length),
-      nextState: String(initial.length - removedIds.length),
-      risk: 'MEDIUM',
-      result: { removedJobs: removedIds.length, retentionDays, minimumTerminalJobs, backupCreated: true },
-      reasons: ['TERMINAL_RETENTION_EXPIRED'],
-      dryRun: false,
-      attempts: 1,
-    });
+    if (!ALL_JOB_STATUSES.has(job.status)) throw new Error('AUTOMATION_JOB_COMPACTION_STATUS_INVALID');
+    if (!Number.isFinite(Date.parse(job.createdAt)) || !Number.isFinite(Date.parse(job.updatedAt))) {
+      throw new Error('AUTOMATION_JOB_COMPACTION_TIMESTAMP_INVALID');
+    }
+    if (TERMINAL.has(job.status)) assertAutomationJobHistoryArchivable(job);
+    sourceIds.add(job.id);
   }
+  const preview = buildCompactionSelection(initial, nowMs, retentionDays, minimumTerminalJobs);
+  const eligible = preview.terminalJobs
+      .filter(job => preview.removable.has(job.id))
+      .sort((left, right) => Date.parse(left.completedAt || left.updatedAt) - Date.parse(right.completedAt || right.updatedAt));
+  const selected = eligible.slice(0, batchSize * maximumBatches);
+  const sourceFingerprintBefore = automationJobHistoryBatchFingerprint(initial);
+  const archivedBeforeJobs = await getAllArchivedAutomationJobs();
+  const manifestBefore = await readAutomationJobHistoryManifest();
+  const archiveFingerprintBefore = automationJobHistoryBatchFingerprint(archivedBeforeJobs);
+  let backupRef: string | undefined;
+  let backupFingerprint: string | undefined;
+  let backupVerified = false;
+  let archiveVerified = selected.length === 0;
+  let removedIds: string[] = [];
+  let batchesProcessed = 0;
+
+  if (options.apply && selected.length) {
+    if (getStorageCapabilities().driver !== 'file') {
+      throw new Error('AUTOMATION_JOB_COMPACTION_FILE_STORAGE_REQUIRED');
+    }
+    const activeRoleProcess = (await listRuntimeRoleLeases()).find(lease => (
+      (lease.role === 'WORKER' || lease.role === 'SCHEDULER')
+      && lease.status === 'ACTIVE'
+      && Date.parse(lease.leaseExpiresAt || lease.expiresAt) > nowMs
+    ));
+    if (activeRoleProcess) {
+      throw new Error(`AUTOMATION_JOB_COMPACTION_ROLE_ACTIVE:${activeRoleProcess.role}`);
+    }
+    backupRef = await backupCollection(JOBS, 'pre-compaction');
+    backupFingerprint = await verifyAutomationJobBackup(backupRef, sourceFingerprintBefore);
+    backupVerified = true;
+    for (let offset = 0; offset < selected.length; offset += batchSize) {
+      const batch = selected.slice(offset, offset + batchSize);
+      await archiveAutomationJobHistoryBatch(batch, { nowMs });
+      await assertAutomationJobHistoryBatchArchived(batch);
+      batchesProcessed += 1;
+      // Yield between bounded batches so role/file-lock heartbeats and web
+      // requests remain responsive during an operator-run migration.
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    archiveVerified = true;
+    const selectedById = new Map(selected.map(job => [job.id, job]));
+    await runTransaction<AutomationJob>(JOBS, jobs => {
+      const currentSelection = buildCompactionSelection(jobs, nowMs, retentionDays, minimumTerminalJobs);
+      for (const [id, expected] of selectedById) {
+        const current = jobs.find(job => job.id === id);
+        if (
+          !current
+          || !currentSelection.removable.has(id)
+          || automationJobHistoryFingerprint(current) !== automationJobHistoryFingerprint(expected)
+        ) {
+          throw new Error('AUTOMATION_JOB_COMPACTION_SOURCE_CHANGED');
+        }
+      }
+      removedIds = [...selectedById.keys()];
+      return jobs.filter(job => !selectedById.has(job.id));
+    }, {
+      beforeCommit: async () => {
+        for (let offset = 0; offset < selected.length; offset += batchSize) {
+          await assertAutomationJobHistoryBatchArchived(selected.slice(offset, offset + batchSize));
+        }
+      },
+      operationCategory: 'automation_job_history_compaction',
+    });
+    const activeAfterRemoval = new Set((await readCollection<AutomationJob>(JOBS)).map(job => job.id));
+    if (selected.some(job => activeAfterRemoval.has(job.id))) {
+      throw new Error('AUTOMATION_JOB_COMPACTION_ACTIVE_REMOVAL_VERIFY_FAILED');
+    }
+    for (let offset = 0; offset < selected.length; offset += batchSize) {
+      await assertAutomationJobHistoryBatchArchived(selected.slice(offset, offset + batchSize));
+    }
+  }
+
+  const finalSource = options.apply && selected.length
+      ? await readCollection<AutomationJob>(JOBS)
+      : initial;
+  const archivedAfterJobs = options.apply && selected.length
+      ? await getAllArchivedAutomationJobs()
+      : archivedBeforeJobs;
+  const manifestAfter = options.apply && selected.length
+      ? await readAutomationJobHistoryManifest()
+      : manifestBefore;
+  const sourceFingerprintAfter = automationJobHistoryBatchFingerprint(finalSource);
+  const archiveFingerprintAfter = automationJobHistoryBatchFingerprint(archivedAfterJobs);
+  const durableAfterById = new Map(archivedAfterJobs.map(job => [job.id, job]));
+  for (const job of finalSource) durableAfterById.set(job.id, job);
+  const recordCountsVerified = (!options.apply || !selected.length) || (
+    finalSource.length === initial.length - removedIds.length
+    && removedIds.length === selected.length
+    && initial.every(job => {
+      const durable = durableAfterById.get(job.id);
+      return Boolean(durable
+        && automationJobHistoryFingerprint(durable) === automationJobHistoryFingerprint(job));
+    })
+  );
+  if (!recordCountsVerified) throw new Error('AUTOMATION_JOB_COMPACTION_RECORD_COUNT_VERIFY_FAILED');
+  const remaining = buildCompactionSelection(
+      finalSource,
+      nowMs,
+      retentionDays,
+      minimumTerminalJobs,
+  ).removable.size;
 
   return {
     apply: options.apply === true,
     totalJobs: initial.length,
     activeJobs: initial.filter(job => !TERMINAL.has(job.status)).length,
     terminalJobs: preview.terminalJobs.length,
-    removableJobs: removedIds.length,
-    retainedJobs: initial.length - removedIds.length,
+    eligibleTerminalJobs: eligible.length,
+    removableJobs: options.apply ? removedIds.length : selected.length,
+    retainedJobs: finalSource.length,
     retentionDays,
     minimumTerminalJobs,
     cutoffAt: preview.cutoffAt,
+    batchSize,
+    maximumBatches,
+    batchesProcessed,
+    remainingEligibleJobs: remaining,
+    sourceStatusCounts: automationJobStatusCounts(initial),
+    archiveStatusCounts: manifestAfter?.statusCounts || {
+      SUCCEEDED: 0,
+      FAILED: 0,
+      CANCELLED: 0,
+      BLOCKED: 0,
+    },
+    archivedJobsBefore: archivedBeforeJobs.length,
+    archivedJobsAfter: archivedAfterJobs.length,
+    archivedVersionsBefore: manifestBefore?.archivedVersions || 0,
+    archivedVersionsAfter: manifestAfter?.archivedVersions || 0,
+    sourceFingerprintBefore,
+    sourceFingerprintAfter,
+    selectedFingerprint: automationJobHistoryBatchFingerprint(selected),
+    archiveFingerprintBefore,
+    archiveFingerprintAfter,
+    archiveVerified,
+    recordCountsVerified,
+    backupVerified,
+    backupFingerprint,
     backupRef,
     removedJobIdsSample: removedIds.slice(0, 20),
+    rollback: {
+      activeSourceBackup: backupRef,
+      archiveIsAppendOnly: true,
+      strategy: 'Stop role processes, verify the recorded backup fingerprint, restore the active source through the guarded storage recovery procedure, then leave immutable archive records in place; duplicate reads are ID-deduplicated.',
+    },
   };
 }

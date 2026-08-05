@@ -8,6 +8,7 @@ import type {
   AutomationJob,
   AutomationJobAttempt,
 } from './types';
+import { findAutomationJobsForCorrelation } from './store';
 
 const SAFE_OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,159}$/;
 const LAYER_LIMIT = 50;
@@ -119,7 +120,7 @@ export async function getRedactedCorrelationTrace(
   if (!SAFE_OPERATION_ID.test(operationId)) throw new Error('CORRELATION_ID_INVALID');
 
   const [jobs, attempts, audits, journals, publicationAudits] = await Promise.all([
-    page<AutomationJob>('automation-jobs', { operationId }, ROOT_JOB_LIMIT),
+    findAutomationJobsForCorrelation({ operationId, limit: ROOT_JOB_LIMIT }),
     page<AutomationJobAttempt>('automation-job-attempts', { operationId }),
     page<AutomationAuditEvent>('automation-audit', { operationId }),
     page<OperationJournalEntry>('operation-journal', { operationId }, 5),
@@ -127,11 +128,10 @@ export async function getRedactedCorrelationTrace(
   ]);
   const rootJobIds = new Set(jobs.map(job => job.id));
   const monitorPages = await Promise.all(
-    jobs.slice(0, ROOT_JOB_LIMIT).map(job => page<AutomationJob>(
-      'automation-jobs',
-      { parentJobId: job.id },
-      LAYER_LIMIT,
-    )),
+    jobs.slice(0, ROOT_JOB_LIMIT).map(job => findAutomationJobsForCorrelation({
+      parentJobId: job.id,
+      limit: LAYER_LIMIT,
+    })),
   );
   const monitors = monitorPages.flat()
     .filter(job => job.type === 'POST_PUBLISH_MONITOR')

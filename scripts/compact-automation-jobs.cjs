@@ -15,6 +15,8 @@ const readNumber = (name, fallback) => {
     apply,
     retentionDays: readNumber('retention-days', undefined),
     minimumTerminalJobs: readNumber('minimum-terminal-jobs', undefined),
+    batchSize: readNumber('batch-size', undefined),
+    maximumBatches: readNumber('maximum-batches', undefined),
     actor: apply ? 'operator:queue-compaction' : 'operator:queue-compaction-preview',
   });
   console.log(JSON.stringify({ type: apply ? 'automation_queue_compacted' : 'automation_queue_compaction_preview', ...plan }, null, 2));
