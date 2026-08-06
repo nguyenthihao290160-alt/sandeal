@@ -66,6 +66,8 @@ export interface ProductReprocessAudit {
 export interface ProductIntelligenceExecutionOptions {
   signal?: AbortSignal;
   deadline?: number;
+  fetchImpl?: typeof fetch;
+  resolveDns?: boolean;
 }
 
 function stringValue(value: unknown, maximum = 160): string {
@@ -285,8 +287,8 @@ async function checkLinkWithDomainCircuit(
     signal: options.signal,
     jobId: identifiers.jobId,
     operationId: identifiers.operationId,
-    fetchImpl: process.env.NODE_ENV === 'test' ? globalThis.fetch : undefined,
-    resolveDns: process.env.NODE_ENV !== 'test',
+    fetchImpl: options.fetchImpl,
+    resolveDns: options.resolveDns,
   });
   const result = commerceProbeToLegacyLinkResult(probe);
   const circuitStatus = probe.classification === 'HEALTHY'
@@ -981,6 +983,23 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
         updates.merchantDomain = sourceEvidence.merchant?.merchantDomain || product.merchantDomain;
       }
       const uniqueSourceReasonCodes = [...new Set(sourceReasonCodes)];
+      const blockersCheckedAt = new Date().toISOString();
+      if (uniqueSourceReasonCodes.length > 0 && !wasPublicSafe) {
+        updates.status = product.status === 'archived' ? 'archived' : 'needs_review';
+        updates.lifecycleState = 'QUARANTINED';
+        updates.lifecycleUpdatedAt = blockersCheckedAt;
+        updates.quarantineReasons = [...new Set([
+          ...(product.quarantineReasons || []),
+          ...uniqueSourceReasonCodes,
+        ])];
+        updates.publicHidden = true;
+        updates.publicBlocked = true;
+        updates.publicDecision = 'quarantined';
+        updates.publicBlockReason = uniqueSourceReasonCodes.join(',');
+        updates.autoPublishEligible = false;
+        updates.needsVerification = true;
+      }
+
       const eligibility = evaluateProductEligibility({ ...product, ...updates }, Date.now());
       const blockers = eligibility.criticalBlockers;
       const operationalBlockers = blockers.filter(reason => ![
@@ -1004,7 +1023,6 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
 
       updates.eligibility = eligibility;
       updates.reviewQuality = eligibility.reviewQuality;
-      const blockersCheckedAt = new Date().toISOString();
       const reconciledBlockers = preserveFailClosedProductBlockers(product, [...blockers, ...uniqueSourceReasonCodes], blockersCheckedAt);
       updates.currentBlockers = reconciledBlockers.map(blocker => ({
         ...blocker,
@@ -1040,19 +1058,6 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
       }
 
       if (uniqueSourceReasonCodes.length > 0 && !wasPublicSafe) {
-        updates.status = product.status === 'archived' ? 'archived' : 'needs_review';
-        updates.lifecycleState = 'QUARANTINED';
-        updates.lifecycleUpdatedAt = blockersCheckedAt;
-        updates.quarantineReasons = [...new Set([
-          ...(product.quarantineReasons || []),
-          ...uniqueSourceReasonCodes,
-        ])];
-        updates.publicHidden = true;
-        updates.publicBlocked = true;
-        updates.publicDecision = 'quarantined';
-        updates.publicBlockReason = uniqueSourceReasonCodes.join(',');
-        updates.autoPublishEligible = false;
-        updates.needsVerification = true;
         updates.nextAutomaticAction = retryTimes.length > 0
           ? 'VERIFY_PRODUCT_HEALTH'
           : 'RECHECK_QUARANTINED_PRODUCT';

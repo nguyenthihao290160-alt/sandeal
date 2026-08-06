@@ -283,7 +283,7 @@ async function main() {
       attemptCount: 1,
       claimedBy: 'abandoned-worker',
       claimedAt: iso(now - 20_000),
-      claimToken: 'claim-recovery-expired-token',
+      claimToken: 'test-claim-recovery-expired-token',
       heartbeatAt: iso(now - 10_000),
       leaseExpiresAt: iso(now - 1_000),
       startedAt: iso(now - 20_000),

@@ -456,7 +456,7 @@ async function main() {
       assert.equal(claimed.id, created.job.id);
       assert.equal(await store.completeAutomationJob(claimed.id, workerId, { stale: true }, {
         ...claimGuard(claimed, role.ownership),
-        claimToken: 'wrong-claim-token',
+        claimToken: 'test-wrong-claim-token',
       }), null);
       assert.equal(await store.completeAutomationJob(claimed.id, workerId, { stale: true }, {
         ...claimGuard(claimed, role.ownership),

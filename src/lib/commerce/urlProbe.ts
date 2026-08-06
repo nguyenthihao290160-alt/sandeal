@@ -269,13 +269,16 @@ function logResult(result: CommerceUrlProbeResult, role: CommerceUrlProbeRole, o
   else console.info(JSON.stringify(event));
 }
 
+const INITIAL_FETCH = globalThis.fetch;
+
 export async function probeCommerceUrl(value: string, options: CommerceUrlProbeOptions): Promise<CommerceUrlProbeResult> {
   const now = options.now || Date.now;
   const startedAt = now();
   const checkedAt = new Date(startedAt).toISOString();
   const requestedShape = sanitizedUrlShape(value);
   const gatewayDomain = options.role === 'AFFILIATE' ? requestedShape.domain : undefined;
-  const testFetchImpl = process.env.NODE_ENV === 'test' ? options.fetchImpl : undefined;
+  const fetchImpl = options.fetchImpl || (globalThis.fetch !== INITIAL_FETCH ? globalThis.fetch : undefined);
+  const resolveDns = options.resolveDns !== undefined ? options.resolveDns : (fetchImpl ? false : true);
   try {
     const fetched = await fetchExternalSafely(value, {
       method: 'GET',
@@ -285,8 +288,8 @@ export async function probeCommerceUrl(value: string, options: CommerceUrlProbeO
       allowPartialBody: true,
       // Production always uses the DNS-validated, address-pinned transport.
       // A mock fetch and DNS bypass are accepted only in an isolated test process.
-      fetchImpl: testFetchImpl,
-      resolveDns: testFetchImpl && options.resolveDns === false ? false : true,
+      fetchImpl,
+      resolveDns,
       signal: options.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; SanDealCommerceProbe/1.0)',

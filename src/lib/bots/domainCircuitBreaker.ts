@@ -7,7 +7,7 @@ const MAX_CIRCUIT_BYTES = 4 * 1024 * 1024;
 export const DOMAIN_CIRCUIT_SCHEMA_VERSION = 3;
 export const DOMAIN_CIRCUIT_RULE_VERSION = 'domain-circuit-v3';
 
-export type DomainCircuitRole = 'AFFILIATE_GATEWAY' | 'MERCHANT';
+export type DomainCircuitRole = 'AFFILIATE_GATEWAY' | 'MERCHANT' | 'IMAGE_HOST';
 export type DomainCircuitStatus = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
 export interface DomainCircuitState {
@@ -382,9 +382,11 @@ export async function listDomainCircuitStates(): Promise<DomainCircuitState[]> {
   const stored = await readCircuitStates();
   const normalized = new Map<string, DomainCircuitState>();
   for (const item of stored) {
-    const domain = String(item.domain || item.id || '').replace(/^(?:affiliate_gateway|merchant):/i, '').toLowerCase();
+    const domain = String(item.domain || item.id || '').replace(/^(?:affiliate_gateway|merchant|image_host):/i, '').toLowerCase();
     if (!domain) continue;
-    const role = item.role === 'AFFILIATE_GATEWAY' ? 'AFFILIATE_GATEWAY' : 'MERCHANT';
+    const role: DomainCircuitRole = item.role === 'IMAGE_HOST' ? 'IMAGE_HOST'
+      : item.role === 'AFFILIATE_GATEWAY' ? 'AFFILIATE_GATEWAY'
+      : 'MERCHANT';
     const state = normalizeState(domain, role, item);
     normalized.set(state.id, state);
   }

@@ -3,6 +3,7 @@ import { listCandidateQueue, type CandidateQueueItem } from '../storage/candidat
 import { getAutomationSettings } from '../storage/automationSettings';
 import type { CommerceUrlProbeEvidence, Product } from '../types';
 import { listDomainCircuitStates, type DomainCircuitStatus } from '../bots/domainCircuitBreaker';
+import { computeSourceDiversity, type SourceDiversitySummary } from './sourceIdentity';
 
 const STATE_COLLECTION = 'source-reliability-state';
 const MAX_PRODUCTS = 10_000;
@@ -52,6 +53,7 @@ export interface SourceReliabilityReport {
     pausedCampaigns: string[];
   };
   ingestion: SourceIngestionState[];
+  diversity?: SourceDiversitySummary;
 }
 
 function domainFromUrl(value: string | undefined): string {
@@ -233,9 +235,18 @@ export async function getSourceReliabilityReport(): Promise<SourceReliabilityRep
     row.ingestionSkipReason = providerState?.ingestionSkipped ? providerState.reasonCode : undefined;
   }
 
+  const rowList = [...rows.values()];
+  const discovered = rowList.map(r => ({ campaignName: r.campaign, merchantDomain: r.merchantDomain }));
+  const eligible = rowList.filter(r => !settings.pausedSourceDomains.includes(r.merchantDomain) && !settings.pausedSourceCampaigns.includes(r.campaign))
+    .map(r => ({ campaignName: r.campaign, merchantDomain: r.merchantDomain }));
+  const healthy = rowList.filter(r => r.circuitState === 'CLOSED' && !settings.pausedSourceDomains.includes(r.merchantDomain) && !settings.pausedSourceCampaigns.includes(r.campaign))
+    .map(r => ({ campaignName: r.campaign, merchantDomain: r.merchantDomain }));
+  const providersChecked = new Set(rowList.map(r => r.provider)).size;
+  const diversity = computeSourceDiversity(discovered, eligible, healthy, providersChecked);
+
   return {
     generatedAt: new Date().toISOString(),
-    rows: [...rows.values()].sort((left, right) =>
+    rows: rowList.sort((left, right) =>
       Number(right.ingestionSkipped) - Number(left.ingestionSkipped)
       || Number(right.circuitState !== 'CLOSED') - Number(left.circuitState !== 'CLOSED')
       || right.delayed + right.discarded + right.quarantined - (left.delayed + left.discarded + left.quarantined)
@@ -247,5 +258,6 @@ export async function getSourceReliabilityReport(): Promise<SourceReliabilityRep
       pausedCampaigns: settings.pausedSourceCampaigns,
     },
     ingestion,
+    diversity,
   };
 }

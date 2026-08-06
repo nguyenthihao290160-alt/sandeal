@@ -665,6 +665,9 @@ async function recordCandidateHealthQuality(input: {
   await recordSourceQualityObservation(input.item.source, {
     idempotencyKey: `candidate-health:${input.item.id}:attempt:${input.item.attempts}`.slice(0, 200),
     observedAt: input.item.processingStartedAt || input.item.updatedAt,
+    campaignName: input.item.payload.campaignName,
+    merchantDomain: input.item.merchantDomain || input.item.payload.merchantDomain,
+    sourceEndpoint: input.item.payload.sourceEndpoint,
     linksChecked: 2,
     healthyLinks: Number(input.productHealthy) + Number(input.affiliateHealthy),
     imagesChecked: input.imageChecks,

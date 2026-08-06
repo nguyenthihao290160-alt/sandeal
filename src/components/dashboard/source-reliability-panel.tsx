@@ -10,10 +10,21 @@ type Row = {
   reasonCode?: string; nextProbeAt?: string; pending: number; delayed: number; discarded: number;
   quarantined: number; published: number; ingestionSkipped: boolean; ingestionSkipReason?: string;
 };
+type Diversity = {
+  status: 'HEALTHY_DIVERSITY' | 'LIMITED_DIVERSITY' | 'INSUFFICIENT_SOURCE_DIVERSITY' | 'SINGLE_SOURCE' | 'NO_SOURCE';
+  discoveredCampaignCount: number;
+  discoveredMerchantCount: number;
+  eligibleCampaignCount: number;
+  eligibleMerchantCount: number;
+  healthyCampaignCount: number;
+  healthyMerchantCount: number;
+  providersChecked: number;
+};
 type Report = {
   generatedAt: string;
   rows: Row[];
   controls: { maximumPerMerchant: number; maximumPerCampaign: number; pausedDomains: string[]; pausedCampaigns: string[] };
+  diversity?: Diversity;
 };
 
 function timestamp(value?: string): string {
@@ -73,7 +84,18 @@ export function SourceReliabilityPanel() {
 
   const skipped = report?.rows.filter(row => row.ingestionSkipped) || [];
   return <section className={`card ${styles.panel}`} aria-labelledby="source-reliability-title">
-    <div className={styles.header}><div><h2 id="source-reliability-title">Source Reliability</h2><p>Affiliate gateway và merchant được theo dõi độc lập; URL truy vấn luôn được che giá trị.</p></div><button type="button" className={`secondary-button ${styles.refresh}`} onClick={() => void load()} disabled={busy}>{busy ? 'Đang tải' : 'Làm mới'}</button></div>
+    <div className={styles.header}>
+      <div>
+        <h2 id="source-reliability-title">Source Reliability</h2>
+        <p>Affiliate gateway và merchant được theo dõi độc lập; URL truy vấn luôn được che giá trị.</p>
+        {report?.diversity && (
+          <small style={{ display: 'block', marginTop: '0.25rem', color: 'var(--text-secondary)' }}>
+            Đa dạng nguồn: <strong>{report.diversity.status}</strong> · {report.diversity.healthyMerchantCount} merchant khỏe mạnh · {report.diversity.discoveredCampaignCount} campaigns
+          </small>
+        )}
+      </div>
+      <button type="button" className={`secondary-button ${styles.refresh}`} onClick={() => void load()} disabled={busy}>{busy ? 'Đang tải' : 'Làm mới'}</button>
+    </div>
     {skipped.length > 0 && <div className={styles.notice} role="status"><strong>Ingestion đang được bỏ qua:</strong> {skipped.map(row => row.ingestionSkipReason || 'NO_HEALTHY_PRODUCT_SOURCE').join(' · ')}</div>}
     {error && <div className={styles.error} role="alert">{error}</div>}
     <div className={styles.controls}>

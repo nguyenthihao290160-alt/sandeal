@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { readCollection, runTransaction } from '@/lib/storage/adapter';
 
 const COLLECTION = 'source-quality';
-export const SOURCE_QUALITY_SCHEMA_VERSION = 1;
-export const SOURCE_QUALITY_RULE_VERSION = 'source-quality-v1';
+export const SOURCE_QUALITY_SCHEMA_VERSION = 2;
+export const SOURCE_QUALITY_RULE_VERSION = 'source-quality-v2';
 
 export interface SourceQualityCounters {
   candidatesObserved: number;
@@ -36,6 +36,10 @@ export type SourcePriorityClass = 'UNVERIFIED' | 'PREFERRED' | 'STANDARD' | 'DEP
 export interface SourceQualityObservation {
   idempotencyKey: string;
   observedAt?: string;
+  /** Optional source identity overrides for per-campaign/merchant quality tracking. */
+  campaignName?: string;
+  merchantDomain?: string;
+  sourceEndpoint?: string;
   candidatesObserved?: number;
   validCandidates?: number;
   linksChecked?: number;
@@ -60,6 +64,14 @@ export interface SourceQualitySnapshot {
   schemaVersion: number;
   id: string;
   sourceId: string;
+  /** Provider identifier (e.g. 'accesstrade'). */
+  providerId: string;
+  /** Campaign name within the provider. */
+  campaignName: string;
+  /** Canonical merchant domain. */
+  merchantDomain: string;
+  /** Source endpoint (e.g. 'datafeed', 'offers'). */
+  sourceEndpoint: string;
   counters: SourceQualityCounters;
   rates: SourceQualityRates;
   qualityScore: number;
@@ -238,7 +250,7 @@ export async function recordSourceQualityObservation(
   let recorded = false;
   await runTransaction<SourceQualitySnapshot>(COLLECTION, snapshots => {
     const index = snapshots.findIndex(item => item.sourceId === sourceId);
-    const existing = index >= 0 ? rebuild(snapshots[index]) : null;
+    const existing = index >= 0 ? migrateSnapshot(rebuild(snapshots[index])) : null;
     const replay = existing?.observations.find(item => item.idempotencyKey === observation.idempotencyKey);
     if (replay) {
       if (replay.contentHash !== observation.contentHash) throw new Error('SOURCE_QUALITY_OBSERVATION_CONFLICT');
@@ -248,6 +260,10 @@ export async function recordSourceQualityObservation(
     const now = new Date().toISOString();
     const next = rebuild(existing ? {
       ...existing,
+      // Update identity from observation if more specific
+      campaignName: input.campaignName || existing.campaignName,
+      merchantDomain: input.merchantDomain || existing.merchantDomain,
+      sourceEndpoint: input.sourceEndpoint || existing.sourceEndpoint,
       observations: [...existing.observations, observation],
       updatedAt: now,
       lastObservedAt: observation.observedAt,
@@ -255,6 +271,10 @@ export async function recordSourceQualityObservation(
       schemaVersion: SOURCE_QUALITY_SCHEMA_VERSION,
       id: `source-quality:${sourceId}`,
       sourceId,
+      providerId: sourceId,
+      campaignName: input.campaignName || 'uncategorized',
+      merchantDomain: input.merchantDomain || 'unknown',
+      sourceEndpoint: input.sourceEndpoint || 'unknown',
       counters: emptyCounters(),
       rates: metrics(emptyCounters()).rates,
       qualityScore: 50,
@@ -279,13 +299,25 @@ export async function recordSourceQualityObservation(
 export async function getSourceQualitySnapshot(source: string): Promise<SourceQualitySnapshot | null> {
   const sourceId = normalizeSourceId(source);
   const found = (await readCollection<SourceQualitySnapshot>(COLLECTION)).find(item => item.sourceId === sourceId);
-  return found ? rebuild(found) : null;
+  return found ? migrateSnapshot(rebuild(found)) : null;
 }
 
 export async function listSourceQualitySnapshots(): Promise<SourceQualitySnapshot[]> {
   return (await readCollection<SourceQualitySnapshot>(COLLECTION))
-    .map(rebuild)
+    .map(item => migrateSnapshot(rebuild(item)))
     .sort((left, right) => right.qualityScore - left.qualityScore || left.sourceId.localeCompare(right.sourceId));
+}
+
+/** Backward-compatible migration: populate identity fields for v1 snapshots. */
+function migrateSnapshot(snapshot: SourceQualitySnapshot): SourceQualitySnapshot {
+  return {
+    ...snapshot,
+    schemaVersion: SOURCE_QUALITY_SCHEMA_VERSION,
+    providerId: snapshot.providerId || snapshot.sourceId || 'unknown',
+    campaignName: snapshot.campaignName || 'uncategorized',
+    merchantDomain: snapshot.merchantDomain || 'unknown',
+    sourceEndpoint: snapshot.sourceEndpoint || 'unknown',
+  };
 }
 
 export function applySourceQualityPriority(basePriority: number, snapshot: SourceQualitySnapshot | null): SourcePriorityDecision {
