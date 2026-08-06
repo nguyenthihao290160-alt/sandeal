@@ -25,6 +25,11 @@ type Report = {
   rows: Row[];
   controls: { maximumPerMerchant: number; maximumPerCampaign: number; pausedDomains: string[]; pausedCampaigns: string[] };
   diversity?: Diversity;
+  lastAutoPilotOutcome?: string;
+  lastDiscoveryAt?: string;
+  nextProbeAt?: string;
+  recommendedNextAction?: string;
+  sourceIdentityCompleteness?: 'COMPLETE' | 'INCOMPLETE';
 };
 
 function timestamp(value?: string): string {
@@ -91,6 +96,10 @@ export function SourceReliabilityPanel() {
         {report?.diversity && (
           <small style={{ display: 'block', marginTop: '0.25rem', color: 'var(--text-secondary)' }}>
             Đa dạng nguồn: <strong>{report.diversity.status}</strong> · {report.diversity.healthyMerchantCount} merchant khỏe mạnh · {report.diversity.discoveredCampaignCount} campaigns
+            {report.lastAutoPilotOutcome && <span> · Lần quét cuối: <strong>{report.lastAutoPilotOutcome}</strong></span>}
+            {report.recommendedNextAction && report.recommendedNextAction !== 'NONE' && <span> · Gợi ý: <strong>{report.recommendedNextAction}</strong></span>}
+            {report.sourceIdentityCompleteness === 'INCOMPLETE' && <span> · Định danh: <strong>Thiếu hụt</strong></span>}
+            {report.lastDiscoveryAt && <span> · Lúc: {timestamp(report.lastDiscoveryAt)}</span>}
           </small>
         )}
       </div>

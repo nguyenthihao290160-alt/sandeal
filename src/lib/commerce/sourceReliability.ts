@@ -54,6 +54,11 @@ export interface SourceReliabilityReport {
   };
   ingestion: SourceIngestionState[];
   diversity?: SourceDiversitySummary;
+  lastAutoPilotOutcome?: string;
+  lastDiscoveryAt?: string;
+  nextProbeAt?: string;
+  recommendedNextAction?: string;
+  sourceIdentityCompleteness?: 'COMPLETE' | 'INCOMPLETE';
 }
 
 function domainFromUrl(value: string | undefined): string {
@@ -244,6 +249,15 @@ export async function getSourceReliabilityReport(): Promise<SourceReliabilityRep
   const providersChecked = new Set(rowList.map(r => r.provider)).size;
   const diversity = computeSourceDiversity(discovered, eligible, healthy, providersChecked);
 
+  const lastIngestion = ingestion.sort((a, b) => Date.parse(b.updatedAt || '0') - Date.parse(a.updatedAt || '0'))[0];
+  const lastAutoPilotOutcome = lastIngestion?.reasonCode;
+  const lastDiscoveryAt = lastIngestion?.updatedAt;
+  const nextProbeAt = rowList.map(r => r.nextProbeAt).filter((v): v is string => Boolean(v)).sort()[0] || lastIngestion?.nextEligibleAt;
+  const recommendedNextAction = diversity.status === 'INSUFFICIENT_SOURCE_DIVERSITY' || diversity.status === 'SINGLE_SOURCE'
+    ? 'CONFIGURE_ADDITIONAL_PRODUCT_SOURCE'
+    : rowList.some(r => r.circuitState === 'OPEN') ? 'WAIT_FOR_CIRCUIT_RECOVERY' : 'NONE';
+  const sourceIdentityCompleteness = rowList.some(r => r.campaign === 'uncategorized' || r.merchantDomain === 'unknown') ? 'INCOMPLETE' : 'COMPLETE';
+
   return {
     generatedAt: new Date().toISOString(),
     rows: rowList.sort((left, right) =>
@@ -259,5 +273,10 @@ export async function getSourceReliabilityReport(): Promise<SourceReliabilityRep
     },
     ingestion,
     diversity,
+    lastAutoPilotOutcome,
+    lastDiscoveryAt,
+    nextProbeAt,
+    recommendedNextAction,
+    sourceIdentityCompleteness,
   };
 }

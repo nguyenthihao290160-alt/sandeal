@@ -42,6 +42,7 @@ import { throwIfExecutionAborted } from '../automation/executionBudget';
 import { selectDiversifiedSources, type SourceSelectionCandidate } from '../commerce/sourceSelection';
 import { recordSourceIngestionState, sourceReliabilityEvent } from '../commerce/sourceReliability';
 import { commerceProbeBlockerCode, commerceProbeIsPermanent, commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '../commerce/urlProbe';
+import { computeSourceDiversity, type SourceDiversitySummary } from '../commerce/sourceIdentity';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const MAX_PRODUCT_COMPARISON_ITEMS = 2_000;
@@ -126,6 +127,15 @@ export interface SourceRunMetrics {
   sourceStatus: SourceProviderStatus;
   reason: string;
   nextEligibleAt?: string;
+  sourceDiversity?: import('../commerce/sourceIdentity').SourceDiversitySummary;
+  discoveredCampaignCount?: number;
+  discoveredMerchantCount?: number;
+  eligibleMerchantCount?: number;
+  healthyMerchantCount?: number;
+  excludedByMerchantCircuit?: number;
+  excludedByPolicy?: number;
+  sourceDiversityStatus?: import('../commerce/sourceIdentity').SourceDiversityStatus;
+  recommendedNextAction?: string;
 }
 
 export interface SourceScanOptions {
@@ -483,6 +493,7 @@ export async function scanSourcesToQueue(
       if (!result.items.length) stat.noResult += 1;
       stat.nextEligibleAt = new Date(startedMs + (result.items.length ? settings.intervalHours * 60 * 60_000 : Math.min(48, 3 * 2 ** Math.min(4, stat.noResult)) * 60 * 60_000)).toISOString();
       counters.found += result.items.length;
+      const fastRejectAggregates = new Map<string, { campaign: string; domain: string; count: number }>();
       for (const sourceItem of result.items) {
         throwIfExecutionAborted(options.signal);
         const item = adapter.normalize(sourceItem);
@@ -492,13 +503,19 @@ export async function scanSourcesToQueue(
         const earlyReason = fastReject(payload);
         if (!earlyReason) { stat.valid++; validCandidates++; } else {
           rejected++; stat.fastRejected += 1;
-          sourceReliabilityEvent('candidate_skipped_unhealthy_source', {
-            provider: adapter.id,
-            campaign: payload.campaignName,
-            domain: payload.merchantDomain || merchantFromUrl(payload.originalUrl),
-            reasonCode: earlyReason.toUpperCase(),
-            operationId: options.runId,
-          });
+          const reasonKey = `${earlyReason.toUpperCase()}|${payload.campaignName || 'uncategorized'}|${payload.merchantDomain || merchantFromUrl(payload.originalUrl)}`;
+          const existing = fastRejectAggregates.get(reasonKey);
+          if (existing) existing.count++;
+          else fastRejectAggregates.set(reasonKey, { campaign: payload.campaignName || 'uncategorized', domain: payload.merchantDomain || merchantFromUrl(payload.originalUrl), count: 1 });
+          if (process.env.SANDEAL_DEBUG_CANDIDATE_SKIP === 'true') {
+            sourceReliabilityEvent('candidate_skipped_unhealthy_source', {
+              provider: adapter.id,
+              campaign: payload.campaignName,
+              domain: payload.merchantDomain || merchantFromUrl(payload.originalUrl),
+              reasonCode: earlyReason.toUpperCase(),
+              operationId: options.runId,
+            });
+          }
           continue;
         }
         if (Number(payload.salePrice || payload.price || 0) > 0) pricesAvailable++;
@@ -543,6 +560,17 @@ export async function scanSourcesToQueue(
         });
         if (discoveryPool.length >= poolLimit) break;
       }
+      // Emit one aggregate event per fast-reject reason/source combination
+      for (const [key, aggregate] of fastRejectAggregates) {
+        const reasonCode = key.split('|')[0];
+        sourceReliabilityEvent('source_candidates_rejected', {
+          provider: adapter.id,
+          campaign: aggregate.campaign,
+          domain: aggregate.domain,
+          reasonCode: `${reasonCode}:${aggregate.count}`,
+          operationId: options.runId,
+        });
+      }
       stat.costPerValidCandidate = stat.valid > 0 ? Number((stat.requests / stat.valid).toFixed(4)) : null;
     } catch (error) {
       if (error instanceof AccessTradeRequestError) {
@@ -574,16 +602,35 @@ export async function scanSourcesToQueue(
     maximumPerMerchant: settings.sourceMaxPerMerchant,
     maximumPerCampaign: settings.sourceMaxPerCampaign,
   });
+  // Aggregate skipped candidates by reason|campaign|merchant instead of per-candidate logging
+  const skipAggregates = new Map<string, { provider: string; campaign: string; domain: string; reason: string; count: number; nextProbeAt?: string }>();
   for (const skipped of diversified.skipped) {
     if (!['SOURCE_DOMAIN_PAUSED', 'SOURCE_CAMPAIGN_PAUSED', 'MERCHANT_CIRCUIT_OPEN'].includes(skipped.reason)) continue;
     counters.skippedCooldown++;
-    sourceReliabilityEvent('candidate_skipped_unhealthy_source', {
-      provider: skipped.candidate.provider,
-      campaign: skipped.candidate.campaign,
-      domain: skipped.candidate.merchantDomain,
-      reasonCode: skipped.reason,
+    const key = `${skipped.reason}|${skipped.candidate.campaign}|${skipped.candidate.merchantDomain}`;
+    const existing = skipAggregates.get(key);
+    const nextProbeAt = circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skipped.candidate.merchantDomain)?.nextProbeAt;
+    if (existing) { existing.count++; existing.nextProbeAt = existing.nextProbeAt || nextProbeAt; }
+    else skipAggregates.set(key, { provider: skipped.candidate.provider, campaign: skipped.candidate.campaign || 'uncategorized', domain: skipped.candidate.merchantDomain || 'unknown', reason: skipped.reason, count: 1, nextProbeAt });
+    if (process.env.SANDEAL_DEBUG_CANDIDATE_SKIP === 'true') {
+      sourceReliabilityEvent('candidate_skipped_unhealthy_source', {
+        provider: skipped.candidate.provider,
+        campaign: skipped.candidate.campaign,
+        domain: skipped.candidate.merchantDomain,
+        reasonCode: skipped.reason,
+        operationId: options.runId,
+        nextProbeAt,
+      });
+    }
+  }
+  for (const [, aggregate] of skipAggregates) {
+    sourceReliabilityEvent('source_candidates_skipped', {
+      provider: aggregate.provider,
+      campaign: aggregate.campaign,
+      domain: aggregate.domain,
+      reasonCode: `${aggregate.reason}:${aggregate.count}`,
       operationId: options.runId,
-      nextProbeAt: circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skipped.candidate.merchantDomain)?.nextProbeAt,
+      nextProbeAt: aggregate.nextProbeAt,
     });
   }
   for (const selectedCandidate of diversified.selected) {
@@ -610,6 +657,27 @@ export async function scanSourcesToQueue(
   const sourceNextEligibleAt = retryAfter
     || diversified.skipped.map(skip => circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skip.candidate.merchantDomain)?.nextProbeAt)
       .filter((value): value is string => Boolean(value)).sort()[0];
+
+  // Compute source diversity from the discovery pool
+  const discoveredSources = discoveryPool.map(c => ({ campaignName: c.campaign || 'uncategorized', merchantDomain: c.merchantDomain || 'unknown' }));
+  const eligibleSources = discoveryPool.filter(c => c.eligible !== false).map(c => ({ campaignName: c.campaign || 'uncategorized', merchantDomain: c.merchantDomain || 'unknown' }));
+  const healthySources = diversified.selected.map(c => ({ campaignName: c.campaign || 'uncategorized', merchantDomain: c.merchantDomain || 'unknown' }));
+  const sourceDiversity = computeSourceDiversity(discoveredSources, eligibleSources, healthySources, 1);
+
+  // Determine the dominant campaign/merchant from the discovery pool for quality tracking
+  const dominantCampaign = discoveredSources.length > 0
+    ? discoveredSources.reduce((acc, s) => { acc.set(s.campaignName, (acc.get(s.campaignName) || 0) + 1); return acc; }, new Map<string, number>())
+    : new Map<string, number>();
+  const dominantMerchant = discoveredSources.length > 0
+    ? discoveredSources.reduce((acc, s) => { acc.set(s.merchantDomain, (acc.get(s.merchantDomain) || 0) + 1); return acc; }, new Map<string, number>())
+    : new Map<string, number>();
+  const topCampaign = [...dominantCampaign.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const topMerchant = [...dominantMerchant.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+
+  // Compute exclusion reasons
+  const excludedByMerchantCircuit = diversified.skipped.filter(s => s.reason === 'MERCHANT_CIRCUIT_OPEN').length;
+  const excludedByPolicy = diversified.skipped.filter(s => ['SOURCE_DOMAIN_PAUSED', 'SOURCE_CAMPAIGN_PAUSED'].includes(s.reason)).length;
+
   await recordSourceIngestionState({
     provider: adapter.id,
     ingestionSkipped: noHealthySource,
@@ -626,6 +694,9 @@ export async function scanSourcesToQueue(
   await recordSourceQualityObservation(adapter.id, {
     idempotencyKey: (options.runId || `source-scan:${startedMs}:${process.pid}:${randomUUID()}`).slice(0, 200),
     observedAt: new Date(startedMs).toISOString(),
+    campaignName: topCampaign,
+    merchantDomain: topMerchant,
+    sourceEndpoint: 'datafeed',
     candidatesObserved: normalized,
     validCandidates,
     pricesChecked: normalized,
@@ -633,6 +704,31 @@ export async function scanSourcesToQueue(
     timeouts: Math.min(timeout, counters.sourceRequests),
     externalRequests: counters.sourceRequests,
   });
+
+  // Emit one aggregate discovery summary instead of per-candidate logs
+  const recommendedNextAction = noHealthySource
+    ? (sourceDiversity.discoveredCampaignCount <= 1 ? 'CONFIGURE_ADDITIONAL_PRODUCT_SOURCE' : 'WAIT_FOR_CIRCUIT_RECOVERY')
+    : 'NONE';
+  sourceReliabilityEvent('auto_pilot_source_discovery_summary', {
+    provider: adapter.id,
+    campaign: topCampaign,
+    domain: topMerchant,
+    reasonCode: [
+      `normalized:${normalized}`,
+      `duplicate:${counters.duplicate}`,
+      `campaigns:${sourceDiversity.discoveredCampaignCount}`,
+      `merchants:${sourceDiversity.discoveredMerchantCount}`,
+      `healthy_merchants:${sourceDiversity.healthyMerchantCount}`,
+      `created:${diversified.selected.length}`,
+      `diversity:${sourceDiversity.status}`,
+      `excluded_circuit:${excludedByMerchantCircuit}`,
+      `excluded_policy:${excludedByPolicy}`,
+      `action:${recommendedNextAction}`,
+    ].join(','),
+    operationId: options.runId,
+    nextProbeAt: sourceNextEligibleAt,
+  });
+
   const durationMs = Date.now() - startedMs;
   const reason = noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE'
     : rateLimited > 0 ? 'source_rate_limited'
@@ -641,7 +737,18 @@ export async function scanSourcesToQueue(
     : counters.found === 0 ? 'source_no_results'
     : 'source_scan_completed';
   const nextEligibleAt = sourceNextEligibleAt || (counters.found === 0 ? new Date(startedMs + 15 * 60_000).toISOString() : undefined);
-  return { ...counters, normalized, rejected, timeout, rateLimited, durationMs, sourceStatus, reason, nextEligibleAt, resultTypes, retryAfter };
+  return {
+    ...counters, normalized, rejected, timeout, rateLimited, durationMs, sourceStatus, reason, nextEligibleAt, resultTypes, retryAfter,
+    sourceDiversity,
+    discoveredCampaignCount: sourceDiversity.discoveredCampaignCount,
+    discoveredMerchantCount: sourceDiversity.discoveredMerchantCount,
+    eligibleMerchantCount: sourceDiversity.eligibleMerchantCount,
+    healthyMerchantCount: sourceDiversity.healthyMerchantCount,
+    excludedByMerchantCircuit,
+    excludedByPolicy,
+    sourceDiversityStatus: sourceDiversity.status,
+    recommendedNextAction,
+  };
 }
 
 function cooldownFor(statuses: string[], attempts = 1): number {
