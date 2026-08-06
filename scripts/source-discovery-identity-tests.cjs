@@ -68,22 +68,56 @@ async function main() {
 
   await test('Pipeline safely skips open merchant and logs aggregate skip', async () => {
     events.length = 0;
-    await circuits.recordDomainHealth('https://30shinestore.com', 'timeout'); // Trip circuit
+
+    // Three consecutive transient failures are required to trip the circuit
+    // (DEFAULT_THRESHOLD = 3 in domainCircuitBreaker.ts).
+    await circuits.recordDomainHealth('https://30shinestore.com', 'timeout');
+    await circuits.recordDomainHealth('https://30shinestore.com', 'timeout');
+    await circuits.recordDomainHealth('https://30shinestore.com', 'timeout');
+
+    // Confirm the circuit is actually OPEN before running the pipeline.
+    const circuitStates = await circuits.listDomainCircuitStates();
+    const openCircuit = circuitStates.find(s => s.domain === '30shinestore.com' && s.role === 'MERCHANT');
+    assert.ok(openCircuit, 'Circuit state for 30shinestore.com must exist');
+    assert.equal(openCircuit.state, 'OPEN', 'Circuit must be OPEN after 3 transient failures');
+    assert.equal(openCircuit.consecutiveFailures, 3);
+
+    // Clear events captured during circuit recording so we only see pipeline events.
+    events.length = 0;
 
     const result = await pipeline.scanSourcesToQueue('bootstrap', Date.now() + 60000, { runId: 'test-merchant-circuit', registry: mockRegistry });
-    if (result.discoveredCampaignCount !== 3) console.log('TEST 2 RESULT:', result);
-    assert.equal(result.discoveredCampaignCount, 3);
-    assert.equal(result.eligibleMerchantCount, 2);
-    assert.equal(result.healthyMerchantCount, 2);
-    assert.ok(result.excludedByMerchantCircuit > 0);
-    
-    const skipEvent = events.find(e => e.event === 'source_candidates_skipped');
-    assert.ok(skipEvent, 'Missing source_candidates_skipped event');
-    assert.equal(skipEvent.domain, '30shinestore.com');
-    assert.match(skipEvent.reasonCode, /^MERCHANT_CIRCUIT_OPEN:\d+$/);
-    
+
+    // --- Source diversity: 3 discovered, but only 2 eligible (30shinestore.com is OPEN) ---
+    assert.equal(result.discoveredCampaignCount, 3, 'All 3 campaigns must be discovered');
+    assert.equal(result.discoveredMerchantCount, 3, 'All 3 merchants must be discovered');
+    assert.equal(result.eligibleMerchantCount, 2, 'Only lazada.vn and tiki.vn are eligible');
+    assert.equal(result.healthyMerchantCount, 2, 'Only lazada.vn and tiki.vn are healthy');
+
+    // --- Exclusion counts ---
+    assert.ok(result.excludedByMerchantCircuit > 0, 'At least one candidate must be excluded by MERCHANT_CIRCUIT_OPEN');
+    assert.equal(typeof result.excludedByPolicy, 'number');
+
+    // --- Aggregate skip event: one bounded event per reason|campaign|merchant, not per-candidate ---
+    const skipEvents = events.filter(e => e.event === 'source_candidates_skipped');
+    assert.ok(skipEvents.length > 0, 'At least one aggregate source_candidates_skipped event must be emitted');
+    const openSkip = skipEvents.find(e => e.domain === '30shinestore.com');
+    assert.ok(openSkip, 'Aggregate skip for 30shinestore.com must exist');
+    assert.match(openSkip.reasonCode, /^MERCHANT_CIRCUIT_OPEN:\d+$/, 'Reason must include count');
+
+    // --- Per-candidate logs must NOT appear by default (only with SANDEAL_DEBUG_CANDIDATE_SKIP=true) ---
+    const perCandidateLogs = events.filter(e => e.event === 'candidate_skipped_unhealthy_source');
+    assert.equal(perCandidateLogs.length, 0, 'Per-candidate skip logs must not be emitted by default');
+
+    // --- Discovery summary: one aggregate event with structured metric fields ---
     const summaryEvent = events.find(e => e.event === 'auto_pilot_source_discovery_summary');
-    assert.match(summaryEvent.reasonCode, /excluded_circuit:\d+/);
+    assert.ok(summaryEvent, 'Discovery summary event must exist');
+    assert.match(summaryEvent.reasonCode, /campaigns:3/, 'Summary must report 3 campaigns');
+    assert.match(summaryEvent.reasonCode, /excluded_circuit:\d+/, 'Summary must report excluded_circuit count');
+
+    // --- Aggregate summaries are structured log events, not candidate objects ---
+    // The result object's candidate counts (found, normalized) must not include summary objects.
+    assert.equal(typeof result.normalized, 'number');
+    assert.ok(result.normalized > 0, 'Normalized candidates must be positive');
   });
 
   console.info = originalInfo;
