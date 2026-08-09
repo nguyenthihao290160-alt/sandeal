@@ -102,7 +102,26 @@ function checkedRecently(value: string | undefined, days: number, now: number): 
 }
 
 function isAccessTrade(product: Partial<Product>): boolean {
-  return product.source === 'accesstrade' || product.platform === 'accesstrade';
+  return product.source === 'accesstrade'
+    || product.source === 'accesstrade_tiktok_shop'
+    || product.platform === 'accesstrade';
+}
+
+function sameUrl(left?: string, right?: string): boolean {
+  try {
+    if (!left || !right) return false;
+    const first = new URL(left);
+    const second = new URL(right);
+    first.hash = '';
+    second.hash = '';
+    return first.href === second.href;
+  } catch {
+    return false;
+  }
+}
+
+function isAccessTradeTikTok(product: Partial<Product>): boolean {
+  return product.source === 'accesstrade_tiktok_shop';
 }
 
 function dataQualityScore(product: Partial<Product>): number {
@@ -194,9 +213,13 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (isAccessTrade(product) && (
     product.canonicalUrlSource !== 'provider_api'
     || product.canonicalUrlProvider !== 'accesstrade'
-    || product.canonicalUrlSourceEndpoint !== 'datafeed'
+    || (isAccessTradeTikTok(product)
+      ? product.canonicalUrlSourceEndpoint !== 'tiktok_product_feed_v2'
+      : product.canonicalUrlSourceEndpoint !== 'datafeed')
     || !product.canonicalUrlSourceField
-    || !(ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(product.canonicalUrlSourceField)
+    || (isAccessTradeTikTok(product)
+      ? !['detail_link', 'product_url', 'url'].includes(product.canonicalUrlSourceField)
+      : !(ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(product.canonicalUrlSourceField))
   )) dataBlockers.push('canonical_provenance_missing');
   if (!validHttpUrl(product.affiliateUrl)) {
     dataBlockers.push(normalizationIssues.has('INVALID_AFFILIATE_URL')
@@ -209,9 +232,13 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
   if (isAccessTrade(product) && (
     product.affiliateUrlSource !== 'provider_api'
     || product.affiliateUrlProvider !== 'accesstrade'
-    || product.affiliateUrlSourceEndpoint !== 'datafeed'
+    || (isAccessTradeTikTok(product)
+      ? product.affiliateUrlSourceEndpoint !== 'tiktok_create_link_v2'
+      : product.affiliateUrlSourceEndpoint !== 'datafeed')
     || !product.affiliateUrlSourceField
-    || !(ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(product.affiliateUrlSourceField)
+    || (isAccessTradeTikTok(product)
+      ? !['aff_short_url', 'aff_url'].includes(product.affiliateUrlSourceField)
+      : !(ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(product.affiliateUrlSourceField))
     || product.deepLinkSupported === false
   )) dataBlockers.push('affiliate_provenance_missing');
 
@@ -223,6 +250,7 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
         || product.sourceEvidence.merchant.classification !== 'HEALTHY') dataBlockers.push('source_unhealthy');
     }
   }
+  if (isAccessTradeTikTok(product) && sameUrl(product.affiliateUrl, canonicalProductUrl)) dataBlockers.push('invalid_affiliate_url_source');
 
   if (!validHttpUrl(product.imageUrl)) {
     dataBlockers.push(normalizationIssues.has('INVALID_IMAGE_URL')

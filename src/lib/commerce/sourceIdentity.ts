@@ -57,6 +57,7 @@ export function extractSourceIdentity(input: {
   campaignName?: string;
   affiliateUrlCampaignId?: string;
   merchantDomain?: string;
+  merchantIdentity?: string;
   affiliateGatewayDomain?: string;
   affiliateUrl?: string;
   canonicalProductUrl?: string;
@@ -71,6 +72,7 @@ export function extractSourceIdentity(input: {
     campaignName?: string;
     affiliateUrlCampaignId?: string;
     merchantDomain?: string;
+    merchantIdentity?: string;
     affiliateUrl?: string;
     canonicalProductUrl?: string;
     originalUrl?: string;
@@ -96,7 +98,9 @@ export function extractSourceIdentity(input: {
   );
 
   const merchantDomain = normalize(
-    input.merchantDomain
+    input.merchantIdentity
+    || payload.merchantIdentity
+    || input.merchantDomain
     || payload.merchantDomain
     || input.sourceEvidence?.merchant?.merchantDomain
     || domainFromUrl(input.canonicalProductUrl || payload.canonicalProductUrl || input.originalUrl || payload.originalUrl),

@@ -61,7 +61,7 @@ export class DealScorerBot {
     const hasAffiliateUrl = !!product.affiliateUrl && product.affiliateUrl.trim().length > 0;
 
     // Check if source is trusted
-    const trustedSources = ['accesstrade', 'shopee_affiliate', 'lazada_affiliate'];
+    const trustedSources = ['accesstrade', 'accesstrade_tiktok_shop', 'shopee_affiliate', 'lazada_affiliate'];
     const trustedSource = product.source ? trustedSources.includes(product.source) : false;
 
     // Calculate data completeness (0-100)

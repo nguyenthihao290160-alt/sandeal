@@ -73,7 +73,8 @@ function gatewayFromCandidate(candidate: CandidateQueueItem): string {
 }
 
 function merchantFromCandidate(candidate: CandidateQueueItem): string {
-  return candidate.merchantDomain
+  return candidate.payload.merchantIdentity
+    || candidate.merchantDomain
     || candidate.sourceEvidence?.merchant?.merchantDomain
     || candidate.payload.merchantDomain
     || domainFromUrl(candidate.payload.canonicalProductUrl || candidate.payload.originalUrl);
@@ -202,7 +203,7 @@ export async function getSourceReliabilityReport(): Promise<SourceReliabilityRep
     const provider = String(product.source || 'unknown');
     const campaign = String(product.campaignName || product.affiliateUrlCampaignId || 'uncategorized');
     const gateway = product.affiliateGatewayDomain || product.sourceEvidence?.affiliate.affiliateGatewayDomain || domainFromUrl(product.affiliateUrl);
-    const merchant = product.merchantDomain || product.sourceEvidence?.merchant?.merchantDomain || domainFromUrl(product.canonicalProductUrl || product.originalUrl);
+    const merchant = product.merchantIdentity || product.merchantDomain || product.sourceEvidence?.merchant?.merchantDomain || domainFromUrl(product.canonicalProductUrl || product.originalUrl);
     const row = getRow(provider, campaign, gateway, merchant);
     if (product.lifecycleState === 'QUARANTINED' || product.status === 'archived' || product.publicBlocked) row.quarantined++;
     if (product.status === 'published' && product.publicHidden === false && !product.publicBlocked) row.published++;
@@ -218,7 +219,7 @@ export async function getSourceReliabilityReport(): Promise<SourceReliabilityRep
   // Materialize the provider state so NO_HEALTHY_PRODUCT_SOURCE remains
   // visible instead of collapsing into an empty dashboard.
   for (const state of ingestion) {
-    const row = getRow(state.provider, 'all campaigns', 'unknown', 'unknown');
+    const row = getRow(state.provider, state.provider, 'unknown', 'unknown');
     row.ingestionSkipped = state.ingestionSkipped;
     row.ingestionSkipReason = state.ingestionSkipped ? state.reasonCode : undefined;
     row.reasonCode ||= state.reasonCode;

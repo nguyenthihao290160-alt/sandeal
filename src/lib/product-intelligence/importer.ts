@@ -38,7 +38,7 @@ export interface ImportApplyContext {
 }
 
 const PLATFORMS = new Set<ProductPlatform>(['shopee', 'tiktok_shop', 'lazada', 'accesstrade', 'website', 'other']);
-const SOURCES = new Set<ProductSource>(['manual', 'accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other']);
+const SOURCES = new Set<ProductSource>(['manual', 'accesstrade', 'accesstrade_tiktok_shop', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other']);
 
 export function neutralizeCsvFormula(value: string): string {
   return /^[\t\r\n ]*[=+\-@]/.test(value) ? `'${value}` : value;

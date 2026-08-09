@@ -7,7 +7,7 @@ const MAX_CIRCUIT_BYTES = 4 * 1024 * 1024;
 export const DOMAIN_CIRCUIT_SCHEMA_VERSION = 3;
 export const DOMAIN_CIRCUIT_RULE_VERSION = 'domain-circuit-v3';
 
-export type DomainCircuitRole = 'AFFILIATE_GATEWAY' | 'MERCHANT' | 'IMAGE_HOST';
+export type DomainCircuitRole = 'AFFILIATE_GATEWAY' | 'AFFILIATE_OPERATION' | 'MERCHANT' | 'IMAGE_HOST' | 'SOURCE_API';
 export type DomainCircuitStatus = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
 export interface DomainCircuitState {
@@ -53,6 +53,8 @@ export interface RecordDomainHealthOptions {
   maximumDelayMs?: number;
   jitterRatio?: number;
   role?: DomainCircuitRole;
+  /** Stable operation/shop scope for providers whose URLs share one host. */
+  identityKey?: string;
   halfOpenLeaseMs?: number;
   correlationId?: string;
   operationId?: string;
@@ -61,6 +63,8 @@ export interface RecordDomainHealthOptions {
 
 export interface DomainCircuitDecisionOptions {
   role?: DomainCircuitRole;
+  /** Stable operation/shop scope for providers whose URLs share one host. */
+  identityKey?: string;
   halfOpenLeaseMs?: number;
   correlationId?: string;
   operationId?: string;
@@ -87,6 +91,12 @@ const DEFAULT_HALF_OPEN_LEASE_MS = 2 * 60_000;
 function hostname(value: string): string | null {
   try { return new URL(value).hostname.toLowerCase().replace(/\.$/, ''); }
   catch { return null; }
+}
+
+function circuitIdentity(value: string, identityKey?: string): string | null {
+  const explicit = String(identityKey || '').trim().toLowerCase();
+  if (explicit && explicit.length <= 253 && /^[a-z0-9][a-z0-9:._-]*$/.test(explicit)) return explicit;
+  return hostname(value);
 }
 
 function stateId(role: DomainCircuitRole, domain: string): string {
@@ -246,7 +256,7 @@ export async function peekDomainCircuitDecision(
   options: DomainCircuitDecisionOptions = {},
 ): Promise<DomainCircuitDecision> {
   const role = options.role || 'MERCHANT';
-  const domain = hostname(url);
+  const domain = circuitIdentity(url, options.identityKey);
   if (!domain) {
     return { allowed: false, role, state: 'CLOSED', failureStreak: 0, consecutiveFailures: 0, reason: 'invalid_domain', halfOpenProbe: false };
   }
@@ -308,7 +318,7 @@ export async function recordDomainHealth(
   now = Date.now(),
   options: RecordDomainHealthOptions = {},
 ): Promise<DomainCircuitState | null> {
-  const domain = hostname(url);
+  const domain = circuitIdentity(url, options.identityKey);
   if (!domain) return null;
   const role = options.role || 'MERCHANT';
   let output!: DomainCircuitState;
@@ -382,10 +392,12 @@ export async function listDomainCircuitStates(): Promise<DomainCircuitState[]> {
   const stored = await readCircuitStates();
   const normalized = new Map<string, DomainCircuitState>();
   for (const item of stored) {
-    const domain = String(item.domain || item.id || '').replace(/^(?:affiliate_gateway|merchant|image_host):/i, '').toLowerCase();
+    const domain = String(item.domain || item.id || '').replace(/^(?:affiliate_gateway|affiliate_operation|merchant|image_host|source_api):/i, '').toLowerCase();
     if (!domain) continue;
     const role: DomainCircuitRole = item.role === 'IMAGE_HOST' ? 'IMAGE_HOST'
       : item.role === 'AFFILIATE_GATEWAY' ? 'AFFILIATE_GATEWAY'
+      : item.role === 'AFFILIATE_OPERATION' ? 'AFFILIATE_OPERATION'
+      : item.role === 'SOURCE_API' ? 'SOURCE_API'
       : 'MERCHANT';
     const state = normalizeState(domain, role, item);
     normalized.set(state.id, state);

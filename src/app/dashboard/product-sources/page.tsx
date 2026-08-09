@@ -92,6 +92,16 @@ type AccessTradeItem = Record<string, unknown> & {
   shopName?: string;
   sku?: string;
   providerUpdatedAt?: string;
+  provider?: string;
+  source?: string;
+  sourceLabel?: string;
+  sourceLabelVi?: string;
+  merchantIdentity?: string;
+  unitsSold?: number;
+  commissionAmount?: number;
+  commissionRate?: number;
+  affiliateState?: string;
+  state?: string;
   normalizationIssues?: string[];
   fieldProvenance?: Product['fieldProvenance'];
 };
@@ -234,6 +244,25 @@ type AccessTradeResults = {
     };
   };
   diagnostics?: AccessTradeDiagnostics;
+};
+
+type TikTokSearchResults = {
+  sourceReady: boolean;
+  source: 'accesstrade_tiktok_shop';
+  sourceLabel: string;
+  items: AccessTradeItem[];
+  diagnostics: {
+    fetched: number;
+    normalized: number;
+    accepted: number;
+    duplicates: number;
+    rejectedByReason: Record<string, number>;
+    pageCount: number;
+    stopReason: string;
+    durationMs: number;
+    previewOnly: boolean;
+    persisted: boolean;
+  };
 };
 
 const ACCESS_TRADE_REJECTION_LABELS: Record<string, string> = {
@@ -1077,6 +1106,12 @@ export default function ProductSourcesPage() {
   const [atSaveResults, setAtSaveResults] = useState<Record<string, CandidateSaveResult>>({});
   const [saveMappingsHydrated, setSaveMappingsHydrated] = useState(false);
   const saveInFlightRef = useRef(new Set<string>());
+  const [tiktokKeyword, setTikTokKeyword] = useState('');
+  const [tiktokLoading, setTikTokLoading] = useState(false);
+  const [tiktokError, setTikTokError] = useState('');
+  const [tiktokResults, setTikTokResults] = useState<TikTokSearchResults | null>(null);
+  const [tiktokSaving, setTikTokSaving] = useState<string | null>(null);
+  const [tiktokCandidates, setTikTokCandidates] = useState<Record<string, string>>({});
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
     if (!mountedRef.current) return;
@@ -1374,6 +1409,58 @@ export default function ProductSourcesPage() {
       }
     } finally {
       if (mountedRef.current) setAtDiagnosticLoading(null);
+    }
+  };
+
+  const handleTikTokSearch = async () => {
+    if (tiktokLoading) return;
+    const keyword = tiktokKeyword.trim();
+    if (keyword.length < 2) {
+      showToast('error', 'Hãy nhập từ khóa sản phẩm TikTok có ít nhất 2 ký tự.');
+      return;
+    }
+    setTikTokLoading(true);
+    setTikTokError('');
+    try {
+      const response = await fetchWithTimeout('/api/product-sources/accesstrade/tiktok/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword, sortStrategy: 'RECOMMENDED', limit: 30 }),
+      }, 40_000);
+      const envelope = await response.json().catch(() => null) as ApiEnvelope<TikTokSearchResults> | null;
+      if (!response.ok || !envelope?.ok || !envelope.data) {
+        throw new Error(envelope?.message || envelope?.error || `Tìm kiếm thất bại. HTTP ${response.status}`);
+      }
+      setTikTokResults(envelope.data);
+      showToast('success', `Đã tìm thấy ${envelope.data.items.length} bản xem trước TikTok Shop.`);
+    } catch (error) {
+      setTikTokError(error instanceof Error ? error.message : 'Không thể tìm sản phẩm TikTok Shop.');
+    } finally {
+      setTikTokLoading(false);
+    }
+  };
+
+  const handleTikTokCandidate = async (item: AccessTradeItem) => {
+    const productId = getString(item.id || item.productId || item.sourceId);
+    if (!productId || tiktokSaving || tiktokCandidates[productId]) return;
+    setTikTokSaving(productId);
+    try {
+      const response = await fetchWithTimeout('/api/product-sources/accesstrade/tiktok/candidate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productId }),
+      }, 40_000);
+      const envelope = await response.json().catch(() => null) as ApiEnvelope<Record<string, unknown>> | null;
+      if (!response.ok || !envelope?.ok) {
+        throw new Error(envelope?.message || envelope?.error || `Không thể tạo ứng viên. HTTP ${response.status}`);
+      }
+      const state = getString(envelope.data?.state) || 'candidate';
+      setTikTokCandidates(current => ({ ...current, [productId]: state }));
+      showToast('success', envelope.message || 'Đã thêm ứng viên TikTok Shop vào hàng chờ.');
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Không thể tạo ứng viên TikTok Shop.');
+    } finally {
+      setTikTokSaving(null);
     }
   };
 
@@ -2774,14 +2861,98 @@ export default function ProductSourcesPage() {
               )}
 
           {/* ====== TIKTOK TAB ====== */}
-          {activeTab === 'tiktok' &&
-              renderPlaceholderTab(
-                  'tiktok',
-                  'TK',
-                  'Tiếp thị liên kết TikTok Shop',
-                  'Nguồn tiếp thị liên kết TikTok Shop sẽ được kết nối ở bước sau. Hiện tại bạn có thể thêm liên kết sản phẩm thủ công.',
-                  'TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET',
-              )}
+          {activeTab === 'tiktok' && (
+            <div
+              id="product-source-panel-tiktok"
+              role="tabpanel"
+              aria-labelledby="product-source-tab-tiktok"
+              style={{ padding: 'var(--space-lg) 0' }}
+            >
+              <div className="card" style={{ padding: 'var(--space-lg)' }}>
+                <div className="flex items-center justify-between gap-md" style={{ flexWrap: 'wrap' }}>
+                  <div>
+                    <h3 style={{ margin: 0 }}>TikTok Shop qua AccessTrade</h3>
+                    <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)' }}>
+                      Kết quả là bản xem trước. Chỉ sản phẩm được chọn mới tạo link affiliate và vào hàng chờ ứng viên.
+                    </p>
+                  </div>
+                  <span className="badge badge-info">Nguồn V2 độc lập</span>
+                </div>
+                <form
+                  className="flex gap-sm"
+                  style={{ marginTop: 'var(--space-md)', flexWrap: 'wrap' }}
+                  onSubmit={(event) => { event.preventDefault(); void handleTikTokSearch(); }}
+                >
+                  <input
+                    value={tiktokKeyword}
+                    onChange={event => setTikTokKeyword(event.target.value)}
+                    placeholder="tai nghe, sạc dự phòng, kem chống nắng..."
+                    aria-label="Từ khóa TikTok Shop"
+                    disabled={tiktokLoading}
+                    style={{ flex: '1 1 280px' }}
+                  />
+                  <button className="btn btn-primary" type="submit" disabled={tiktokLoading} aria-busy={tiktokLoading}>
+                    {tiktokLoading ? 'Đang tìm...' : 'Tìm sản phẩm thật'}
+                  </button>
+                </form>
+                {tiktokError && <div className="alert alert-error" style={{ marginTop: 12 }}>{tiktokError}</div>}
+                {tiktokResults && (
+                  <>
+                    <div className="flex gap-sm" style={{ marginTop: 12, flexWrap: 'wrap' }}>
+                      <span className="badge badge-neutral">Đã lấy {tiktokResults.diagnostics.fetched}</span>
+                      <span className="badge badge-success">Chấp nhận {tiktokResults.diagnostics.accepted}</span>
+                      <span className="badge badge-neutral">Trùng {tiktokResults.diagnostics.duplicates}</span>
+                      <span className="badge badge-neutral">{tiktokResults.diagnostics.pageCount} trang</span>
+                      <span className="badge badge-neutral">Dừng: {tiktokResults.diagnostics.stopReason}</span>
+                      <span className="badge badge-warning">Bản xem trước · chưa công khai</span>
+                    </div>
+                    <div className="grid" style={{ marginTop: 12, gap: 12 }}>
+                      {tiktokResults.items.map(item => {
+                        const productId = getString(item.id || item.productId || item.sourceId);
+                        const savedState = tiktokCandidates[productId];
+                        return (
+                          <div key={productId} className="card" style={{ padding: 12 }}>
+                            <div className="flex gap-md" style={{ alignItems: 'flex-start' }}>
+                              <SafeThumb src={getString(item.imageUrl)} label="TK" size={72} />
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <strong>{getAtItemName(item)}</strong>
+                                <div className="flex gap-xs" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                                  <span className="badge badge-info">TikTok Shop qua AccessTrade</span>
+                                  <span className="badge badge-neutral">Shop: {getString(item.shopName) || 'Chưa rõ'}</span>
+                                  <span className="badge badge-success">{formatPrice(item.salePrice || item.price)}</span>
+                                  <span className="badge badge-neutral">Đã bán {Number(item.unitsSold || 0).toLocaleString('vi-VN')}</span>
+                                  <span className="badge badge-neutral">Hoa hồng {Number(item.commissionRate || 0).toLocaleString('vi-VN')}%</span>
+                                  <span className="badge badge-warning">Preview</span>
+                                </div>
+                                <div style={{ marginTop: 10 }}>
+                                  {savedState ? (
+                                    <span className="badge badge-success">
+                                      {savedState === 'stored_internal_product' ? 'Sản phẩm nội bộ · chưa công khai' : 'Ứng viên · chưa công khai'}
+                                    </span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="btn btn-sm btn-primary"
+                                      disabled={Boolean(tiktokSaving)}
+                                      aria-busy={tiktokSaving === productId}
+                                      onClick={() => void handleTikTokCandidate(item)}
+                                    >
+                                      {tiktokSaving === productId ? 'Đang tạo link...' : 'Tạo ứng viên an toàn'}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {!tiktokResults.items.length && <div className="empty-state">Không có sản phẩm hợp lệ trong phạm vi quét an toàn.</div>}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* ====== LAZADA TAB ====== */}
           {activeTab === 'lazada' &&

@@ -8,6 +8,18 @@ import {
   type NormalizedAccessTradeItem,
 } from '@/lib/integrations/accesstrade';
 import { getFeatureRolloutState } from '@/lib/automation/featureRollout';
+import {
+  ACCESSTRADE_TIKTOK_BOUNDS,
+  ACCESSTRADE_TIKTOK_SOURCE,
+  AccessTradeTikTokError,
+  createAccessTradeTikTokAffiliateLink,
+  searchAccessTradeTikTokProducts,
+  withAccessTradeTikTokAffiliateLink,
+  type AccessTradeTikTokCreateLinkInput,
+  type AccessTradeTikTokSearchInput,
+  type AccessTradeTikTokSearchResult,
+  type NormalizedAccessTradeTikTokProduct,
+} from '@/lib/integrations/accesstradeTikTokShop';
 
 export const SOURCE_ADAPTER_PLATFORM_VERSION = 'source-adapter-platform-v1';
 
@@ -42,8 +54,9 @@ export interface SourceHealth {
 }
 
 export interface SourceDiscoveryInput {
-  keyword: string;
+  keyword?: string;
   limit: number;
+  strategy?: string;
 }
 
 export interface SourceDiscoveryResult<T> {
@@ -60,6 +73,7 @@ export interface ProductSourceAdapter<TSource = unknown, TNormalized = unknown> 
   healthCheck(options?: { probe?: boolean }): Promise<SourceHealth>;
   discover(input: SourceDiscoveryInput): Promise<SourceDiscoveryResult<TSource>>;
   normalize(item: TSource): TNormalized;
+  createAffiliateLink?(item: TNormalized, input?: Partial<AccessTradeTikTokCreateLinkInput>): Promise<TNormalized>;
   budget(): Promise<SourceBudget>;
   classifyError(error: unknown): SourceProviderStatus;
   retryAfter(error: unknown): string | undefined;
@@ -71,6 +85,14 @@ export interface AccessTradeAdapterDependencies {
   credentialReadiness?: () => Promise<AccessTradeCredentialReadiness>;
   discover?: typeof searchAccessTrade;
   healthProbe?: () => Promise<boolean | SourceHealth>;
+  getBudget?: () => Promise<SourceBudget>;
+}
+
+export interface AccessTradeTikTokAdapterDependencies {
+  configured?: () => Promise<boolean>;
+  credentialReadiness?: () => Promise<AccessTradeCredentialReadiness>;
+  discover?: (input: AccessTradeTikTokSearchInput) => Promise<AccessTradeTikTokSearchResult>;
+  createLink?: typeof createAccessTradeTikTokAffiliateLink;
   getBudget?: () => Promise<SourceBudget>;
 }
 
@@ -260,7 +282,7 @@ export function createAccessTradeSourceAdapter(dependencies: AccessTradeAdapterD
     },
     async discover(input) {
       if (!(await configured())) throw new Error('SOURCE_NOT_CONFIGURED');
-      const result = await discover({ keyword: input.keyword.trim().slice(0, 160), kind: 'product', limit: Math.max(1, Math.min(50, Math.floor(input.limit || 1))) });
+      const result = await discover({ keyword: String(input.keyword || '').trim().slice(0, 160), kind: 'product', limit: Math.max(1, Math.min(50, Math.floor(input.limit || 1))) });
       return {
         items: result.items,
         requests: result.requests.reduce((total, request) => total + Math.max(0, request.attempts ?? 1), 0),
@@ -304,6 +326,107 @@ export function createAccessTradeSourceAdapter(dependencies: AccessTradeAdapterD
   };
 }
 
+export function createAccessTradeTikTokSourceAdapter(
+  dependencies: AccessTradeTikTokAdapterDependencies = {},
+): ProductSourceAdapter<NormalizedAccessTradeTikTokProduct, NormalizedAccessTradeTikTokProduct> {
+  const configured = dependencies.configured || isAccessTradeConfigured;
+  const discover = dependencies.discover || searchAccessTradeTikTokProducts;
+  const createLink = dependencies.createLink || createAccessTradeTikTokAffiliateLink;
+  return {
+    id: ACCESSTRADE_TIKTOK_SOURCE,
+    version: 'accesstrade-tiktok-shop-v2-adapter-v1',
+    isConfigured: configured,
+    async healthCheck() {
+      const isConfigured = await configured();
+      const credential = dependencies.credentialReadiness
+        ? await dependencies.credentialReadiness()
+        : dependencies.configured ? undefined : await getAccessTradeCredentialReadiness();
+      if (!isConfigured) {
+        return {
+          status: credential?.credentialsPresent ? 'invalid_credential' : 'not_configured',
+          configured: false,
+          ready: false,
+          credentialsPresent: credential?.credentialsPresent,
+          credentialFormatValid: credential?.credentialFormatValid,
+          readinessProbeStatus: 'NOT_RUN',
+          reason: credential?.reason === 'CREDENTIAL_FORMAT_INVALID' ? 'credential_format_invalid' : undefined,
+        };
+      }
+      return {
+        status: 'configured', configured: true, ready: false, readinessProbeStatus: 'NOT_RUN',
+        credentialsPresent: credential?.credentialsPresent, credentialFormatValid: credential?.credentialFormatValid,
+        reason: 'live_probe_not_run',
+      };
+    },
+    async discover(input) {
+      if (!(await configured())) throw new Error('SOURCE_NOT_CONFIGURED');
+      const requestedStrategy = String(input.strategy || 'RECOMMENDED').toUpperCase();
+      const sortStrategy = ['RECOMMENDED', 'BEST_SELLERS', 'LOW_PRICE', 'HIGH_PRICE', 'NEWLY_RELEASED', 'HIGH_COMMISSION_RATE'].includes(requestedStrategy)
+        ? requestedStrategy as AccessTradeTikTokSearchInput['sortStrategy'] : 'RECOMMENDED';
+      const keyword = String(input.keyword || '').trim().slice(0, 160);
+      const result = await discover({
+        titleKeywords: keyword ? [keyword] : [],
+        sortStrategy,
+        acceptedItemBudget: Math.max(1, Math.min(ACCESSTRADE_TIKTOK_BOUNDS.autoPilotAcceptedItemBudget, Math.floor(input.limit || 1))),
+        rawItemBudget: Math.max(ACCESSTRADE_TIKTOK_BOUNDS.pageSize, Math.min(ACCESSTRADE_TIKTOK_BOUNDS.rawItemBudget, Math.floor(input.limit || 1) * 4)),
+        maximumPages: ACCESSTRADE_TIKTOK_BOUNDS.autoPilotMaximumPages,
+        mode: 'auto_pilot',
+      });
+      return {
+        items: result.items,
+        requests: result.requests.reduce((total, request) => total + Math.max(0, request.attempts), 0),
+        retryAfter: result.requests.map(request => request.retryAfter).filter((item): item is string => Boolean(item)).sort().at(-1),
+        outcomes: result.requests.reduce<Record<string, number>>((outcomes, request) => {
+          outcomes[request.resultType] = (outcomes[request.resultType] || 0) + 1;
+          return outcomes;
+        }, {}),
+      };
+    },
+    normalize(item) {
+      const safe = { ...item };
+      delete safe.rawData;
+      return safe;
+    },
+    async createAffiliateLink(item, input = {}) {
+      if (item.affiliateState === 'CREATED' && item.affiliateUrl) return item;
+      const link = await createLink({
+        productUrl: item.canonicalProductUrl || item.originalUrl,
+        productId: item.id,
+        ...input,
+      });
+      return withAccessTradeTikTokAffiliateLink(item, link);
+    },
+    async budget() {
+      return normalizeBudget(await (dependencies.getBudget?.() || Promise.resolve({ maximumRequests: 0, usedRequests: 0, remainingRequests: 0 })));
+    },
+    classifyError(error) {
+      if (error instanceof AccessTradeTikTokError) {
+        if (error.resultType === 'rate_limited') return 'rate_limited';
+        if (error.resultType === 'unauthorized' || error.resultType === 'forbidden') return 'invalid_credential';
+        if (error.resultType === 'circuit_open') return 'circuit_open';
+        if (['timeout', 'network_error', 'upstream_error'].includes(error.resultType)) return 'degraded';
+      }
+      return 'last_check_failed';
+    },
+    retryAfter(error) {
+      return error instanceof AccessTradeTikTokError ? error.request?.retryAfter : undefined;
+    },
+    disclosure() {
+      return {
+        id: ACCESSTRADE_TIKTOK_SOURCE,
+        version: 'accesstrade-tiktok-shop-v2-adapter-v1',
+        provider: 'accesstrade',
+        providerType: 'affiliate-product-source',
+        apiVersion: 'v2',
+        credentialExposed: false,
+        configuredIsReady: false,
+        discoveryKinds: ['product'],
+        affiliateLinkMode: 'post-selection',
+      };
+    },
+  };
+}
+
 /** Test-only adapter used by the full-stack smoke. It cannot target a remote host. */
 export function createLoopbackMockSourceAdapter(endpoint: string): ProductSourceAdapter<NormalizedAccessTradeItem, NormalizedAccessTradeItem> {
   const baseUrl = assertLoopbackMockUrl(endpoint);
@@ -316,7 +439,7 @@ export function createLoopbackMockSourceAdapter(endpoint: string): ProductSource
     },
     async discover(input) {
       const url = new URL(baseUrl);
-      url.searchParams.set('keyword', input.keyword.slice(0, 160));
+      url.searchParams.set('keyword', String(input.keyword || '').slice(0, 160));
       url.searchParams.set('limit', String(Math.max(1, Math.min(50, Math.floor(input.limit || 1)))));
       const response = await fetch(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(2_000) });
       if (!response.ok) throw new Error(`MOCK_SOURCE_HTTP_${response.status}`);
@@ -341,11 +464,17 @@ export function createLoopbackMockSourceAdapter(endpoint: string): ProductSource
   };
 }
 
-export function createDefaultSourceAdapterRegistry(dependencies: { accessTrade?: AccessTradeAdapterDependencies } = {}): SourceAdapterRegistry {
+export function createDefaultSourceAdapterRegistry(dependencies: {
+  accessTrade?: AccessTradeAdapterDependencies;
+  accessTradeTikTok?: AccessTradeTikTokAdapterDependencies;
+} = {}): SourceAdapterRegistry {
   const registry = new SourceAdapterRegistry();
   const mockEndpoint = process.env.NODE_ENV === 'test' ? process.env.SANDEAL_MOCK_SOURCE_URL?.trim() : '';
   registry.register(mockEndpoint && !dependencies.accessTrade
     ? createLoopbackMockSourceAdapter(mockEndpoint)
     : createAccessTradeSourceAdapter(dependencies.accessTrade));
+  if (!mockEndpoint && (process.env.NODE_ENV !== 'test' || dependencies.accessTradeTikTok)) {
+    registry.register(createAccessTradeTikTokSourceAdapter(dependencies.accessTradeTikTok));
+  }
   return registry;
 }

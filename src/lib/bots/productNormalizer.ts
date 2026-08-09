@@ -119,7 +119,7 @@ export class ProductNormalizerBot {
 }
 
 function normalizeSource(source: string): ProductSource {
-  return ['manual', 'accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other'].includes(source) ? source as ProductSource : 'other';
+  return ['manual', 'accesstrade', 'accesstrade_tiktok_shop', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other'].includes(source) ? source as ProductSource : 'other';
 }
 
 export async function createProductNormalizer(runId: string): Promise<ProductNormalizerBot> {

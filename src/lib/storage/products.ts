@@ -74,7 +74,7 @@ function duplicateKeys(product: Partial<Product>): Set<string> {
   if (canonicalUrl) keys.add(`canonical:${canonicalUrl}`);
   const affiliateUrl = normalizedDuplicateUrl(product.affiliateUrl);
   if (affiliateUrl) keys.add(`affiliate:${affiliateUrl}`);
-  const merchant = (product.merchantDomain || (() => {
+  const merchant = (product.merchantIdentity || product.merchantDomain || (() => {
     try { return canonicalUrl ? new URL(canonicalUrl).hostname : ''; } catch { return ''; }
   })()).toLowerCase();
   const title = product.title?.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
@@ -96,8 +96,9 @@ function mergeDuplicateCandidate(existing: Product, candidate: CreateProductInpu
   const fields: Array<keyof Product> = [
     'originalUrl', 'canonicalProductUrl', 'affiliateUrl', 'affiliateDestinationUrl',
     'imageUrl', 'price', 'salePrice', 'sourceId', 'sourceItemId', 'externalId', 'sourceEndpoint',
-    'sourceFetchedAt', 'merchant', 'merchantDomain', 'rawSourceKind', 'sourceItemKind',
+    'sourceFetchedAt', 'merchant', 'merchantDomain', 'merchantIdentity', 'rawSourceKind', 'sourceItemKind',
     'shopId', 'shopName', 'sku', 'providerUpdatedAt', 'sourceNormalizationIssues',
+    'commissionAmount', 'commissionRate', 'unitsSold', 'categoryId', 'categoryChain', 'available',
     'canonicalUrlSource', 'canonicalUrlProvider', 'canonicalUrlSourceEndpoint',
     'canonicalUrlSourceField', 'canonicalUrlFetchedAt', 'affiliateUrlSource',
     'affiliateUrlProvider', 'affiliateUrlSourceEndpoint', 'affiliateUrlSourceField',
@@ -929,7 +930,8 @@ export async function repairSourceCandidateEvidence(
 
       const providerIsNewer = incomingEvidenceAt > evidenceTimestamp(existing.providerUpdatedAt || existing.sourceFetchedAt);
       const refreshable: Array<keyof Product> = [
-        'title', 'description', 'category', 'brand', 'merchant', 'merchantDomain', 'shopId', 'shopName',
+        'title', 'description', 'category', 'brand', 'merchant', 'merchantDomain', 'merchantIdentity', 'shopId', 'shopName',
+        'commissionAmount', 'commissionRate', 'unitsSold', 'categoryId', 'categoryChain', 'available',
         'sku', 'providerUpdatedAt', 'sourceFetchedAt', 'sourceEndpoint', 'sourceNormalizationIssues',
       ];
       for (const field of refreshable) {

@@ -15,6 +15,7 @@ export type ProductPlatform =
 export type ProductSource =
   | "manual"
   | "accesstrade"
+  | "accesstrade_tiktok_shop"
   | "shopee_affiliate"
   | "tiktok_shop"
   | "lazada_affiliate"
@@ -477,8 +478,16 @@ export interface Product {
   dataSource?: string;
   importedFrom?: string;
   merchantDomain?: string;
+  /** Stable provider merchant identity when many shops share one hostname. */
+  merchantIdentity?: string;
   shopId?: string;
   shopName?: string;
+  commissionAmount?: number;
+  commissionRate?: number;
+  unitsSold?: number;
+  categoryId?: string;
+  categoryChain?: Array<{ id: string; name: string; parentId?: string; leaf: boolean }>;
+  available?: boolean;
   providerUpdatedAt?: string;
   sourceNormalizationIssues?: string[];
   rawData?: Record<string, unknown>;

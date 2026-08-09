@@ -21,7 +21,7 @@ import { generateEditorialReview, isReviewIndexable, textSimilarity, validateRev
 import { generateGeminiEditorialReview } from '../ai/geminiEditorialProvider';
 import { listAvailableGeminiModels } from '../ai/geminiCredentialRouter';
 import { scoreCandidateReadiness } from './candidateReadiness';
-import { getDomainCircuitDecision, listDomainCircuitStates, recordDomainHealth } from './domainCircuitBreaker';
+import { getDomainCircuitDecision, listDomainCircuitStates, peekDomainCircuitDecision, recordDomainHealth } from './domainCircuitBreaker';
 import { evaluateSafePublish } from '../safePublish';
 import { canonicalBlockerCodes, preserveFailClosedProductBlockers } from '../productBlockers';
 import { classifyRecord } from '../autonomous/recordClassification';
@@ -43,6 +43,14 @@ import { selectDiversifiedSources, type SourceSelectionCandidate } from '../comm
 import { recordSourceIngestionState, sourceReliabilityEvent } from '../commerce/sourceReliability';
 import { commerceProbeBlockerCode, commerceProbeIsPermanent, commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '../commerce/urlProbe';
 import { computeSourceDiversity, type SourceDiversitySummary } from '../commerce/sourceIdentity';
+import {
+  ACCESSTRADE_TIKTOK_SOURCE,
+  AccessTradeTikTokError,
+  withAccessTradeTikTokAffiliateLink,
+  type AccessTradeTikTokResultType,
+  type AccessTradeTikTokSortStrategy,
+  type NormalizedAccessTradeTikTokProduct,
+} from '../integrations/accesstradeTikTokShop';
 
 const KEYWORD_COLLECTION = 'source-keyword-state';
 const MAX_PRODUCT_COMPARISON_ITEMS = 2_000;
@@ -268,8 +276,12 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
     currency: 'VND', category: item.category || undefined,
     rawSourceKind: item.rawSourceKind, nonProductReason: item.nonProductReason,
     campaignName: item.campaignName, commissionRate: item.commissionRate,
+    commissionAmount: item.commissionAmount, unitsSold: item.unitsSold,
+    categoryId: item.categoryId, categoryChain: item.categoryChain,
+    available: item.available,
     merchant: item.merchant || merchantFromUrl(item.canonicalProductUrl || item.originalUrl),
     merchantDomain: item.merchantDomain,
+    merchantIdentity: item.merchantIdentity,
     shopId: item.shopId,
     shopName: item.shopName,
     sourceItemId: item.sourceItemId,
@@ -283,13 +295,17 @@ function toPayload(item: NormalizedAccessTradeItem): CandidatePayload {
   };
 }
 
-export function fastReject(payload: CandidatePayload): string | null {
+export function fastReject(payload: CandidatePayload, options: { affiliateRequired?: boolean } = {}): string | null {
   if (payload.kind !== 'product') return 'not_product';
   if (payload.title.trim().length < 8) return 'missing_title';
   if (!(Number(payload.salePrice || payload.price) > 0)) return 'missing_price';
   if (!validHttpUrl(payload.originalUrl)) return 'missing_product_url';
-  if (!validHttpUrl(payload.affiliateUrl)) return 'missing_affiliate_url';
+  if (options.affiliateRequired !== false && !validHttpUrl(payload.affiliateUrl)) return 'missing_affiliate_url';
+  if (payload.platform === 'tiktok_shop' && validHttpUrl(payload.affiliateUrl)
+    && sameCanonicalUrl(payload.affiliateUrl, payload.canonicalProductUrl || payload.originalUrl)) return 'invalid_affiliate_url';
   if (!validHttpUrl(payload.imageUrl)) return 'missing_image';
+  if (payload.available === false) return 'product_unavailable';
+  if (payload.platform === 'tiktok_shop' && !payload.merchantIdentity) return 'missing_shop_identity';
   return null;
 }
 
@@ -396,7 +412,7 @@ async function recordKeywordCandidateOutcome(item: CandidateQueueItem, product?:
   });
 }
 
-export async function scanSourcesToQueue(
+async function scanLegacyAccessTradeToQueue(
   mode: OperationMode,
   deadlineMs = Date.now() + 240_000,
   options: SourceScanOptions = {},
@@ -751,6 +767,630 @@ export async function scanSourcesToQueue(
   };
 }
 
+type SourceScanResult = PipelineCounters & SourceRunMetrics & {
+  resultTypes: Partial<Record<AccessTradeResultType | AccessTradeTikTokResultType, number>>;
+  retryAfter?: string;
+};
+
+function sourceSnapshotHash(value: Partial<CandidatePayload> | Partial<Product>): string {
+  return createHash('sha256').update(JSON.stringify({
+    title: value.title,
+    kind: value.kind,
+    platform: value.platform,
+    originalUrl: value.canonicalProductUrl || value.originalUrl,
+    imageUrl: value.imageUrl,
+    price: value.price,
+    salePrice: value.salePrice,
+    currency: value.currency,
+    category: value.category,
+    merchantIdentity: value.merchantIdentity,
+    shopId: value.shopId,
+    shopName: value.shopName,
+    providerUpdatedAt: value.providerUpdatedAt,
+    commissionRate: value.commissionRate,
+    commissionAmount: value.commissionAmount,
+    unitsSold: value.unitsSold,
+    available: value.available,
+  })).digest('hex');
+}
+
+function sameCanonicalUrl(left: string | undefined, right: string | undefined): boolean {
+  try {
+    if (!left || !right) return false;
+    const first = new URL(left);
+    const second = new URL(right);
+    first.hash = '';
+    second.hash = '';
+    return first.href === second.href;
+  } catch {
+    return false;
+  }
+}
+
+function reusableTikTokAffiliateProvenance(value: Partial<CandidatePayload> | Partial<Product>, originalUrl: string): boolean {
+  return validHttpUrl(value.affiliateUrl || '')
+    && !sameCanonicalUrl(value.affiliateUrl, originalUrl)
+    && value.affiliateUrlSource === 'provider_api'
+    && value.affiliateUrlProvider === 'accesstrade'
+    && value.affiliateUrlSourceEndpoint === 'tiktok_create_link_v2'
+    && ['aff_short_url', 'aff_url'].includes(value.affiliateUrlSourceField || '');
+}
+
+function reusableTikTokAffiliate(
+  item: NormalizedAccessTradeTikTokProduct,
+  queuedCandidates: CandidateQueueItem[],
+  products: Product[],
+): { url: string; sourceField: 'aff_short_url' | 'aff_url'; fetchedAt: string } | undefined {
+  const candidate = queuedCandidates.find(entry => entry.source === ACCESSTRADE_TIKTOK_SOURCE
+    && entry.sourceId === item.id
+    && entry.payload.originalUrl === item.originalUrl
+    && reusableTikTokAffiliateProvenance(entry.payload, item.originalUrl));
+  if (candidate) return {
+    url: candidate.payload.affiliateUrl,
+    sourceField: candidate.payload.affiliateUrlSourceField === 'aff_short_url' ? 'aff_short_url' : 'aff_url',
+    fetchedAt: candidate.payload.affiliateUrlFetchedAt || candidate.updatedAt,
+  };
+  const product = products.find(entry => entry.source === ACCESSTRADE_TIKTOK_SOURCE
+    && (entry.sourceId === item.id || entry.externalId === item.id)
+    && entry.originalUrl === item.originalUrl
+    && reusableTikTokAffiliateProvenance(entry, item.originalUrl));
+  if (!product?.affiliateUrl) return undefined;
+  return {
+    url: product.affiliateUrl,
+    sourceField: product.affiliateUrlSourceField === 'aff_short_url' ? 'aff_short_url' : 'aff_url',
+    fetchedAt: product.affiliateUrlFetchedAt || product.updatedAt,
+  };
+}
+
+function withReusableTikTokAffiliate(
+  item: NormalizedAccessTradeTikTokProduct,
+  reusable: { url: string; sourceField: 'aff_short_url' | 'aff_url'; fetchedAt: string },
+): NormalizedAccessTradeTikTokProduct {
+  return withAccessTradeTikTokAffiliateLink(item, {
+    ...reusable,
+    attempts: 0,
+    request: {
+      endpoint: 'tiktok_create_link_v2', durationMs: 0, attempts: 0,
+      resultType: 'success_with_results', itemCount: 1,
+    },
+  });
+}
+
+function merchantCircuitIdentity(payload: CandidatePayload): string {
+  return payload.merchantIdentity || payload.merchantDomain || merchantFromUrl(payload.originalUrl);
+}
+
+export async function enqueueSelectedAccessTradeTikTokProduct(
+  item: NormalizedAccessTradeTikTokProduct,
+  options: { registry?: SourceAdapterRegistry; signal?: AbortSignal; requestedBy?: string } = {},
+): Promise<{
+  candidate?: CandidateQueueItem;
+  productId?: string;
+  queued: boolean;
+  unchanged: boolean;
+  affiliateLinkCreated: boolean;
+}> {
+  throwIfExecutionAborted(options.signal);
+  const registry = options.registry || createDefaultSourceAdapterRegistry();
+  const adapter = registry.get<NormalizedAccessTradeTikTokProduct, NormalizedAccessTradeTikTokProduct>(ACCESSTRADE_TIKTOK_SOURCE);
+  if (!adapter?.createAffiliateLink) throw new Error('TIKTOK_SOURCE_ADAPTER_UNAVAILABLE');
+  const previewPayload = toPayload(adapter.normalize(item));
+  const previewReason = fastReject(previewPayload, { affiliateRequired: false });
+  if (previewReason) throw new Error(`TIKTOK_CANDIDATE_REJECTED:${previewReason.toUpperCase()}`);
+  const merchantIdentity = merchantCircuitIdentity(previewPayload);
+  const merchantCircuit = await peekDomainCircuitDecision(previewPayload.originalUrl, Date.now(), {
+    role: 'MERCHANT', identityKey: merchantIdentity,
+  });
+  if (!merchantCircuit.allowed) throw new Error('TIKTOK_MERCHANT_CIRCUIT_OPEN');
+  const [queuedCandidates, products] = await Promise.all([listCandidateQueue(), getAllProducts()]);
+  const snapshot = sourceSnapshotHash(previewPayload);
+  const existingCandidate = queuedCandidates.find(candidate => candidate.source === ACCESSTRADE_TIKTOK_SOURCE && candidate.sourceId === item.id);
+  if (existingCandidate
+    && sourceSnapshotHash(existingCandidate.payload) === snapshot
+    && reusableTikTokAffiliateProvenance(existingCandidate.payload, previewPayload.originalUrl)) {
+    return { candidate: existingCandidate, queued: false, unchanged: true, affiliateLinkCreated: false };
+  }
+  const existingProduct = products.find(product => product.source === ACCESSTRADE_TIKTOK_SOURCE
+    && (product.sourceId === item.id || product.externalId === item.id));
+  if (existingProduct
+    && sourceSnapshotHash(existingProduct) === snapshot
+    && reusableTikTokAffiliateProvenance(existingProduct, previewPayload.originalUrl)) {
+    return { productId: existingProduct.id, queued: false, unchanged: true, affiliateLinkCreated: false };
+  }
+  const reusable = reusableTikTokAffiliate(item, queuedCandidates, products);
+  const linkedItem = reusable
+    ? withReusableTikTokAffiliate(item, reusable)
+    : await adapter.createAffiliateLink(item, {
+      tracking: {
+        utmSource: 'sandeal',
+        utmMedium: 'affiliate',
+        utmCampaign: 'manual_product_discovery',
+        utmContent: options.requestedBy || 'product_sources',
+      },
+      signal: options.signal,
+    });
+  const payload = toPayload(linkedItem);
+  const finalReason = fastReject(payload);
+  if (finalReason) throw new Error(`TIKTOK_CANDIDATE_REJECTED:${finalReason.toUpperCase()}`);
+  const sourceHash = hashPayload(payload);
+  const readiness = scoreCandidateReadiness(payload);
+  const result = await enqueueCandidate({
+    source: ACCESSTRADE_TIKTOK_SOURCE,
+    sourceId: item.id,
+    priority: Math.max(1, Math.min(100, readiness.score + 10)),
+    readinessScore: readiness.score,
+    lane: readiness.lane,
+    contentHash: sourceHash,
+    sourceHash,
+    keyword: options.requestedBy || 'manual_product_discovery',
+    payload,
+    merchantDomain: merchantIdentity,
+    affiliateGatewayDomain: merchantFromUrl(payload.affiliateUrl),
+  });
+  return {
+    candidate: result.item,
+    queued: result.queued,
+    unchanged: result.unchanged,
+    affiliateLinkCreated: !reusable,
+  };
+}
+
+export async function scanAccessTradeTikTokToQueue(
+  mode: OperationMode,
+  deadlineMs = Date.now() + 240_000,
+  options: SourceScanOptions = {},
+): Promise<SourceScanResult> {
+  throwIfExecutionAborted(options.signal);
+  const startedMs = Date.now();
+  const counters = emptyCounters();
+  const resultTypes: SourceScanResult['resultTypes'] = {};
+  let normalized = 0;
+  let rejected = 0;
+  let timeout = 0;
+  let rateLimited = 0;
+  let validCandidates = 0;
+  let pricesAvailable = 0;
+  let sourceStatus: SourceProviderStatus = 'not_configured';
+  let retryAfter: string | undefined;
+  const registry = options.registry || createDefaultSourceAdapterRegistry();
+  const adapter = registry.get<NormalizedAccessTradeTikTokProduct, NormalizedAccessTradeTikTokProduct>(ACCESSTRADE_TIKTOK_SOURCE);
+  if (!adapter) {
+    return {
+      ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs,
+      sourceStatus: 'adapter_unavailable', reason: 'source_adapter_unavailable', resultTypes,
+    };
+  }
+  const sourceHealth = await adapter.healthCheck();
+  sourceStatus = sourceHealth.status;
+  if (!(await adapter.isConfigured())) {
+    return {
+      ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs,
+      sourceStatus, reason: 'source_not_configured', resultTypes,
+    };
+  }
+  const settings = await getAutomationSettings();
+  const usage = await getDailyPipelineUsage();
+  const sourceBudgetRemaining = Math.max(0, settings.sourceRequestBudgetPerDay - usage.sourceRequests);
+  if (sourceBudgetRemaining <= 0) {
+    return {
+      ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs,
+      sourceStatus, reason: 'source_budget_exhausted', nextEligibleAt: new Date(startedMs + 24 * 60 * 60_000).toISOString(), resultTypes,
+    };
+  }
+
+  const candidateLimit = mode === 'bootstrap' ? settings.bootstrapCandidateLimit : settings.steadyCandidateLimit;
+  const poolLimit = Math.min(160, Math.max(15, candidateLimit * settings.sourceDiscoveryPoolMultiplier));
+  const keywordStats = await loadKeywordStats(settings.sourceKeywords);
+  const keyword = selectSourceKeywords(keywordStats, 1, startedMs)[0]?.keyword;
+  const strategies: Array<{ strategy: AccessTradeTikTokSortStrategy; keyword?: string }> = [
+    { strategy: 'RECOMMENDED' },
+    { strategy: 'BEST_SELLERS' },
+    { strategy: 'HIGH_COMMISSION_RATE', keyword },
+  ];
+  const products = await getAllProducts();
+  const queuedCandidates = await listCandidateQueue();
+  const circuitStates = await listDomainCircuitStates();
+  const openMerchants = new Set(circuitStates
+    .filter(state => state.role === 'MERCHANT' && (state.state === 'OPEN' || state.state === 'HALF_OPEN' && state.halfOpenProbeInFlight))
+    .map(state => state.domain));
+  const pausedDomains = new Set(settings.pausedSourceDomains);
+  const pausedCampaigns = new Set(settings.pausedSourceCampaigns);
+  const domainPaused = (domain: string) => [...pausedDomains].some(paused => domain === paused || domain.endsWith(`.${paused}`));
+  const merchantCounts = new Map<string, number>();
+  const categoryCounts = new Map<string, number>();
+  for (const entry of products) {
+    const merchant = entry.merchantIdentity || entry.merchantDomain || merchantFromUrl(entry.originalUrl || entry.affiliateUrl || '');
+    merchantCounts.set(merchant, (merchantCounts.get(merchant) || 0) + 1);
+    const category = String(entry.category || 'uncategorized').toLowerCase();
+    categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+  }
+  for (const entry of queuedCandidates) {
+    const merchant = merchantCircuitIdentity(entry.payload);
+    merchantCounts.set(merchant, (merchantCounts.get(merchant) || 0) + 1);
+    const category = String(entry.payload.category || 'uncategorized').toLowerCase();
+    categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+  }
+  const qualitySnapshot = await getSourceQualitySnapshot(adapter.id);
+  const perStrategyLimit = Math.max(5, Math.min(15, Math.ceil(poolLimit / strategies.length)));
+  const discoveryPool: Array<SourceSelectionCandidate<{
+    item: NormalizedAccessTradeTikTokProduct;
+    payload: CandidatePayload;
+    priority: number;
+    readiness: ReturnType<typeof scoreCandidateReadiness>;
+    keyword: string;
+  }>> = [];
+  const knownDuplicates: Array<{
+    campaignName: string;
+    merchantDomain: string;
+    eligible: boolean;
+    healthy: boolean;
+  }> = [];
+  let sourceFailureStreak = 0;
+
+  for (const strategy of strategies) {
+    throwIfExecutionAborted(options.signal);
+    if (Date.now() >= deadlineMs || discoveryPool.length >= poolLimit || counters.sourceRequests >= sourceBudgetRemaining) break;
+    try {
+      const result = await adapter.discover({ keyword: strategy.keyword, strategy: strategy.strategy, limit: Math.min(perStrategyLimit, poolLimit - discoveryPool.length) });
+      sourceFailureStreak = 0;
+      counters.sourceRequests += result.requests;
+      retryAfter = result.retryAfter || retryAfter;
+      for (const [outcome, count] of Object.entries(result.outcomes || {})) {
+        resultTypes[outcome as AccessTradeResultType | AccessTradeTikTokResultType] = (resultTypes[outcome as AccessTradeResultType | AccessTradeTikTokResultType] || 0) + count;
+        if (outcome === 'timeout') timeout += count;
+        if (outcome === 'rate_limited') rateLimited += count;
+      }
+      counters.found += result.items.length;
+      if (result.items.length) sourceStatus = 'ready';
+      const rejectAggregates = new Map<string, number>();
+      for (const sourceItem of result.items) {
+        throwIfExecutionAborted(options.signal);
+        const item = adapter.normalize(sourceItem);
+        normalized += 1;
+        const payload = toPayload(item);
+        const earlyReason = fastReject(payload, { affiliateRequired: false });
+        if (earlyReason) {
+          rejected += 1;
+          rejectAggregates.set(earlyReason, (rejectAggregates.get(earlyReason) || 0) + 1);
+          continue;
+        }
+        validCandidates += 1;
+        if (Number(payload.salePrice || payload.price || 0) > 0) pricesAvailable += 1;
+        const existingCandidate = queuedCandidates.find(candidate => candidate.source === ACCESSTRADE_TIKTOK_SOURCE && candidate.sourceId === item.id);
+        const existingProduct = products.find(product => product.source === ACCESSTRADE_TIKTOK_SOURCE
+          && (product.sourceId === item.id || product.externalId === item.id));
+        const discoveryHash = sourceSnapshotHash(payload);
+        const merchantIdentity = merchantCircuitIdentity(payload);
+        const merchantDomain = payload.merchantDomain || merchantFromUrl(payload.originalUrl);
+        const category = String(payload.category || 'uncategorized').toLowerCase();
+        const campaign = ACCESSTRADE_TIKTOK_SOURCE;
+        const pauseReason = domainPaused(merchantDomain) ? 'SOURCE_DOMAIN_PAUSED'
+          : pausedCampaigns.has(campaign) ? 'SOURCE_CAMPAIGN_PAUSED'
+            : openMerchants.has(merchantIdentity) ? 'MERCHANT_CIRCUIT_OPEN'
+              : undefined;
+        const unchangedCandidate = existingCandidate
+          && sourceSnapshotHash(existingCandidate.payload) === discoveryHash
+          && reusableTikTokAffiliateProvenance(existingCandidate.payload, payload.originalUrl);
+        const unchangedProduct = existingProduct
+          && sourceSnapshotHash(existingProduct) === discoveryHash
+          && reusableTikTokAffiliateProvenance(existingProduct, payload.originalUrl);
+        if (unchangedCandidate || unchangedProduct) {
+          counters.duplicate += 1;
+          counters.unchanged += 1;
+          const existingHealthy = Boolean(
+            (unchangedCandidate && existingCandidate && !['discarded', 'failed', 'delayed'].includes(existingCandidate.status))
+            || (unchangedProduct && existingProduct && existingProduct.status !== 'archived' && existingProduct.lifecycleState !== 'QUARANTINED'),
+          );
+          knownDuplicates.push({
+            campaignName: campaign,
+            merchantDomain: merchantIdentity,
+            eligible: !pauseReason,
+            healthy: !pauseReason && existingHealthy,
+          });
+          continue;
+        }
+        const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.imageUrl, payload.merchantIdentity].filter(Boolean).length;
+        const merchantPenalty = Math.min(40, (merchantCounts.get(merchantIdentity) || 0) * 4);
+        const categoryBoost = Math.max(0, 12 - Math.min(12, categoryCounts.get(category) || 0));
+        const basePriority = Math.max(1, complete * 20 + 20 + Math.min(20, Number(payload.unitsSold || 0) > 0 ? 10 : 0) + categoryBoost - merchantPenalty);
+        const priority = applySourceQualityPriority(basePriority, qualitySnapshot).effectivePriority;
+        const readiness = scoreCandidateReadiness(payload);
+        discoveryPool.push({
+          value: { item, payload, priority, readiness, keyword: strategy.keyword || strategy.strategy },
+          provider: adapter.id,
+          sourceId: item.id,
+          sourceHash: discoveryHash,
+          merchantUrl: payload.canonicalProductUrl || payload.originalUrl,
+          merchantDomain: merchantIdentity,
+          campaign,
+          category,
+          keyword: strategy.keyword || strategy.strategy,
+          priority,
+          eligible: !pauseReason,
+          skipReason: pauseReason,
+        });
+        if (discoveryPool.length >= poolLimit) break;
+      }
+      for (const [reason, count] of rejectAggregates) {
+        sourceReliabilityEvent('source_candidates_rejected', {
+          provider: adapter.id, campaign: ACCESSTRADE_TIKTOK_SOURCE, reasonCode: `${reason.toUpperCase()}:${count}`, operationId: options.runId,
+        });
+      }
+    } catch (error) {
+      counters.failed += 1;
+      sourceFailureStreak += 1;
+      const classified = adapter.classifyError(error);
+      sourceStatus = classified;
+      retryAfter = adapter.retryAfter(error) || retryAfter;
+      if (classified === 'rate_limited') rateLimited += 1;
+      if (classified === 'degraded') timeout += Number(/timeout|abort/i.test(error instanceof Error ? `${error.name}:${error.message}` : String(error)));
+      if (['invalid_credential', 'rate_limited', 'circuit_open'].includes(classified)
+        || classified === 'degraded' && sourceFailureStreak >= 2) break;
+    }
+  }
+
+  const diversified = selectDiversifiedSources(discoveryPool, {
+    limit: candidateLimit,
+    scheduleBucket: options.scheduleBucket || options.runId || `tiktok:${mode}:${Math.floor(startedMs / (settings.intervalHours * 60 * 60_000))}`,
+    maximumPerMerchant: settings.sourceMaxPerMerchant,
+    maximumPerCampaign: Math.max(settings.sourceMaxPerCampaign, candidateLimit),
+  });
+  const skipAggregates = new Map<string, number>();
+  for (const skipped of diversified.skipped) {
+    if (!['SOURCE_DOMAIN_PAUSED', 'SOURCE_CAMPAIGN_PAUSED', 'MERCHANT_CIRCUIT_OPEN'].includes(skipped.reason)) continue;
+    counters.skippedCooldown += 1;
+    const key = `${skipped.reason}|${skipped.candidate.merchantDomain || 'unknown'}`;
+    skipAggregates.set(key, (skipAggregates.get(key) || 0) + 1);
+  }
+  for (const [key, count] of skipAggregates) {
+    const [reasonCode, domain] = key.split('|');
+    sourceReliabilityEvent('source_candidates_skipped', {
+      provider: adapter.id, campaign: ACCESSTRADE_TIKTOK_SOURCE, domain, reasonCode: `${reasonCode}:${count}`, operationId: options.runId,
+      nextProbeAt: circuitStates.find(state => state.role === 'MERCHANT' && state.domain === domain)?.nextProbeAt,
+    });
+  }
+
+  const acceptedSelections: typeof diversified.selected = [];
+  let affiliateFailures = 0;
+  for (const selected of diversified.selected) {
+    throwIfExecutionAborted(options.signal);
+    if (Date.now() >= deadlineMs || counters.sourceRequests >= sourceBudgetRemaining) break;
+    let linkedItem = selected.value.item;
+    const reusable = reusableTikTokAffiliate(linkedItem, queuedCandidates, products);
+    if (reusable) linkedItem = withReusableTikTokAffiliate(linkedItem, reusable);
+    else {
+      if (!adapter.createAffiliateLink) { affiliateFailures += 1; rejected += 1; continue; }
+      try {
+        linkedItem = await adapter.createAffiliateLink(linkedItem, {
+          tracking: { utmSource: 'sandeal', utmMedium: 'affiliate', utmCampaign: 'auto_pilot' },
+          signal: options.signal,
+        });
+        counters.sourceRequests += Math.max(1, linkedItem.affiliateRequestAttempts || 1);
+      } catch (error) {
+        counters.sourceRequests += error instanceof AccessTradeTikTokError
+          ? Math.max(1, error.request?.attempts || 1)
+          : 1;
+        affiliateFailures += 1;
+        rejected += 1;
+        const classified = adapter.classifyError(error);
+        if (classified === 'rate_limited') rateLimited += 1;
+        retryAfter = adapter.retryAfter(error) || retryAfter;
+        continue;
+      }
+    }
+    const payload = toPayload(linkedItem);
+    const finalReason = fastReject(payload);
+    if (finalReason) { affiliateFailures += Number(finalReason === 'missing_affiliate_url'); rejected += 1; continue; }
+    const sourceHash = hashPayload(payload);
+    const queued = await enqueueCandidate({
+      source: ACCESSTRADE_TIKTOK_SOURCE,
+      sourceId: linkedItem.id,
+      priority: selected.value.priority,
+      readinessScore: scoreCandidateReadiness(payload).score,
+      lane: scoreCandidateReadiness(payload).lane,
+      contentHash: sourceHash,
+      sourceHash,
+      keyword: selected.value.keyword,
+      payload,
+      merchantDomain: selected.merchantDomain,
+      affiliateGatewayDomain: merchantFromUrl(payload.affiliateUrl),
+    });
+    if (queued.queued) {
+      counters.queued += 1;
+      counters.reviewQueued += 1;
+      acceptedSelections.push(selected);
+      merchantCounts.set(selected.merchantDomain || 'unknown', (merchantCounts.get(selected.merchantDomain || 'unknown') || 0) + 1);
+    } else {
+      counters.duplicate += 1;
+      counters.unchanged += 1;
+    }
+  }
+  if (affiliateFailures) {
+    sourceReliabilityEvent('source_candidates_rejected', {
+      provider: adapter.id, campaign: ACCESSTRADE_TIKTOK_SOURCE,
+      reasonCode: `AFFILIATE_LINK_UNAVAILABLE:${affiliateFailures}`, operationId: options.runId,
+    });
+  }
+
+  const discovered = [
+    ...discoveryPool.map(candidate => ({ campaignName: candidate.campaign || ACCESSTRADE_TIKTOK_SOURCE, merchantDomain: candidate.merchantDomain || 'unknown' })),
+    ...knownDuplicates.map(candidate => ({ campaignName: candidate.campaignName, merchantDomain: candidate.merchantDomain })),
+  ];
+  const eligible = [
+    ...discoveryPool.filter(candidate => candidate.eligible !== false)
+      .map(candidate => ({ campaignName: candidate.campaign || ACCESSTRADE_TIKTOK_SOURCE, merchantDomain: candidate.merchantDomain || 'unknown' })),
+    ...knownDuplicates.filter(candidate => candidate.eligible)
+      .map(candidate => ({ campaignName: candidate.campaignName, merchantDomain: candidate.merchantDomain })),
+  ];
+  const healthy = [
+    ...acceptedSelections.map(candidate => ({ campaignName: candidate.campaign || ACCESSTRADE_TIKTOK_SOURCE, merchantDomain: candidate.merchantDomain || 'unknown' })),
+    ...knownDuplicates.filter(candidate => candidate.healthy)
+      .map(candidate => ({ campaignName: candidate.campaignName, merchantDomain: candidate.merchantDomain })),
+  ];
+  const sourceDiversity = computeSourceDiversity(discovered, eligible, healthy, 1);
+  const noHealthySource = normalized > 0 && healthy.length === 0;
+  const sourceNextEligibleAt = retryAfter || diversified.skipped
+    .map(skip => circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skip.candidate.merchantDomain)?.nextProbeAt)
+    .filter((value): value is string => Boolean(value)).sort()[0];
+  await recordSourceIngestionState({
+    provider: adapter.id,
+    ingestionSkipped: noHealthySource,
+    reasonCode: noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE' : 'SOURCE_SCAN_COMPLETED',
+    observed: discovered.length,
+    selected: acceptedSelections.length,
+    skipped: diversified.skipped.length + affiliateFailures,
+    nextEligibleAt: sourceNextEligibleAt,
+    operationId: options.runId,
+  });
+  counters.queueSize = (await getQueueStats()).total;
+  await recordDailyUsage(counters);
+  await recordSourceQualityObservation(adapter.id, {
+    idempotencyKey: (options.runId || `tiktok-source-scan:${startedMs}:${process.pid}:${randomUUID()}`).slice(0, 200),
+    observedAt: new Date(startedMs).toISOString(),
+    campaignName: ACCESSTRADE_TIKTOK_SOURCE,
+    merchantDomain: discovered[0]?.merchantDomain,
+    sourceEndpoint: 'tiktok_product_feed_v2',
+    candidatesObserved: normalized,
+    validCandidates,
+    pricesChecked: normalized,
+    pricesAvailable,
+    timeouts: Math.min(timeout, counters.sourceRequests),
+    externalRequests: counters.sourceRequests,
+  });
+  sourceReliabilityEvent('source_discovery_summary', {
+    provider: adapter.id,
+    campaign: ACCESSTRADE_TIKTOK_SOURCE,
+    reasonCode: `normalized:${normalized},duplicates:${counters.duplicate},shops:${sourceDiversity.discoveredMerchantCount},selected:${acceptedSelections.length},affiliate_failed:${affiliateFailures}`,
+    operationId: options.runId,
+    nextProbeAt: sourceNextEligibleAt,
+  });
+  const durationMs = Date.now() - startedMs;
+  const reason = noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE'
+    : rateLimited ? 'source_rate_limited'
+      : timeout && counters.found === 0 ? 'source_timeout'
+        : counters.found === 0 ? 'source_no_results'
+          : 'source_scan_completed';
+  return {
+    ...counters,
+    normalized,
+    rejected,
+    timeout,
+    rateLimited,
+    durationMs,
+    sourceStatus,
+    reason,
+    nextEligibleAt: sourceNextEligibleAt || (counters.found === 0 ? new Date(startedMs + 15 * 60_000).toISOString() : undefined),
+    resultTypes,
+    retryAfter,
+    sourceDiversity,
+    discoveredCampaignCount: sourceDiversity.discoveredCampaignCount,
+    discoveredMerchantCount: sourceDiversity.discoveredMerchantCount,
+    eligibleMerchantCount: sourceDiversity.eligibleMerchantCount,
+    healthyMerchantCount: sourceDiversity.healthyMerchantCount,
+    excludedByMerchantCircuit: diversified.skipped.filter(skip => skip.reason === 'MERCHANT_CIRCUIT_OPEN').length,
+    excludedByPolicy: diversified.skipped.filter(skip => ['SOURCE_DOMAIN_PAUSED', 'SOURCE_CAMPAIGN_PAUSED'].includes(skip.reason)).length,
+    sourceDiversityStatus: sourceDiversity.status,
+    recommendedNextAction: noHealthySource ? 'WAIT_FOR_CIRCUIT_RECOVERY' : 'NONE',
+  };
+}
+
+function mergeResultTypes(
+  ...values: Array<SourceScanResult['resultTypes']>
+): SourceScanResult['resultTypes'] {
+  const output: SourceScanResult['resultTypes'] = {};
+  for (const value of values) for (const [key, count] of Object.entries(value)) {
+    const typed = key as AccessTradeResultType | AccessTradeTikTokResultType;
+    output[typed] = (output[typed] || 0) + (count || 0);
+  }
+  return output;
+}
+
+function combinedDiversity(results: SourceScanResult[]): SourceDiversitySummary | undefined {
+  const values = results.map(result => result.sourceDiversity).filter((value): value is SourceDiversitySummary => Boolean(value));
+  if (!values.length) return undefined;
+  if (values.length === 1) return values[0];
+  const discoveredCampaignCount = values.reduce((sum, value) => sum + value.discoveredCampaignCount, 0);
+  const discoveredMerchantCount = values.reduce((sum, value) => sum + value.discoveredMerchantCount, 0);
+  const eligibleCampaignCount = values.reduce((sum, value) => sum + value.eligibleCampaignCount, 0);
+  const eligibleMerchantCount = values.reduce((sum, value) => sum + value.eligibleMerchantCount, 0);
+  const healthyCampaignCount = values.reduce((sum, value) => sum + value.healthyCampaignCount, 0);
+  const healthyMerchantCount = values.reduce((sum, value) => sum + value.healthyMerchantCount, 0);
+  const status: SourceDiversitySummary['status'] = discoveredCampaignCount === 0 ? 'NO_SOURCE'
+    : discoveredCampaignCount === 1 && discoveredMerchantCount === 1 ? 'SINGLE_SOURCE'
+      : healthyMerchantCount === 0 ? 'INSUFFICIENT_SOURCE_DIVERSITY'
+        : healthyMerchantCount === 1 || healthyCampaignCount === 1 ? 'LIMITED_DIVERSITY'
+          : 'HEALTHY_DIVERSITY';
+  return {
+    status,
+    discoveredCampaignCount,
+    discoveredMerchantCount,
+    eligibleCampaignCount,
+    eligibleMerchantCount,
+    healthyCampaignCount,
+    healthyMerchantCount,
+    providersChecked: values.reduce((sum, value) => sum + value.providersChecked, 0),
+  };
+}
+
+export async function scanSourcesToQueue(
+  mode: OperationMode,
+  deadlineMs = Date.now() + 240_000,
+  options: SourceScanOptions = {},
+): Promise<SourceScanResult> {
+  const registry = options.registry || createDefaultSourceAdapterRegistry();
+  const results: SourceScanResult[] = [];
+  // TikTok is intentionally attempted first so a slow/unhealthy legacy
+  // merchant cannot consume the entire discovery window.
+  if (registry.get(ACCESSTRADE_TIKTOK_SOURCE) && Date.now() < deadlineMs) {
+    results.push(await scanAccessTradeTikTokToQueue(mode, deadlineMs, { ...options, registry }));
+  }
+  if (registry.get('accesstrade') && Date.now() < deadlineMs) {
+    results.push(await scanLegacyAccessTradeToQueue(mode, deadlineMs, { ...options, registry }) as SourceScanResult);
+  }
+  if (!results.length) {
+    return {
+      ...emptyCounters(), normalized: 0, rejected: 0, timeout: 0, rateLimited: 0, durationMs: 0,
+      sourceStatus: 'adapter_unavailable', reason: 'source_adapter_unavailable', resultTypes: {},
+    };
+  }
+  if (results.length === 1) return results[0];
+  const counters = emptyCounters();
+  for (const result of results) {
+    for (const key of Object.keys(counters) as Array<keyof PipelineCounters>) counters[key] += result[key];
+  }
+  counters.queueSize = Math.max(...results.map(result => result.queueSize));
+  const diversity = combinedDiversity(results);
+  const statusOrder: SourceProviderStatus[] = ['ready', 'configured', 'degraded', 'rate_limited', 'circuit_open', 'invalid_credential', 'last_check_failed', 'not_configured', 'adapter_unavailable'];
+  const sourceStatus = [...results].sort((left, right) => statusOrder.indexOf(left.sourceStatus) - statusOrder.indexOf(right.sourceStatus))[0].sourceStatus;
+  const foundHealthySupply = results.some(result => result.queued > 0 || result.reason === 'source_scan_completed');
+  const retryTimes = results.flatMap(result => [result.retryAfter, result.nextEligibleAt]).filter((value): value is string => Boolean(value)).sort();
+  return {
+    ...counters,
+    normalized: results.reduce((sum, result) => sum + result.normalized, 0),
+    rejected: results.reduce((sum, result) => sum + result.rejected, 0),
+    timeout: results.reduce((sum, result) => sum + result.timeout, 0),
+    rateLimited: results.reduce((sum, result) => sum + result.rateLimited, 0),
+    durationMs: results.reduce((sum, result) => sum + result.durationMs, 0),
+    sourceStatus,
+    reason: foundHealthySupply ? 'source_scan_completed'
+      : results.every(result => result.reason === 'NO_HEALTHY_PRODUCT_SOURCE') ? 'NO_HEALTHY_PRODUCT_SOURCE'
+        : results.some(result => result.reason === 'source_rate_limited') ? 'source_rate_limited'
+          : 'source_no_results',
+    nextEligibleAt: retryTimes[0],
+    retryAfter: results.map(result => result.retryAfter).filter((value): value is string => Boolean(value)).sort()[0],
+    resultTypes: mergeResultTypes(...results.map(result => result.resultTypes)),
+    sourceDiversity: diversity,
+    discoveredCampaignCount: diversity?.discoveredCampaignCount,
+    discoveredMerchantCount: diversity?.discoveredMerchantCount,
+    eligibleMerchantCount: diversity?.eligibleMerchantCount,
+    healthyMerchantCount: diversity?.healthyMerchantCount,
+    excludedByMerchantCircuit: results.reduce((sum, result) => sum + (result.excludedByMerchantCircuit || 0), 0),
+    excludedByPolicy: results.reduce((sum, result) => sum + (result.excludedByPolicy || 0), 0),
+    sourceDiversityStatus: diversity?.status,
+    recommendedNextAction: foundHealthySupply ? 'NONE' : 'WAIT_FOR_CIRCUIT_RECOVERY',
+  };
+}
+
 function cooldownFor(statuses: string[], attempts = 1): number {
   if (statuses.includes('rate_limited')) return 60 * 60_000;
   if (statuses.some((status) => ['timeout', 'server_error', 'dns_error', 'error'].includes(status))) return Math.min(48 * 60 * 60_000, 60 * 60_000 * 2 ** Math.min(5, attempts));
@@ -902,25 +1542,35 @@ async function reviewAutonomousCandidate(
   }
 
   const minimumBlockers: string[] = [];
+  const requiresLegacyAccessTradeProvenance = item.source === 'accesstrade';
+  const requiresTikTokProvenance = item.source === ACCESSTRADE_TIKTOK_SOURCE;
   if (payload.title.trim().length < 8) minimumBlockers.push('TITLE_INVALID');
   if (!(Number(payload.salePrice || payload.price || 0) > 0) || payload.currency !== 'VND') minimumBlockers.push('PRICE_UNVERIFIED');
   if (!validHttpUrl(payload.imageUrl)) minimumBlockers.push('IMAGE_UNVERIFIED');
   if (!validHttpUrl(payload.affiliateUrl)) minimumBlockers.push('INVALID_AFFILIATE_URL');
+  if (requiresTikTokProvenance && sameCanonicalUrl(payload.affiliateUrl, payload.canonicalProductUrl || payload.originalUrl)) minimumBlockers.push('INVALID_AFFILIATE_URL');
   if (!validHttpUrl(payload.canonicalProductUrl || payload.originalUrl)) minimumBlockers.push('INVALID_MERCHANT_URL');
-  const requiresAccessTradeProvenance = item.source === 'accesstrade';
-  const canonicalProvenanceValid = !requiresAccessTradeProvenance || (
+  const canonicalProvenanceValid = !requiresLegacyAccessTradeProvenance && !requiresTikTokProvenance || (
     payload.canonicalUrlSource === 'provider_api'
     && payload.canonicalUrlProvider === 'accesstrade'
-    && payload.canonicalUrlSourceEndpoint === 'datafeed'
+    && (requiresTikTokProvenance
+      ? payload.canonicalUrlSourceEndpoint === 'tiktok_product_feed_v2'
+      : payload.canonicalUrlSourceEndpoint === 'datafeed')
     && Boolean(payload.canonicalUrlSourceField)
-    && (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(payload.canonicalUrlSourceField || '')
+    && (requiresTikTokProvenance
+      ? ['detail_link', 'product_url', 'url'].includes(payload.canonicalUrlSourceField || '')
+      : (ACCESS_TRADE_CANONICAL_PRODUCT_URL_FIELDS as readonly string[]).includes(payload.canonicalUrlSourceField || ''))
   );
-  const affiliateProvenanceValid = !requiresAccessTradeProvenance || (
+  const affiliateProvenanceValid = !requiresLegacyAccessTradeProvenance && !requiresTikTokProvenance || (
     payload.affiliateUrlSource === 'provider_api'
     && payload.affiliateUrlProvider === 'accesstrade'
-    && payload.affiliateUrlSourceEndpoint === 'datafeed'
+    && (requiresTikTokProvenance
+      ? payload.affiliateUrlSourceEndpoint === 'tiktok_create_link_v2'
+      : payload.affiliateUrlSourceEndpoint === 'datafeed')
     && Boolean(payload.affiliateUrlSourceField)
-    && (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(payload.affiliateUrlSourceField || '')
+    && (requiresTikTokProvenance
+      ? ['aff_short_url', 'aff_url'].includes(payload.affiliateUrlSourceField || '')
+      : (ACCESS_TRADE_AFFILIATE_URL_FIELDS as readonly string[]).includes(payload.affiliateUrlSourceField || ''))
   );
   if (!canonicalProvenanceValid) minimumBlockers.push('CANONICAL_PROVENANCE_REQUIRED');
   if (!affiliateProvenanceValid) minimumBlockers.push('AFFILIATE_PROVENANCE_REQUIRED');
@@ -986,7 +1636,10 @@ async function reviewAutonomousCandidate(
   }
 
   const merchantUrl = payload.canonicalProductUrl || payload.originalUrl;
-  const merchantCircuit = await getDomainCircuitDecision(merchantUrl, Date.now(), { ...probeOptions, role: 'MERCHANT' });
+  const merchantCircuitKey = payload.merchantIdentity;
+  const merchantCircuit = await getDomainCircuitDecision(merchantUrl, Date.now(), {
+    ...probeOptions, role: 'MERCHANT', identityKey: merchantCircuitKey,
+  });
   if (!merchantCircuit.allowed) {
     const nextRetryAt = merchantCircuit.retryAt || new Date(Date.now() + 30 * 60_000).toISOString();
     const partialEvidence = affiliateOnlySourceEvidence(affiliateProbe);
@@ -1008,7 +1661,7 @@ async function reviewAutonomousCandidate(
   if (!fixture) counters.networkChecks += 1;
   throwIfExecutionAborted(execution.signal);
   const merchantCircuitState = await recordDomainHealth(merchantUrl, circuitStatusForProbe(merchantProbe), Date.now(), {
-    ...probeOptions, role: 'MERCHANT', retryAfter: merchantProbe.retryAfter,
+    ...probeOptions, role: 'MERCHANT', retryAfter: merchantProbe.retryAfter, identityKey: merchantCircuitKey,
   });
   const sourceEvidence = sourceEvidenceFor(affiliateProbe, merchantProbe);
   if (merchantProbe.classification !== 'HEALTHY') {
@@ -1018,7 +1671,7 @@ async function reviewAutonomousCandidate(
       await finishCandidate(item.id, {
         status: 'discarded', delayReason: reasonCode, terminalReason: reasonCode, retryable: false,
         lastProbeAt: merchantProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
-        merchantDomain: merchantProbe.merchantDomain, sourceEvidence,
+        merchantDomain: merchantCircuitKey || merchantProbe.merchantDomain, sourceEvidence,
       });
       counters.discarded += 1;
       return { status: 'discarded', terminal: true, reason: reasonCode, productId: existing?.id };
@@ -1028,7 +1681,7 @@ async function reviewAutonomousCandidate(
     await finishCandidate(item.id, {
       status: 'delayed', delayReason: reasonCode, retryable: true, nextAttemptAt: nextRetryAt,
       lastProbeAt: merchantProbe.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
-      merchantDomain: merchantProbe.merchantDomain, sourceEvidence,
+      merchantDomain: merchantCircuitKey || merchantProbe.merchantDomain, sourceEvidence,
     });
     sourceReliabilityEvent('merchant_temporarily_unreachable', {
       provider: item.source, campaign: payload.campaignName, domain: merchantProbe.merchantDomain,
@@ -1040,6 +1693,8 @@ async function reviewAutonomousCandidate(
   const classifiedKind = kindForRecordType(classification.recordType);
   const mapped = mapAccessTradeToProduct({
     id: item.sourceId,
+    provider: 'accesstrade',
+    source: item.source,
     name: payload.title,
     description: payload.description || '',
     kind: classifiedKind,
@@ -1068,13 +1723,19 @@ async function reviewAutonomousCandidate(
     category: payload.category || '',
     campaignName: payload.campaignName,
     commissionRate: payload.commissionRate,
+    commissionAmount: payload.commissionAmount,
+    unitsSold: payload.unitsSold,
     sourceItemId: payload.sourceItemId || item.sourceId,
     sourceEndpoint: payload.sourceEndpoint,
     fetchedAt: payload.sourceFetchedAt,
     merchant: payload.merchant,
     merchantDomain: payload.merchantDomain,
+    merchantIdentity: payload.merchantIdentity,
     shopId: payload.shopId,
     shopName: payload.shopName,
+    categoryId: payload.categoryId,
+    categoryChain: payload.categoryChain,
+    available: payload.available,
     sku: payload.sku,
     providerUpdatedAt: payload.providerUpdatedAt,
     normalizationIssues: payload.sourceNormalizationIssues as NormalizedAccessTradeItem['normalizationIssues'],
@@ -1335,7 +1996,7 @@ async function reviewAutonomousCandidate(
       terminalReason: status === 'discarded' ? healthReasonCodes[0] || reasons[0] : undefined,
       retryable: status === 'delayed', lastProbeAt: sourceEvidence.checkedAt,
       affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
-      merchantDomain: merchantProbe.merchantDomain,
+      merchantDomain: merchantCircuitKey || merchantProbe.merchantDomain,
       sourceEvidence,
     });
     return { status, terminal: status !== 'delayed', nextRetryAt, reason: reasons.join(','), productId: product.id };
@@ -1570,7 +2231,7 @@ async function reviewAutonomousCandidate(
   if (publicationGateReasons.length) {
     sourceReliabilityEvent('safe_publish_blocked', {
       provider: item.source, campaign: payload.campaignName,
-      domain: merchantProbe.merchantDomain, reasonCode: publicationGateReasons.join(','),
+      domain: merchantCircuitKey || merchantProbe.merchantDomain, reasonCode: publicationGateReasons.join(','),
       operationId, jobId: item.durableJobId,
     });
   }
@@ -1579,7 +2240,7 @@ async function reviewAutonomousCandidate(
   await finishCandidate(item.id, {
     status: 'completed', delayReason: ready ? undefined : uniqueReadinessReasons.join(','), retryable: false,
     lastProbeAt: sourceEvidence.checkedAt, affiliateGatewayDomain: affiliateProbe.affiliateGatewayDomain,
-    merchantDomain: merchantProbe.merchantDomain, sourceEvidence,
+    merchantDomain: merchantCircuitKey || merchantProbe.merchantDomain, sourceEvidence,
   });
   return { status: 'completed', terminal: true, reason: ready ? publicationGateReasons[0] : uniqueReadinessReasons.join(','), productId: product.id };
 }

@@ -199,7 +199,7 @@ export function parsePublicProductQuery(params: URLSearchParams): PublicProductQ
 }
 
 function sourceLabel(product: Product): string {
-  return ({ manual: 'Nhập thủ công', accesstrade: 'AccessTrade', shopee_affiliate: 'Shopee Affiliate', tiktok_shop: 'TikTok Shop', lazada_affiliate: 'Lazada Affiliate', csv: 'CSV', other: 'Nguồn đối tác' } as Record<string, string>)[product.source] || 'Nguồn đối tác';
+  return ({ manual: 'Nhập thủ công', accesstrade: 'AccessTrade', accesstrade_tiktok_shop: 'TikTok Shop qua AccessTrade', shopee_affiliate: 'Shopee Affiliate', tiktok_shop: 'TikTok Shop', lazada_affiliate: 'Lazada Affiliate', csv: 'CSV', other: 'Nguồn đối tác' } as Record<string, string>)[product.source] || 'Nguồn đối tác';
 }
 
 function price(product: Product): number | undefined {

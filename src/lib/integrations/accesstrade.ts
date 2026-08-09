@@ -247,6 +247,10 @@ export interface AccessTradeSearchDiagnostics {
 
 export interface NormalizedAccessTradeItem {
   id: string;
+  provider?: 'accesstrade';
+  source?: Product['source'];
+  sourceLabel?: string;
+  sourceLabelVi?: string;
   name: string;
   description: string;
   kind: ProductKind;
@@ -258,7 +262,7 @@ export interface NormalizedAccessTradeItem {
   canonicalProductUrl?: string;
   canonicalUrlSource?: 'provider_api' | 'none';
   canonicalUrlProvider?: 'accesstrade';
-  canonicalUrlSourceEndpoint?: 'datafeed' | 'offers';
+  canonicalUrlSourceEndpoint?: 'datafeed' | 'offers' | 'tiktok_product_feed_v2';
   canonicalUrlSourceField?: string;
   canonicalUrlFetchedAt?: string;
   canonicalUrlStatus?: 'available' | 'unavailable';
@@ -266,7 +270,7 @@ export interface NormalizedAccessTradeItem {
   affiliateDestinationUrl?: string;
   affiliateUrlSource?: 'provider_api' | 'none';
   affiliateUrlProvider?: 'accesstrade';
-  affiliateUrlSourceEndpoint?: 'datafeed' | 'offers';
+  affiliateUrlSourceEndpoint?: 'datafeed' | 'offers' | 'tiktok_create_link_v2';
   affiliateUrlSourceField?: string;
   affiliateUrlCampaignId?: string;
   affiliateUrlFetchedAt?: string;
@@ -278,17 +282,24 @@ export interface NormalizedAccessTradeItem {
   category: string;
   merchant?: string;
   commissionRate?: number;
+  commissionAmount?: number;
+  unitsSold?: number;
   campaignName?: string;
   merchantDomain?: string;
+  merchantIdentity?: string;
   shopId?: string;
   shopName?: string;
+  categoryId?: string;
+  categoryName?: string;
+  categoryChain?: Array<{ id: string; name: string; parentId?: string; leaf: boolean }>;
+  available?: boolean;
   sku?: string;
   providerUpdatedAt?: string;
   discount?: number | string;
   discountAmount?: number | string;
   discountRate?: number | string;
   discountStatus?: number | string;
-  sourceEndpoint?: 'datafeed' | 'offers';
+  sourceEndpoint?: 'datafeed' | 'offers' | 'tiktok_product_feed_v2';
   sourceItemId?: string;
   fetchedAt?: string;
   rawSourceKind: string;
@@ -1926,6 +1937,7 @@ export function mapAccessTradeToProduct(
   const status = shouldArchive ? 'archived' : 'needs_review';
   const normalizationIssues = new Set(item.normalizationIssues || []);
 
+  const tiktokV2 = item.source === 'accesstrade_tiktok_shop';
   const product = {
     title: item.name,
     description: item.description || undefined,
@@ -1933,10 +1945,10 @@ export function mapAccessTradeToProduct(
     kind: item.kind,
     sourceItemKind: item.kind,
 
-    platform: 'accesstrade',
-    source: 'accesstrade',
-    dataSource: 'accesstrade',
-    importedFrom: 'accesstrade',
+    platform: tiktokV2 ? 'tiktok_shop' as const : 'accesstrade' as const,
+    source: tiktokV2 ? 'accesstrade_tiktok_shop' as const : 'accesstrade' as const,
+    dataSource: tiktokV2 ? 'accesstrade_tiktok_shop' : 'accesstrade',
+    importedFrom: tiktokV2 ? 'accesstrade_tiktok_shop' : 'accesstrade',
     sourceType: 'affiliate',
     rawSourceKind: item.rawSourceKind,
 
@@ -1966,7 +1978,7 @@ export function mapAccessTradeToProduct(
     url: item.canonicalProductUrl || item.originalUrl || undefined,
 
     imageUrl: item.imageUrl || undefined,
-    gallery: [],
+    gallery: item.imageCandidates.filter(candidate => candidate !== item.imageUrl).slice(0, 10),
 
     price: item.price || undefined,
     salePrice: item.salePrice || undefined,
@@ -1988,6 +2000,9 @@ export function mapAccessTradeToProduct(
     affiliateSource: 'accesstrade',
     campaignName: item.campaignName || undefined,
     commissionNote: item.commissionRate ? `Hoa hồng: ${item.commissionRate}%` : undefined,
+    commissionRate: item.commissionRate,
+    commissionAmount: item.commissionAmount,
+    unitsSold: item.unitsSold,
 
     riskLevel: item.needsVerification ? 'unknown' : 'low',
     status,
@@ -1999,8 +2014,12 @@ export function mapAccessTradeToProduct(
     sourceFetchedAt: item.fetchedAt,
     merchant: item.merchant,
     merchantDomain: item.merchantDomain,
+    merchantIdentity: item.merchantIdentity,
     shopId: item.shopId,
     shopName: item.shopName,
+    categoryId: item.categoryId,
+    categoryChain: item.categoryChain,
+    available: item.available,
     sku: item.sku,
     providerUpdatedAt: item.providerUpdatedAt,
     sourceNormalizationIssues: item.normalizationIssues || [],
@@ -2046,6 +2065,14 @@ export function mapAccessTradeToProduct(
 
 async function getAccessTradeKey(): Promise<string | null> {
   return (await resolveAccessTradeCredential()).value;
+}
+
+/**
+ * Server-only credential accessor shared by AccessTrade API boundaries.
+ * Callers must never return, persist, or log this value.
+ */
+export async function getAccessTradeServerCredential(): Promise<string | null> {
+  return getAccessTradeKey();
 }
 
 function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {

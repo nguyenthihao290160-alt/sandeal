@@ -16,7 +16,7 @@ export const dynamic = 'force-dynamic';
 
 const PRODUCT_PLATFORMS = new Set<ProductPlatform>(['shopee', 'tiktok_shop', 'lazada', 'accesstrade', 'website', 'other']);
 const PRODUCT_KINDS = new Set<ProductKind>(['product', 'voucher', 'campaign', 'deal', 'store_offer', 'unknown']);
-const PRODUCT_SOURCES = new Set<ProductSource>(['manual', 'accesstrade', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other']);
+const PRODUCT_SOURCES = new Set<ProductSource>(['manual', 'accesstrade', 'accesstrade_tiktok_shop', 'shopee_affiliate', 'tiktok_shop', 'lazada_affiliate', 'csv', 'other']);
 const RISK_LEVELS = new Set<ProductRiskLevel>(['low', 'medium', 'high', 'unknown']);
 
 function validHttpUrl(value: unknown): boolean {
