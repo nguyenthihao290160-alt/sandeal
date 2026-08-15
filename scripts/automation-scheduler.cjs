@@ -151,11 +151,11 @@ process.on('SIGTERM', () => requestShutdown('SIGTERM'));
           requestShutdown('ROLE_LOST');
           break;
         }
-        const { guardian, automation, intelligence } = cycle;
-        const state = `${guardian.status}:${automation.status}:${intelligence.status}`;
+        const { guardian, reconciliation, automation, intelligence } = cycle;
+        const state = `${guardian.status}:${reconciliation.status}:${automation.status}:${intelligence.status}`;
         const now = Date.now();
-        if (once || state !== previousState || guardian.status === 'scheduled' || automation.status === 'scheduled' || intelligence.scheduled > 0 || now - lastLogAt >= 5 * 60_000) {
-          log('scheduler_tick', { guardian, automation, intelligence });
+        if (once || state !== previousState || guardian.status === 'scheduled' || reconciliation.status === 'scheduled' || automation.status === 'scheduled' || intelligence.scheduled > 0 || now - lastLogAt >= 5 * 60_000) {
+          log('scheduler_tick', { guardian, reconciliation, automation, intelligence });
           lastLogAt = now;
           previousState = state;
         }

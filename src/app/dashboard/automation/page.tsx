@@ -1,8 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
 import { buildIdempotencyKey } from '@/lib/automation/idempotency';
+import type { AutomationJobListItem } from '@/lib/automation/types';
+import { presentAutomationJob } from '@/lib/dashboard/v4';
 import styles from '../operations.module.css';
 
 type RunLog = {
@@ -43,6 +46,10 @@ type SafeRunLifecycle = {
 };
 type DialogAction = 'enable_schedule' | 'save_settings';
 type ToastState = { tone: 'success' | 'warning' | 'error' | 'info'; message: string };
+type ActiveJobsEnvelope = {
+  ok: boolean;
+  data?: { items: AutomationJobListItem[] };
+};
 
 function formatAge(value: number | null | undefined): string {
   if (value === null || value === undefined) return 'Chưa có';
@@ -87,6 +94,8 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
 export default function AutomationDashboard() {
   const [state, setState] = useState<ScheduleState | null>(null);
   const [truth, setTruth] = useState<AutomationTruth | null>(null);
+  const [activeJobs, setActiveJobs] = useState<AutomationJobListItem[] | null>(null);
+  const [activeJobsUnavailable, setActiveJobsUnavailable] = useState(false);
   const [draft, setDraft] = useState({ intervalHours: 6, maxItemsPerRun: 10, maxItemsPerDay: 30 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -110,9 +119,15 @@ export default function AutomationDashboard() {
       setError('');
     }
     try {
-      const [scheduleResponse, truthResponse] = await Promise.all([
+      const [scheduleResponse, truthResponse, activeJobsBody] = await Promise.all([
         fetchWithTimeout('/api/ai-bots/schedule', { cache: 'no-store' }),
         fetchWithTimeout('/api/automation/truth', { cache: 'no-store' }),
+        fetchWithTimeout('/api/automation/jobs?active=true&page=1&pageSize=12', { cache: 'no-store' })
+          .then(async response => {
+            const body = await response.json() as ActiveJobsEnvelope;
+            return response.ok && body.ok && body.data ? body : null;
+          })
+          .catch(() => null),
       ]);
       const scheduleBody = await scheduleResponse.json();
       const truthBody = await truthResponse.json();
@@ -121,6 +136,8 @@ export default function AutomationDashboard() {
       if (!mountedRef.current) return;
       setState(scheduleBody);
       setTruth(truthBody.data);
+      setActiveJobs(current => activeJobsBody?.data?.items || current);
+      setActiveJobsUnavailable(activeJobsBody === null);
       setDraft({ intervalHours: scheduleBody.settings.intervalHours, maxItemsPerRun: scheduleBody.settings.maxItemsPerRun, maxItemsPerDay: scheduleBody.settings.maxItemsPerDay });
     } catch (cause) {
       if (mountedRef.current) setError(cause instanceof Error ? cause.message : 'Không thể tải trang tự động hóa.');
@@ -285,10 +302,35 @@ export default function AutomationDashboard() {
       <div><h1>Tự động hóa</h1><p>Quản lý lịch xử lý có giới hạn, tạo tác vụ chạy thử và theo dõi trạng thái bằng dữ liệu backend.</p></div>
       <div className={styles.actions}><button className={styles.button} onClick={() => void load()} disabled={loading}><DashboardIcon name="refresh" size={16} />Làm mới</button></div>
     </header>
+    <nav className={styles.sectionNav} aria-label="Khu vực Tự động hóa">
+      <a href="#automation-running">Đang chạy</a>
+      <a href="#automation-history">Lịch sử</a>
+      <a href="#automation-schedule">Lịch chạy</a>
+      <Link href="/dashboard/ai-bots">Hàng chờ</Link>
+      <a href="#automation-advanced">Nâng cao</a>
+    </nav>
     {error && <div className={`${styles.notice} ${styles.errorBox}`} role="alert">{error} Vui lòng kiểm tra kết nối rồi thử lại.</div>}
     {loading && !state && <div className={styles.notice}>Đang tải trạng thái lịch tự động...</div>}
     {state && <>
-      <section className={styles.grid}>
+      <section className={styles.panel} id="automation-running">
+        <div className={styles.panelHeader}><div><h2><DashboardIcon name="worker" size={19} />Workflow đang hoạt động</h2><p>Trạng thái dễ hiểu từ compact durable job read model; job ID và reason code nằm trong chi tiết kỹ thuật.</p></div><Link href="/dashboard/ai-bots">Mở hàng chờ nâng cao</Link></div>
+        {activeJobsUnavailable && <div className={styles.notice}>{activeJobs === null
+          ? 'Không thể xác minh danh sách workflow đang hoạt động. Lịch và Runtime Truth bên dưới vẫn dùng snapshot riêng.'
+          : 'Không thể làm mới workflow đang hoạt động. Dữ liệu bên dưới là snapshot gần nhất đã tải thành công.'}</div>}
+        {activeJobs === null ? (!activeJobsUnavailable && <div className={styles.notice}>Đang tải workflow đang hoạt động...</div>)
+          : activeJobs.length ? <div className={styles.activeJobGrid}>{activeJobs.map(job => {
+            const presentation = presentAutomationJob(job);
+            return <article className={styles.activeJobCard} data-tone={presentation.tone} key={job.id}>
+              <div className={styles.activeJobHeading}><div><span>{presentation.workflowLabel}</span><strong>{presentation.statusLabel}</strong></div><span className={styles.activeJobTone}>{presentation.humanActionRequired ? 'Cần bạn xử lý' : 'SanDeal tự xử lý'}</span></div>
+              <div className={styles.activeJobProgress}><span style={{ width: `${Math.max(0, Math.min(100, job.progress?.percentage || 0))}%` }} /></div>
+              <dl><div><dt>Tiến độ</dt><dd>{presentation.progressLabel}</dd></div><div><dt>Bắt đầu</dt><dd>{formatTime(job.startedAt || job.queuedAt)}</dd></div><div><dt>Attempt</dt><dd>{job.attemptCount}/{job.maxAttempts}</dd></div>{job.nextRetryAt && <div><dt>Thử lại lúc</dt><dd>{formatTime(job.nextRetryAt)}</dd></div>}</dl>
+              <p>{presentation.nextAction}</p>
+              <details><summary>Xem chi tiết kỹ thuật</summary><code>{job.id} · {job.type} · {job.status} · {presentation.technicalReason}</code></details>
+            </article>;
+          })}</div> : <div className={styles.empty}><h3>Không có workflow đang hoạt động</h3><p>Snapshot hiện tại không có job pending, running, retry, waiting hoặc paused.</p></div>}
+      </section>
+
+      <section className={styles.grid} id="automation-schedule">
         <article className={`${styles.panel} ${schedulerStatus === 'active' ? styles.successPanel : schedulerStatus === 'paused' ? styles.warningPanel : schedulerStatus === 'stale' ? styles.dangerPanel : styles.infoPanel}`}>
           <div className={styles.panelHeader}><h2><DashboardIcon name="scheduler" size={19} />Lịch chạy tự động</h2><span className={`${styles.badge} ${schedulerStatus === 'active' ? styles.success : schedulerStatus === 'stale' ? styles.error : styles.warning}`}>{STATUS_LABELS[schedulerStatus] || 'Không thể xác minh'}</span></div>
           <div className={styles.healthList}>
@@ -325,7 +367,7 @@ export default function AutomationDashboard() {
         </article>
       </section>
 
-      {truth && <section className={`${styles.panel} ${truth.inconsistencies.length ? styles.warningPanel : styles.successPanel}`}>
+      {truth && <section className={`${styles.panel} ${truth.inconsistencies.length ? styles.warningPanel : styles.successPanel}`} id="automation-advanced">
         <div className={styles.panelHeader}><h2><DashboardIcon name="warning" size={19} />Operational inconsistencies</h2><span className={styles.badge}>{truth.inconsistencies.length}</span></div>
         {truth.inconsistencies.length ? <div className={styles.healthList}>{truth.inconsistencies.map(item => <div className={styles.healthRow} key={item.code}><span><strong>{item.code}</strong><br />{item.message}</span><code>{JSON.stringify(item.evidence)}</code></div>)}</div> : <div className={styles.notice}>Không phát hiện mâu thuẫn trong snapshot hiện tại.</div>}
       </section>}
@@ -340,7 +382,7 @@ export default function AutomationDashboard() {
         <div className={styles.locked}><DashboardIcon name="lock" size={16} /> Được bảo vệ bởi chính sách hệ thống và không thể bỏ qua từ trình duyệt.</div>
       </section>
 
-      <section className={styles.panel}>
+      <section className={styles.panel} id="automation-safe-run">
         <div className={styles.panelHeader}><h2><DashboardIcon name="task" size={19} />Lần chạy thử mới nhất</h2><button className={styles.button} onClick={() => void load()} disabled={loading}>Làm mới trạng thái</button></div>
         {latestSafeRun ? <div className={styles.safeRunCard}><div><span>Trạng thái</span><strong className={`${styles.badge} ${latestSafeRun.status === 'SUCCEEDED' ? styles.success : latestSafeRun.status === 'FAILED' ? styles.error : styles.info}`}>{SAFE_RUN_LABELS[latestSafeRun.status]}</strong></div><div><span>Job ID</span><code>{latestSafeRun.jobId}</code></div><div><span>Tạo / vào hàng chờ</span><strong>{formatTime(latestSafeRun.createdAt)} · {formatTime(latestSafeRun.queuedAt)}</strong></div><div><span>Bắt đầu / hoàn tất</span><strong>{formatTime(latestSafeRun.startedAt)} · {formatTime(latestSafeRun.completedAt)}</strong></div><div><span>Kết quả</span><strong>{latestSafeRun.result.claimed} nhận · {latestSafeRun.result.succeeded} thành công · {latestSafeRun.result.failed} lỗi · {latestSafeRun.result.skipped} bỏ qua</strong></div>{latestSafeRun.error && <div><span>Nguyên nhân</span><strong>{latestSafeRun.error}</strong></div>}</div> : <div className={styles.empty}><p>Chưa có lần chạy thử an toàn.</p></div>}
         {safeRunPollingTimedOut && effectiveTrackedSafeRunId && !latestTrackedRunTerminal && (
@@ -350,7 +392,7 @@ export default function AutomationDashboard() {
         )}
       </section>
 
-      <section className={styles.panel}>
+      <section className={styles.panel} id="automation-history">
         <div className={styles.panelHeader}><h2><DashboardIcon name="task" size={19} />Nhật ký pipeline gần đây</h2></div>
         {state.recentRuns.length ? <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Thời gian</th><th>Trạng thái</th><th>Nguồn khởi chạy</th><th>Kết quả</th><th>Chi tiết</th></tr></thead><tbody>{state.recentRuns.map(run => <tr key={run.id}><td>{formatTime(run.startedAt)}</td><td><span className={`${styles.badge} ${run.status === 'completed' ? styles.success : run.status === 'failed' ? styles.error : styles.info}`}>{RUN_LABELS[run.status] || 'Không thể xác minh'}</span></td><td>{TRIGGER_LABELS[run.trigger] || 'Hệ thống'}</td><td>{run.summary ? `${run.summary.saved || 0} đã lưu, ${run.summary.errors || run.summary.skipped || 0} lỗi` : 'Chưa có số liệu'}</td><td>{run.message || run.error || 'Không có chi tiết'}</td></tr>)}</tbody></table></div> : <div className={styles.empty}><span className={styles.emptyIcon}><DashboardIcon name="task" size={22} /></span><h3>Chưa có nhật ký chạy</h3><p>Tạo một tác vụ chạy thử an toàn để xác minh hàng chờ mà không thay đổi dữ liệu sản phẩm.</p><div className={styles.emptyActions}><button className={styles.button} onClick={() => void createDryRun()} disabled={busy}>Chạy thử an toàn</button></div></div>}
       </section>

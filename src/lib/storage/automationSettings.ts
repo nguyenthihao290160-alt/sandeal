@@ -185,7 +185,6 @@ function sanitizeSourceControlList(value: unknown, domain: boolean): string[] {
 }
 
 export async function getAutomationSettings(): Promise<AutomationSettings> {
-  await ensureDataDir();
   try {
     const raw = await fs.readFile(getSettingsFile(), 'utf-8');
     const parsed = JSON.parse(raw);

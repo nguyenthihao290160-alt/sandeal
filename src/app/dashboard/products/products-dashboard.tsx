@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BulkProductActions } from '@/components/dashboard/bulk-product-actions';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
+import { ProductStudioDrawer } from '@/components/dashboard/product-studio-drawer';
 import { SavedViewsToolbar } from '@/components/dashboard/saved-views-toolbar';
 import { TaskStatus } from '@/components/dashboard/task-status';
 import { SafeProductImage } from '@/components/safe-product-image';
@@ -28,8 +29,11 @@ const STATUS_LABELS: Record<string, string> = { draft: 'Bản nháp', needs_revi
 const SAFE_LABELS: Record<string, string> = { qualified: 'Đủ điều kiện', needs_review: 'Chờ phê duyệt', blocked: 'Bị chặn', published: 'Đã đăng', archived: 'Đã lưu trữ' };
 const RISK_LABELS: Record<string, string> = { low: 'Rủi ro thấp', medium: 'Rủi ro trung bình', high: 'Rủi ro cao', unknown: 'Chưa đánh giá' };
 const PIPELINE_LABELS: Record<string, string> = { classified: 'Đã phân loại sản phẩm', link_valid: 'Link hợp lệ', image_valid: 'Ảnh hợp lệ', price_valid: 'Giá hợp lệ', deduped: 'Đã chống trùng', ready: 'Sẵn sàng đăng', published: 'Đang công khai', blocked: 'Đang bị chặn' };
-const FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'pipelineStage', 'sort', 'page', 'pageSize'] as const;
-const SAVED_FILTER_KEYS = ['q', 'platform', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'pipelineStage'] as const;
+const WORKSPACE_STAGE_LABELS: Record<string, string> = { discovered: 'Mới phát hiện', checking: 'Đang xử lý', review: 'Cần xem lại', safe_publish: 'Đủ điều kiện', public: 'Đã đăng', unclassified: 'Chưa phân loại' };
+const FUNNEL_LABELS: Record<string, string> = { workspace: 'Góc làm việc văn phòng', travel: 'Hành trang du lịch', gifts: 'Quà tặng sinh nhật', technology: 'Đồ công nghệ đáng mua', family: 'Deal gia đình', personal_care: 'Chăm sóc cá nhân', unclassified: 'Chưa phân loại' };
+const SOURCE_LABELS: Record<string, string> = { manual: 'Thủ công', accesstrade: 'AccessTrade', accesstrade_tiktok_shop: 'AccessTrade TikTok Shop', shopee_affiliate: 'Shopee Affiliate', tiktok_shop: 'TikTok Shop', lazada_affiliate: 'Lazada Affiliate', csv: 'CSV', other: 'Khác' };
+const FILTER_KEYS = ['q', 'platform', 'source', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'pipelineStage', 'workspaceStage', 'funnel', 'minScore', 'sort', 'page', 'pageSize'] as const;
+const SAVED_FILTER_KEYS = ['q', 'platform', 'source', 'status', 'kind', 'safePublishStatus', 'riskLevel', 'pipelineStage', 'workspaceStage', 'funnel', 'minScore'] as const;
 const PRODUCT_COLUMNS = ['title', 'kind', 'source', 'status', 'price', 'riskLevel'];
 type SafeAutomationJob = Omit<AutomationJob, 'payload'>;
 
@@ -98,6 +102,31 @@ function ProductActions({ item, busy, onAction }: { item: DashboardProductItem; 
   );
 }
 
+function ProductStudioCard({ item, selected, busy, now, onSelect, onOpen, onAction }: {
+  item: DashboardProductItem;
+  selected: boolean;
+  busy: string | null;
+  now: number | null;
+  onSelect: () => void;
+  onOpen: () => void;
+  onAction: (action: 'approve' | 'archive', item: DashboardProductItem) => void;
+}) {
+  const promotionEnd = Date.parse(item.promotionExpiresAt || '');
+  const verifiedPromotionActive = now !== null && Number.isFinite(promotionEnd) && promotionEnd > now;
+  return <article className={styles.studioCard}>
+    <div className={styles.studioCardMedia}><SafeImage item={item} /><label><input type="checkbox" checked={selected} onChange={onSelect} aria-label={`Chọn ${item.title}`} /><span className={styles.srOnly}>Chọn sản phẩm</span></label>{verifiedPromotionActive && <span className={styles.verifiedUrgency}>Có hạn đến {new Date(promotionEnd).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</span>}</div>
+    <div className={styles.studioCardBody}>
+      <div className={styles.cardBadges}><Badge>{PLATFORM_LABELS[item.platform]}</Badge><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{WORKSPACE_STAGE_LABELS[item.workspaceStage]}</Badge></div>
+      <button type="button" className={styles.studioCardTitle} onClick={onOpen}>{item.title}</button>
+      <p className={styles.studioCardMeta}>{item.shop || 'Chưa có shop'} · {SOURCE_LABELS[item.source] || item.source}</p>
+      <strong className={styles.studioCardPrice}>{formatPrice(item.price)}</strong>
+      <div className={styles.studioSignals}><span>Deal <b>{item.scores.deal ?? '—'}</b></span><span>Opportunity <b>{item.scores.opportunity ?? '—'}</b></span><span>Commission <b>{item.commission.amount === null ? '—' : formatPrice(item.commission.amount)}</b></span></div>
+      <span className={styles.funnelTag}>{item.funnel.label}</span>
+      <ProductActions item={item} busy={busy} onAction={onAction} />
+    </div>
+  </article>;
+}
+
 export default function ProductsDashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -110,6 +139,8 @@ export default function ProductsDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(() => searchParams.get('open'));
+  const [currentTime, setCurrentTime] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -128,6 +159,7 @@ export default function ProductsDashboard() {
   const [sourceBusy, setSourceBusy] = useState(false);
   const [sourceForm, setSourceForm] = useState({ name: '', url: '', platform: 'website', kind: 'product', enabled: true, scanSchedule: '', description: '' });
   const dialogFocusRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
   const connectionsAbortRef = useRef<AbortController | null>(null);
   const itemActionAbortRef = useRef<AbortController | null>(null);
@@ -157,6 +189,13 @@ export default function ProductsDashboard() {
     setRefreshing(true);
     router.replace(`/dashboard/products${nextQuery ? `?${nextQuery}` : ''}`, { scroll: false });
   }, [queryString, router]);
+
+  useEffect(() => {
+    const update = () => setCurrentTime(Date.now());
+    const initialTimer = window.setTimeout(update, 0);
+    const interval = window.setInterval(update, 30_000);
+    return () => { window.clearTimeout(initialTimer); window.clearInterval(interval); };
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -243,6 +282,22 @@ export default function ProductsDashboard() {
       if (connectionsAbortRef.current === controller) connectionsAbortRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    const requestedProduct = searchParams.get('open');
+    const productTimer = requestedProduct
+      ? window.setTimeout(() => setSelectedProductId(requestedProduct), 0)
+      : null;
+    const focusTimer = searchParams.get('focus') === 'search'
+      ? window.setTimeout(() => searchInputRef.current?.focus(), 0)
+      : null;
+    return () => {
+      if (productTimer !== null) window.clearTimeout(productTimer);
+      if (focusTimer !== null) window.clearTimeout(focusTimer);
+    };
+  // queryString is the stable URL dependency; searchParams itself changes identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryString]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -416,6 +471,13 @@ export default function ProductsDashboard() {
   };
 
   const clearFilters = () => { setSearchDraft({ base: '', value: '' }); setError(null); setRefreshing(true); router.replace('/dashboard/products', { scroll: false }); };
+  const closeProductDrawer = useCallback(() => {
+    setSelectedProductId(null);
+    if (!searchParams.get('open')) return;
+    const next = new URLSearchParams(queryString);
+    next.delete('open');
+    router.replace(`/dashboard/products${next.size ? `?${next.toString()}` : ''}`, { scroll: false });
+  }, [queryString, router, searchParams]);
   const openPublic = () => {
     if (!publicUrl) { showToast('info', `${publicMessage} Dữ liệu hiện tại không bị thay đổi. Vui lòng thiết lập địa chỉ trang công khai trong cấu hình phát hành.`); return; }
     window.open(publicUrl, '_blank', 'noopener,noreferrer');
@@ -444,8 +506,8 @@ export default function ProductsDashboard() {
           <span className={styles.pageIcon}><DashboardIcon name="product" size={24} /></span>
           <div>
             <div className={styles.headerMeta}><Badge tone={accessTradeReady ? 'success' : 'warning'}>{accessTradeReady === null ? 'Đang kiểm tra kết nối' : accessTradeReady ? 'Nguồn dữ liệu đã kết nối' : 'Cần thiết lập kết nối'}</Badge>{data && <Badge tone={data.stale ? 'warning' : 'success'}>{data.stale ? 'Dữ liệu health đã cũ' : 'Dữ liệu health còn hạn'}</Badge>}<span>Cập nhật màn hình: {data ? new Date(data.updatedAt).toLocaleString('vi-VN') : 'Chưa có'}</span><span>Snapshot health: {data?.healthSnapshotAt ? new Date(data.healthSnapshotAt).toLocaleString('vi-VN') : 'Chưa có'}</span></div>
-            <h1>Kết quả bot</h1>
-            <p>Theo dõi sản phẩm đã quét, kết quả kiểm tra an toàn và trạng thái đăng từ dữ liệu backend hiện tại.</p>
+            <h1>Product Studio Pro</h1>
+            <p>Không gian sản phẩm compact cho lifecycle, review, affiliate và cơ hội monetization từ dữ liệu thật.</p>
           </div>
         </div>
         <button type="button" className={styles.primaryButton} onClick={() => { setDryRun(true); setOperationDialog('source_scan'); }}><DashboardIcon name="product" size={16} />Quét nguồn sản phẩm</button>
@@ -475,25 +537,30 @@ export default function ProductsDashboard() {
       {!loading && !error && summary && (
         <>
           <section className={styles.primaryMetrics} aria-label="Tổng quan">
-            <article className={styles.metricIndigo}><span className={styles.metricLabel}><i><DashboardIcon name="product" size={20} /></i>{data?.scope === 'FILTERED_PRODUCTS' ? 'Sản phẩm trong bộ lọc' : 'Tổng sản phẩm toàn hệ thống'}</span><strong>{summary.totalItems}</strong></article>
-            <article className={styles.metricGreen}><span className={styles.metricLabel}><i><DashboardIcon name="check" size={20} /></i>Sản phẩm đủ điều kiện</span><strong>{summary.qualifiedForPublish}</strong></article>
-            <article className={styles.metricAmber}><span className={styles.metricLabel}><i><DashboardIcon name="approval" size={20} /></i>Sản phẩm cần xem xét</span><strong>{summary.needsReview}</strong></article>
-            <article className={styles.metricRed}><span className={styles.metricLabel}><i><DashboardIcon name="warning" size={20} /></i>Tổng issue hiện hành</span><strong>{summary.issueOccurrences}</strong><small className={styles.metricHelp}>{summary.affectedProducts} sản phẩm bị ảnh hưởng; issue đã dedupe theo sản phẩm nhưng một sản phẩm có thể có nhiều loại issue.</small></article>
+            <article className={styles.metricIndigo}><span className={styles.metricLabel}><i><DashboardIcon name="product" size={20} /></i>Đã tìm thấy</span><strong>{summary.totalItems}</strong><small className={styles.metricHelp}>{data?.scope === 'FILTERED_PRODUCTS' ? 'Trong bộ lọc hiện tại' : 'Trong phạm vi sản phẩm hiện tại'}</small></article>
+            <article className={styles.metricAmber}><span className={styles.metricLabel}><i><DashboardIcon name="approval" size={20} /></i>Cần xem lại</span><strong>{summary.needsReview}</strong></article>
+            <article className={styles.metricGreen}><span className={styles.metricLabel}><i><DashboardIcon name="check" size={20} /></i>Đủ điều kiện</span><strong>{summary.qualifiedForPublish}</strong></article>
+            <article className={styles.metricPurple}><span className={styles.metricLabel}><i><DashboardIcon name="external" size={20} /></i>Đã đăng</span><strong>{summary.published}</strong></article>
           </section>
           <section className={styles.detailMetrics}>
             <div className={styles.categoryPanel}><h2><DashboardIcon name="product" size={18} />Phân loại dữ liệu</h2><dl><div><dt>Sản phẩm thật</dt><dd>{summary.realProducts}</dd></div><div><dt>Ưu đãi cửa hàng</dt><dd>{summary.shopOffers}</dd></div><div><dt>Mã giảm giá (voucher)</dt><dd>{summary.vouchers}</dd></div><div><dt>Chiến dịch</dt><dd>{summary.campaigns}</dd></div><div><dt>Không phải sản phẩm</dt><dd>{summary.rejectedItems}</dd></div></dl></div>
             <div className={styles.publishPanel}><h2><DashboardIcon name="external" size={18} />Quy trình đăng</h2><dl><div><dt>Sản phẩm ứng viên đăng</dt><dd>{summary.publishCandidates}</dd></div><div><dt>Sản phẩm đã đăng</dt><dd>{summary.published}</dd></div><div><dt>Sản phẩm bị chặn</dt><dd>{summary.blocked}</dd></div></dl></div>
-            <div className={styles.qualityPanel}><h2><DashboardIcon name="health" size={18} />Chất lượng dữ liệu</h2><dl><div><dt>Sản phẩm có vấn đề link</dt><dd>{summary.linkIssueProducts}</dd></div><div><dt>Link hỏng đã xác nhận</dt><dd>{summary.brokenLinks}</dd></div><div><dt>Sản phẩm có vấn đề ảnh</dt><dd>{summary.imageIssueProducts}</dd></div><div><dt>Ảnh hỏng đã xác nhận</dt><dd>{summary.brokenImages}</dd></div><div><dt>Sản phẩm thiếu giá</dt><dd>{summary.missingPrice}</dd></div><div><dt>Đã lưu trữ</dt><dd>{summary.archived}</dd></div></dl></div>
+            <div className={`${styles.qualityPanel} ${summary.linkIssueProducts + summary.imageIssueProducts + summary.missingPrice > 0 ? styles.metricRed : ''}`}><h2><DashboardIcon name="health" size={18} />Chất lượng dữ liệu</h2><dl><div><dt>Sản phẩm có vấn đề link</dt><dd>{summary.linkIssueProducts}</dd></div><div><dt>Link hỏng đã xác nhận</dt><dd>{summary.brokenLinks}</dd></div><div><dt>Sản phẩm có vấn đề ảnh</dt><dd>{summary.imageIssueProducts}</dd></div><div><dt>Ảnh hỏng đã xác nhận</dt><dd>{summary.brokenImages}</dd></div><div><dt>Sản phẩm thiếu giá</dt><dd>{summary.missingPrice}</dd></div><div><dt>Đã lưu trữ</dt><dd>{summary.archived}</dd></div></dl></div>
           </section>
         </>
       )}
 
       {!loading && !error && <section className={styles.resultsSection}>
-        <div className={styles.resultsHeader}><div><h2><DashboardIcon name="filter" size={18} />Bộ lọc và kết quả {activeFilterCount > 0 && <span className={styles.filterCount}>{activeFilterCount} đang áp dụng</span>}</h2><p>{data?.pagination.totalItems || 0} kết quả phù hợp</p></div><div className={styles.viewToggle} aria-label="Kiểu hiển thị"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => selectView('list')}><DashboardIcon name="list" size={16} />Danh sách</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => selectView('grid')}><DashboardIcon name="grid" size={16} />Dạng lưới</button></div></div>
+        <div className={styles.resultsHeader}><div><h2><DashboardIcon name="filter" size={18} />Bộ lọc và kết quả {activeFilterCount > 0 && <span className={styles.filterCount}>{activeFilterCount} đang áp dụng</span>}</h2><p>{data?.pagination.totalItems || 0} kết quả phù hợp</p></div><div className={styles.viewToggle} aria-label="Kiểu hiển thị"><button type="button" aria-pressed={viewMode === 'list'} onClick={() => selectView('list')}><DashboardIcon name="list" size={16} />Danh sách</button><button type="button" aria-pressed={viewMode === 'grid'} onClick={() => selectView('grid')}><DashboardIcon name="grid" size={16} />Board</button></div></div>
+        <div className={styles.funnelChips} aria-label="Smart contextual funnels">
+          <button type="button" aria-pressed={!searchParams.get('funnel')} onClick={() => setFilter('funnel', '')}>Tất cả funnel</button>
+          {Object.entries(FUNNEL_LABELS).map(([value, label]) => <button type="button" key={value} aria-pressed={searchParams.get('funnel') === value} onClick={() => setFilter('funnel', searchParams.get('funnel') === value ? '' : value)}>{label}</button>)}
+        </div>
         <div className={styles.filters}>
           <div className={styles.commonFilters}>
-            <label className={styles.searchField}><span>Tìm kiếm</span><input value={searchInput} onChange={(event) => setSearchDraft({ base: urlSearch, value: event.target.value })} placeholder="Tên, nguồn hoặc nền tảng" /></label>
+            <label className={styles.searchField}><span>Tìm kiếm</span><input ref={searchInputRef} value={searchInput} onChange={(event) => setSearchDraft({ base: urlSearch, value: event.target.value })} placeholder="Tìm sản phẩm, shop, nguồn..." /></label>
             <label><span>Nền tảng</span><select value={searchParams.get('platform') || ''} onChange={(e) => setFilter('platform', e.target.value)}><option value="">Tất cả</option>{Object.entries(PLATFORM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label><span>Nguồn</span><select value={searchParams.get('source') || ''} onChange={(e) => setFilter('source', e.target.value)}><option value="">Tất cả</option>{Object.entries(SOURCE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <label><span>Trạng thái</span><select value={searchParams.get('status') || ''} onChange={(e) => setFilter('status', e.target.value)}><option value="">Tất cả</option>{Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <label><span>Loại dữ liệu</span><select value={searchParams.get('kind') || ''} onChange={(e) => setFilter('kind', e.target.value)}><option value="">Tất cả</option>{Object.entries(TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <button type="button" className={styles.clearButton} onClick={clearFilters} disabled={!activeFilters}>Xóa bộ lọc</button>
@@ -502,8 +569,10 @@ export default function ProductsDashboard() {
             <summary><DashboardIcon name="filter" size={16} />Bộ lọc nâng cao</summary>
             <div className={styles.advancedGrid}>
               <label><span>Đăng an toàn</span><select value={searchParams.get('safePublishStatus') || ''} onChange={(e) => setFilter('safePublishStatus', e.target.value)}><option value="">Tất cả</option>{Object.entries(SAFE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label><span>Product Studio stage</span><select value={searchParams.get('workspaceStage') || ''} onChange={(e) => setFilter('workspaceStage', e.target.value)}><option value="">Tất cả</option>{Object.entries(WORKSPACE_STAGE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label><span>Giai đoạn pipeline</span><select value={searchParams.get('pipelineStage') || ''} onChange={(e) => setFilter('pipelineStage', e.target.value)}><option value="">Tất cả</option>{Object.entries(PIPELINE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label><span>Mức rủi ro</span><select value={searchParams.get('riskLevel') || ''} onChange={(e) => setFilter('riskLevel', e.target.value)}><option value="">Tất cả</option>{Object.entries(RISK_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label><span>Điểm cơ hội tối thiểu</span><select value={searchParams.get('minScore') || ''} onChange={(e) => setFilter('minScore', e.target.value)}><option value="">Tất cả</option><option value="40">40+</option><option value="60">60+</option><option value="80">80+</option></select></label>
               <label><span>Sắp xếp</span><select value={searchParams.get('sort') || 'updated_desc'} onChange={(e) => setFilter('sort', e.target.value)}><option value="updated_desc">Mới cập nhật</option><option value="created_desc">Mới tạo</option><option value="created_asc">Tạo lâu nhất</option><option value="title_asc">Tên A-Z</option><option value="price_desc">Giá cao nhất</option></select></label>
               <label><span>Mỗi trang</span><select value={searchParams.get('pageSize') || '20'} onChange={(e) => setFilter('pageSize', e.target.value)}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
             </div>
@@ -526,13 +595,15 @@ export default function ProductsDashboard() {
         <BulkProductActions productIds={selectedIds} onClear={() => setSelectedIds([])} />
 
         {data && data.items.length === 0 ? <div className={styles.emptyState}><span className={styles.emptyIcon}><DashboardIcon name="product" size={24} /></span><h3>{activeFilters ? 'Không tìm thấy kết quả' : 'Chưa có sản phẩm'}</h3><p>{activeFilters ? 'Không có sản phẩm phù hợp với bộ lọc hiện tại.' : 'Thêm nguồn sản phẩm hoặc tạo tác vụ chạy thử an toàn để bắt đầu kiểm tra dữ liệu.'}</p>{activeFilters ? <button type="button" className={styles.secondaryButton} onClick={clearFilters}>Xóa bộ lọc</button> : <div className={styles.emptyActions}><button type="button" className={styles.secondaryButton} onClick={() => setSourceDialog(true)}><DashboardIcon name="source" size={16} />Thêm nguồn sản phẩm</button><button type="button" className={styles.ghostButton} onClick={() => { setDryRun(true); setOperationDialog('source_scan'); }}><DashboardIcon name="task" size={16} />Chạy thử an toàn</button></div>}</div> : (
-          viewMode === 'list' ? <div className={styles.tableWrap}><table><thead><tr><th>Chọn</th><th>Sản phẩm</th><th>Loại và nguồn</th><th>Trạng thái</th><th>Giá</th><th>Rủi ro</th><th>Thao tác</th></tr></thead><tbody>{data?.items.map((item) => <tr key={item.id}><td className={styles.selectionCell}><input type="checkbox" aria-label={`Chọn ${item.title}`} checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /></td><td><div className={styles.productCell}><SafeImage item={item} /><div><Link href={`/dashboard/products/${item.id}`}>{item.title}</Link><small>{item.publish.message}</small></div></div></td><td><Badge>{TYPE_LABELS[item.type]}</Badge><small>{PLATFORM_LABELS[item.platform]} · {item.source}</small></td><td><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{SAFE_LABELS[item.safePublishStatus]}</Badge><small>{STATUS_LABELS[item.status]}</small></td><td>{formatPrice(item.price)}</td><td><Badge tone={item.riskLevel === 'high' ? 'danger' : item.riskLevel === 'medium' ? 'warning' : item.riskLevel === 'low' ? 'success' : 'neutral'}>{RISK_LABELS[item.riskLevel]}</Badge></td><td><ProductActions item={item} busy={busy} onAction={runItemAction} /></td></tr>)}</tbody></table></div>
-          : <div className={styles.productGrid}>{data?.items.map((item) => <article key={item.id} className={styles.productCard}><SafeImage item={item} /><div className={styles.productCardBody}><label className={styles.cardSelect}><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /><span>Chọn sản phẩm</span></label><div className={styles.cardBadges}><Badge>{TYPE_LABELS[item.type]}</Badge><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{SAFE_LABELS[item.safePublishStatus]}</Badge></div><Link href={`/dashboard/products/${item.id}`} className={styles.cardTitle}>{item.title}</Link><p>{item.publish.message}</p><strong>{formatPrice(item.price)}</strong><ProductActions item={item} busy={busy} onAction={runItemAction} /></div></article>)}</div>
+          viewMode === 'list' ? <div className={styles.tableWrap}><table><thead><tr><th>Chọn</th><th>Sản phẩm</th><th>Nguồn / shop</th><th>Lifecycle</th><th>Giá</th><th>Điểm / hoa hồng</th><th>Thao tác</th></tr></thead><tbody>{data?.items.map((item) => <tr key={item.id}><td className={styles.selectionCell}><input type="checkbox" aria-label={`Chọn ${item.title}`} checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /></td><td><div className={styles.productCell}><SafeImage item={item} /><div><button type="button" className={styles.productTitleButton} onClick={() => setSelectedProductId(item.id)}>{item.title}</button><small>{item.funnel.label}</small></div></div></td><td><Badge>{PLATFORM_LABELS[item.platform]}</Badge><small>{item.shop || 'Chưa có shop'} · {SOURCE_LABELS[item.source] || item.source}</small></td><td><Badge tone={item.safePublishStatus === 'published' || item.safePublishStatus === 'qualified' ? 'success' : item.safePublishStatus === 'blocked' ? 'danger' : 'warning'}>{WORKSPACE_STAGE_LABELS[item.workspaceStage]}</Badge><small>{item.lifecycleState || STATUS_LABELS[item.status]}</small></td><td>{formatPrice(item.price)}</td><td><span className={styles.tableScore}>Deal {item.scores.deal ?? '—'} · Opportunity {item.scores.opportunity ?? '—'}</span><small>{item.commission.amount === null ? 'Commission —' : `Commission ${formatPrice(item.commission.amount)}`}</small></td><td><ProductActions item={item} busy={busy} onAction={runItemAction} /></td></tr>)}</tbody></table></div>
+          : <div className={styles.productBoard}>{Object.entries(WORKSPACE_STAGE_LABELS).map(([stage, label]) => { const items = data?.items.filter(item => item.workspaceStage === stage) || []; return <section className={styles.boardColumn} key={stage}><header><span>{label}</span><strong>{items.length}</strong></header><div>{items.length ? items.map(item => <ProductStudioCard key={item.id} item={item} selected={selectedIds.includes(item.id)} busy={busy} now={currentTime} onSelect={() => toggleSelection(item.id)} onOpen={() => setSelectedProductId(item.id)} onAction={runItemAction} />) : <p>Không có sản phẩm ở trang hiện tại.</p>}</div></section>; })}</div>
         )}
         {data && data.pagination.totalItems > 0 && <nav className={styles.pagination} aria-label="Phân trang"><button type="button" disabled={page <= 1} onClick={() => updateQuery({ page: String(page - 1) })}>Trang trước</button><span>Trang {page} / {totalPages}</span><button type="button" disabled={page >= totalPages} onClick={() => updateQuery({ page: String(page + 1) })}>Trang sau</button></nav>}
       </section>}
 
       {sourceDialog && <div className={styles.modalBackdrop} onMouseDown={(e) => { if (e.currentTarget === e.target && !sourceBusy) setSourceDialog(false); }}><form className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="source-title" onSubmit={submitSource}><h2 id="source-title">Thêm nguồn sản phẩm</h2><div className={styles.formGrid}><label><span>Tên nguồn</span><input ref={dialogFocusRef} value={sourceForm.name} onChange={(e) => setSourceForm({ ...sourceForm, name: e.target.value })} aria-invalid={Boolean(sourceFields.name)} aria-describedby={sourceFields.name ? 'source-name-error' : undefined} />{sourceFields.name && <small id="source-name-error" className={styles.fieldError}>{sourceFields.name}</small>}</label><label><span>Địa chỉ nguồn</span><input type="url" placeholder="https://" value={sourceForm.url} onChange={(e) => setSourceForm({ ...sourceForm, url: e.target.value })} aria-invalid={Boolean(sourceFields.url)} aria-describedby={sourceFields.url ? 'source-url-error' : undefined} />{sourceFields.url && <small id="source-url-error" className={styles.fieldError}>{sourceFields.url}</small>}</label><label><span>Nền tảng</span><select value={sourceForm.platform} onChange={(e) => setSourceForm({ ...sourceForm, platform: e.target.value })}>{Object.entries(PLATFORM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Loại dữ liệu</span><select value={sourceForm.kind} onChange={(e) => setSourceForm({ ...sourceForm, kind: e.target.value })}>{Object.entries(TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Lịch quét (không bắt buộc)</span><input value={sourceForm.scanSchedule} onChange={(e) => setSourceForm({ ...sourceForm, scanSchedule: e.target.value })} placeholder="Ví dụ: mỗi ngày lúc 08:00" /></label><label className={styles.fullField}><span>Mô tả</span><textarea rows={3} value={sourceForm.description} onChange={(e) => setSourceForm({ ...sourceForm, description: e.target.value })} /></label></div><label className={styles.checkbox}><input type="checkbox" checked={sourceForm.enabled} onChange={(e) => setSourceForm({ ...sourceForm, enabled: e.target.checked })} /><span>Bật nguồn sau khi lưu</span></label><p className={styles.modalNote}>Không nhập khóa kết nối hoặc thông tin đăng nhập vào các trường này. Thông tin nhạy cảm phải được lưu trong Kết nối bảo mật.</p><div className={styles.modalActions}><button type="button" className={styles.ghostButton} disabled={sourceBusy} onClick={() => setSourceDialog(false)}>Đóng</button><button type="submit" className={styles.primaryButton} disabled={sourceBusy}>{sourceBusy ? 'Đang lưu' : 'Lưu nguồn'}</button></div></form></div>}
+
+      <ProductStudioDrawer productId={selectedProductId} onClose={closeProductDrawer} />
 
     </div>
   );

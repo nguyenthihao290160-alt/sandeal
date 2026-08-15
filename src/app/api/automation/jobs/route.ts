@@ -24,10 +24,12 @@ export async function GET(request: NextRequest) {
   const pageSize = Math.min(requestedPageSize, 50);
   const status = searchParams.get('status') as AutomationJobStatus | null;
   const type = searchParams.get('type') as AutomationJobType | null;
-  if (!Number.isInteger(page) || page < 1 || page > 10_000 || !Number.isInteger(requestedPageSize) || requestedPageSize < 1 || (status && !STATUSES.has(status)) || (type && !ALL_TYPES.has(type))) {
+  const active = searchParams.get('active');
+  const activeOnly = active === 'true';
+  if (!Number.isInteger(page) || page < 1 || page > 10_000 || !Number.isInteger(requestedPageSize) || requestedPageSize < 1 || (status && !STATUSES.has(status)) || (type && !ALL_TYPES.has(type)) || (active !== null && active !== 'true' && active !== 'false')) {
     return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', message: 'Bộ lọc tác vụ không hợp lệ.' }, { status: 400 });
   }
-  const result = await listAutomationJobs({ page, pageSize, status: status || undefined, type: type || undefined });
+  const result = await listAutomationJobs({ page, pageSize, status: status || undefined, type: type || undefined, activeOnly });
   return NextResponse.json({
     ok: true,
     code: result.pagination.totalItems ? 'OK' : 'EMPTY',
@@ -41,6 +43,7 @@ export async function GET(request: NextRequest) {
         payloadBudgetBytes: AUTOMATION_JOB_LIST_PAYLOAD_BUDGET_BYTES,
         pageSizeCap: 50,
         pageSizeCapped: requestedPageSize > pageSize,
+        activeOnly,
         dataAccess: result.dataAccess,
       },
     },

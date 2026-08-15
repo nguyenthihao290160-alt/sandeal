@@ -1016,7 +1016,7 @@ function buildProjectionRepairCandidate(
       candidate: AutomationJobProjectionRebuildCandidate;
     },
 ): AutomationJobProjectionRebuildCandidate {
-  const { active, retained } = selectProjectionSourceJobs(jobs);
+  const { retained } = selectProjectionSourceJobs(jobs);
   const reusableStatuses = new Map(reuse?.candidate.statusProjections.map(item => [item.id, item]) || []);
   const reusableList = new Map(reuse?.candidate.listProjections.map(item => [item.id, item]) || []);
   const unchanged = (job: AutomationJob) => reuse?.identity.jobFingerprints.get(job.id) === identity.jobFingerprints.get(job.id);
@@ -2962,10 +2962,16 @@ function payloadProductIds(payload: Record<string, unknown>): Set<string> {
   return new Set(payload.productIds.map(value => String(value || '').trim()).filter(Boolean));
 }
 
+function isWorkflowReconciliationJob(job: Pick<AutomationJob, 'type' | 'payload'>): boolean {
+  return job.type === 'RECONCILE_AUTOMATION'
+    && job.payload.maintenanceTask !== 'JOB_HEALTH_PROJECTION_REBUILD';
+}
+
 /** Prevent overlapping health/source scans even when callers use different time-based keys. */
 export function isEquivalentActiveScan(existing: AutomationJob, requested: AutomationJob): boolean {
   if (!ACTIVE_SCAN_STATUSES.has(existing.status) || existing.dryRun !== requested.dryRun) return false;
   if (existing.type === 'RUNTIME_GUARDIAN' && requested.type === 'RUNTIME_GUARDIAN') return true;
+  if (isWorkflowReconciliationJob(existing) && isWorkflowReconciliationJob(requested)) return true;
   if (existing.type === 'PRODUCT_SCAN' && requested.type === 'PRODUCT_SCAN') return true;
   if (existing.type !== 'RECHECK_PRODUCT_HEALTH' || requested.type !== 'RECHECK_PRODUCT_HEALTH') return false;
   const existingIds = payloadProductIds(existing.payload);
@@ -3139,11 +3145,22 @@ export async function getAutomationJobAuthoritySnapshot(id: string): Promise<Aut
   };
 }
 
-export async function listAutomationJobs(options: { status?: AutomationJobStatus; type?: AutomationJobType; page: number; pageSize: number }) {
+const ACTIVE_AUTOMATION_LIST_STATUSES = new Set<AutomationJobStatus>([
+  'PENDING',
+  'WAITING_APPROVAL',
+  'WAITING_FOR_MANUAL_INPUT',
+  'WAITING_CHILDREN',
+  'RUNNING',
+  'RETRY_SCHEDULED',
+  'PAUSED',
+]);
+
+export async function listAutomationJobs(options: { status?: AutomationJobStatus; type?: AutomationJobType; activeOnly?: boolean; page: number; pageSize: number }) {
   const projection = await readBoundedAutomationJobProjections();
   const filtered = projection.items
       .filter(item => !options.status || item.status === options.status)
       .filter(item => !options.type || item.type === options.type)
+      .filter(item => !options.activeOnly || ACTIVE_AUTOMATION_LIST_STATUSES.has(item.status))
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   const totalItems = filtered.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / options.pageSize));
@@ -4018,6 +4035,16 @@ export async function waitAutomationJobForChildren(
   return waitingJob;
 }
 
+function parentChildStatusCount(
+    childSummary: Record<string, unknown>,
+    status: 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'BLOCKED',
+): number {
+  const byStatus = childSummary.byStatus;
+  if (!byStatus || typeof byStatus !== 'object' || Array.isArray(byStatus)) return 0;
+  const value = Number((byStatus as Record<string, unknown>)[status]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 export async function completeAutomationParentJob(
     id: string,
     actor: string,
@@ -4025,31 +4052,84 @@ export async function completeAutomationParentJob(
 ): Promise<AutomationJob | null> {
   let completed: AutomationJob | null = null;
   const now = new Date().toISOString();
+  const succeededChildren = parentChildStatusCount(childSummary, 'SUCCEEDED');
+  const failedChildren = parentChildStatusCount(childSummary, 'FAILED');
+  const cancelledChildren = parentChildStatusCount(childSummary, 'CANCELLED');
+  const blockedChildren = parentChildStatusCount(childSummary, 'BLOCKED');
+  const observedChildren = succeededChildren + failedChildren + cancelledChildren + blockedChildren;
+  const reportedTotal = Number(childSummary.total);
+  const totalChildren = Number.isFinite(reportedTotal) && reportedTotal > 0
+    ? Math.floor(reportedTotal)
+    : observedChildren;
+  const parentStatus: Extract<AutomationJobStatus, 'SUCCEEDED' | 'FAILED' | 'BLOCKED'> =
+    failedChildren + cancelledChildren > 0
+      ? 'FAILED'
+      : blockedChildren > 0 || totalChildren <= 0 || observedChildren !== totalChildren
+        ? 'BLOCKED'
+        : 'SUCCEEDED';
+  const outcomeStatus = parentStatus === 'SUCCEEDED'
+    ? 'COMPLETED_WITH_LOCAL_RULES' as const
+    : parentStatus === 'BLOCKED'
+      ? 'BLOCKED_BY_SAFETY' as const
+      : 'FAILED' as const;
+  const terminalReasonCode = parentStatus === 'SUCCEEDED'
+    ? undefined
+    : parentStatus === 'BLOCKED'
+      ? 'AUTOMATION_CHILD_BLOCKED'
+      : cancelledChildren > 0 && failedChildren === 0
+        ? 'AUTOMATION_CHILD_CANCELLED'
+        : 'AUTOMATION_CHILD_FAILED';
   const projectionMutation = await runAutomationJobSourceTransaction(items => {
     const job = items.find(item => item.id === id);
     if (!job || job.status !== 'WAITING_CHILDREN') return undefined;
-    const completedSteps = (job.executionPlan || []).map(step => step.id);
-    job.status = 'SUCCEEDED';
-    job.outcomeStatus = 'COMPLETED_WITH_LOCAL_RULES';
-    job.executionPlan = (job.executionPlan || []).map(step => ({ ...step, status: 'COMPLETED' }));
+    const allSteps = job.executionPlan || [];
+    const completedSteps = parentStatus === 'SUCCEEDED'
+      ? allSteps.map(step => step.id)
+      : allSteps.filter(step => step.status === 'COMPLETED').map(step => step.id);
+    const failedStep = parentStatus === 'SUCCEEDED'
+      ? undefined
+      : allSteps.find(step => step.status !== 'COMPLETED')?.id;
+    job.status = parentStatus;
+    job.outcomeStatus = outcomeStatus;
+    job.executionPlan = allSteps.map(step => ({
+      ...step,
+      status: step.status === 'COMPLETED' || parentStatus === 'SUCCEEDED' ? 'COMPLETED' : 'FAILED',
+    }));
     if (job.checkpoint) {
       job.checkpoint = {
         ...job.checkpoint,
         completedSteps,
         pendingSteps: [],
+        failedStep,
         outputs: { ...job.checkpoint.outputs, childSummary: sanitizeAutomationData(childSummary) },
         outputHash: createHash('sha256').update(JSON.stringify(childSummary)).digest('hex'),
         updatedAt: now,
       };
     }
-    if (job.progress) {
-      const total = job.progress.total || Math.max(1, completedSteps.length);
-      job.progress = { ...job.progress, processed: total, succeeded: total, percentage: 100, updatedAt: now };
-    }
+    const progressTotal = Math.max(0, totalChildren);
+    job.progress = {
+      ...(job.progress || { processed: 0, succeeded: 0, skipped: 0, failed: 0 }),
+      total: progressTotal,
+      processed: progressTotal,
+      succeeded: succeededChildren,
+      skipped: blockedChildren,
+      failed: failedChildren + cancelledChildren,
+      percentage: 100,
+      updatedAt: now,
+    };
     if (job.disclosure) {
-      job.disclosure = { ...job.disclosure, status: 'COMPLETED_WITH_LOCAL_RULES', completedSteps, pendingSteps: [], completedAt: now };
+      job.disclosure = { ...job.disclosure, status: outcomeStatus, completedSteps, pendingSteps: [], completedAt: now };
     }
-    job.result = sanitizeAutomationData({ ...job.result, executionStatus: 'COMPLETED_WITH_LOCAL_RULES', completedSteps, pendingSteps: [], childSummary }) as Record<string, unknown>;
+    job.result = sanitizeAutomationData({ ...job.result, executionStatus: outcomeStatus, completedSteps, pendingSteps: [], childSummary }) as Record<string, unknown>;
+    job.lastErrorCode = terminalReasonCode;
+    job.lastErrorCategory = parentStatus === 'FAILED'
+      ? 'UNKNOWN_ERROR'
+      : parentStatus === 'BLOCKED'
+        ? 'VALIDATION_FAILED'
+        : undefined;
+    job.lastErrorMessage = terminalReasonCode;
+    job.retryable = false;
+    job.deadLetterReason = terminalReasonCode;
     job.completedAt = now;
     job.updatedAt = now;
     markAutomationJobProjectionSourceMutation(job);
@@ -4066,10 +4146,10 @@ export async function completeAutomationParentJob(
     operationType: 'PARENT_JOB_COMPLETED',
     actor,
     previousState: 'WAITING_CHILDREN',
-    nextState: 'SUCCEEDED',
+    nextState: parentStatus,
     risk: completedJob.riskLevel,
     result: childSummary,
-    reasons: ['All descendant jobs reached terminal state.'],
+    reasons: [terminalReasonCode || 'All descendant jobs reached terminal state successfully.'],
     dryRun: completedJob.dryRun,
     attempts: completedJob.attemptCount,
   });

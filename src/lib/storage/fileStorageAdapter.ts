@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { constants as fsConstants } from 'fs';
 import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
@@ -381,7 +381,6 @@ async function acquireCollectionFileLock(
 
 async function readCollectionUnlocked<T>(collection: string): Promise<T[]> {
   recordFullCollectionRead(collection);
-  await ensureDataDir();
   const filePath = getFilePath(collection);
   let originalError: unknown;
   try {
@@ -842,7 +841,6 @@ async function scanCollection<T>(
     visitor: (item: T, index: number) => Promise<void> | void,
 ): Promise<StorageScanResult> {
   recordScanCollection();
-  await ensureDataDir();
   const primary = getFilePath(collection);
   const paths = [primary, `${primary}.bak`, `${primary}.bak.2`];
   let originalError: unknown;
@@ -892,6 +890,28 @@ function boundedCollectionError(code: string, collection: string): Error {
   return error;
 }
 
+function filePageSourceRevision(
+    sourcePath: string,
+    stat: Awaited<ReturnType<typeof fs.stat>>,
+): string {
+  const identity = [
+    path.basename(sourcePath),
+    stat.dev,
+    stat.ino,
+    stat.size,
+    stat.mtimeMs,
+    stat.ctimeMs,
+    stat.birthtimeMs,
+  ].join(':');
+  return `file:${createHash('sha256').update(identity).digest('hex').slice(0, 24)}`;
+}
+
+function filePageSourceChangedError(): Error {
+  const error = new Error('STORAGE_COLLECTION_SOURCE_CHANGED') as Error & { code?: string };
+  error.code = 'STORAGE_COLLECTION_SOURCE_CHANGED';
+  return error;
+}
+
 function validateBoundedCollectionOptions(
     collection: string,
     options: StorageBoundedCollectionOptions,
@@ -925,7 +945,6 @@ async function readBoundedCollectionSnapshot<T>(
 ): Promise<StorageBoundedCollectionResult<T>> {
   recordBoundedRead();
   const { maximumItems, maximumBytes } = validateBoundedCollectionOptions(collection, options);
-  await ensureDataDir();
   const filePath = getFilePath(collection);
   const stat = await fs.stat(filePath).catch(error => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -1015,7 +1034,6 @@ function validatePageOptions(options: StoragePageOptions): void {
 async function readCollectionPage<T>(collection: string, options: StoragePageOptions) {
   recordBoundedRead();
   validatePageOptions(options);
-  await ensureDataDir();
   const primary = getFilePath(collection);
   const stat = await fs.stat(primary).catch(error => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -1030,7 +1048,13 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
         });
       })
   );
-  if (!sourcePath) return { items: [] as T[], totalItems: 0, queryCount: 1 };
+  if (!sourcePath) return { items: [] as T[], totalItems: 0, sourceRevision: 'file:missing', queryCount: 1 };
+
+  const sourceStatBefore = await fs.stat(sourcePath).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw filePageSourceChangedError();
+    throw error;
+  });
+  const sourceRevision = filePageSourceRevision(sourcePath, sourceStatBefore);
 
   const pageStart = (options.page - 1) * options.pageSize;
   const retainedLimit = options.sort
@@ -1066,6 +1090,13 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
       matches.pop();
     }
   });
+  const sourceStatAfter = await fs.stat(sourcePath).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw filePageSourceChangedError();
+    throw error;
+  });
+  if (filePageSourceRevision(sourcePath, sourceStatAfter) !== sourceRevision) {
+    throw filePageSourceChangedError();
+  }
   if (options.sort) {
     const { field, direction } = options.sort;
     const multiplier = direction === 'desc' ? -1 : 1;
@@ -1080,9 +1111,11 @@ async function readCollectionPage<T>(collection: string, options: StoragePageOpt
     });
   }
   const start = (options.page - 1) * options.pageSize;
+  const retainedStart = options.sort ? start : 0;
   return {
-    items: matches.slice(start, start + options.pageSize).map(({ item }) => item),
+    items: matches.slice(retainedStart, retainedStart + options.pageSize).map(({ item }) => item),
     totalItems,
+    sourceRevision,
     queryCount: 1,
   };
 }

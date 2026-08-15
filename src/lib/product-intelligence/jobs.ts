@@ -115,8 +115,58 @@ export function selectDeterministicProductBatch(
 
 const PRODUCT_COLLECTION = 'products';
 const PRODUCT_WINDOW_PAGE_SIZE = Math.min(CONFIG.limits.batchProducts, 100);
+const PRODUCT_SELECTION_MAX_ATTEMPTS = 3;
 
-async function readProductsByIds(ids: string[], signal?: AbortSignal): Promise<Product[]> {
+type ProductSelectionErrorCode =
+  | 'PRODUCT_SELECTION_SOURCE_CHANGED'
+  | 'PRODUCT_SELECTION_TARGET_MISSING';
+
+class ProductSelectionError extends Error {
+  readonly code: ProductSelectionErrorCode;
+
+  constructor(code: ProductSelectionErrorCode) {
+    super(code);
+    this.name = 'ProductSelectionError';
+    this.code = code;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+type ProductSelectionTestHook = (input: {
+  attempt: number;
+  phase: 'AFTER_FIRST_PAGE';
+  sourceRevision: string;
+  totalItems: number;
+}) => void | Promise<void>;
+
+let productSelectionTestHook: ProductSelectionTestHook | undefined;
+
+export function setProductSelectionTestHookForTests(hook?: ProductSelectionTestHook): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('PRODUCT_SELECTION_TEST_HOOK_FORBIDDEN');
+  productSelectionTestHook = hook;
+}
+
+async function invokeProductSelectionTestHook(input: Parameters<ProductSelectionTestHook>[0]): Promise<void> {
+  if (process.env.NODE_ENV !== 'test' || !productSelectionTestHook) return;
+  await productSelectionTestHook(input);
+}
+
+function isProductSelectionSourceChange(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  return code === 'PRODUCT_SELECTION_SOURCE_CHANGED'
+    || code === 'STORAGE_COLLECTION_SOURCE_CHANGED'
+    || message.includes('PRODUCT_SELECTION_SOURCE_CHANGED')
+    || message.includes('STORAGE_COLLECTION_SOURCE_CHANGED');
+}
+
+async function readProductsByIds(
+  ids: string[],
+  signal?: AbortSignal,
+  requireAll = false,
+): Promise<Product[]> {
   const wanted = new Set(ids);
   const found = new Map<string, Product>();
   await scanCollection<Partial<Product>>(PRODUCT_COLLECTION, raw => {
@@ -127,23 +177,33 @@ async function readProductsByIds(ids: string[], signal?: AbortSignal): Promise<P
       wanted.delete(id);
     }
   });
+  if (requireAll && wanted.size) throw new ProductSelectionError('PRODUCT_SELECTION_TARGET_MISSING');
   return ids.map(id => found.get(id)).filter((item): item is Product => Boolean(item));
 }
 
-async function selectedProducts(payload: Record<string, unknown>, signal?: AbortSignal): Promise<Product[]> {
-  const ids = productIds(payload);
-  if (ids.length) return selectDeterministicProductBatch(await readProductsByIds(ids, signal), payload);
-
+async function materializeScheduledProductSelection(
+  payload: Record<string, unknown>,
+  attempt: number,
+  signal?: AbortSignal,
+): Promise<Product[]> {
   // Scheduled jobs use a bounded source-order window. The file adapter scans
   // the JSON array incrementally and retains only one page; Mongo uses the
   // equivalent bounded query. This keeps the cursor deterministic across
-  // cycles without materializing the complete product collection.
+  // cycles without materializing the complete product collection. Every page
+  // must belong to the same durable source revision.
   throwIfExecutionAborted(signal);
   const requestedLimit = Math.min(payloadLimit(payload), PRODUCT_WINDOW_PAGE_SIZE);
   const firstPage = await readCollectionPage<Partial<Product>>(PRODUCT_COLLECTION, {
     page: 1,
     pageSize: requestedLimit,
   });
+  await invokeProductSelectionTestHook({
+    attempt,
+    phase: 'AFTER_FIRST_PAGE',
+    sourceRevision: firstPage.sourceRevision,
+    totalItems: firstPage.totalItems,
+  });
+  throwIfExecutionAborted(signal);
   const totalItems = firstPage.totalItems;
   if (!totalItems) return [];
   const limit = Math.min(requestedLimit, totalItems);
@@ -163,6 +223,9 @@ async function selectedProducts(payload: Record<string, unknown>, signal?: Abort
       page,
       pageSize: limit,
     });
+    if (result.sourceRevision !== firstPage.sourceRevision || result.totalItems !== totalItems) {
+      throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
+    }
     const normalized = result.items.map(item => normalizeCanonicalProduct(item));
     pages.set(page, normalized);
     return normalized;
@@ -175,10 +238,32 @@ async function selectedProducts(payload: Record<string, unknown>, signal?: Abort
     const page = Math.floor(absoluteIndex / limit) + 1;
     const pageItems = await loadPage(page);
     const item = pageItems[absoluteIndex % limit];
-    if (!item) throw new Error('PRODUCT_SELECTION_SOURCE_CHANGED');
+    if (!item) throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
     selected.push(item);
   }
+  if (new Set(selected.map(product => product.id)).size !== selected.length) {
+    throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
+  }
   return selected;
+}
+
+async function selectedProducts(payload: Record<string, unknown>, signal?: AbortSignal): Promise<Product[]> {
+  const ids = productIds(payload);
+  if (ids.length) return selectDeterministicProductBatch(await readProductsByIds(ids, signal, true), payload);
+
+  for (let attempt = 1; attempt <= PRODUCT_SELECTION_MAX_ATTEMPTS; attempt += 1) {
+    throwIfExecutionAborted(signal);
+    try {
+      return await materializeScheduledProductSelection(payload, attempt, signal);
+    } catch (error) {
+      if (!isProductSelectionSourceChange(error)) throw error;
+      throwIfExecutionAborted(signal);
+      if (attempt >= PRODUCT_SELECTION_MAX_ATTEMPTS) {
+        throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
+      }
+    }
+  }
+  throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
 }
 
 async function assertJobMayContinue(job: AutomationJob, options: ProductIntelligenceExecutionOptions = {}): Promise<void> {
@@ -1231,7 +1316,7 @@ async function bulkOperation(job: AutomationJob, execution: ProductIntelligenceE
     if (!groupId || !primaryId) throw new Error('MERGE_INPUT_REQUIRED');
     return { ...(await applyDuplicateMerge(groupId, primaryId, job.operationId)), businessDataChanged: true };
   }
-  const products = await readProductsByIds(preview.valid, execution.signal);
+  const products = await readProductsByIds(preview.valid, execution.signal, true);
   if (action === 'recheck_link' || action === 'recheck_image') return recheckHealth({
     ...job,
     payload: {

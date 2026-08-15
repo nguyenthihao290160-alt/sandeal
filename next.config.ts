@@ -29,14 +29,21 @@ export function resolveBuildCommit(input: {
     return explicit || 'development';
 }
 
-const buildCommit = resolveBuildCommit();
+// A local review build must not present dirty, uncommitted source as the
+// immutable Git release at HEAD. The validation-only identity is deliberately
+// not a Git SHA, so release diagnostics and Runtime Guardian fail closed if
+// this artifact is ever started accidentally. Normal production builds keep
+// the strict Git identity path above.
+const validationOnly = process.env.SANDEAL_BUILD_VALIDATION_ONLY === 'true';
+const buildCommit = validationOnly ? 'validation-only-non-release' : resolveBuildCommit();
+const isDevelopment = process.env.NODE_ENV === 'development';
 const contentSecurityPolicy = [
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
     "frame-ancestors 'none'",
     "form-action 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    `script-src 'self' 'unsafe-inline'${isDevelopment ? " 'unsafe-eval'" : ''}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",

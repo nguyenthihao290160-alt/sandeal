@@ -252,6 +252,8 @@ function errorCode(error: unknown): string {
 
 function errorCategory(code: string): AutomationErrorCategory {
   if (isInfrastructureContentionCode(code)) return 'STORAGE_ERROR';
+  if (code === 'PRODUCT_SELECTION_SOURCE_CHANGED') return 'STORAGE_ERROR';
+  if (code === 'PRODUCT_SELECTION_TARGET_MISSING') return 'VALIDATION_FAILED';
   if (['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'LINK_NOT_FOUND', 'IMAGE_HOTLINK_BLOCKED', 'INVALID_SOURCE_DATA', 'VALIDATION_FAILED', 'DUPLICATE', 'STORAGE_ERROR', 'INTERNAL_CODE_ERROR', 'UNKNOWN_ERROR'].includes(code)) {
     return code as AutomationErrorCategory;
   }

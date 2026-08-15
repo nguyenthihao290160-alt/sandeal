@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DashboardIcon } from '@/components/dashboard/dashboard-icon';
+import { useCommandCenter } from '@/components/dashboard/command-center-provider';
 import { requestClientJson } from '@/lib/dashboard/clientRequest';
 import {
   appHealthRequestFailureMessage,
@@ -441,7 +442,60 @@ function duration(value: number | null) {
   return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)} giây`;
 }
 
+function TechnicalSystemCenter({ health }: { health: Health }) {
+  const runtimeReasons = [...new Set([
+    ...(health.runtime?.reasons || []),
+    ...(health.operational?.currentActiveReasons || []),
+  ])];
+  const storageComponent = health.components.storage || health.components.core;
+  const layers = [
+    { name: 'Web', status: health.readiness || health.liveness || 'UNVERIFIED', detail: health.release.releaseId },
+    { name: 'Worker', status: health.worker.status.toUpperCase(), detail: health.worker.heartbeatAt || 'NO_HEARTBEAT' },
+    { name: 'Scheduler', status: health.scheduler.status.toUpperCase(), detail: health.scheduler.heartbeatAt || 'NO_HEARTBEAT' },
+    { name: 'Runtime Guardian', status: health.runtime ? (health.runtime.publishSafe ? 'HEALTHY' : 'BLOCKING') : 'UNVERIFIED', detail: health.runtime?.checkedAt || 'NO_SNAPSHOT' },
+    { name: 'Storage', status: storageComponent?.status.toUpperCase() || 'UNVERIFIED', detail: storageComponent?.reasonCode || 'STORAGE_EVIDENCE_UNAVAILABLE' },
+    { name: 'Release Identity', status: health.operational?.release.matchStatus || (health.release.releaseMismatch ? 'MISMATCH' : 'UNVERIFIED'), detail: health.release.releaseId },
+  ];
+  return <div className={styles.technicalCenter} lang="en">
+    <section className={styles.technicalLayerGrid} aria-label="System layers">
+      {layers.map(layer => <article key={layer.name}><div><span>{layer.name}</span><strong>{layer.status}</strong></div><code>{layer.detail}</code></article>)}
+    </section>
+    <section className={styles.panel}>
+      <div className={styles.panelHeader}><h2>Runtime Guardian diagnostics</h2><span className={stateClass(health.runtime?.publishSafe ? 'PASS' : 'BLOCKED')}>{health.runtime?.publishSafe ? 'PASS' : 'FAIL-CLOSED'}</span></div>
+      <div className={styles.healthList}>
+        <div className={styles.healthRow}><span>snapshotStatus</span><strong>{health.runtime?.dataStatus || 'UNAVAILABLE'}</strong></div>
+        <div className={styles.healthRow}><span>checkedAt</span><strong>{health.runtime?.checkedAt || '—'}</strong></div>
+        <div className={styles.healthRow}><span>publishSafe</span><strong>{String(health.runtime?.publishSafe ?? false)}</strong></div>
+        <div className={styles.healthRow}><span>operatorPause</span><strong>{String(health.control?.publishPausedByOperator ?? false)}</strong></div>
+        <div className={styles.healthRow}><span>runtimeBlock</span><strong>{String(health.control?.publishBlockedByRuntime ?? false)}</strong></div>
+        <div className={styles.healthRow}><span>policyBlock</span><strong>{String(health.control?.publishBlockedByPolicy ?? false)}</strong></div>
+      </div>
+    </section>
+    <section className={styles.panel}>
+      <div className={styles.panelHeader}><h2>Current reason codes</h2><span className={styles.badge}>{runtimeReasons.length}</span></div>
+      {runtimeReasons.length ? <div className={styles.technicalCodes}>{runtimeReasons.map(reason => <code key={reason}>{reason}</code>)}</div> : <div className={styles.notice}>No active Runtime Guardian reason codes in the current snapshot.</div>}
+    </section>
+    <section className={styles.panel}>
+      <div className={styles.panelHeader}><h2>Worker, Scheduler, queue, and fencing</h2></div>
+      <div className={styles.healthList}>
+        <div className={styles.healthRow}><span>Worker heartbeat source / age</span><strong>{health.worker.heartbeatSource} / {health.worker.heartbeatAgeMs ?? 'UNKNOWN'} ms</strong></div>
+        <div className={styles.healthRow}><span>Worker current job</span><strong>{health.worker.currentJobId || 'NONE'}</strong></div>
+        <div className={styles.healthRow}><span>Scheduler heartbeat source / age</span><strong>{health.scheduler.heartbeatSource} / {health.scheduler.heartbeatAgeMs ?? 'UNKNOWN'} ms</strong></div>
+        <div className={styles.healthRow}><span>Scheduler schedule state</span><strong>{health.scheduler.scheduleState}</strong></div>
+        <div className={styles.healthRow}><span>Queue PENDING / RUNNING / RETRY_SCHEDULED</span><strong>{health.queue.PENDING || 0} / {health.queue.RUNNING || 0} / {health.queue.RETRY_SCHEDULED || 0}</strong></div>
+        <div className={styles.healthRow}><span>Worker Pool slots</span><strong>{health.operational?.workerPool.activeSlots ?? 0} / {health.operational?.workerPool.maximumSlots ?? 0}</strong></div>
+        <div className={styles.healthRow}><span>Release Identity</span><strong>{health.operational?.release.embeddedReleaseId || health.release.embeddedBuildId}</strong></div>
+      </div>
+    </section>
+    <details className={styles.details}>
+      <summary>Advanced projection and rollout diagnostics</summary>
+      <dl><dt>Job Health projection</dt><dd>{health.jobReadModel ? `${health.jobReadModel.projectionStatus} · ${health.jobReadModel.activeProjectionGeneration ?? 'UNKNOWN'}:${health.jobReadModel.activeProjectionSlot || 'UNKNOWN'}` : 'UNAVAILABLE'}</dd><dt>Projection repair</dt><dd>{health.projectionMaintenance ? `${health.projectionMaintenance.repairState} · ${health.projectionMaintenance.phase || 'IDLE'} · attempt ${health.projectionMaintenance.attemptCount}/${health.projectionMaintenance.maximumAttempts}` : 'UNAVAILABLE'}</dd><dt>Feature rollouts</dt><dd>{health.operational?.featureRollouts.map(item => `${item.feature}=${item.effectiveMode}:${item.rolloutCohort}`).join(' · ') || 'NONE'}</dd></dl>
+    </details>
+  </div>;
+}
+
 export default function SystemHealthPage() {
+  const { technicalMode } = useCommandCenter();
   const [refreshState, setRefreshState] = useState(() => initialAppHealthRefreshState<Health>());
   const [loading, setLoading] = useState(true);
   const [repairLoading, setRepairLoading] = useState(false);
@@ -566,41 +620,55 @@ export default function SystemHealthPage() {
     <main className={styles.page} aria-busy={loading || repairLoading}>
       <header className={styles.header}>
         <div>
-          <h1>Sức khỏe hệ thống</h1>
-          <p>Tách riêng vận hành, Đăng an toàn, AI và dừng khẩn cấp để trạng thái của một chức năng không bị hiểu nhầm là toàn hệ thống đã dừng.</p>
+          <h1>{technicalMode ? 'System Center' : 'Sức khỏe hệ thống'}</h1>
+          <p>{technicalMode
+            ? 'Verified runtime, release, storage, queue, and fail-closed publication diagnostics.'
+            : 'Tách riêng vận hành, Đăng an toàn, AI và dừng khẩn cấp để trạng thái của một chức năng không bị hiểu nhầm là toàn hệ thống đã dừng.'}</p>
         </div>
         <button className={styles.button} onClick={() => void load()} disabled={loading || repairLoading}>
-          <DashboardIcon name="refresh" size={16} />{loading ? 'Đang kiểm tra' : 'Làm mới'}
+          <DashboardIcon name="refresh" size={16} />{technicalMode ? (loading ? 'Checking' : 'Refresh') : (loading ? 'Đang kiểm tra' : 'Làm mới')}
         </button>
         <button
           className={styles.button}
           onClick={() => void scheduleProjectionRepair()}
           disabled={loading || repairLoading || !projectionRepairCanBeScheduled}
-          title="Chỉ xếp lịch sửa phép chiếu Job Health khi trạng thái hiện tại cần sửa; không xuất bản hay thay đổi dữ liệu sản phẩm."
+          title={technicalMode
+            ? 'Schedules Job Health projection repair only when required; it does not publish or mutate product data.'
+            : 'Chỉ xếp lịch sửa phép chiếu Job Health khi trạng thái hiện tại cần sửa; không xuất bản hay thay đổi dữ liệu sản phẩm.'}
         >
-          <DashboardIcon name="refresh" size={16} />{repairLoading ? 'Đang xếp lịch sửa' : 'Thử lại: xếp lịch sửa Job Health'}
+          <DashboardIcon name="refresh" size={16} />{technicalMode
+            ? (repairLoading ? 'Scheduling repair' : 'Retry: schedule Job Health repair')
+            : (repairLoading ? 'Đang xếp lịch sửa' : 'Thử lại: xếp lịch sửa Job Health')}
         </button>
       </header>
 
-      {loading && !health && <div className={styles.notice} role="status" aria-live="polite">Đang kiểm tra tình trạng hệ thống...</div>}
-      {loading && health && <div className={styles.notice} role="status" aria-live="polite">Đang làm mới; bản chụp hiện tại vẫn được hiển thị.</div>}
-      {repairLoading && <div className={styles.notice} role="status" aria-live="polite">Đang yêu cầu Worker xếp lịch sửa phép chiếu Job Health; không có dữ liệu sản phẩm nào được xuất bản.</div>}
+      {loading && !health && <div className={styles.notice} role="status" aria-live="polite">{technicalMode ? 'Checking system health...' : 'Đang kiểm tra tình trạng hệ thống...'}</div>}
+      {loading && health && <div className={styles.notice} role="status" aria-live="polite">{technicalMode ? 'Refreshing; the last verified snapshot remains visible.' : 'Đang làm mới; bản chụp hiện tại vẫn được hiển thị.'}</div>}
+      {repairLoading && <div className={styles.notice} role="status" aria-live="polite">{technicalMode ? 'Requesting a durable Job Health projection repair; no product data is being published.' : 'Đang yêu cầu Worker xếp lịch sửa phép chiếu Job Health; không có dữ liệu sản phẩm nào được xuất bản.'}</div>}
       {error && (
         <div
           className={`${styles.notice} ${health && refreshState.stale ? styles.warning : styles.errorBox}`}
           role={health ? 'status' : 'alert'}
           aria-live="polite"
         >
-          <strong>{refreshState.stale
-            ? 'Đang hiển thị bản chụp cũ.'
-            : health?.partial
-              ? 'Sức khỏe một phần.'
-              : 'Không thể xác minh tình trạng hệ thống.'}</strong> {error}{' '}
-          <button className={styles.button} onClick={() => void load()} disabled={loading || repairLoading}>Thử lại làm mới</button>
+          <strong>{technicalMode
+            ? refreshState.stale
+              ? 'Displaying the last verified snapshot.'
+              : health?.partial
+                ? 'Partial system evidence.'
+                : 'Unable to verify system health.'
+            : refreshState.stale
+              ? 'Đang hiển thị bản chụp cũ.'
+              : health?.partial
+                ? 'Sức khỏe một phần.'
+                : 'Không thể xác minh tình trạng hệ thống.'}</strong>{technicalMode ? ' The current request did not return a usable verified snapshot. ' : ` ${error} `}
+          <button className={styles.button} onClick={() => void load()} disabled={loading || repairLoading}>{technicalMode ? 'Retry refresh' : 'Thử lại làm mới'}</button>
         </div>
       )}
 
-      {health && (
+      {health && (technicalMode ? (
+        <TechnicalSystemCenter health={health} />
+      ) : (
         <>
           {componentIssues.length > 0 && (
             <section className={`${styles.notice} ${styles.warning}`} aria-label="Bằng chứng sức khỏe chưa đầy đủ">
@@ -982,7 +1050,7 @@ export default function SystemHealthPage() {
           ) : null}
           <p className={styles.muted}>Cập nhật gần nhất: {new Date(health.updatedAt).toLocaleString('vi-VN')}</p>
         </>
-      )}
+      ))}
     </main>
   );
 }

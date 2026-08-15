@@ -5,9 +5,16 @@ import type {
   ProductKind,
   ProductPlatform,
   ProductRiskLevel,
+  ProductSource,
   ProductStatus,
 } from '@/lib/types';
 import { canonicalBlockerCodes } from '@/lib/productBlockers';
+import {
+  classifyProductFunnel,
+  mapProductPipelineStage,
+  type ProductFunnelId,
+  type ProductPipelinePresentationStage,
+} from './v4';
 
 export const DASHBOARD_PRODUCT_SORTS = [
   'updated_desc',
@@ -33,11 +40,15 @@ export type DashboardPipelineStage = (typeof PIPELINE_STAGES)[number];
 export interface DashboardProductQuery {
   q?: string;
   platform?: ProductPlatform;
+  source?: ProductSource;
   status?: ProductStatus;
   kind?: ProductKind;
   riskLevel?: ProductRiskLevel;
   safePublishStatus?: SafePublishStatus;
   pipelineStage?: DashboardPipelineStage;
+  workspaceStage?: ProductPipelinePresentationStage;
+  funnel?: ProductFunnelId;
+  minScore?: number;
   sort: DashboardProductSort;
   page: number;
   pageSize: number;
@@ -47,6 +58,7 @@ export interface DashboardProductItem {
   id: string;
   title: string;
   source: string;
+  shop: string | null;
   platform: ProductPlatform;
   type: ProductKind;
   status: ProductStatus;
@@ -58,6 +70,19 @@ export interface DashboardProductItem {
   originalPrice: number | null;
   createdAt: string;
   updatedAt: string;
+  lifecycleState: string | null;
+  workspaceStage: ProductPipelinePresentationStage;
+  funnel: ReturnType<typeof classifyProductFunnel>;
+  scores: {
+    quality: number | null;
+    opportunity: number | null;
+    deal: number | null;
+  };
+  commission: {
+    amount: number | null;
+    rate: number | null;
+  };
+  promotionExpiresAt: string | null;
   review: {
     score: number | null;
     needsReview: boolean;
@@ -133,6 +158,16 @@ export interface DashboardProductsResult {
 const PLATFORMS = new Set<ProductPlatform>([
   'shopee', 'tiktok_shop', 'lazada', 'accesstrade', 'website', 'other',
 ]);
+const SOURCES = new Set<ProductSource>([
+  'manual', 'accesstrade', 'accesstrade_tiktok_shop', 'shopee_affiliate',
+  'tiktok_shop', 'lazada_affiliate', 'csv', 'other',
+]);
+const WORKSPACE_STAGES = new Set<ProductPipelinePresentationStage>([
+  'discovered', 'checking', 'review', 'safe_publish', 'public', 'unclassified',
+]);
+const FUNNELS = new Set<ProductFunnelId>([
+  'workspace', 'travel', 'gifts', 'technology', 'family', 'personal_care', 'unclassified',
+]);
 const STATUSES = new Set<ProductStatus>([
   'draft', 'needs_review', 'approved', 'published', 'archived',
 ]);
@@ -159,22 +194,31 @@ export function parseDashboardProductQuery(searchParams: URLSearchParams):
   | { ok: false; message: string } {
   const q = (searchParams.get('q') || '').trim();
   const platform = searchParams.get('platform');
+  const source = searchParams.get('source');
   const status = searchParams.get('status');
   const kind = searchParams.get('kind');
   const riskLevel = searchParams.get('riskLevel');
   const safePublishStatus = searchParams.get('safePublishStatus');
   const pipelineStage = searchParams.get('pipelineStage');
+  const workspaceStage = searchParams.get('workspaceStage');
+  const funnel = searchParams.get('funnel');
+  const minScoreValue = searchParams.get('minScore');
   const sort = searchParams.get('sort') || 'updated_desc';
   const page = positiveInteger(searchParams.get('page'), 1);
   const requestedPageSize = positiveInteger(searchParams.get('pageSize'), 20);
 
   if (q.length > 120) return { ok: false, message: 'Từ khóa tìm kiếm không được dài quá 120 ký tự.' };
   if (platform && !PLATFORMS.has(platform as ProductPlatform)) return { ok: false, message: 'Bộ lọc nền tảng không hợp lệ.' };
+  if (source && !SOURCES.has(source as ProductSource)) return { ok: false, message: 'Bộ lọc nguồn không hợp lệ.' };
   if (status && !STATUSES.has(status as ProductStatus)) return { ok: false, message: 'Bộ lọc trạng thái không hợp lệ.' };
   if (kind && !KINDS.has(kind as ProductKind)) return { ok: false, message: 'Bộ lọc loại dữ liệu không hợp lệ.' };
   if (riskLevel && !RISKS.has(riskLevel as ProductRiskLevel)) return { ok: false, message: 'Bộ lọc mức rủi ro không hợp lệ.' };
   if (safePublishStatus && !SAFE_PUBLISH_STATUSES.includes(safePublishStatus as SafePublishStatus)) return { ok: false, message: 'Bộ lọc đăng an toàn không hợp lệ.' };
   if (pipelineStage && !PIPELINE_STAGES.includes(pipelineStage as DashboardPipelineStage)) return { ok: false, message: 'Bộ lọc giai đoạn pipeline không hợp lệ.' };
+  if (workspaceStage && !WORKSPACE_STAGES.has(workspaceStage as ProductPipelinePresentationStage)) return { ok: false, message: 'Bộ lọc Product Studio không hợp lệ.' };
+  if (funnel && !FUNNELS.has(funnel as ProductFunnelId)) return { ok: false, message: 'Bộ lọc funnel không hợp lệ.' };
+  const minScore = minScoreValue === null || minScoreValue === '' ? undefined : Number(minScoreValue);
+  if (minScore !== undefined && (!Number.isFinite(minScore) || minScore < 0 || minScore > 100)) return { ok: false, message: 'Điểm tối thiểu phải từ 0 đến 100.' };
   if (!DASHBOARD_PRODUCT_SORTS.includes(sort as DashboardProductSort)) return { ok: false, message: 'Cách sắp xếp không hợp lệ.' };
   if (page === null) return { ok: false, message: 'Số trang không hợp lệ.' };
   if (requestedPageSize === null || requestedPageSize > 50) return { ok: false, message: 'Số sản phẩm mỗi trang phải từ 1 đến 50.' };
@@ -184,11 +228,15 @@ export function parseDashboardProductQuery(searchParams: URLSearchParams):
     query: {
       q: q || undefined,
       platform: platform as ProductPlatform || undefined,
+      source: source as ProductSource || undefined,
       status: status as ProductStatus || undefined,
       kind: kind as ProductKind || undefined,
       riskLevel: riskLevel as ProductRiskLevel || undefined,
       safePublishStatus: safePublishStatus as SafePublishStatus || undefined,
       pipelineStage: pipelineStage as DashboardPipelineStage || undefined,
+      workspaceStage: workspaceStage as ProductPipelinePresentationStage || undefined,
+      funnel: funnel as ProductFunnelId || undefined,
+      minScore,
       sort: sort as DashboardProductSort,
       page,
       pageSize: requestedPageSize,
@@ -230,10 +278,16 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
     : productUrlValid ? product.productUrlFinalUrl || product.canonicalProductUrl || product.originalUrl : undefined;
   let finalDomain: string | null = null;
   try { finalDomain = new URL(finalUrl || '').hostname.toLowerCase().replace(/^www\./, '') || null; } catch { /* invalid URL */ }
+  const workspaceStage = mapProductPipelineStage(product);
+  const funnel = classifyProductFunnel(product);
+  const selectedOffer = (product.offers || []).find(offer => offer.id === product.bestOfferId)
+    || (product.offers || []).find(offer => offer.primary);
+  const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null;
   return {
     id: product.id,
     title: product.title || 'Sản phẩm chưa có tên',
     source: product.source || 'other',
+    shop: product.shopName || product.merchant || null,
     platform: product.platform || 'other',
     type: product.kind || 'unknown',
     status: product.status || 'draft',
@@ -246,6 +300,20 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
     originalPrice: Number.isFinite(product.price) ? product.price! : null,
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,
+    lifecycleState: product.lifecycleState || null,
+    workspaceStage,
+    funnel,
+    scores: {
+      quality: finite(product.qualityScore ?? product.score),
+      opportunity: finite(product.opportunityScore),
+      deal: finite(product.dealScore),
+    },
+    commission: {
+      amount: finite(product.commissionAmount),
+      rate: finite(product.commissionRate),
+    },
+    promotionExpiresAt: selectedOffer?.sourceVerified === true && selectedOffer.confidence >= 0.8
+      ? selectedOffer.expiresAt || null : null,
     review: {
       score: Number.isFinite(product.score) ? product.score! : null,
       needsReview: product.status === 'needs_review' || product.riskLevel === 'high',
@@ -275,7 +343,7 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
 
 function includesSearch(item: DashboardProductItem, q: string): boolean {
   const needle = q.toLocaleLowerCase('vi');
-  return [item.title, item.source, item.platform, item.type]
+  return [item.title, item.source, item.platform, item.type, item.shop, item.funnel.label]
     .some((value) => String(value).toLocaleLowerCase('vi').includes(needle));
 }
 
@@ -310,10 +378,14 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
   const filtered = products.filter(matchesPipeline).map(toDashboardProductItem).filter((item) => {
     if (query.q && !includesSearch(item, query.q)) return false;
     if (query.platform && item.platform !== query.platform) return false;
+    if (query.source && item.source !== query.source) return false;
     if (query.status && item.status !== query.status) return false;
     if (query.kind && item.type !== query.kind) return false;
     if (query.riskLevel && item.riskLevel !== query.riskLevel) return false;
     if (query.safePublishStatus && item.safePublishStatus !== query.safePublishStatus) return false;
+    if (query.workspaceStage && item.workspaceStage !== query.workspaceStage) return false;
+    if (query.funnel && item.funnel.id !== query.funnel) return false;
+    if (query.minScore !== undefined && (item.scores.opportunity ?? item.review.score ?? -1) < query.minScore) return false;
     return true;
   });
 
@@ -359,7 +431,7 @@ export function buildDashboardProducts(products: Product[], query: DashboardProd
   const totalPages = Math.max(1, Math.ceil(filtered.length / query.pageSize));
   const page = Math.min(query.page, totalPages);
   const start = (page - 1) * query.pageSize;
-  const activeScopeFilter = Boolean(query.q || query.platform || query.status || query.kind || query.riskLevel || query.safePublishStatus || query.pipelineStage);
+  const activeScopeFilter = Boolean(query.q || query.platform || query.source || query.status || query.kind || query.riskLevel || query.safePublishStatus || query.pipelineStage || query.workspaceStage || query.funnel || query.minScore !== undefined);
   const healthTimes = scopedProducts.flatMap(product => [product.blockersCheckedAt, product.linkLastCheckedAt, product.affiliateLastCheckedAt, product.imageLastCheckedAt])
     .map(value => Date.parse(value || ''))
     .filter(Number.isFinite);

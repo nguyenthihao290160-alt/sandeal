@@ -21,6 +21,11 @@ import { buildLaunchInventoryOverview } from './launchInventory';
 import { startOfVietnamDay, vietnamActivityLabel } from './timezone';
 import { classifyAutomationJobEvidence, getAutomationTruth } from './truth';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
+import {
+  buildTrendingDealLeaderboard,
+  mapProductPipelineStage,
+  PRODUCT_PIPELINE_STAGES,
+} from '@/lib/dashboard/v4';
 
 export type DashboardRange = 'today' | '7d' | '30d';
 
@@ -288,6 +293,60 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     sourceMap.set(name, source);
   }
 
+  const productStageCounts = new Map(PRODUCT_PIPELINE_STAGES.map(stage => [stage.id, 0]));
+  for (const product of products) {
+    const stage = mapProductPipelineStage(product);
+    productStageCounts.set(stage, (productStageCounts.get(stage) || 0) + 1);
+  }
+  const operatorActionJobs = sortedJobs.filter(job => (
+    job.status === 'WAITING_APPROVAL' || job.status === 'WAITING_FOR_MANUAL_INPUT'
+  )).slice(0, 6);
+  const automaticActionJobs = sortedJobs.filter(job => (
+    job.status === 'RETRY_SCHEDULED'
+    || job.status === 'WAITING_CHILDREN'
+    || ((job.type === 'RUNTIME_GUARDIAN' || job.type === 'RECONCILE_AUTOMATION')
+      && ['PENDING', 'RUNNING'].includes(job.status))
+  )).slice(0, 8);
+  const actionItem = (job: AutomationJob) => ({
+    id: job.id,
+    parentId: job.parentJobId || null,
+    type: job.type,
+    status: job.status,
+    attempt: job.attemptCount,
+    progress: job.progress ? {
+      processed: job.progress.processed,
+      total: job.progress.total,
+      percentage: job.progress.percentage,
+    } : null,
+    retryAt: job.nextRetryAt || null,
+    reasonCode: job.lastErrorCode || job.status,
+    updatedAt: job.updatedAt,
+  });
+  const highestOpportunity = [...products]
+    .filter(product => Number.isFinite(product.opportunityScore) && Number(product.opportunityScore) > 0)
+    .sort((left, right) => Number(right.opportunityScore || 0) - Number(left.opportunityScore || 0))[0];
+  const bestSource = [...sourceMap.values()].filter(source => source.valid > 0)
+    .sort((left, right) => right.valid - left.valid || right.total - left.total || left.name.localeCompare(right.name))[0];
+  const smartInsights = [
+    publishBlockReasons.length || currentRuntimeReasons.length
+      ? { code: 'PUBLICATION_WAITING_FOR_SAFETY', message: 'Publication đang chờ điều kiện an toàn từ Runtime Guardian và Safe Publish.' }
+      : { code: 'PUBLICATION_SAFETY_READY', message: 'Publication hiện không có runtime blocker trong snapshot mới nhất.' },
+    highestOpportunity
+      ? { code: 'TOP_PRODUCT_OPPORTUNITY', message: `Ưu tiên xem lại “${highestOpportunity.title}” với opportunity score ${highestOpportunity.opportunityScore}.`, productId: highestOpportunity.id }
+      : null,
+    bestSource
+      ? { code: 'MOST_VALID_SOURCE_INVENTORY', message: `${bestSource.name} hiện có ${bestSource.valid} sản phẩm hợp lệ trong kho.`, source: bestSource.name }
+      : null,
+    automaticActionJobs.length
+      ? { code: 'AUTOMATION_HANDLING_WORK', message: `SanDeal đang tự xử lý ${automaticActionJobs.length} trạng thái retry, workflow hoặc reconciliation.` }
+      : null,
+  ].filter((item): item is NonNullable<typeof item> => item !== null);
+  const trending = buildTrendingDealLeaderboard(products, outboundEvents, now);
+  const productsCreatedToday = products.filter(product => {
+    const createdAt = Date.parse(product.createdAt);
+    return Number.isFinite(createdAt) && createdAt >= startOfVietnamDay(now) && createdAt <= now;
+  }).length;
+
   return {
     updatedAt: new Date().toISOString(), range,
     jobReadModel: {
@@ -310,6 +369,31 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     },
     activity: [...activityMap.values()],
     sourcePerformance: [...sourceMap.values()].sort((a, b) => b.valid - a.valid).slice(0, 6).map(item => ({ ...item, rate: item.total ? Math.min(100, Math.round(item.valid / item.total * 100)) : 0 })),
+    commandCenter: {
+      kpis: {
+        productsToday: productsCreatedToday,
+        processing: productStageCounts.get('checking') || 0,
+        readyToPublish: products.filter(product => mapProductPipelineStage(product) === 'safe_publish').length,
+        publicProducts: products.filter(isPublicSafeProduct).length,
+      },
+      pipeline: PRODUCT_PIPELINE_STAGES.map(stage => ({
+        ...stage,
+        count: productStageCounts.get(stage.id) || 0,
+        href: `/dashboard/products?workspaceStage=${stage.id}`,
+      })),
+      actions: {
+        operator: operatorActionJobs.map(actionItem),
+        automatic: automaticActionJobs.map(actionItem),
+      },
+      timeline: sortedJobs.slice(0, 12).map(actionItem),
+      smartInsights,
+      trending,
+      analytics: {
+        conversionsAvailable: false,
+        revenueAvailable: false,
+        publicSocialProofEnabled: false,
+      },
+    },
     queue,
     runtime: {
       web: { ...(runtimeHealth?.web || { status: 'unverified', buildAvailable: false, publicRouteHealthy: null, buildId: null, releaseId: release.releaseId, releaseMatchesBuild: null }), checkedAt: runtimeHealth?.checkedAt || null },

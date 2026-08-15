@@ -331,7 +331,7 @@ export class MongoStorageAdapter implements StorageAdapter {
           .findOne({ _id: safeCollection, kind: 'collection' }, { session });
       if (!metadata) {
         await commitWithBoundedRetry(session);
-        return { items: [] as T[], totalItems: 0, queryCount: 2 };
+        return { items: [] as T[], totalItems: 0, sourceRevision: 'mongo:missing', queryCount: 2 };
       }
       const match: Record<string, unknown> = { revision: metadata.revision };
       for (const [field, expected] of filterEntries) match[`item.${field}`] = expected;
@@ -356,6 +356,7 @@ export class MongoStorageAdapter implements StorageAdapter {
       return {
         items: deserializeMongoItems<T>(facet?.rows || []),
         totalItems: facet?.count[0]?.total || 0,
+        sourceRevision: `mongo:${metadata.revision}`,
         // One schema lookup, one revision lookup, and one aggregation command.
         // The aggregation returns both the page and total through $facet.
         queryCount: 3,

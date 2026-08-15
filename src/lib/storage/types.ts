@@ -80,6 +80,11 @@ export interface StoragePage<T> {
   items: T[];
   totalItems: number;
   /**
+   * Opaque identity of the durable collection snapshot used for this page.
+   * Callers that compose several pages must reject mixed revisions.
+   */
+  sourceRevision: string;
+  /**
    * Number of storage round trips used for this page. File storage reads the
    * selected durable snapshot once; Mongo verifies schema, reads the active
    * revision, and executes one bounded query.

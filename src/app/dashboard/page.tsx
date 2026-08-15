@@ -3,7 +3,9 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DashboardIcon, type DashboardIconName } from '@/components/dashboard/dashboard-icon';
+import { useCommandCenter } from '@/components/dashboard/command-center-provider';
 import { buildIdempotencyKey } from '@/lib/automation/idempotency';
+import { explainTechnicalReason, type ProductPipelinePresentationStage } from '@/lib/dashboard/v4';
 import styles from './dashboard.module.css';
 
 type Range = 'today' | '7d' | '30d';
@@ -14,12 +16,22 @@ type OnboardingRecommendation = Pick<OnboardingStep, 'id' | 'title' | 'reason' |
 type JobDiagnostic = { id: string; type: string; status: string; outcomeStatus: string | null; updatedAt: string; nextRetryAt: string | null; lastErrorCode: string | null; lastErrorMessage: string | null; reasons: string[]; schemaVersion: number; policyVersion: string; handlerVersion: string };
 type RoleDiagnostic = { processStatus: string; activeRole: boolean; roleState: string; owner: string | null; instanceId: string | null; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; acquiredAt: string | null; leaseAgeMs: number | null; expiresAt: string | null; fencingToken: number | null; takeoverCount: number; releaseId: string | null; releaseMatchesWeb: boolean | null };
 type KeywordYield = { keyword: string; requests: number; found: number; valid: number; ready: number; published: number; noResult: number; timeout: number; rateLimited: number; costPerValidCandidate: number | null; lastUsedAt?: string; nextEligibleAt?: string };
+type CommandCenterAction = { id: string; parentId: string | null; type: string; status: string; attempt: number; progress: { processed: number; total: number; percentage: number } | null; retryAt: string | null; reasonCode: string; updatedAt: string };
 type DashboardData = {
   updatedAt: string; range: Range;
   release: { buildId: string; releaseId: string; commitSha: string | null; runtimeReleaseId: string; releaseMismatch: boolean; releaseSource: string };
   kpis: { productsProcessed: number; running: number; waiting: number; waitingApproval: number; completionRate: number | null; systemErrors: number };
   activity: ActivityPoint[];
   sourcePerformance: Array<{ name: string; total: number; valid: number; rate: number }>;
+  commandCenter: {
+    kpis: { productsToday: number; processing: number; readyToPublish: number; publicProducts: number };
+    pipeline: Array<{ id: ProductPipelinePresentationStage; label: string; technicalLabel: string; count: number; href: string }>;
+    actions: { operator: CommandCenterAction[]; automatic: CommandCenterAction[] };
+    timeline: CommandCenterAction[];
+    smartInsights: Array<{ code: string; message: string; productId?: string; source?: string }>;
+    trending: { available: boolean; evidenceEvents: number; items: Array<{ productId: string; title: string; rank: number; score: number; signals: { outboundClicks: number; detailViews: number; cardClicks: number } }> };
+    analytics: { conversionsAvailable: boolean; revenueAvailable: boolean; publicSocialProofEnabled: boolean };
+  };
   queue: Record<string, number>;
   worker: { status: string; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; releaseId: string | null; workerId: string | null; currentJobId: string | null };
   scheduler: { status: string; lastRunAt: string | null; nextRunAt: string | null; timezone: string; scheduleState: string; scheduleWarning: string | null; heartbeatAt: string | null; heartbeatAgeMs: number | null; heartbeatSource: string; staleAgeMs: number | null; releaseId: string | null };
@@ -87,6 +99,45 @@ function formatDuration(value: number | null): string {
   if (value < 1000) return `${value} ms`;
   if (value < 60_000) return `${Math.round(value / 1000)} giây`;
   return `${Math.round(value / 60_000)} phút`;
+}
+
+function actionStatusLabel(action: CommandCenterAction): string {
+  if (action.status === 'WAITING_APPROVAL') return 'Đang chờ phê duyệt theo policy';
+  if (action.status === 'WAITING_FOR_MANUAL_INPUT') return 'Đang chờ thông tin từ operator';
+  if (action.status === 'WAITING_CHILDREN') return 'Workflow đang chờ các bước con';
+  if (action.status === 'RETRY_SCHEDULED') return action.retryAt ? `SanDeal sẽ thử lại lúc ${formatTime(action.retryAt)}` : 'SanDeal đã lên lịch thử lại';
+  if (action.type === 'RECONCILE_AUTOMATION') return 'SanDeal đang đối soát workflow bền vững';
+  if (action.type === 'RUNTIME_GUARDIAN') return 'Runtime Guardian đang kiểm tra an toàn';
+  return STATUS_LABELS[action.status] || action.status;
+}
+
+function CommandActionList({ items, emptyMessage, technicalMode }: {
+  items: CommandCenterAction[];
+  emptyMessage: string;
+  technicalMode: boolean;
+}) {
+  if (!items.length) return <p className={styles.honestEmpty}>{emptyMessage}</p>;
+  return <div className={styles.commandActionList}>{items.map(action => {
+    const reason = explainTechnicalReason(action.reasonCode);
+    return <article key={action.id} className={styles.commandActionItem}>
+      <span className={`${styles.actionStateDot} ${styles[`action${action.status}`]}`} aria-hidden="true" />
+      <div>
+        <strong>{technicalMode ? action.type : TYPE_LABELS[action.type] || action.type}</strong>
+        <p>{technicalMode ? action.status : actionStatusLabel(action)}</p>
+        {action.progress && <span>{action.progress.processed}/{action.progress.total} · {action.progress.percentage}%</span>}
+      </div>
+      <details>
+        <summary aria-label="Xem chi tiết kỹ thuật"><DashboardIcon name="chevronRight" size={14} /></summary>
+        <dl>
+          <div><dt>job ID</dt><dd>{action.id}</dd></div>
+          {action.parentId && <div><dt>parent ID</dt><dd>{action.parentId}</dd></div>}
+          <div><dt>attempt</dt><dd>{action.attempt}</dd></div>
+          <div><dt>reason code</dt><dd>{reason.technicalCode}</dd></div>
+          <div><dt>updatedAt</dt><dd>{action.updatedAt}</dd></div>
+        </dl>
+      </details>
+    </article>;
+  })}</div>;
 }
 
 function JobDiagnosticCard({ title, job }: { title: string; job: JobDiagnostic | null }) {
@@ -267,6 +318,7 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
 }
 
 export default function DashboardPage() {
+  const { technicalMode } = useCommandCenter();
   const [range, setRange] = useState<Range>('7d');
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -362,12 +414,11 @@ export default function DashboardPage() {
 
   const maxQueue = useMemo(() => data ? Math.max(1, data.queue.PENDING || 0, data.queue.RUNNING || 0, data.queue.WAITING_APPROVAL || 0, data.queue.FAILED || 0, data.queue.BLOCKED || 0) : 1, [data]);
   const populatedKpis: Array<{ label: string; value: string | number; help: string; icon: DashboardIconName; tone: string }> = data ? [
-    { label: 'Tổng record', value: data.inventory.diagnostic.totalProductRecords, help: 'Tổng record sản phẩm trong FileStorage hiện tại', icon: 'product', tone: 'cyan' },
-    { label: 'Đủ điều kiện', value: data.inventory.diagnostic.readyForLaunchCount, help: 'Candidate vượt các cổng readiness hiện tại', icon: 'check', tone: 'green' },
-    { label: 'Đang bị block', value: data.inventory.diagnostic.publishBlockedCount, help: 'Record chưa đạt cổng publish', icon: 'warning', tone: 'red' },
-    { label: 'Quarantine', value: data.inventory.diagnostic.quarantineCount, help: 'Record được giữ lại nhưng khóa public', icon: 'security', tone: 'purple' },
-    { label: 'Job chạy / lỗi trong kỳ', value: `${data.kpis.running} / ${data.kpis.systemErrors}`, help: 'RUNNING hiện tại và FAILED trong khoảng thời gian đã chọn', icon: 'worker', tone: data.kpis.systemErrors ? 'red' : 'cyan' },
-    { label: 'Quota còn lại', value: Math.max(0, data.aiUsage.requestLimit - data.aiUsage.requests), help: 'Số request miễn phí còn lại theo quota đã ghi nhận', icon: 'analytics', tone: 'amber' },
+    { label: 'Sản phẩm hôm nay', value: data.commandCenter.kpis.productsToday, help: 'Sản phẩm có createdAt trong ngày hiện tại theo múi giờ Việt Nam', icon: 'product', tone: 'cyan' },
+    { label: 'Đang xử lý', value: data.commandCenter.kpis.processing, help: 'Sản phẩm đang ở các lifecycle kiểm tra hoặc retry', icon: 'worker', tone: 'indigo' },
+    { label: 'Sẵn sàng đăng', value: data.commandCenter.kpis.readyToPublish, help: 'Sản phẩm đang ở presentation group Safe Publish', icon: 'check', tone: 'purple' },
+    { label: 'Đã công khai', value: data.commandCenter.kpis.publicProducts, help: 'Sản phẩm vượt qua bộ lọc public fail-closed hiện tại', icon: 'external', tone: 'green' },
+    ...(data.kpis.systemErrors > 0 ? [{ label: 'Lỗi hệ thống trong kỳ', value: data.kpis.systemErrors, help: 'FAILED job trong khoảng thời gian đã chọn', icon: 'warning' as DashboardIconName, tone: 'red' }] : []),
   ] : [];
   const kpis = populatedKpis;
   const systemItems = data ? [
@@ -401,6 +452,55 @@ export default function DashboardPage() {
     {pendingControl && <section className={styles.inlineConfirm} role="alertdialog" aria-labelledby="control-title"><div><h2 id="control-title">{pendingControl.title}</h2><p>Thao tác thay đổi trạng thái vận hành và được ghi audit. Nhập lý do tối thiểu 8 ký tự.</p></div><label><span>Lý do</span><textarea autoFocus rows={2} value={reason} onChange={event => setReason(event.target.value)} /></label><div className={styles.modalActions}><button type="button" onClick={() => { setPendingControl(null); setReason(''); }} disabled={submitting}>Hủy</button><button type="button" className={pendingControl.danger ? styles.dangerButton : ''} onClick={() => void applyControl()} disabled={submitting || reason.trim().length < 8}>{submitting ? 'Đang cập nhật' : 'Xác nhận'}</button></div></section>}
     {data && <>
       <section className={styles.kpis} aria-label="Chỉ số chính">{kpis.map(item => <article key={item.label} className={styles[item.tone]} title={item.help}><div className={styles.kpiTop}><span className={styles.kpiIcon}><DashboardIcon name={item.icon} size={22} /></span><span>{item.label}</span></div><strong>{item.value}</strong><small>{item.help}</small></article>)}</section>
+
+      <section className={`${styles.panel} ${styles.pipelinePanel}`} aria-labelledby="product-pipeline-title">
+        <div className={styles.panelHeader}><div><h2 id="product-pipeline-title"><DashboardIcon name="compare" size={19} />Luồng sản phẩm</h2><p>Presentation groups được ánh xạ từ lifecycle thật; trạng thái lạ luôn được giữ lại.</p></div><Link href="/dashboard/products">Mở Product Studio</Link></div>
+        <div className={styles.pipelineFlow}>
+          {data.commandCenter.pipeline.filter(stage => stage.id !== 'unclassified' || stage.count > 0).map((stage, index, visibleStages) => <div className={styles.pipelineStageWrap} key={stage.id}>
+            <Link className={`${styles.pipelineStage} ${styles[`pipeline${stage.id}`]}`} href={stage.href} title={stage.technicalLabel}>
+              <span>{technicalMode ? stage.technicalLabel : stage.label}</span><strong>{stage.count}</strong>
+            </Link>
+            {index < visibleStages.length - 1 && <DashboardIcon name="chevronRight" size={17} />}
+          </div>)}
+        </div>
+      </section>
+
+      <section className={styles.actionCenter} aria-label="Action Center">
+        <article className={`${styles.panel} ${styles.operatorActions}`}>
+          <div className={styles.panelHeader}><div><h2><DashboardIcon name="approval" size={19} />Cần bạn xử lý</h2><p>Chỉ gồm approval hoặc thông tin thật sự cần operator.</p></div><Link href="/dashboard/queue">Mở hàng chờ</Link></div>
+          <CommandActionList items={data.commandCenter.actions.operator} emptyMessage="Hiện không có tác vụ nào yêu cầu bạn can thiệp." technicalMode={technicalMode} />
+        </article>
+        <article className={`${styles.panel} ${styles.automaticActions}`}>
+          <div className={styles.panelHeader}><div><h2><DashboardIcon name="worker" size={19} />SanDeal đang tự xử lý</h2><p>Retry, WAITING_CHILDREN, reconciliation và Runtime Guardian không cần sửa tay.</p></div><Link href="/dashboard/automation">Xem workflow</Link></div>
+          <CommandActionList items={data.commandCenter.actions.automatic} emptyMessage="Không có retry hoặc reconciliation đang chờ trong snapshot hiện tại." technicalMode={technicalMode} />
+        </article>
+      </section>
+
+      <section className={styles.commandCenterGrid} aria-label="Health, insight và trending">
+        <article className={`${styles.panel} ${styles.healthCenter}`}>
+          <div className={styles.panelHeader}><div><h2><DashboardIcon name="health" size={19} />Health Center</h2><p>Runtime Guardian và Safe Publish vẫn là nguồn quyết định.</p></div><Link href="/dashboard/app-health">System Center</Link></div>
+          <div className={styles.healthBanner} data-state={data.control.safePublish.state === 'ready' && !systemDegraded ? 'healthy' : 'waiting'}>
+            <DashboardIcon name={data.control.safePublish.state === 'ready' && !systemDegraded ? 'check' : 'lock'} size={20} />
+            <div><strong>{data.control.safePublish.state === 'ready' && !systemDegraded ? 'Publication sẵn sàng theo snapshot hiện tại' : 'Publication đang tạm khóa'}</strong><p>{data.control.safePublish.state === 'ready' && !systemDegraded ? 'Runtime không báo blocker hiện hành.' : 'Hệ thống đang ở chế độ an toàn.'}</p></div>
+          </div>
+          <div className={styles.reasonList}>{data.runtime.reasons.length ? data.runtime.reasons.slice(0, 5).map(code => { const reason = explainTechnicalReason(code); return <div key={code}><span>{technicalMode ? reason.technicalCode : reason.label}</span>{!technicalMode && <code>{reason.technicalCode}</code>}</div>; }) : <p className={styles.honestEmpty}>Không có runtime reason hiện hành trong snapshot mới nhất.</p>}</div>
+        </article>
+
+        <article className={`${styles.panel} ${styles.smartInsight}`}>
+          <div className={styles.panelHeader}><div><h2><DashboardIcon name="ai" size={19} />Smart Insight</h2><p>Luật cục bộ xác định, không phụ thuộc AI trả phí.</p></div></div>
+          <div className={styles.insightList}>{data.commandCenter.smartInsights.map(insight => <div key={insight.code}><span><DashboardIcon name="check" size={15} /></span><p>{technicalMode ? insight.code : insight.message}</p>{insight.productId && <Link href={`/dashboard/products?open=${encodeURIComponent(insight.productId)}`}>Xem</Link>}</div>)}</div>
+        </article>
+
+        <article className={`${styles.panel} ${styles.trendingPanel}`}>
+          <div className={styles.panelHeader}><div><h2><DashboardIcon name="analytics" size={19} />Top Deal Hôm Nay</h2><p>Xếp hạng xác định từ event thật trong ngày.</p></div></div>
+          {data.commandCenter.trending.available ? <ol className={styles.trendingList}>{data.commandCenter.trending.items.map(item => <li key={item.productId}><strong>{item.rank}</strong><Link href={`/dashboard/products?open=${encodeURIComponent(item.productId)}`}>{item.title}</Link><span>{item.signals.outboundClicks} outbound · {item.signals.detailViews} detail</span></li>)}</ol> : <p className={styles.honestEmpty}>Chưa đủ dữ liệu để xếp hạng hôm nay.</p>}
+        </article>
+      </section>
+
+      <section className={`${styles.panel} ${styles.timelinePanel}`} aria-labelledby="automation-timeline-title">
+        <div className={styles.panelHeader}><div><h2 id="automation-timeline-title"><DashboardIcon name="task" size={19} />Dòng thời gian tự động hóa</h2><p>Event gần nhất từ durable job read model.</p></div><Link href="/dashboard/automation">Xem tất cả</Link></div>
+        {data.commandCenter.timeline.length ? <ol className={styles.timeline}>{data.commandCenter.timeline.map(item => <li key={item.id}><time dateTime={item.updatedAt}>{new Date(item.updatedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</time><span aria-hidden="true" /><div><strong>{technicalMode ? item.type : TYPE_LABELS[item.type] || item.type}</strong><p>{technicalMode ? item.status : actionStatusLabel(item)}</p></div><details><summary>Xem chi tiết kỹ thuật</summary><code>{item.type} · {item.status} · attempt {item.attempt} · {item.reasonCode}</code></details></li>)}</ol> : <p className={styles.honestEmpty}>Chưa có event tự động hóa trong read model hiện tại.</p>}
+      </section>
       <section className={styles.operationsGrid} aria-label="Trạng thái hệ thống"><article className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="health" size={19} />Trạng thái hệ thống</h2><p>Chỉ đánh dấu tốt khi có heartbeat, probe hoặc snapshot thực.</p></div><Link href="/dashboard/app-health">Chi tiết</Link></div><div className={styles.systemGrid}>{systemItems.map(item => { const healthy = ['ready', 'active', 'healthy', 'SUCCEEDED'].includes(item.status); return <div key={item.label}><span className={healthy ? styles.statusHealthy : styles.statusAttention}>{healthy ? 'OK' : '!'}</span><span><strong>{item.label}</strong><small>{RUNTIME_LABELS[item.status] || STATUS_LABELS[item.status] || item.status} · {formatTime(item.detail)}</small></span></div>; })}</div></article><article className={styles.panel}><div className={styles.panelHeader}><div><h2><DashboardIcon name="warning" size={19} />Việc cần xử lý</h2><p>Ưu tiên từ dữ liệu hiện tại, không tạo cảnh báo giả.</p></div><Link href="/dashboard/today">Mở danh sách việc</Link></div>{workItems.length ? <div className={styles.workList}>{workItems.slice(0, 6).map(item => <Link href={item.href} key={`${item.severity}:${item.text}`}><span className={styles[`severity${item.severity}`]}>{item.severity === 'critical' ? 'P0' : item.severity === 'warning' ? 'P1' : 'P2'}</span><span>{item.text}</span><DashboardIcon name="chevronRight" size={15} /></Link>)}</div> : <p className={styles.mutedText}>Không có việc khẩn cấp được suy ra từ snapshot hiện tại.</p>}</article></section>
       <section className={styles.onboarding} aria-labelledby="onboarding-title"><div className={styles.panelHeader}><div><h2 id="onboarding-title"><DashboardIcon name="today" size={19} />{data.onboarding.compact ? 'Việc nên làm tiếp theo' : 'Bắt đầu vận hành SanDeal'}</h2><p>{data.onboarding.summary.completed}/{data.onboarding.summary.total} bước đã hoàn thành, trạng thái được suy ra từ backend.</p></div><Link href="/dashboard/today">Xem việc hôm nay</Link></div><div className={styles.onboardingList}>{(data.onboarding.compact ? data.onboarding.recommendations : data.onboarding.steps).map(item => <article key={item.id} className={styles.onboardingStep}><div><span className={styles[`step${item.status}`]}>{item.status === 'COMPLETED' ? 'Hoàn thành' : item.status === 'IN_PROGRESS' ? 'Đang thực hiện' : item.status === 'BLOCKED' ? 'Bị chặn' : 'Chưa bắt đầu'}</span><h3>{item.title}</h3></div><p>{item.reason}</p>{hasCompletionCriteria(item) && <small>Hoàn thành khi: {item.completionCriteria}</small>}<Link href={item.route}>{item.cta}</Link></article>)}</div></section>
       <details className={styles.advancedDiagnostics}><summary><span><DashboardIcon name="tools" size={18} />Chẩn đoán chuyên sâu và điều khiển</span><small>Mở khi cần xem funnel, lease, keyword và policy chi tiết.</small></summary><OwnerDiagnostics data={data} selectedMode={selectedMode} setSelectedMode={setSelectedMode} openControl={setPendingControl} runDry={() => void createDryRun()} submitting={submitting} /></details>

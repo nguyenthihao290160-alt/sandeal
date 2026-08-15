@@ -1936,6 +1936,29 @@ export default function ProductSourcesPage() {
 
         <SourceReliabilityPanel />
 
+        <section className="multi-network-center" aria-labelledby="multi-network-title">
+          <div className="multi-network-heading">
+            <div><span>MULTI-NETWORK COMMAND CENTER</span><h2 id="multi-network-title">Tình trạng từng nguồn affiliate</h2><p>Mỗi nguồn được đánh giá riêng; một nguồn lỗi không làm nguồn khác chuyển sang trạng thái thất bại.</p></div>
+            <span className={`source-overall-state${atResults || tiktokResults ? ' source-state-healthy' : ''}`}>
+              Khám phá sản phẩm: {atResults || tiktokResults ? 'Đang hoạt động' : 'Chưa xác minh'}
+            </span>
+          </div>
+          <div className="multi-network-grid">
+            <article className="network-source-card">
+              <div><span className="network-source-mark">AT</span><span><strong>AccessTrade</strong><small>Affiliate network</small></span></div>
+              <span className={`network-source-status ${atError ? 'source-state-degraded' : atResults ? 'source-state-healthy' : ''}`}>{atError ? 'Tạm gián đoạn' : atResults ? 'Đã nhận dữ liệu' : atConfigured ? 'Đã cấu hình · Chưa kiểm tra' : 'Chưa kết nối'}</span>
+              <dl><div><dt>Products discovered</dt><dd>{atResults?.summary.fetched ?? atResults?.summary.total ?? '—'}</dd></div><div><dt>Affiliate links</dt><dd>{atResults ? atResults.items.filter(item => isValidHttpUrl(item.affiliateUrl)).length : '—'}</dd></div><div><dt>Clicks / conversions / revenue</dt><dd>—</dd></div></dl>
+            </article>
+            <article className="network-source-card">
+              <div><span className="network-source-mark network-source-tiktok">TT</span><span><strong>AccessTrade TikTok Shop</strong><small>Source adapter</small></span></div>
+              <span className={`network-source-status ${tiktokError ? 'source-state-degraded' : tiktokResults ? 'source-state-healthy' : ''}`}>{tiktokError ? 'Tạm gián đoạn' : tiktokResults ? 'Đã nhận dữ liệu' : atConfigured ? 'Đã cấu hình · Chưa kiểm tra' : 'Chưa kết nối'}</span>
+              <dl><div><dt>Products discovered</dt><dd>{tiktokResults?.diagnostics.fetched ?? '—'}</dd></div><div><dt>Accepted candidates</dt><dd>{tiktokResults?.diagnostics.accepted ?? '—'}</dd></div><div><dt>Last successful run</dt><dd>{tiktokResults ? 'Phiên hiện tại' : '—'}</dd></div></dl>
+            </article>
+            <article className="network-source-card network-source-future"><div><span className="network-source-mark network-source-shopee">S</span><span><strong>Shopee Affiliate</strong><small>Future provider</small></span></div><span className="network-source-status">Chưa kết nối</span><p>Không có integration hoặc metrics production trong repository hiện tại.</p></article>
+            <article className="network-source-card network-source-future"><div><span className="network-source-mark network-source-lazada">L</span><span><strong>Lazada Affiliate</strong><small>Future provider</small></span></div><span className="network-source-status">Chưa kết nối</span><p>Không hiển thị trạng thái connected cho đến khi có adapter thật.</p></article>
+          </div>
+        </section>
+
         {/* Safe Source Rules */}
         <div
             className="card"

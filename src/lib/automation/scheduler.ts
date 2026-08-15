@@ -143,11 +143,53 @@ export interface RuntimeControlSchedulerTickResult {
   jobId: string;
 }
 
+export interface AutomationReconciliationSchedulerTickResult {
+  status: 'paused' | 'killed' | 'scheduled' | 'duplicate';
+  jobId?: string;
+}
+
+const AUTOMATION_RECONCILIATION_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Persist workflow reconciliation as ordinary durable queue work. The active
+ * job equivalence guard in the store prevents a slow or restarted Worker from
+ * accumulating one job per time bucket while preserving crash recovery.
+ */
+export async function runAutomationReconciliationSchedulerTick(
+  now = Date.now(),
+): Promise<AutomationReconciliationSchedulerTickResult> {
+  const timestamp = new Date(now).toISOString();
+  await updateAutomationControl({ schedulerHeartbeatAt: timestamp }, 'scheduler');
+  const control = await getAutomationControl();
+  if (control.killSwitch) return { status: 'killed' };
+  if (control.schedulerPaused) return { status: 'paused' };
+
+  const bucket = Math.floor(now / AUTOMATION_RECONCILIATION_INTERVAL_MS);
+  const policy = getAutomationPolicy('RECONCILE_AUTOMATION');
+  const operationId = `scheduler:workflow-reconciliation:${bucket}`;
+  const created = await createAutomationJob({
+    type: 'RECONCILE_AUTOMATION',
+    payload: {
+      reconciliationKind: 'WORKFLOW',
+      scheduleBucket: bucket,
+    },
+    priority: 90,
+    idempotencyKey: operationId,
+    operationId,
+    requestedBy: 'scheduler',
+    riskLevel: policy.defaultRisk,
+    dryRun: false,
+    maxAttempts: policy.retryPolicy.maxAttempts,
+  });
+  return { status: created.created ? 'scheduled' : 'duplicate', jobId: created.job.id };
+}
+
 export interface OwnedSchedulerCycleResult {
   status: 'completed' | 'role_lost';
   /** True when a timer fired while the previous cycle was still running. */
   skippedOverlap?: boolean;
   guardian?: RuntimeControlSchedulerTickResult;
+  reconciliation?: AutomationReconciliationSchedulerTickResult;
   automation?: SchedulerTickResult;
   intelligence?: ProductIntelligenceSchedulerTickResult;
 }
@@ -169,8 +211,10 @@ export async function runOwnedSchedulerCycle(
     if (!await heartbeatRuntimeRole('SCHEDULER', ownership, undefined, now)) return { status: 'role_lost' };
     const guardian = await runRuntimeControlSchedulerTick(now);
     if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian };
+    const reconciliation = await runAutomationReconciliationSchedulerTick(now);
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, reconciliation };
     const automation = await runAutomationSchedulerTick(now);
-    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, automation };
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, reconciliation, automation };
     const intelligence = await runProductIntelligenceSchedulerTick(now);
     const storageAfter = getStorageDiagnosticsSnapshot();
     const fullReadsByCollection: Record<string, number> = {};
@@ -182,10 +226,15 @@ export async function runOwnedSchedulerCycle(
       type: 'automation_scheduler_cycle',
       durationMs: Math.max(0, Date.now() - startedAt),
       guardian: guardian.status,
+      reconciliation: reconciliation.status,
       automation: automation.status,
       intelligence: intelligence.status,
-      scheduled: (automation.status === 'scheduled' ? 1 : 0) + intelligence.scheduled,
-      duplicateCount: intelligence.duplicates + (automation.status === 'duplicate' ? 1 : 0),
+      scheduled: (reconciliation.status === 'scheduled' ? 1 : 0)
+        + (automation.status === 'scheduled' ? 1 : 0)
+        + intelligence.scheduled,
+      duplicateCount: intelligence.duplicates
+        + (reconciliation.status === 'duplicate' ? 1 : 0)
+        + (automation.status === 'duplicate' ? 1 : 0),
       fullDurableCollectionReads: storageAfter.fullCollectionReadCount - storageBefore.fullCollectionReadCount,
       fullDurableCollectionReadsByCollection: fullReadsByCollection,
       boundedReads: storageAfter.boundedReadCount - storageBefore.boundedReadCount,
@@ -200,7 +249,7 @@ export async function runOwnedSchedulerCycle(
       rssBytes: process.memoryUsage().rss,
       heapUsedBytes: process.memoryUsage().heapUsed,
     }));
-    return { status: 'completed', guardian, automation, intelligence };
+    return { status: 'completed', guardian, reconciliation, automation, intelligence };
   });
   ownedSchedulerFlight = flight;
   try {

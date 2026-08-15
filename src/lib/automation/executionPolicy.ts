@@ -70,6 +70,7 @@ const PRODUCT_CRITICAL_JOB_TYPES = new Set<AutomationJobType>([
 
 const CONTROL_JOB_TYPES = new Set<AutomationJobType>([
   'RUNTIME_GUARDIAN',
+  'RECONCILE_AUTOMATION',
   'HEALTH_CHECK',
   'EVALUATE_ALERTS',
   'AGGREGATE_GROWTH_METRICS',
@@ -81,7 +82,7 @@ function isProjectionRepairJob(input: Pick<AutomationJob, 'type' | 'payload'>): 
 }
 
 function policyForType(type: AutomationJobType): AutomationExecutionPolicy {
-  if (type === 'BULK_PRODUCT_OPERATION' || type === 'RECONCILE_AUTOMATION') {
+  if (type === 'BULK_PRODUCT_OPERATION') {
     return {
       concurrencyClass: 'STORAGE_EXCLUSIVE',
       critical: false,
@@ -165,6 +166,7 @@ export function getAutomationExecutionDescriptor(
   }
   const policy = policyForType(job.type);
   const keys = new Set<string>();
+  if (job.type === 'RECONCILE_AUTOMATION') keys.add('control:workflow-reconciliation');
   if (policy.resourceScope === 'GLOBAL') keys.add('storage:global');
   if (policy.resourceScope === 'SOURCE') keys.add('source:ingestion');
   if (policy.resourceScope === 'PRODUCT') {
