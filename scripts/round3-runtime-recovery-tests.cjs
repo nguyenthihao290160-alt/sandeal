@@ -128,7 +128,9 @@ function makeCandidate(id, fixture = 'healthy') {
 
 async function main() {
   const adapter = require('../src/lib/storage/adapter.ts');
+  const { fileStorageAdapter } = require('../src/lib/storage/fileStorageAdapter.ts');
   const queue = require('../src/lib/storage/candidateQueue.ts');
+  const { getAutomationPolicy } = require('../src/lib/automation/policyRegistry.ts');
   const store = require('../src/lib/automation/store.ts');
   const worker = require('../src/lib/automation/worker.ts');
   const scheduler = require('../src/lib/automation/scheduler.ts');
@@ -140,6 +142,7 @@ async function main() {
 
   async function scenario(name) {
     intelligence.setProductSelectionTestHookForTests();
+    intelligence.setScoreProductWriteTestHookForTests();
     const directory = path.join(rootTempDir, name);
     fs.mkdirSync(directory, { recursive: true });
     process.env.SANDEAL_DATA_DIR = directory;
@@ -443,6 +446,50 @@ async function main() {
     assert.equal((await adapter.readCollection('products')).some(product => product.scoreCalculatedAt), false);
   });
 
+  await test('raw product storage revision races retain the exact selection code and retry policy', async () => {
+    await scenario('raw-storage-source-change');
+    const scorePolicy = getAutomationPolicy('SCORE_PRODUCTS');
+    const recheckPolicy = getAutomationPolicy('RECHECK_PRODUCT_HEALTH');
+    for (const policy of [scorePolicy, recheckPolicy]) {
+      assert.ok(policy.retryPolicy.retryableCodes.includes('STORAGE_COLLECTION_SOURCE_CHANGED'));
+      assert.ok(policy.retryPolicy.retryableCodes.includes('PRODUCT_SELECTION_SOURCE_CHANGED'));
+      assert.equal(policy.retryPolicy.maxAttempts, 3);
+    }
+
+    await adapter.writeCollection('products', [makeProduct('raw-source-change')]);
+    const created = await store.createAutomationJob({
+      type: 'SCORE_PRODUCTS',
+      payload: { limit: 1, cursor: 0 },
+      idempotencyKey: 'raw-storage-source-change',
+      requestedBy: 'scheduler',
+    });
+    const originalReadCollectionPage = fileStorageAdapter.readCollectionPage;
+    let sourceChangeCalls = 0;
+    fileStorageAdapter.readCollectionPage = async function revisionRace(collection, options) {
+      // The adapter retries a coherent page three times and the selection
+      // layer rematerializes the complete window three times.
+      if (collection === 'products' && sourceChangeCalls < 9) {
+        sourceChangeCalls += 1;
+        const error = new Error('STORAGE_COLLECTION_SOURCE_CHANGED');
+        error.code = 'STORAGE_COLLECTION_SOURCE_CHANGED';
+        throw error;
+      }
+      return originalReadCollectionPage.call(this, collection, options);
+    };
+    try {
+      await worker.processAutomationBatch('round3-source-change-worker', 1);
+    } finally {
+      fileStorageAdapter.readCollectionPage = originalReadCollectionPage;
+    }
+    const current = await store.getAutomationJob(created.job.id);
+    assert.equal(sourceChangeCalls, 9);
+    assert.equal(current.status, 'RETRY_SCHEDULED');
+    assert.equal(current.lastErrorCode, 'PRODUCT_SELECTION_SOURCE_CHANGED');
+    assert.equal(current.lastErrorCategory, 'STORAGE_ERROR');
+    assert.equal(current.retryable, true);
+    assert.ok(Date.parse(current.nextRetryAt) > Date.now());
+  });
+
   await test('explicit product IDs remain stable across collection reordering', async () => {
     await scenario('selection-explicit-ids');
     const products = Array.from({ length: 6 }, (_, index) => makeProduct(`e${index + 1}`)).reverse();
@@ -459,6 +506,38 @@ async function main() {
       .map(product => product.id)
       .sort();
     assert.deepEqual(scored, ['e2', 'e5']);
+  });
+
+  await test('record-level score CAS rejects a product changed after selection', async () => {
+    await scenario('selection-record-cas');
+    await adapter.writeCollection('products', [makeProduct('cas-target')]);
+    let mutationCount = 0;
+    intelligence.setScoreProductWriteTestHookForTests(async ({ productId }) => {
+      if (mutationCount) return;
+      await adapter.runTransaction('products', products => {
+        const product = products.find(item => item.id === productId);
+        product.title = 'Authoritative title changed after score selection';
+        product.sourceHash = 'source-cas-target-new-revision';
+        product.updatedAt = '2099-01-01T00:00:00.000Z';
+        return products;
+      });
+      mutationCount += 1;
+    });
+    const created = await store.createAutomationJob({
+      type: 'SCORE_PRODUCTS',
+      payload: { productIds: ['cas-target'] },
+      idempotencyKey: 'selection-record-cas',
+      requestedBy: 'round3-runtime-test',
+    });
+    await assert.rejects(
+      intelligence.executeProductIntelligenceJob({ ...created.job, status: 'RUNNING' }),
+      error => error && (error.code === 'PRODUCT_SELECTION_SOURCE_CHANGED' || error.message === 'PRODUCT_SELECTION_SOURCE_CHANGED'),
+    );
+    intelligence.setScoreProductWriteTestHookForTests();
+    const [stored] = await adapter.readCollection('products');
+    assert.equal(mutationCount, 1);
+    assert.equal(stored.title, 'Authoritative title changed after score selection');
+    assert.equal(stored.scoreCalculatedAt, undefined);
   });
 
   await test('selection preserves cancellation and fencing authority', async () => {
@@ -534,6 +613,7 @@ async function main() {
   });
 
   intelligence.setProductSelectionTestHookForTests();
+  intelligence.setScoreProductWriteTestHookForTests();
   console.log(`\nROUND 3 runtime recovery: ${passed} passed, ${failed} failed`);
   console.log(`Isolated artifacts: ${path.relative(process.cwd(), rootTempDir)}`);
   if (failed) process.exitCode = 1;

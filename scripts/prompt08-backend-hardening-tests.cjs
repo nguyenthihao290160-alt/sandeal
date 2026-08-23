@@ -69,6 +69,7 @@ function product(id, overrides = {}) {
     affiliateLastCheckedAt: now,
     imageLastCheckedAt: now,
     priceObservedAt: now,
+    priceVerificationStatus: 'VERIFIED',
     priceTruthState: 'FRESH',
     sourceHash: `source-${id}`,
     createdAt: now,

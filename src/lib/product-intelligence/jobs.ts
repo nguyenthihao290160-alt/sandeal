@@ -42,6 +42,8 @@ import { createLocalContentDraft, editorialCheckDraft, listContentDrafts } from 
 import { aggregateGrowthMetrics } from './growth';
 import { evaluateAlerts } from './alerts';
 import { getAlertIncident, recordServerIncidentRecheck, synchronizeAlertIncidents } from './alertIncidents';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
+import { updateProductHealthFailureCounters } from '@/lib/productHealthFailureCounters';
 
 const JOB_TYPES = new Set([
   'IMPORT_PRODUCTS', 'RECHECK_PRODUCT_HEALTH', 'DETECT_DUPLICATES', 'SCORE_PRODUCTS', 'CAPTURE_PRICE_HISTORY',
@@ -141,14 +143,31 @@ type ProductSelectionTestHook = (input: {
 
 let productSelectionTestHook: ProductSelectionTestHook | undefined;
 
+type ScoreProductWriteTestHook = (input: {
+  productId: string;
+  expectedUpdatedAt: string;
+}) => void | Promise<void>;
+
+let scoreProductWriteTestHook: ScoreProductWriteTestHook | undefined;
+
 export function setProductSelectionTestHookForTests(hook?: ProductSelectionTestHook): void {
   if (process.env.NODE_ENV !== 'test') throw new Error('PRODUCT_SELECTION_TEST_HOOK_FORBIDDEN');
   productSelectionTestHook = hook;
 }
 
+export function setScoreProductWriteTestHookForTests(hook?: ScoreProductWriteTestHook): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('SCORE_PRODUCT_WRITE_TEST_HOOK_FORBIDDEN');
+  scoreProductWriteTestHook = hook;
+}
+
 async function invokeProductSelectionTestHook(input: Parameters<ProductSelectionTestHook>[0]): Promise<void> {
   if (process.env.NODE_ENV !== 'test' || !productSelectionTestHook) return;
   await productSelectionTestHook(input);
+}
+
+async function invokeScoreProductWriteTestHook(input: Parameters<ScoreProductWriteTestHook>[0]): Promise<void> {
+  if (process.env.NODE_ENV !== 'test' || !scoreProductWriteTestHook) return;
+  await scoreProductWriteTestHook(input);
 }
 
 function isProductSelectionSourceChange(error: unknown): boolean {
@@ -309,7 +328,7 @@ async function scoreProducts(job: AutomationJob, execution: ProductIntelligenceE
     const history = await getPriceStatistics(product.id);
     const scores = calculateProductScores(product, history);
     throwIfExecutionAborted(execution.signal);
-    await saveCanonicalProduct(product.id, {
+    const scorePatch: Partial<Product> = {
       qualityScore: scores.quality.score,
       qualityBand: scores.quality.band,
       opportunityScore: scores.opportunity.score,
@@ -328,7 +347,20 @@ async function scoreProducts(job: AutomationJob, execution: ProductIntelligenceE
       dealConfidence: scores.deal.confidence,
       dataIssues: [...new Set([...scores.quality.failedRules, ...scores.quality.warnings, ...scores.quality.blockers])],
       recommendedActions: [...new Set([...scores.quality.recommendations, ...scores.opportunity.warnings])],
-    });
+    };
+    await invokeScoreProductWriteTestHook({ productId: product.id, expectedUpdatedAt: product.updatedAt });
+    try {
+      const saved = await saveCanonicalProduct(product.id, scorePatch, { expectedUpdatedAt: product.updatedAt });
+      if (!saved) throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code || '')
+        : '';
+      if (code === 'STORAGE_PRODUCT_REVISION_CHANGED') {
+        throw new ProductSelectionError('PRODUCT_SELECTION_SOURCE_CHANGED');
+      }
+      throw error;
+    }
     updated += 1;
   }
   return { inspected: products.length, updated, businessDataChanged: updated > 0 };
@@ -807,25 +839,29 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
       const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
       let affiliateUrlHealthy = !checkAffiliate && goodHealth.has(String(product.affiliateHealthStatus || ''));
       const effectivePrice = product.salePrice || product.price;
-      const priceObservedAt = Date.parse(product.priceObservedAt || product.sourceFetchedAt || '');
-      const priceStale = Number.isFinite(priceObservedAt) && Date.now() - priceObservedAt > 7 * 24 * 60 * 60_000;
+      const currentPriceTruth = derivePersistedPriceTruth(product);
       const invalidSourcePrice = !effectivePrice && (
         normalizationIssues.has('INVALID_PRICE')
         || product.fieldProvenance?.price?.verificationStatus === 'INVALID'
       );
-      updates.priceVerificationStatus = !effectivePrice ? invalidSourcePrice ? 'INVALID' : 'MISSING'
-        : priceStale ? 'STALE'
-          : product.priceVerificationStatus === 'VERIFIED' ? 'VERIFIED' : 'UNVERIFIED';
+      updates.priceTruthState = currentPriceTruth.state;
+      updates.priceTruthConfidence = currentPriceTruth.confidence;
+      updates.priceTruthReasons = currentPriceTruth.reasons;
+      updates.priceTruthRuleVersion = 'price-truth-v2';
+      updates.priceVerificationStatus = !effectivePrice
+        ? invalidSourcePrice ? 'INVALID' : 'MISSING'
+        : currentPriceTruth.verificationStatus;
       setFieldProvenance(product, updates, 'price', {
         value: effectivePrice ?? product.fieldProvenance?.price?.value,
         verificationStatus: updates.priceVerificationStatus,
         verificationReason: !effectivePrice
           ? invalidSourcePrice ? 'PRICE_FORMAT_INVALID' : 'PRICE_MISSING'
-          : priceStale ? 'PRICE_STALE'
-            : product.priceVerificationStatus === 'VERIFIED' ? undefined : 'PRICE_SOURCE_OBSERVATION_NOT_INDEPENDENTLY_VERIFIED',
+          : currentPriceTruth.state === 'STALE' ? 'PRICE_STALE'
+            : currentPriceTruth.state === 'CONFLICTED' ? 'PRICE_CONFLICT'
+              : currentPriceTruth.isVerified ? undefined : 'PRICE_SOURCE_OBSERVATION_NOT_INDEPENDENTLY_VERIFIED',
       });
       if (!effectivePrice) failureReasons.push(invalidSourcePrice ? 'price:invalid' : 'price:missing');
-      else if (updates.priceVerificationStatus !== 'VERIFIED') failureReasons.push(`price:${updates.priceVerificationStatus.toLowerCase()}`);
+      else if (!currentPriceTruth.isVerified) failureReasons.push(`price:${updates.priceVerificationStatus.toLowerCase()}`);
 
       const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
       const canonicalSupport = accessTradeCanonicalSupport(product);
@@ -1168,9 +1204,18 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
         }
       }
 
+      const reasonFor = (prefix: string) => failureReasons.filter(reason => reason.startsWith(`${prefix}:`)).join(',') || undefined;
+      const healthFailureState = updateProductHealthFailureCounters(product, [
+        { scope: 'price', healthy: !reasonFor('price'), reason: reasonFor('price') },
+        ...(checkLinks ? [{ scope: 'productUrl' as const, healthy: !reasonFor('link'), reason: reasonFor('link') }] : []),
+        ...(checkAffiliate ? [{ scope: 'affiliateUrl' as const, healthy: !reasonFor('affiliate'), reason: reasonFor('affiliate') }] : []),
+        ...(checkImages ? [{ scope: 'image' as const, healthy: !reasonFor('image'), reason: reasonFor('image') }] : []),
+      ]);
+      updates.healthFailureCounters = healthFailureState.counters;
+      updates.consecutiveHealthFailures = healthFailureState.consecutiveFailures;
+      updates.lastHealthyAt = healthFailureState.lastHealthyAt;
       if (failureReasons.length) {
-        updates.consecutiveHealthFailures = Math.max(0, Number(product.consecutiveHealthFailures || 0)) + 1;
-        updates.sourceHealthReason = failureReasons.join(',').slice(0, 500);
+        updates.sourceHealthReason = healthFailureState.activeReasons.join(',').slice(0, 500) || failureReasons.join(',').slice(0, 500);
         const retryAt = latestTimestamp(retryTimes);
         if (retryAt) {
           updates.sourceHealthCooldownUntil = retryAt;
@@ -1181,11 +1226,12 @@ async function recheckHealth(job: AutomationJob, execution: ProductIntelligenceE
           updates.nextRetryAt = undefined;
           updates.nextAutomaticAction = 'MANUAL_REVIEW_CONFIRMED_BROKEN';
         }
-      } else {
-        updates.consecutiveHealthFailures = 0;
+      } else if (healthFailureState.consecutiveFailures === 0) {
         updates.sourceHealthReason = undefined;
         updates.sourceHealthCooldownUntil = undefined;
         updates.nextRetryAt = undefined;
+      } else {
+        updates.sourceHealthReason = healthFailureState.activeReasons.join(',').slice(0, 500) || product.sourceHealthReason;
       }
 
       // A generic reprocess is never an applicable superseding workflow for

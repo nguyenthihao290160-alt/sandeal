@@ -1,11 +1,13 @@
 import { createHash } from 'crypto';
 import type { EditorialClaim, Product, ReviewContent, VerifiedProductFact } from './types';
+import { derivePersistedPriceTruth } from './autonomous/priceTruthEngine';
 
 export const REVIEW_DISCLOSURE = 'Bài viết được SanDeal tổng hợp và đánh giá tự động dựa trên dữ liệu sản phẩm, giá, liên kết và hình ảnh tại thời điểm kiểm tra. SanDeal chưa trực tiếp thử nghiệm sản phẩm này, trừ khi bài viết ghi rõ có thử nghiệm thực tế. SanDeal có thể nhận hoa hồng affiliate qua một số liên kết; việc này không làm thay đổi giá người mua thanh toán.';
 export const REVIEW_THRESHOLDS = { contentQualityScore: 75, originalityScore: 70, seoReadinessScore: 80 } as const;
 
-// V2: reviewVersion constant
-export const CURRENT_REVIEW_VERSION = 2;
+// V3 invalidates older category-shaped local fallbacks so unchanged source
+// records are regenerated with the neutral, evidence-only template.
+export const CURRENT_REVIEW_VERSION = 3;
 
 const RISKY_CLAIMS = /\b(chắc chắn|tuyệt đối|cam kết|tốt nhất|số một|hiệu quả ngay|chữa|điều trị|an toàn hoàn toàn|không tác dụng phụ|bền nhất|rẻ nhất thị trường)\b/i;
 const MARKETING_SENTENCES = /(tốt nhất|số một|chữa khỏi|cam kết hiệu quả|an toàn tuyệt đối)/i;
@@ -44,7 +46,14 @@ export function normalizeReviewContent(value: unknown, sourceHash = ''): ReviewC
 
 function formatMoney(value: number): string { return `${value.toLocaleString('vi-VN')} ₫`; }
 function fact(id: string, label: string, value: string | number, sourceField: string, product: Product): VerifiedProductFact {
-  return { id, label, value, sourceField, sourceName: product.source || 'canonical_product', verifiedAt: product.linkLastCheckedAt || product.updatedAt };
+  const isPriceFact = sourceField.split(',').some(field => field === 'price' || field === 'salePrice');
+  const verifiedAt = isPriceFact
+    ? product.priceObservedAt
+      || product.fieldProvenance?.price?.verifiedAt
+      || product.fieldProvenance?.price?.fetchedAt
+      || product.updatedAt
+    : product.linkLastCheckedAt || product.updatedAt;
+  return { id, label, value, sourceField, sourceName: product.source || 'canonical_product', verifiedAt };
 }
 
 export function extractVerifiedProductFacts(product: Product): VerifiedProductFact[] {
@@ -52,10 +61,24 @@ export function extractVerifiedProductFacts(product: Product): VerifiedProductFa
   const title = cleanText(product.title, 180);
   if (title && !MARKETING_SENTENCES.test(title)) facts.push(fact('title', 'Tên sản phẩm', title, 'title', product));
   const currentPrice = Number(product.salePrice || product.price || 0);
-  if (currentPrice > 0) facts.push(fact('current_price', 'Giá hiện tại', currentPrice, product.salePrice ? 'salePrice' : 'price', product));
-  if (product.price && product.salePrice && product.price > product.salePrice) {
-    facts.push(fact('original_price', 'Giá gốc', product.price, 'price', product));
-    facts.push(fact('discount', 'Mức giảm tính từ dữ liệu giá', Math.round((1 - product.salePrice / product.price) * 100), 'price,salePrice', product));
+  const priceTruth = derivePersistedPriceTruth(product);
+  if (currentPrice > 0 && priceTruth.isVerified) facts.push(fact('current_price', 'Giá đã xác minh', currentPrice, product.salePrice ? 'salePrice' : 'price', product));
+  const originalPrice = Number(product.price || 0);
+  const storedDiscountPercent = Number(product.priceTruthDiscountPercent);
+  const observedDiscountPercent = originalPrice > currentPrice && currentPrice > 0
+    ? Math.round((1 - currentPrice / originalPrice) * 100)
+    : 0;
+  const hasVerifiedDiscount = priceTruth.isVerified
+    && Boolean(product.priceTruthEvidenceFactIds?.length)
+    && originalPrice > currentPrice
+    && currentPrice > 0
+    && Number.isFinite(storedDiscountPercent)
+    && storedDiscountPercent > 0
+    && storedDiscountPercent <= 100
+    && Math.abs(observedDiscountPercent - storedDiscountPercent) <= 1;
+  if (hasVerifiedDiscount) {
+    facts.push(fact('original_price', 'Giá gốc', originalPrice, 'price', product));
+    facts.push(fact('discount', 'Mức giảm tính từ dữ liệu giá', Math.round(storedDiscountPercent), 'price,salePrice', product));
   }
   const brand = cleanText(product.brand, 80);
   if (brand) facts.push(fact('brand', 'Thương hiệu', brand, 'brand', product));
@@ -427,6 +450,16 @@ function fillTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || key);
 }
 
+function distinctText(values: string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter(value => {
+    const normalized = cleanText(value, 1_000).toLocaleLowerCase('vi');
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
 /**
  * Build specification summary text from product specs.
  */
@@ -450,12 +483,13 @@ function buildBrandAttribution(product: Product): string {
 }
 
 // ============================================================
-// V2: Main editorial review generator
+// V3: Main editorial review generator
 // ============================================================
 
 export function generateEditorialReview(product: Product, otherProducts: Product[] = [], now = new Date().toISOString()): ReviewContent {
   const existingReview = product.reviewContent;
-  // V2: Also regenerate if reviewVersion < CURRENT_REVIEW_VERSION
+  // The version is part of the editorial safety contract, so unchanged source
+  // records still regenerate when an older template produced the review.
   if (existingReview && existingReview.sourceHash === product.sourceHash && existingReview.reviewContentHash && existingReview.reviewVersion >= CURRENT_REVIEW_VERSION) return existingReview;
 
   const facts = extractVerifiedProductFacts(product);
@@ -466,11 +500,14 @@ export function generateEditorialReview(product: Product, otherProducts: Product
   const priceStr = price > 0 ? formatMoney(price) : 'chưa có giá tham khảo';
 
   // V2: Deterministic seed for variant selection
-  const seed = product.id || product.sourceHash || product.slug || title;
+  const detectedCategory = detectCategory(product);
+  const seed = `${product.id || product.sourceHash || product.slug || title}:${detectedCategory}`;
 
   // V2: Category-aware template
-  const detectedCategory = detectCategory(product);
-  const template = CATEGORY_TEMPLATES[detectedCategory];
+  // Local fallback deliberately stays neutral. Category-specific prose can
+  // imply size, styling, compatibility, material or health considerations
+  // that are not present in the source evidence.
+  const template = CATEGORY_TEMPLATES.general;
 
   // V2: Template variables
   const vars: Record<string, string> = { title, category, price: priceStr };
@@ -482,16 +519,20 @@ export function generateEditorialReview(product: Product, otherProducts: Product
   const healthNote = buildHealthNote(product);
 
   // V2: Select category-specific templates deterministically
-  const reviewTitle = fillTemplate(pickVariant(template.titleFormats, `title-${seed}`), vars);
+  const reviewTitle = fillTemplate(pickVariant(template.titleFormats, `neutral-title-${seed}`), vars);
 
   let summary: string;
   if (facts.length >= 8) {
-    const intro = fillTemplate(pickVariant(template.summaryIntros, `summary-${seed}`), vars);
+    const intro = distinctText([
+      `SanDeal ghi nhận ${title} từ dữ liệu nguồn hiện có.`,
+      byId.has('category') ? `Nhóm sản phẩm được nguồn ghi nhận: ${category}.` : '',
+      byId.has('current_price') ? `Giá đã xác minh tại thời điểm quan sát: ${priceStr}.` : '',
+    ]).join(' ');
     const additionalParts = [specSummary, brandAttribution, discount, healthNote].filter(Boolean);
-    const dataSuffix = 'Dữ liệu liên kết và hình ảnh đã được kiểm tra kỹ thuật, nhưng SanDeal chưa trực tiếp sử dụng sản phẩm. Người mua nên đối chiếu giá, thông số và chính sách của nhà bán hàng trước khi quyết định.';
-    summary = [intro, ...additionalParts, dataSuffix].join(' ');
+    const dataSuffix = 'Nội dung này chỉ phản ánh các trường dữ liệu và kết quả kiểm tra đang có; SanDeal chưa trực tiếp sử dụng sản phẩm.';
+    summary = distinctText([intro, ...additionalParts, dataSuffix]).join(' ');
   } else {
-    summary = `${title} hiện chưa có đủ dữ kiện đã xác minh để tạo một bài đánh giá đầy đủ. SanDeal chỉ hiển thị thông tin ngắn và đề nghị kiểm tra thêm tại nguồn.`;
+    summary = `${title} hiện chỉ có một số trường dữ liệu nguồn. SanDeal trình bày đúng các trường đó và không suy đoán thuộc tính, công dụng hay trải nghiệm chưa được xác minh.`;
   }
 
   // V2: Category-specific factual claims with product-specific data
@@ -505,13 +546,6 @@ export function generateEditorialReview(product: Product, otherProducts: Product
 
   // V2: Category-specific inferred claims
   const inferredClaims: EditorialClaim[] = [];
-  if (byId.has('category')) {
-    const audienceText = fillTemplate(
-      pickVariant(template.suitableForFormats, `audience-${seed}`),
-      vars,
-    );
-    inferredClaims.push(makeClaim('inference_audience', `Theo dữ liệu phân loại, sản phẩm có thể phù hợp để cân nhắc với ${audienceText.toLowerCase()}`, 'inferred', ['category'], 'medium'));
-  }
   if (byId.has('discount')) {
     inferredClaims.push(makeClaim('inference_price', 'Theo dữ liệu giá hiện tại và giá gốc, mức giá đang thấp hơn giá tham chiếu; người mua vẫn nên kiểm tra lại tại thời điểm đặt hàng.', 'inferred', ['current_price', 'original_price', 'discount'], 'medium'));
   }
@@ -534,20 +568,26 @@ export function generateEditorialReview(product: Product, otherProducts: Product
   const limitations = unknownClaims.slice(0, 2);
 
   // V2: Category-specific buying considerations
-  const buyingConsiderations = template.buyingConsiderations.slice(0, 4);
+  const buyingConsiderations = distinctText([
+    byId.has('current_price') ? 'Đối chiếu lại giá tại trang đối tác trước khi đặt hàng.' : '',
+    byId.has('product_url') ? 'Đọc chính sách đổi trả và bảo hành do người bán công bố tại trang sản phẩm.' : '',
+    Object.keys(product.specifications || {}).length ? 'Đối chiếu các thông số do nguồn cung cấp với nhu cầu thực tế.' : '',
+    'Không xem nội dung tổng hợp này là kết quả thử nghiệm sử dụng thực tế.',
+  ]).slice(0, 4);
 
   // V2: Category-specific verdict
   const reviewVerdict = facts.length >= 8
-    ? fillTemplate(pickVariant(template.verdictFormats, `verdict-${seed}`), vars)
-    : 'Dữ liệu hiện tại chưa đủ để đưa ra kết luận biên tập đầy đủ.';
+    ? `${title} có dữ liệu để đối chiếu, nhưng quyết định mua vẫn cần dựa trên thông tin hiện hành do người bán công bố. SanDeal không có bằng chứng thử nghiệm thực tế.`
+    : 'Dữ liệu hiện tại chỉ hỗ trợ một bản tổng hợp trung lập; chưa có cơ sở để đưa ra nhận định về công dụng, độ bền hoặc mức độ phù hợp.';
 
   // V2: Category-specific suitable/notSuitable
-  const suitableFor = inferredClaims.length > 0
-    ? [fillTemplate(pickVariant(template.suitableForFormats, `suitable-${seed}`), vars)]
+  const suitableFor = facts.length
+    ? ['Người muốn đối chiếu các dữ kiện nguồn đang có trước khi tự đánh giá sản phẩm.']
     : [];
-  const notSuitableFor = [fillTemplate(pickVariant(template.notSuitableForFormats, `notsuitable-${seed}`), vars)];
+  const notSuitableFor = ['Người cần kết luận dựa trên thử nghiệm sử dụng thực tế hoặc dữ liệu độ bền dài hạn.'];
 
-  const sourceConfidence = product.verifiedSource === true && facts.length >= 10 ? 'high' : facts.length >= 7 ? 'medium' : 'low';
+  const sourceConfidence = product.verifiedSource === true && facts.length >= 10 ? 'high'
+    : product.verifiedSource === true && facts.length >= 7 ? 'medium' : 'low';
   const dataQualityScore = Math.min(100, facts.length * 7 + (product.verifiedSource ? 15 : 0));
   const healthyStatuses = [product.linkHealthStatus, product.affiliateHealthStatus, product.imageHealthStatus]
     .filter((status) => status === 'ok' || status === 'redirect_ok').length;
@@ -637,5 +677,5 @@ export function shouldRegenerateReview(product: Product): boolean {
   return !product.reviewContent
     || product.reviewContent.sourceHash !== product.sourceHash
     || product.reviewContent.reviewStatus === 'stale'
-    || product.reviewContent.reviewVersion < CURRENT_REVIEW_VERSION; // V2: Force regeneration for V1 reviews
+    || product.reviewContent.reviewVersion < CURRENT_REVIEW_VERSION;
 }

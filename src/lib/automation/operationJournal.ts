@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import type { StorageCommitGuard } from '@/lib/storage/types';
 
 const COLLECTION = 'operation-journal';
 export const OPERATION_JOURNAL_EFFECT_LEASE_MS = 2 * 60_000;
@@ -120,10 +121,19 @@ function normalizeEntry(entry: OperationJournalEntry): OperationJournalEntry {
       reclaimCount: effect.reclaimCount || 0,
     };
   });
+  const computedContractHash = contractHash(entry.jobId, entry.operationType, intendedEffects);
+  const storedV2ContractInvalid = Number(entry.schemaVersion) >= 2
+    && entry.contractHash !== computedContractHash;
   return {
     ...entry,
     schemaVersion: 2,
-    contractHash: contractHash(entry.jobId, entry.operationType, intendedEffects),
+    // A v2 contract hash is immutable integrity evidence. Recomputing it on
+    // read would silently heal tampering or drift and defeat fail-closed
+    // JOURNAL_CONTRACT_MISMATCH handling. Only legacy entries without a v2
+    // contract are upgraded from their persisted contract fields.
+    contractHash: Number(entry.schemaVersion) >= 2 && typeof entry.contractHash === 'string' && entry.contractHash
+      ? entry.contractHash
+      : computedContractHash,
     intendedEffects,
     completedEffects: [...new Set(entry.completedEffects || intendedEffects.filter(effect => effect.status === 'COMPLETED').map(effect => effect.id))],
     pendingEffects: intendedEffects.filter(effect => effect.status !== 'COMPLETED').map(effect => effect.id),
@@ -131,7 +141,34 @@ function normalizeEntry(entry: OperationJournalEntry): OperationJournalEntry {
     intendedChecksums,
     actualChecksums,
     checksums: { ...intendedChecksums, ...actualChecksums },
+    reconciliationStatus: storedV2ContractInvalid ? 'BLOCKED' : entry.reconciliationStatus,
+    integrityError: storedV2ContractInvalid ? 'JOURNAL_CONTRACT_MISMATCH' : entry.integrityError,
   };
+}
+
+function storedV2ContractInvalid(
+  persisted: OperationJournalEntry,
+  normalized: OperationJournalEntry,
+): boolean {
+  return Number(persisted.schemaVersion) >= 2
+    && persisted.contractHash !== contractHash(
+      normalized.jobId,
+      normalized.operationType,
+      normalized.intendedEffects,
+    );
+}
+
+function persistStoredContractBlock(
+  persisted: OperationJournalEntry,
+  normalized: OperationJournalEntry,
+  now: string,
+): boolean {
+  if (!storedV2ContractInvalid(persisted, normalized)) return false;
+  normalized.reconciliationStatus = 'BLOCKED';
+  normalized.integrityError = 'JOURNAL_CONTRACT_MISMATCH';
+  normalized.blockedAt ||= now;
+  normalized.updatedAt = now;
+  return true;
 }
 
 export async function ensureOperationJournal(input: {
@@ -139,7 +176,7 @@ export async function ensureOperationJournal(input: {
   jobId?: string;
   operationType: string;
   effects: EffectContractInput[];
-}): Promise<OperationJournalEntry> {
+}, options: { withCommitGuard?: StorageCommitGuard } = {}): Promise<OperationJournalEntry> {
   const requestedEffects = buildEffects(input.effects);
   const requestedContractHash = contractHash(input.jobId, input.operationType, requestedEffects);
   let output!: OperationJournalEntry;
@@ -148,8 +185,9 @@ export async function ensureOperationJournal(input: {
   await runTransaction<OperationJournalEntry>(COLLECTION, entries => {
     const index = entries.findIndex(item => item.operationId === input.operationId);
     if (index >= 0) {
-      const existing = normalizeEntry(entries[index]);
-      if (existing.contractHash !== requestedContractHash) {
+      const persisted = entries[index];
+      const existing = normalizeEntry(persisted);
+      if (persistStoredContractBlock(persisted, existing, now) || existing.contractHash !== requestedContractHash) {
         existing.reconciliationStatus = 'BLOCKED';
         existing.integrityError = 'JOURNAL_CONTRACT_MISMATCH';
         existing.blockedAt ||= now;
@@ -159,8 +197,9 @@ export async function ensureOperationJournal(input: {
         contractMismatch = true;
         return entries;
       }
-      entries[index] = existing;
       output = existing;
+      if (JSON.stringify(persisted) === JSON.stringify(existing)) return undefined;
+      entries[index] = existing;
       return entries;
     }
     const intendedChecksums = Object.fromEntries(requestedEffects.filter(effect => effect.intendedChecksum).map(effect => [effect.id, effect.intendedChecksum!]));
@@ -184,6 +223,9 @@ export async function ensureOperationJournal(input: {
     };
     entries.push(output);
     return entries;
+  }, {
+    withCommitGuard: options.withCommitGuard,
+    operationCategory: 'operation_journal_contract',
   });
   if (contractMismatch) throw new Error('JOURNAL_CONTRACT_MISMATCH');
   return structuredClone(output);
@@ -201,11 +243,18 @@ async function claimEffect(
   nowMs: number,
 ): Promise<JournalEffectClaim> {
   let result!: JournalEffectClaim;
+  let contractMismatch = false;
   const now = new Date(nowMs).toISOString();
   await runTransaction<OperationJournalEntry>(COLLECTION, entries => {
     const index = entries.findIndex(item => item.operationId === operationId);
     if (index < 0) throw new Error('JOURNAL_EFFECT_NOT_FOUND');
-    const journal = normalizeEntry(entries[index]);
+    const persisted = entries[index];
+    const journal = normalizeEntry(persisted);
+    if (persistStoredContractBlock(persisted, journal, now)) {
+      entries[index] = journal;
+      contractMismatch = true;
+      return entries;
+    }
     const effect = journal.intendedEffects.find(item => item.id === effectId);
     if (!effect) throw new Error('JOURNAL_EFFECT_NOT_FOUND');
     if (journal.reconciliationStatus === 'BLOCKED') throw new Error('JOURNAL_BLOCKED');
@@ -245,6 +294,7 @@ async function claimEffect(
     };
     return entries;
   });
+  if (contractMismatch) throw new Error('JOURNAL_CONTRACT_MISMATCH');
   return result;
 }
 
@@ -270,17 +320,25 @@ export async function completeJournalEffect(
   operationId: string,
   effectId: string,
   actualValue?: unknown,
-  options?: { ownerId?: string } | string,
+  options?: { ownerId?: string; withCommitGuard?: StorageCommitGuard } | string,
 ): Promise<OperationJournalEntry> {
   const ownerId = ownerFrom(options);
   const actualChecksum = actualValue === undefined ? undefined : checksum(actualValue);
   let output!: OperationJournalEntry;
   let resultMismatch = false;
+  let contractMismatch = false;
   const now = new Date().toISOString();
   await runTransaction<OperationJournalEntry>(COLLECTION, entries => {
     const index = entries.findIndex(item => item.operationId === operationId);
     if (index < 0) throw new Error('JOURNAL_EFFECT_NOT_FOUND');
-    const journal = normalizeEntry(entries[index]);
+    const persisted = entries[index];
+    const journal = normalizeEntry(persisted);
+    if (persistStoredContractBlock(persisted, journal, now)) {
+      entries[index] = journal;
+      output = structuredClone(journal);
+      contractMismatch = true;
+      return entries;
+    }
     const effect = journal.intendedEffects.find(item => item.id === effectId);
     if (!effect) throw new Error('JOURNAL_EFFECT_NOT_FOUND');
     if (journal.reconciliationStatus === 'BLOCKED') throw new Error('JOURNAL_BLOCKED');
@@ -315,7 +373,11 @@ export async function completeJournalEffect(
     entries[index] = journal;
     output = structuredClone(journal);
     return entries;
+  }, {
+    withCommitGuard: typeof options === 'string' ? undefined : options?.withCommitGuard,
+    operationCategory: 'operation_journal_effect_complete',
   });
+  if (contractMismatch) throw new Error('JOURNAL_CONTRACT_MISMATCH');
   if (resultMismatch) throw new Error('JOURNAL_EFFECT_RESULT_MISMATCH');
   return output;
 }
@@ -327,10 +389,19 @@ export async function failJournalEffect(
   options?: { ownerId?: string } | string,
 ): Promise<void> {
   const ownerId = ownerFrom(options);
+  let contractMismatch = false;
+  const now = new Date().toISOString();
   await runTransaction<OperationJournalEntry>(COLLECTION, entries => {
     const index = entries.findIndex(item => item.operationId === operationId);
     if (index < 0) return undefined;
-    const journal = normalizeEntry(entries[index]);
+    const persisted = entries[index];
+    const journal = normalizeEntry(persisted);
+    if (persistStoredContractBlock(persisted, journal, now)) {
+      entries[index] = journal;
+      contractMismatch = true;
+      return entries;
+    }
+    if (journal.reconciliationStatus === 'BLOCKED') throw new Error('JOURNAL_BLOCKED');
     const effect = journal.intendedEffects.find(item => item.id === effectId);
     if (!effect || effect.status === 'COMPLETED') return undefined;
     if (effect.ownerId && effect.ownerId !== ownerId) throw new Error('JOURNAL_EFFECT_OWNERSHIP_MISMATCH');
@@ -338,11 +409,12 @@ export async function failJournalEffect(
     effect.leaseExpiresAt = undefined;
     effect.lastError = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
     journal.pendingEffects = journal.intendedEffects.filter(item => item.status !== 'COMPLETED').map(item => item.id);
-    if (journal.reconciliationStatus !== 'BLOCKED') journal.reconciliationStatus = 'PENDING';
-    journal.updatedAt = new Date().toISOString();
+    journal.reconciliationStatus = 'PENDING';
+    journal.updatedAt = now;
     entries[index] = journal;
     return entries;
   });
+  if (contractMismatch) throw new Error('JOURNAL_CONTRACT_MISMATCH');
 }
 
 export async function listInconsistentJournals(): Promise<OperationJournalEntry[]> {

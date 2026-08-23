@@ -9,6 +9,7 @@ import type {
   ProductStatus,
 } from '@/lib/types';
 import { canonicalBlockerCodes } from '@/lib/productBlockers';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import {
   classifyProductFunnel,
   mapProductPipelineStage,
@@ -97,6 +98,8 @@ export interface DashboardProductItem {
     link: string | null;
     affiliate: string | null;
     image: string | null;
+    priceFreshness: ReturnType<typeof derivePersistedPriceTruth>['state'];
+    priceVerification: ReturnType<typeof derivePersistedPriceTruth>['verificationStatus'];
     productUrlValid: boolean;
     affiliateUrlValid: boolean;
     finalDomain: string | null;
@@ -266,6 +269,7 @@ function publicMessage(product: Product, eligible: boolean): string {
 
 export function toDashboardProductItem(product: Product): DashboardProductItem {
   const eligibility = evaluateProductEligibility(product);
+  const priceTruth = derivePersistedPriceTruth(product);
   const eligible = eligibility.eligibleForPublish;
   const message = publicMessage(product, eligible);
   const goodHealth = new Set(['ok', 'healthy', 'redirect_ok', 'redirected']);
@@ -304,8 +308,8 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
     workspaceStage,
     funnel,
     scores: {
-      quality: finite(product.qualityScore ?? product.score),
-      opportunity: finite(product.opportunityScore),
+      quality: finite(product.qualityScore),
+      opportunity: finite(product.opportunityScore ?? product.score),
       deal: finite(product.dealScore),
     },
     commission: {
@@ -315,7 +319,7 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
     promotionExpiresAt: selectedOffer?.sourceVerified === true && selectedOffer.confidence >= 0.8
       ? selectedOffer.expiresAt || null : null,
     review: {
-      score: Number.isFinite(product.score) ? product.score! : null,
+      score: finite(product.reviewQuality?.qualityScore ?? product.reviewContent?.contentQualityScore),
       needsReview: product.status === 'needs_review' || product.riskLevel === 'high',
       message,
     },
@@ -328,6 +332,8 @@ export function toDashboardProductItem(product: Product): DashboardProductItem {
       link: product.linkHealthStatus || null,
       affiliate: product.affiliateHealthStatus || null,
       image: product.imageHealthStatus || null,
+      priceFreshness: priceTruth.state,
+      priceVerification: priceTruth.verificationStatus,
       productUrlValid,
       affiliateUrlValid,
       finalDomain,

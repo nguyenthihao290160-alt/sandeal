@@ -66,6 +66,7 @@ async function main() {
   const { probeCommerceUrl } = require('../src/lib/commerce/urlProbe.ts');
   const circuits = require('../src/lib/bots/domainCircuitBreaker.ts');
   const selection = require('../src/lib/commerce/sourceSelection.ts');
+  const sourceIdentity = require('../src/lib/commerce/sourceIdentity.ts');
   const reliability = require('../src/lib/commerce/sourceReliability.ts');
   const queue = require('../src/lib/storage/candidateQueue.ts');
   const bridge = require('../src/lib/automation/candidateBridge.ts');
@@ -290,6 +291,222 @@ async function main() {
     });
     assert.equal(result.selected.length, 1);
     assert.equal(result.skipped.filter(item => item.reason === 'DUPLICATE_SOURCE_OR_MERCHANT_URL').length, 2);
+  });
+
+  await test('20a incomplete source identity stays diagnostic but is non-selectable and excluded from diversity', async () => {
+    await adapter.writeCollection('source-reliability-state', []);
+    await adapter.writeCollection('candidate-queue', []);
+    await adapter.writeCollection('products', []);
+    await adapter.writeCollection('domain-circuit-breakers', []);
+    await reliability.recordSourceIngestionState({
+      provider: 'accesstrade', ingestionSkipped: true, reasonCode: 'SOURCE_IDENTITY_INCOMPLETE',
+      observed: 1, selected: 0, skipped: 1,
+    });
+    const report = await reliability.getSourceReliabilityReport();
+    assert.equal(report.rows.length, 1);
+    assert.equal(report.rows[0].identityStatus, 'IDENTITY_INCOMPLETE');
+    assert.equal(report.rows[0].selectable, false);
+    assert.equal(report.rows[0].sourceConnectivityHealth, 'UNKNOWN');
+    assert.equal(report.diversity.discoveredMerchantCount, 0);
+    assert.equal(report.diversity.healthyMerchantCount, 0);
+    assert.equal(report.sourceIdentityCompleteness, 'INCOMPLETE');
+    assert.equal(report.recommendedNextAction, 'COMPLETE_SOURCE_IDENTITY');
+  });
+
+  await test('20b publication blockers do not masquerade as TikTok transport failures', async () => {
+    const checkedAt = new Date().toISOString();
+    const healthyProbe = (role, domain) => ({
+      classification: 'HEALTHY', redirectCount: 0, elapsedMs: 2, retryable: false,
+      reasonCode: 'HTTP_REACHABLE', checkedAt,
+      ...(role === 'affiliate' ? { affiliateGatewayDomain: domain } : { merchantDomain: domain }),
+    });
+    await adapter.writeCollection('source-reliability-state', []);
+    await adapter.writeCollection('candidate-queue', []);
+    await adapter.writeCollection('domain-circuit-breakers', []);
+    await adapter.writeCollection('products', [{
+      id: 'tiktok-review-blocked', source: 'accesstrade_tiktok', campaignName: 'tiktok-shop-product-feed',
+      affiliateGatewayDomain: 'shorten.asia', merchantDomain: 'healthy-tiktok-shop.example',
+      lifecycleState: 'QUARANTINED', status: 'needs_review', publicBlocked: true, publicHidden: true,
+      priceTruthState: 'FRESH', priceVerificationStatus: 'VERIFIED', imageHealthStatus: 'healthy',
+      description: 'Source-backed product description.',
+      lastEligibilityDecision: { eligible: false, reasonCodes: ['review_not_indexable'], checkedAt, ruleVersion: 'test' },
+      quarantineReasons: ['review_not_indexable'], publicBlockReasons: ['review_not_indexable'],
+      sourceEvidence: {
+        affiliate: healthyProbe('affiliate', 'shorten.asia'),
+        merchant: healthyProbe('merchant', 'healthy-tiktok-shop.example'),
+      },
+    }]);
+    const report = await reliability.getSourceReliabilityReport();
+    const row = report.rows.find(item => item.id.includes('healthy-tiktok-shop.example'));
+    assert.ok(row);
+    assert.equal(row.identityStatus, 'COMPLETE');
+    assert.equal(row.selectable, true);
+    assert.equal(row.sourceConnectivityHealth, 'HEALTHY');
+    assert.equal(row.affiliateGatewayHealth, 'HEALTHY');
+    assert.equal(row.merchantHealth, 'HEALTHY');
+    assert.equal(row.reasonCode, undefined);
+    assert.equal(row.reviewReadiness, 'BLOCKED');
+    assert.equal(row.publicationEligibility, 'INELIGIBLE');
+    assert.ok(row.productReadinessReasonCodes.includes('review_not_indexable'));
+    assert.ok(row.rawDiagnosticReasonCodes.includes('review_not_indexable'));
+    assert.equal(report.diversity.healthyMerchantCount, 1);
+  });
+
+  await test('20b2 operator-paused sources remain transport-healthy but are not selection-eligible', async () => {
+    const checkedAt = new Date().toISOString();
+    const merchantDomain = 'paused-but-healthy.example';
+    await adapter.writeCollection('source-reliability-state', []);
+    await adapter.writeCollection('candidate-queue', []);
+    await adapter.writeCollection('domain-circuit-breakers', []);
+    await adapter.writeCollection('products', [{
+      id: 'paused-transport-healthy', source: 'accesstrade', campaignName: 'paused-healthy-campaign',
+      affiliateGatewayDomain: 'go.isclix.com', merchantDomain,
+      sourceEvidence: {
+        affiliate: {
+          classification: 'HEALTHY', affiliateGatewayDomain: 'go.isclix.com', redirectCount: 0,
+          elapsedMs: 2, retryable: false, reasonCode: 'HTTP_REACHABLE', checkedAt,
+        },
+        merchant: {
+          classification: 'HEALTHY', merchantDomain, redirectCount: 0,
+          elapsedMs: 2, retryable: false, reasonCode: 'HTTP_REACHABLE', checkedAt,
+        },
+      },
+    }]);
+    await settings.updateAutomationSettings({ pausedSourceDomains: [merchantDomain], pausedSourceCampaigns: [] });
+    try {
+      const report = await reliability.getSourceReliabilityReport();
+      const row = report.rows.find(item => item.merchantDomain === merchantDomain);
+      assert.ok(row);
+      assert.equal(row.selectable, false);
+      assert.equal(row.sourceConnectivityHealth, 'HEALTHY');
+      assert.equal(report.diversity.discoveredMerchantCount, 1);
+      assert.equal(report.diversity.eligibleMerchantCount, 0);
+      assert.equal(report.diversity.healthyMerchantCount, 1);
+    } finally {
+      await settings.updateAutomationSettings({ pausedSourceDomains: [], pausedSourceCampaigns: [] });
+    }
+  });
+
+  await test('20c one failing legacy merchant is isolated from a healthy merchant', async () => {
+    const checkedAt = new Date().toISOString();
+    const affiliate = {
+      classification: 'HEALTHY', affiliateGatewayDomain: 'go.isclix.com', redirectCount: 0,
+      elapsedMs: 2, retryable: false, reasonCode: 'HTTP_REACHABLE', checkedAt,
+    };
+    await adapter.writeCollection('source-reliability-state', []);
+    await adapter.writeCollection('candidate-queue', []);
+    await adapter.writeCollection('domain-circuit-breakers', []);
+    await adapter.writeCollection('products', [
+      {
+        id: 'healthy-source-row', source: 'accesstrade', campaignName: 'current-campaign',
+        affiliateGatewayDomain: 'go.isclix.com', merchantDomain: 'healthy.example',
+        sourceEvidence: { affiliate, merchant: { classification: 'HEALTHY', merchantDomain: 'healthy.example', redirectCount: 0, elapsedMs: 2, retryable: false, reasonCode: 'HTTP_REACHABLE', checkedAt } },
+      },
+      {
+        id: 'legacy-source-row', source: 'legacy-30shine', campaignName: 'legacy-campaign',
+        affiliateGatewayDomain: 'go.isclix.com', merchantDomain: '30shine.example',
+        sourceEvidence: { affiliate, merchant: { classification: 'CONNECTION_RESET', merchantDomain: '30shine.example', redirectCount: 0, elapsedMs: 2, retryable: true, reasonCode: 'ECONNRESET', checkedAt } },
+      },
+    ]);
+    const report = await reliability.getSourceReliabilityReport();
+    const healthy = report.rows.find(row => row.merchantDomain === 'healthy.example');
+    const legacy = report.rows.find(row => row.merchantDomain === '30shine.example');
+    assert.equal(healthy.sourceConnectivityHealth, 'HEALTHY');
+    assert.equal(healthy.transportReasonCode, undefined);
+    assert.equal(legacy.sourceConnectivityHealth, 'DEGRADED');
+    assert.equal(legacy.transportReasonCode, 'ECONNRESET');
+    assert.equal(report.diversity.healthyMerchantCount, 1);
+  });
+
+  await test('20d newest transport evidence wins across product probes and circuit state', async () => {
+    const oldAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const newerAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    const newestAt = new Date(Date.now() - 30 * 60_000).toISOString();
+    const healthyAffiliate = checkedAt => ({
+      classification: 'HEALTHY', affiliateGatewayDomain: 'go.isclix.com', redirectCount: 0,
+      elapsedMs: 2, retryable: false, reasonCode: 'HTTP_REACHABLE', checkedAt,
+    });
+    await adapter.writeCollection('source-reliability-state', []);
+    await adapter.writeCollection('candidate-queue', []);
+    await adapter.writeCollection('products', [
+      {
+        id: 'newer-circuit-evidence', source: 'accesstrade', campaignName: 'current-campaign',
+        affiliateGatewayDomain: 'go.isclix.com', merchantDomain: 'circuit-newer.example',
+        sourceEvidence: {
+          affiliate: healthyAffiliate(newerAt),
+          merchant: { classification: 'CONNECTION_RESET', merchantDomain: 'circuit-newer.example', redirectCount: 0, elapsedMs: 2, retryable: true, reasonCode: 'OLD_PRODUCT_FAILURE', checkedAt: oldAt },
+        },
+      },
+      {
+        id: 'newer-product-evidence', source: 'accesstrade', campaignName: 'current-campaign',
+        affiliateGatewayDomain: 'go.isclix.com', merchantDomain: 'product-newer.example',
+        sourceEvidence: {
+          affiliate: healthyAffiliate(newestAt),
+          merchant: { classification: 'HEALTHY', merchantDomain: 'product-newer.example', redirectCount: 0, elapsedMs: 2, retryable: false, reasonCode: 'HTTP_REACHABLE', checkedAt: newestAt },
+        },
+      },
+    ]);
+    const circuit = (domain, lastSuccessAt, lastFailureAt, lastFailureCode) => ({
+      schemaVersion: 3, id: `merchant:${domain}`, domain, role: 'MERCHANT', state: 'CLOSED',
+      consecutiveFailures: 0, failureStreak: 0, halfOpenProbeInFlight: false,
+      lastSuccessAt, lastFailureAt, lastFailureCode, updatedAt: newerAt,
+      ruleVersion: 'domain-circuit-v3',
+    });
+    await adapter.writeCollection('domain-circuit-breakers', [
+      circuit('circuit-newer.example', newerAt, oldAt, 'OLD_CIRCUIT_FAILURE'),
+      circuit('product-newer.example', oldAt, newerAt, 'OLDER_CIRCUIT_FAILURE'),
+    ]);
+    const report = await reliability.getSourceReliabilityReport();
+    const circuitNewer = report.rows.find(row => row.merchantDomain === 'circuit-newer.example');
+    const productNewer = report.rows.find(row => row.merchantDomain === 'product-newer.example');
+    assert.equal(circuitNewer.merchantHealth, 'HEALTHY');
+    assert.equal(circuitNewer.merchantReasonCode, undefined);
+    assert.equal(productNewer.merchantHealth, 'HEALTHY');
+    assert.equal(productNewer.merchantReasonCode, undefined);
+  });
+
+  await test('20e scan outcomes separate transport, policy, and exact provider failures', async () => {
+    assert.deepEqual(sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 4, completeSourceCount: 2, transportHealthySourceCount: 2, materializedCount: 0,
+    }), { ingestionSkipped: false, reasonCode: 'SOURCE_SCAN_NO_NEW_CANDIDATES' });
+    assert.deepEqual(sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 4, completeSourceCount: 2, transportHealthySourceCount: 0, materializedCount: 0,
+    }), { ingestionSkipped: true, reasonCode: 'NO_HEALTHY_PRODUCT_SOURCE' });
+    assert.deepEqual(sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 1, completeSourceCount: 0, transportHealthySourceCount: 0, materializedCount: 0,
+    }), { ingestionSkipped: true, reasonCode: 'SOURCE_IDENTITY_INCOMPLETE' });
+    const policyPaused = sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 4, completeSourceCount: 2, transportHealthySourceCount: 2,
+      selectionEligibleSourceCount: 0, policyBlockedSourceCount: 2, materializedCount: 0,
+    });
+    assert.deepEqual(policyPaused, { ingestionSkipped: true, reasonCode: 'SOURCE_POLICY_PAUSED' });
+    assert.deepEqual(sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 0, completeSourceCount: 0, transportHealthySourceCount: 0, materializedCount: 0, rateLimitedCount: 1,
+    }), { ingestionSkipped: true, reasonCode: 'SOURCE_RATE_LIMITED' });
+    assert.deepEqual(sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 0, completeSourceCount: 0, transportHealthySourceCount: 0, materializedCount: 0, timeoutCount: 1,
+    }), { ingestionSkipped: true, reasonCode: 'SOURCE_TIMEOUT' });
+    assert.deepEqual(sourceIdentity.classifySourceIngestionTruth({
+      normalizedCount: 0, completeSourceCount: 0, transportHealthySourceCount: 0, materializedCount: 0,
+      failureReasonCode: 'SOURCE_INVALID_CREDENTIAL',
+    }), { ingestionSkipped: true, reasonCode: 'SOURCE_INVALID_CREDENTIAL' });
+    await reliability.recordSourceIngestionState({
+      provider: 'policy-paused-fixture', ...policyPaused, observed: 4, selected: 0, skipped: 4,
+    });
+    const persisted = (await reliability.listSourceIngestionStates()).find(state => state.provider === 'policy-paused-fixture');
+    assert.equal(persisted.reasonCode, 'SOURCE_POLICY_PAUSED');
+    assert.equal(persisted.ingestionSkipped, true);
+  });
+
+  await test('20f Source Reliability keeps every diagnostic column reachable on narrow viewports', () => {
+    const panel = fs.readFileSync(path.join(process.cwd(), 'src/components/dashboard/source-reliability-panel.tsx'), 'utf8');
+    const css = fs.readFileSync(path.join(process.cwd(), 'src/components/dashboard/source-reliability-panel.module.css'), 'utf8');
+    for (const label of ['Kết nối nguồn', 'Mức sẵn sàng sản phẩm', 'Chẩn đoán thô', 'IDENTITY_INCOMPLETE']) assert.match(panel, new RegExp(label));
+    assert.match(panel, /tabIndex=\{0\}/);
+    assert.match(css, /overflow-x:\s*auto/);
+    assert.match(css, /scrollbar-gutter:\s*stable/);
+    assert.match(css, /position:\s*sticky/);
+    assert.doesNotMatch(css, /display:\s*none[^}]*diagnostic/i);
   });
 
   const flowCollections = [

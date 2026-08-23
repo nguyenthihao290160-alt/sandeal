@@ -4,6 +4,7 @@ import { extractVerifiedProductFacts, generateEditorialReview } from '@/lib/edit
 import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
 import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
 import { appendAutomationAudit } from '@/lib/automation/store';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import type {
   ContentDraft,
@@ -295,8 +296,8 @@ export function runEditorialGuard(draft: ContentDraft, product: Product, now = D
   if (!SLUG_PATTERN.test(draft.slug)) addIssue(issues, 'invalid_slug', 'slug', 'blocker', 'Slug không hợp lệ.', 'Chỉ dùng chữ thường, số và dấu gạch ngang.');
   if (combined.length < 180) addIssue(issues, 'content_too_short', 'content', 'error', 'Nội dung quá ngắn để kiểm duyệt.', 'Bổ sung phần kết luận, điểm mạnh và hạn chế có bằng chứng.');
   if (combined.length > 30_000) addIssue(issues, 'content_too_long', 'content', 'error', 'Nội dung vượt giới hạn.', 'Rút gọn nội dung dưới 30.000 ký tự.');
-  const priceAge = Date.parse(product.priceLastChangedAt || product.lastSeenAt || product.updatedAt);
-  if (!Number.isFinite(priceAge) || now - priceAge > CONFIG.freshness.priceDays * 86_400_000) addIssue(issues, 'stale_price', 'price', 'error', 'Giá đã cũ hoặc chưa có thời điểm xác minh.', 'Tạo snapshot giá mới.');
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  if (!priceTruth.isVerified || !['FRESH', 'AGING'].includes(priceTruth.state)) addIssue(issues, 'stale_price', 'price', 'error', 'Giá đã cũ hoặc chưa có thời điểm xác minh.', 'Tạo snapshot giá mới.');
   if (!['ok', 'redirect_ok'].includes(String(product.linkHealthStatus || product.productHealthStatus || ''))) addIssue(issues, 'link_unhealthy', 'originalUrl', 'blocker', 'Link sản phẩm chưa được xác minh hoạt động.', 'Chạy kiểm tra link trước khi duyệt.');
   if (product.imageUrl && !['ok', 'redirect_ok'].includes(String(product.imageHealthStatus || ''))) addIssue(issues, 'image_unhealthy', 'imageUrl', 'error', 'Ảnh chưa được xác minh hoạt động.', 'Chạy kiểm tra ảnh.');
   if ((product.duplicateConfidence || 0) >= CONFIG.thresholds.duplicateHigh) addIssue(issues, 'duplicate_blocker', 'product', 'blocker', 'Sản phẩm có nguy cơ trùng rất cao.', 'Xử lý nhóm trùng trước khi duyệt.');

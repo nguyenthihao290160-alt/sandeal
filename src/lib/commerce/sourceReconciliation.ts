@@ -10,7 +10,13 @@ import {
   getAllActiveAutomationJobs,
 } from '@/lib/automation/store';
 import type { AutomationJob } from '@/lib/automation/types';
-import { advanceCandidateBridgeGeneration, finishCandidate, listCandidateQueue, type CandidateQueueItem } from '@/lib/storage/candidateQueue';
+import {
+  finishCandidate,
+  listCandidateQueue,
+  readCandidateDurableJobGeneration,
+  type CandidateQueueItem,
+} from '@/lib/storage/candidateQueue';
+import { advanceCandidateBridgeGenerationByOperator } from '@/lib/automation/candidateBridge';
 import { getDataDir } from '@/lib/storage/adapter';
 import { getStorageConfig } from '@/lib/storage/storageConfig';
 import { getAllProducts, saveCanonicalProduct } from '@/lib/storage/products';
@@ -307,8 +313,24 @@ export async function reconcileUnhealthySources(options: SourceReconciliationOpt
         });
         mutations.candidatesDelayed++;
         const job = candidate.durableJobId ? jobsById.get(candidate.durableJobId) : undefined;
-        if (job && TERMINAL_JOB_STATUSES.has(job.status)
-          && await advanceCandidateBridgeGeneration(candidate.id, job.id)) mutations.candidateBridgesAdvanced++;
+        if (
+          job
+          && TERMINAL_JOB_STATUSES.has(job.status)
+          && candidate.durableJobKey
+          && candidate.durableOperationId
+          && await advanceCandidateBridgeGenerationByOperator({
+            binding: {
+              candidateId: candidate.id,
+              sourceHash: candidate.sourceHash,
+              generation: readCandidateDurableJobGeneration(candidate),
+              jobId: job.id,
+              durableJobKey: candidate.durableJobKey,
+              operationId: candidate.durableOperationId,
+            },
+            actor: 'source-reliability-reconciliation',
+            reasonCode,
+          })
+        ) mutations.candidateBridgesAdvanced++;
       }
     }
 

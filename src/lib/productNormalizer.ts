@@ -158,6 +158,8 @@ export function normalizeProductForPublic(p: Partial<Product>): Product {
     confidences: p.confidences,
     priceTruthState: p.priceTruthState,
     priceObservedAt: p.priceObservedAt,
+    priceVerificationStatus: p.priceVerificationStatus,
+    priceTruthConfidence: p.priceTruthConfidence,
     duplicateStatus: p.duplicateStatus,
     claimValidationStatus: p.claimValidationStatus,
     lastReprocessOperationId: p.lastReprocessOperationId,

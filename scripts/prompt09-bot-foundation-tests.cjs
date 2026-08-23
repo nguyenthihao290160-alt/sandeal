@@ -78,6 +78,7 @@ function makeProduct(id = 'safe-publish-product') {
     affiliateLastCheckedAt: now,
     imageLastCheckedAt: now,
     priceObservedAt: now,
+    priceVerificationStatus: 'VERIFIED',
     priceTruthState: 'FRESH',
     duplicateStatus: 'CLEAR',
     claimValidationStatus: 'VERIFIED',

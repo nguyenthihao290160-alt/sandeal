@@ -2,13 +2,100 @@ import type { PriceTruthState, Product, ProductOffer } from '@/lib/types';
 
 export const PRICE_TRUTH_RULE_VERSION = 'price-truth-v2';
 
-const FRESH_MS = 24 * 60 * 60_000;
-const AGING_MS = 72 * 60 * 60_000;
+export const PRICE_TRUTH_FRESH_MS = 24 * 60 * 60_000;
+export const PRICE_TRUTH_AGING_MS = 72 * 60 * 60_000;
 const COMPARISON_WINDOW_MS = 24 * 60 * 60_000;
 const CLOCK_SKEW_MS = 5 * 60_000;
 const CONFLICT_RATIO = 0.2;
 const LARGE_CHANGE_RATIO = 0.5;
 const CORROBORATION_RATIO = 0.1;
+
+export interface DerivedPersistedPriceTruth {
+  state: PriceTruthState;
+  observedAt?: string;
+  ageMs?: number;
+  verificationStatus: NonNullable<Product['priceVerificationStatus']>;
+  isVerified: boolean;
+  isFresh: boolean;
+  confidence: number;
+  reasons: string[];
+}
+
+/**
+ * Canonical read-time price truth. Persisted state, provenance verification,
+ * and observation age are deliberately combined conservatively so a stale
+ * provenance record can never be presented as a fresh price.
+ */
+export function derivePersistedPriceTruth(
+  product: Partial<Product>,
+  now = Date.now(),
+): DerivedPersistedPriceTruth {
+  const value = Number(product.salePrice || product.price || 0);
+  const observedAt = product.priceObservedAt;
+  const observedMs = Date.parse(observedAt || '');
+  const validValue = Number.isFinite(value) && value > 0 && product.currency === 'VND';
+  const validObservedAt = Number.isFinite(observedMs) && observedMs <= now + CLOCK_SKEW_MS;
+  const ageMs = validObservedAt ? Math.max(0, now - observedMs) : undefined;
+  const declaredVerification = product.priceVerificationStatus;
+  const provenanceVerification = product.fieldProvenance?.price?.verificationStatus;
+  const verificationStates = [declaredVerification, provenanceVerification].filter(Boolean);
+  const reasons: string[] = [];
+
+  let state: PriceTruthState;
+  if (!validValue) {
+    state = 'UNAVAILABLE';
+    reasons.push('price_unavailable');
+  } else if (!validObservedAt) {
+    state = 'STALE';
+    reasons.push('price_observation_missing_or_invalid');
+  } else if (ageMs! <= PRICE_TRUTH_FRESH_MS) {
+    state = 'FRESH';
+  } else if (ageMs! <= PRICE_TRUTH_AGING_MS) {
+    state = 'AGING';
+  } else {
+    state = 'STALE';
+  }
+
+  const persisted = product.priceTruthState;
+  if (persisted === 'CONFLICTED' || declaredVerification === 'CONFLICT' || provenanceVerification === 'CONFLICT') state = 'CONFLICTED';
+  else if (persisted === 'ANOMALOUS') state = 'ANOMALOUS';
+  else if (persisted === 'UNAVAILABLE' || declaredVerification === 'INVALID' || provenanceVerification === 'INVALID') state = 'UNAVAILABLE';
+  else if (persisted === 'STALE' || declaredVerification === 'STALE' || provenanceVerification === 'STALE') state = 'STALE';
+  else if (persisted === 'AGING' && state === 'FRESH') state = 'AGING';
+
+  if (ageMs !== undefined) reasons.push(`age_ms:${ageMs}`);
+  if (persisted && persisted !== state) reasons.push(`persisted_state:${persisted}`);
+  if (declaredVerification && declaredVerification !== 'VERIFIED') reasons.push(`verification:${declaredVerification}`);
+  if (provenanceVerification && provenanceVerification !== 'VERIFIED') reasons.push(`provenance:${provenanceVerification}`);
+  const hasVerificationEvidence = verificationStates.length > 0;
+  const verificationAgrees = hasVerificationEvidence && verificationStates.every(status => status === 'VERIFIED');
+  const isVerified = verificationAgrees && (state === 'FRESH' || state === 'AGING');
+  const confidenceCeiling = state === 'FRESH' ? 0.97 : state === 'AGING' ? 0.78 : state === 'STALE' ? 0.4 : 0.2;
+  const persistedConfidence = Number(product.priceTruthConfidence);
+  const confidence = Number(Math.min(
+    confidenceCeiling,
+    Number.isFinite(persistedConfidence) ? Math.max(0, persistedConfidence) : confidenceCeiling,
+  ).toFixed(4));
+  return {
+    state,
+    observedAt: validObservedAt ? observedAt : undefined,
+    ageMs,
+    verificationStatus: state === 'CONFLICTED' ? 'CONFLICT'
+      : state === 'UNAVAILABLE' ? (!validValue
+          ? 'MISSING'
+          : declaredVerification === 'INVALID' || provenanceVerification === 'INVALID'
+            ? 'INVALID'
+            : 'UNVERIFIED')
+        : state === 'ANOMALOUS' ? 'VERIFYING'
+        : state === 'STALE' ? 'STALE'
+          : isVerified ? 'VERIFIED'
+            : declaredVerification || provenanceVerification || 'UNVERIFIED',
+    isVerified,
+    isFresh: state === 'FRESH' && isVerified,
+    confidence,
+    reasons: [...new Set(reasons)],
+  };
+}
 
 export interface PriceObservation {
   sourceId: string;
@@ -109,7 +196,7 @@ export function evaluatePriceTruth(
   const corroborating = independent.filter(item => item.sourceId !== latest.sourceId && relativeDifference(item.value, latest.value) <= CORROBORATION_RATIO);
   const anomalousWithoutCrossCheck = changeRatio > LARGE_CHANGE_RATIO && corroborating.length === 0;
 
-  let state: PriceTruthState = latestAge <= FRESH_MS ? 'FRESH' : latestAge <= AGING_MS ? 'AGING' : 'STALE';
+  let state: PriceTruthState = latestAge <= PRICE_TRUTH_FRESH_MS ? 'FRESH' : latestAge <= PRICE_TRUTH_AGING_MS ? 'AGING' : 'STALE';
   const reasons = [`age_ms:${latestAge}`];
   if (conflicted) {
     state = 'CONFLICTED';
@@ -191,7 +278,7 @@ export function priceTruthProductPatch(result: PriceTruthResult): Partial<Produc
   // A source value becomes VERIFIED only after the price-truth evaluator has
   // retained current, persisted evidence. This deliberately does not infer
   // verification from a price value or source configuration alone.
-  const verified = result.state === 'FRESH'
+  const verified = ['FRESH', 'AGING'].includes(result.state)
     && result.requiresCrossCheck === false
     && result.evidenceFactIds.length > 0;
   return {
@@ -204,6 +291,10 @@ export function priceTruthProductPatch(result: PriceTruthResult): Partial<Produc
     priceTruthReasons: result.reasons,
     priceTruthRuleVersion: result.ruleVersion,
     priceTruthRequiresCrossCheck: result.requiresCrossCheck,
-    ...(verified ? { priceVerificationStatus: 'VERIFIED' as const } : {}),
+    priceVerificationStatus: verified ? 'VERIFIED' as const
+      : result.state === 'STALE' ? 'STALE' as const
+        : result.state === 'CONFLICTED' ? 'CONFLICT' as const
+          : result.state === 'UNAVAILABLE' ? 'UNVERIFIED' as const
+            : 'VERIFYING' as const,
   };
 }

@@ -408,6 +408,8 @@ export async function buildAutomationHealthResponse(
     summary,
     projectionMaintenance.value,
   );
+  const currentQueueAuthoritative = effectiveSummary.currentStateComplete
+    && effectiveSummary.currentServingProjectionValid;
   components.slo = operational.value?.slo
     ? {
         status: operational.value.slo.dataStatus === 'MEASURED' || operational.value.slo.dataStatus === 'RECOVERY'
@@ -511,10 +513,17 @@ export async function buildAutomationHealthResponse(
     worker,
     scheduler,
     queue: {
-      pending: queue.PENDING + queue.RETRY_SCHEDULED,
-      running: queue.RUNNING,
-      stuck: Number(runtime?.queue.stuck || 0) || (summary.stuckPendingCount > 0 ? 1 : 0),
-      staleJobs: Math.max(runtime?.queue.staleJobs || 0, summary.staleRunningCount),
+      pending: currentQueueAuthoritative ? queue.PENDING + queue.RETRY_SCHEDULED : 0,
+      running: currentQueueAuthoritative ? queue.RUNNING : 0,
+      stuck: (runtimeFresh && runtime?.queue.currentStateComplete === true
+        ? Number(runtime.queue.stuck || 0)
+        : 0) || (currentQueueAuthoritative && effectiveSummary.stuckPendingCount > 0 ? 1 : 0),
+      staleJobs: Math.max(
+        runtimeFresh && runtime?.queue.currentStateComplete === true
+          ? runtime.queue.staleJobs || 0
+          : 0,
+        currentQueueAuthoritative ? effectiveSummary.staleRunningCount : 0,
+      ),
     },
     control: capabilityControl,
     runtime: runtimeFresh ? runtime : null,

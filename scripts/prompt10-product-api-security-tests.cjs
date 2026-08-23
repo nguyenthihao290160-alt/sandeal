@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const password = ['prompt10', 'product', 'security'].join('-');
+const rawSecretFixture = ['raw', 'secret', 'must', 'not', 'cross'].join('-');
+const rawBearerFixture = ['raw', 'bearer', 'must', 'not', 'cross'].join('-');
+const inlineSecretFixture = ['inline', 'secret', 'must', 'not', 'cross'].join('-');
 const tempDir = path.join(process.cwd(), '.test-tmp', `prompt10-product-api-${process.pid}-${Date.now()}`);
 fs.mkdirSync(tempDir, { recursive: true });
 process.env.SANDEAL_DATA_DIR = tempDir;
@@ -55,6 +58,7 @@ function fixture(editorial) {
     currency: 'VND',
     category: 'Audio',
     brand: 'Fixture',
+    commissionNote: `Publisher metadata token=${inlineSecretFixture}`,
     sku: 'FIXTURE-SECURE',
     specifications: { connection: 'Bluetooth', warranty: '12 months' },
     tags: ['audio'], benefits: [], warnings: [],
@@ -93,12 +97,23 @@ function fixture(editorial) {
     },
     offers: [],
     priceTruthState: 'FRESH',
+    priceVerificationStatus: 'VERIFIED',
     priceObservedAt: now,
+    priceTruthEffectivePrice: 1_000_000,
+    priceTruthConfidence: 0.97,
+    priceTruthDiscountPercent: 17,
+    priceTruthEvidenceFactIds: ['current-price-fixture', 'reference-price-fixture'],
+    priceTruthReasons: ['verified_price_pair'],
+    priceTruthRequiresCrossCheck: false,
     publicationEffectKey: 'published-effect-fixture',
     publicationJobId: 'publish-job-fixture',
     publishedAt: now,
     sourceHash: 'secured-source-hash',
     contentHash: 'secured-content-hash',
+    rawData: {
+      privateToken: rawSecretFixture,
+      authorization: `Bearer ${rawBearerFixture}`,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -110,12 +125,13 @@ async function main() {
   const editorial = require('../src/lib/editorialReview.ts');
   const route = require('../src/app/api/products/[id]/route.ts');
   const store = require('../src/lib/automation/store.ts');
+  const productActions = require('../src/lib/product-intelligence/productActions.ts');
   const { NextRequest } = require('next/server');
 
   global.fetch = async () => { throw new Error('NETWORK_FORBIDDEN_IN_PRODUCT_API_SECURITY_TEST'); };
 
   async function seed() {
-    for (const collection of ['products', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-circuits', 'automation-ai-usage']) {
+    for (const collection of ['products', 'automation-jobs', 'automation-control', 'automation-audit', 'automation-circuits', 'automation-ai-usage', 'product-admin-actions']) {
       await adapter.writeCollection(collection, []);
     }
     await adapter.writeCollection('products', [fixture(editorial)]);
@@ -128,6 +144,23 @@ async function main() {
       body: JSON.stringify(body),
     }), { params: Promise.resolve({ id: 'secured-product' }) });
   }
+
+  await test('admin Product Detail GET returns an explicit secret-safe DTO', async () => {
+    await seed();
+    const response = await route.GET(new NextRequest('http://localhost/api/products/secured-product', {
+      headers,
+    }), { params: Promise.resolve({ id: 'secured-product' }) });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.ok, true);
+    assert.equal(payload.data.title, 'Tai nghe Bluetooth fixture');
+    assert.equal(Object.hasOwn(payload.data, 'rawData'), false);
+    const serialized = JSON.stringify(payload.data);
+    assert.equal(serialized.includes(rawSecretFixture), false);
+    assert.equal(serialized.includes(rawBearerFixture), false);
+    assert.equal(serialized.includes(inlineSecretFixture), false);
+    assert.ok(serialized.includes('[REDACTED]'));
+  });
 
   await test('anonymous product mutation is denied without storage changes', async () => {
     await seed();
@@ -228,6 +261,15 @@ async function main() {
     assert.equal(product.claimValidationStatus, 'MISSING_EVIDENCE');
     assert.equal(product.duplicateStatus, 'UNRESOLVED');
     assert.equal(product.priceTruthState, 'STALE');
+    assert.equal(product.priceVerificationStatus, 'UNVERIFIED');
+    assert.equal(product.priceObservedAt, undefined);
+    assert.equal(product.priceTruthEffectivePrice, undefined);
+    assert.equal(product.priceTruthConfidence, undefined);
+    assert.equal(product.priceTruthDiscountPercent, undefined);
+    assert.deepEqual(product.priceTruthEvidenceFactIds, []);
+    assert.deepEqual(product.priceTruthReasons, ['owner_factual_edit_requires_reverification']);
+    assert.equal(product.priceTruthRequiresCrossCheck, true);
+    assert.equal(product.fieldProvenance.price.verifiedAt, undefined);
     assert.equal(product.linkHealthStatus, 'unverified');
     assert.equal(product.sourceVerified, false);
     assert.equal(product.reviewContent.reviewStatus, 'stale');
@@ -252,6 +294,25 @@ async function main() {
     assert.equal(product.status, 'published');
     assert.equal(product.publicHidden, false);
     assert.equal(product.evidenceCoverage, 0.95);
+  });
+
+  await test('operator price verification cannot retain an old discount contract', async () => {
+    await seed();
+    await productActions.recordProductAdminAction({
+      productId: 'secured-product',
+      action: 'price_verified',
+      actor: 'prompt10-product-api',
+      operationId: 'operator-price-reverify',
+    });
+    const product = (await adapter.readCollection('products'))[0];
+    assert.equal(product.priceVerificationStatus, 'VERIFIED');
+    assert.equal(product.priceTruthState, 'FRESH');
+    assert.equal(product.priceTruthEffectivePrice, 1_000_000);
+    assert.equal(product.priceTruthDiscountPercent, undefined);
+    assert.deepEqual(product.priceTruthEvidenceFactIds, []);
+    assert.deepEqual(product.priceTruthReasons, ['OPERATOR_PRICE_VERIFIED']);
+    assert.equal(product.publicHidden, true);
+    assert.equal(product.publicBlocked, true);
   });
 
   console.log(`\nPROMPT10 product API security: ${passed} passed, ${failed} failed`);

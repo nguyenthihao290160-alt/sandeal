@@ -20,6 +20,7 @@ import { getQueueStats, listCandidateQueue } from '@/lib/storage/candidateQueue'
 import { getAllProducts } from '@/lib/storage/products';
 import type { AutomationJob } from './types';
 import type { Product } from '@/lib/types';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import {
   classifyAutomationJobEvidence,
   completeAutomationJobEvidence,
@@ -149,7 +150,7 @@ function preliminaryLaunchBlockers(product: Product, now: number): string[] {
   if (product.riskLevel !== 'low') reasons.push('risk_not_low');
   if (Number(product.evidenceCoverage || 0) < 0.8) reasons.push('evidence_coverage_low');
   if (product.claimValidationStatus !== 'VERIFIED') reasons.push('claim_evidence_unverified');
-  if (!['FRESH', 'AGING'].includes(String(product.priceTruthState || ''))) reasons.push('price_truth_unsafe');
+  if (!derivePersistedPriceTruth(product, now).isVerified) reasons.push('price_truth_unsafe');
   if (!Number.isFinite(observedAt) || now - observedAt > 14 * 24 * 60 * 60_000) reasons.push('product_stale');
   if (!isReviewIndexable(product)) reasons.push('seo_not_indexable');
   if (product.sourceHealthCooldownUntil && Date.parse(product.sourceHealthCooldownUntil) > now) reasons.push('cooldown_active');

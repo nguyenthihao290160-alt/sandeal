@@ -1,6 +1,7 @@
 import type { EditorialClaim, Product, ReviewQualityAssessment } from './types';
 import { PRODUCT_INTELLIGENCE_CONFIG } from './product-intelligence/config';
 import { REVIEW_THRESHOLDS } from './editorialReview';
+import { derivePersistedPriceTruth } from './autonomous/priceTruthEngine';
 
 export const REVIEW_QUALITY_POLICY_VERSION = 'review-quality-v1';
 
@@ -114,7 +115,10 @@ export function evaluateReviewQuality(product: Partial<Product>, now = Date.now(
   );
 
   const reviewFreshness = scoreFreshness(review.contentUpdatedAt || review.reviewedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.editorialDays, now);
-  const priceFreshness = scoreFreshness(product.priceObservedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.priceDays, now);
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  const priceFreshness = priceTruth.isVerified && priceTruth.state === 'FRESH'
+    ? 100
+    : priceTruth.isVerified && priceTruth.state === 'AGING' ? 50 : 0;
   const linkFreshness = Math.min(
     scoreFreshness(product.linkLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now),
     scoreFreshness(product.affiliateLastCheckedAt, PRODUCT_INTELLIGENCE_CONFIG.freshness.linkDays, now),
@@ -142,7 +146,7 @@ export function evaluateReviewQuality(product: Partial<Product>, now = Date.now(
   if (!review.limitations.length || !review.notSuitableFor.length) criticalIssues.push('review_unbalanced');
   if (PROMOTIONAL_CLAIMS.test(promotionalClaimText)) criticalIssues.push('unsupported_promotional_claim');
   if (normalized(review.reviewSummary) === normalized(product.description) && review.reviewSummary.trim().length > 0) criticalIssues.push('duplicate_source_copy');
-  if (priceFreshness === 0 || ['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(String(product.priceTruthState || ''))) criticalIssues.push('price_stale_or_unverified');
+  if (priceFreshness === 0) criticalIssues.push('price_stale_or_unverified');
   if (!GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''))) criticalIssues.push('product_url_unverified');
   if (!GOOD_HEALTH.has(String(product.affiliateHealthStatus || ''))) criticalIssues.push('affiliate_url_unverified');
   if (!GOOD_HEALTH.has(String(product.imageHealthStatus || ''))) criticalIssues.push('image_unverified');

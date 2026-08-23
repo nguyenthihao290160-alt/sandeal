@@ -791,7 +791,11 @@ function jobEnvelope(job) {
     assert.match(sourcePage, /Có link tiếp thị|Đã xác minh domain|Chưa xác minh/);
     assert.match(css, /@media \(max-width: 768px\)[\s\S]*source-candidate-card/);
     assert.match(detailPage, /Việc cần sửa trước/);
-    assert.match(detailPage, /Chi tiết kỹ thuật/);
+    assert.match(detailPage, /\['debug', 'Debug'\]/);
+    assert.match(detailPage, /id="product-panel-debug" role="tabpanel" aria-labelledby="product-tab-debug" hidden=\{activeTab !== 'debug'\}/);
+    assert.match(detailPage, /Debug · mã lý do và tham chiếu kỹ thuật/);
+    assert.match(detailPage, /\{publishDisabledReason \? <>/);
+    assert.match(detailPage, />Xem blockers<\/button>/);
     assert.match(detailPage, /slice\(0, 6\)/);
     await assert.rejects(products.createProduct({
       title: 'Unsafe direct publish', kind: 'product', platform: 'website', source: 'manual',

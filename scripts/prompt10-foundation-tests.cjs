@@ -295,7 +295,7 @@ async function main() {
     assert.equal((await adapter.readCollection('automation-jobs'))[0].schemaVersion, 2);
     assert.equal((await adapter.readCollection('automation-control'))[0].schemaVersion, 2);
     assert.equal((await adapter.readCollection('automation-audit'))[0].schemaVersion, 2);
-    assert.equal((await adapter.readCollection('candidate-queue'))[0].schemaVersion, 2);
+    assert.equal((await adapter.readCollection('candidate-queue'))[0].schemaVersion, 3);
     assert.equal((await adapter.readCollection('automation-audit')).length, 1, 'audit history must be preserved');
     const rerun = await schemaMigrations.runPersistedEntityBackfill({ dryRun: false });
     assert.equal(rerun.migrated, 0);

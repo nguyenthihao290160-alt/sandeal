@@ -79,11 +79,39 @@ export function readBoundedCollectionSnapshot<T>(
   );
 }
 
-export function readCollectionPage<T>(
+const COLLECTION_PAGE_COHERENT_READ_MAX_ATTEMPTS = 3;
+
+function isCollectionSourceChange(error: unknown): boolean {
+  const code = error && typeof error === 'object'
+    && typeof (error as { code?: unknown }).code === 'string'
+    ? String((error as { code: string }).code)
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  return code === 'STORAGE_COLLECTION_SOURCE_CHANGED'
+    || message === 'STORAGE_COLLECTION_SOURCE_CHANGED'
+    || message.startsWith('STORAGE_COLLECTION_SOURCE_CHANGED:');
+}
+
+export async function readCollectionPage<T>(
     collection: string,
     options: StoragePageOptions,
 ): Promise<StoragePage<T>> {
-  return getStorageAdapter().readCollectionPage<T>(collection, options);
+  let sourceChange: unknown;
+  for (let attempt = 1; attempt <= COLLECTION_PAGE_COHERENT_READ_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      // Resolve the adapter on every attempt so each retry rematerializes one
+      // complete page from a fresh source revision. Cross-page callers still
+      // compare sourceRevision and remain responsible for whole-window retry.
+      return await getStorageAdapter().readCollectionPage<T>(collection, options);
+    } catch (error) {
+      if (!isCollectionSourceChange(error)) throw error;
+      sourceChange = error;
+      if (attempt === COLLECTION_PAGE_COHERENT_READ_MAX_ATTEMPTS) throw error;
+    }
+  }
+  // The loop is statically exhaustive; retain the exact storage error if that
+  // invariant is ever changed rather than manufacturing a generic failure.
+  throw sourceChange;
 }
 
 export function writeCollection<T>(

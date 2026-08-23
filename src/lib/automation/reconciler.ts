@@ -1,7 +1,13 @@
 import { autoSafePublishJobKey, readinessSnapshotHash } from '@/lib/autonomous/publishPolicy';
-import { clearOrphanedCandidateBridge, listCandidateQueue, recoverStaleProcessing } from '@/lib/storage/candidateQueue';
+import {
+  advanceCandidateBridgeGeneration,
+  clearOrphanedCandidateBridge,
+  listCandidateQueue,
+  readCandidateDurableJobGeneration,
+  recoverStaleProcessing,
+} from '@/lib/storage/candidateQueue';
 import { getAllProducts, saveCanonicalProduct } from '@/lib/storage/products';
-import { bridgeCandidatesToDurableJobs } from './candidateBridge';
+import { bridgeCandidatesToDurableJobs, candidateJobKey, candidateOperationId } from './candidateBridge';
 import { completeJournalEffect, listInconsistentJournals } from './operationJournal';
 import {
   approveAutomationJob,
@@ -97,13 +103,35 @@ export async function runAutonomousReconciler(
   result.skipped += lifecycleRepair.failed.length;
 
   const initialJobs = await getAllActiveAutomationJobs();
-  const initialJobIds = new Set(initialJobs.map(job => job.id));
+  const initialJobsById = new Map(initialJobs.map(job => [job.id, job]));
   for (const candidate of await listCandidateQueue()) {
     throwIfExecutionAborted(options.signal);
-    if (!candidate.durableJobId || initialJobIds.has(candidate.durableJobId)) continue;
-    if (await getAutomationJob(candidate.durableJobId)) continue;
-    result.orphans += 1;
-    if (await clearOrphanedCandidateBridge(candidate.id, candidate.durableJobId)) result.repaired += 1;
+    if (!candidate.durableJobId) continue;
+    const generation = readCandidateDurableJobGeneration(candidate);
+    const durableJobKey = candidate.durableJobKey || candidateJobKey(candidate.id, candidate.sourceHash, generation);
+    const operationId = candidate.durableOperationId || candidateOperationId(candidate.id, candidate.sourceHash, generation);
+    const expected = { sourceHash: candidate.sourceHash, generation, durableJobKey, operationId };
+    const boundJob = initialJobsById.get(candidate.durableJobId)
+      || await getAutomationJob(candidate.durableJobId);
+    if (!boundJob) {
+      result.orphans += 1;
+      if (await clearOrphanedCandidateBridge(candidate.id, candidate.durableJobId, expected)) result.repaired += 1;
+      continue;
+    }
+    // Same-job retries remain authoritative. Only an exhausted FAILED job
+    // paired with an explicitly delayed/retryable candidate may advance to a
+    // new generation. Success, cancellation and policy blocking stay durable.
+    if (
+      boundJob.status === 'FAILED'
+      && candidate.status === 'delayed'
+      && candidate.retryable === true
+      && candidate.nextAttemptAt
+      && await advanceCandidateBridgeGeneration({
+        candidateId: candidate.id,
+        jobId: boundJob.id,
+        ...expected,
+      })
+    ) result.repaired += 1;
   }
 
   const bridge = await bridgeCandidatesToDurableJobs({ requestedBy: 'autonomous-reconciler', limit: 100 });

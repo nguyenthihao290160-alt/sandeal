@@ -224,6 +224,8 @@ type Health = {
       pickupLatencyFeatureMode: string;
     } | null;
     workerPool: {
+      currentStateComplete: boolean;
+      evidenceClassification: string;
       featureMode: string;
       configuredMode: string;
       effectiveMode: string;
@@ -483,7 +485,9 @@ function TechnicalSystemCenter({ health }: { health: Health }) {
         <div className={styles.healthRow}><span>Scheduler heartbeat source / age</span><strong>{health.scheduler.heartbeatSource} / {health.scheduler.heartbeatAgeMs ?? 'UNKNOWN'} ms</strong></div>
         <div className={styles.healthRow}><span>Scheduler schedule state</span><strong>{health.scheduler.scheduleState}</strong></div>
         <div className={styles.healthRow}><span>Queue PENDING / RUNNING / RETRY_SCHEDULED</span><strong>{health.queue.PENDING || 0} / {health.queue.RUNNING || 0} / {health.queue.RETRY_SCHEDULED || 0}</strong></div>
-        <div className={styles.healthRow}><span>Worker Pool slots</span><strong>{health.operational?.workerPool.activeSlots ?? 0} / {health.operational?.workerPool.maximumSlots ?? 0}</strong></div>
+        <div className={styles.healthRow}><span>Worker Pool slots</span><strong>{health.operational?.workerPool.currentStateComplete
+          ? `${health.operational.workerPool.activeSlots} / ${health.operational.workerPool.maximumSlots}`
+          : 'UNKNOWN / INCOMPLETE'}</strong></div>
         <div className={styles.healthRow}><span>Release Identity</span><strong>{health.operational?.release.embeddedReleaseId || health.release.embeddedBuildId}</strong></div>
       </div>
     </section>
@@ -848,7 +852,9 @@ export default function SystemHealthPage() {
               </div>
             </section>
 
-            <section className={`${styles.panel} ${operational?.workerPool.capacityExceeded ? styles.dangerPanel : styles.successPanel}`}>
+            <section className={`${styles.panel} ${operational?.workerPool.currentStateComplete !== true
+              ? styles.warningPanel
+              : operational.workerPool.capacityExceeded ? styles.dangerPanel : styles.successPanel}`}>
               <div className={styles.panelHeader}>
                 <h2><DashboardIcon name="worker" size={19} />Pool thực thi Worker</h2>
                 <span className={stateClass(operational?.workerPool.effectiveMode || 'OFF')}>{operational?.workerPool.effectiveMode || 'OFF'}</span>
@@ -857,10 +863,21 @@ export default function SystemHealthPage() {
                 <div className={styles.healthRow}><span>Chế độ cấu hình / hiệu lực</span><strong>{operational?.workerPool.configuredMode || 'OFF'} / {operational?.workerPool.effectiveMode || 'OFF'}</strong></div>
                 <div className={styles.healthRow}><span>Nguồn chế độ hiệu lực</span><strong>{operational?.workerPool.effectiveModeSource || 'SAFE_DEFAULT'}</strong></div>
                 <div className={styles.healthRow}><span>Pool thực sự hoạt động</span><strong>{operational?.workerPool.implementationActive ? 'Có' : 'Không'}</strong></div>
-                <div className={styles.healthRow}><span>Slot đang dùng / tối đa</span><strong>{operational?.workerPool.activeSlots || 0}/{operational?.workerPool.maximumSlots || 0}</strong></div>
-                <div className={styles.healthRow}><span>Slot còn trống</span><strong>{operational?.workerPool.availableSlots || 0}</strong></div>
-                <div className={styles.healthRow}><span>Critical / normal đang chạy</span><strong>{operational?.workerPool.activeCriticalSlots || 0} / {operational?.workerPool.activeNormalSlots || 0}</strong></div>
-                <div className={styles.healthRow}><span>Critical dự phòng / normal còn trống</span><strong>{operational?.workerPool.criticalReservedCapacity || 0} / {operational?.workerPool.normalAvailableSlots || 0}</strong></div>
+                <div className={styles.healthRow}><span>Bằng chứng slot hiện tại</span><strong>{operational?.workerPool.currentStateComplete
+                  ? operational.workerPool.evidenceClassification
+                  : 'UNKNOWN / INCOMPLETE'}</strong></div>
+                <div className={styles.healthRow}><span>Slot đang dùng / tối đa</span><strong>{operational?.workerPool.currentStateComplete
+                  ? `${operational.workerPool.activeSlots}/${operational.workerPool.maximumSlots}`
+                  : 'UNKNOWN / INCOMPLETE'}</strong></div>
+                <div className={styles.healthRow}><span>Slot còn trống</span><strong>{operational?.workerPool.currentStateComplete
+                  ? operational.workerPool.availableSlots
+                  : 'UNKNOWN / INCOMPLETE'}</strong></div>
+                <div className={styles.healthRow}><span>Critical / normal đang chạy</span><strong>{operational?.workerPool.currentStateComplete
+                  ? `${operational.workerPool.activeCriticalSlots} / ${operational.workerPool.activeNormalSlots}`
+                  : 'UNKNOWN / INCOMPLETE'}</strong></div>
+                <div className={styles.healthRow}><span>Critical dự phòng / normal còn trống</span><strong>{operational?.workerPool.currentStateComplete
+                  ? `${operational.workerPool.criticalReservedCapacity} / ${operational.workerPool.normalAvailableSlots}`
+                  : `${operational?.workerPool.criticalReservedCapacity || 0} / UNKNOWN`}</strong></div>
                 <div className={styles.healthRow}><span>Ưu tiên critical: cấu hình / hiệu lực / làn</span><strong>{priorityScheduling?.configuredMode || 'OFF'} / {priorityScheduling?.effectiveMode || 'OFF'} / {priorityScheduling?.laneMode || 'RUNTIME_GUARDIAN_ONLY'}</strong></div>
                 <div className={styles.healthRow}><span>Critical / normal đang chờ claim</span><strong>{diagnosticCount(workerPriority?.waitingCriticalJobs)} / {diagnosticCount(workerPriority?.waitingNormalJobs)} · {workerPriority?.status || 'UNAVAILABLE'}</strong></div>
                 <div className={styles.healthRow}><span>Critical / normal đang chạy (bằng chứng job)</span><strong>{diagnosticCount(workerPriority?.runningCriticalJobs)} / {diagnosticCount(workerPriority?.runningNormalJobs)}</strong></div>

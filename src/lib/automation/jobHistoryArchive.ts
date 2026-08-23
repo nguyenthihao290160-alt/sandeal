@@ -583,7 +583,11 @@ export async function archiveAutomationJobHistoryBatch(
     segmentResults.set(collection, await appendHistoryRecords(collection, group, options.withCommitGuard));
   }
   const byIndex = new Map<string, AutomationJobHistoryIdempotencyRecord[]>();
-  for (const record of records.filter(item => item.job.status === 'SUCCEEDED')) {
+  // The immutable identity index records every terminal materialization. Most
+  // callers still reuse only successful work; workflow reconciliation uses
+  // the all-terminal lookup so a failed archived bucket cannot be recreated
+  // on every Scheduler tick.
+  for (const record of records) {
     const indexRecord = makeIdempotencyRecord(record);
     const collection = automationJobHistoryIdempotencyCollection(indexRecord.keyDigest);
     const group = byIndex.get(collection) || [];
@@ -598,7 +602,7 @@ export async function archiveAutomationJobHistoryBatch(
       nowMs,
       options.withCommitGuard,
   );
-  await assertAutomationJobHistoryBatchArchived(jobs);
+  await assertAutomationJobHistoryBatchArchived(jobs, { requireAllTerminalIdempotencyIndex: true });
   return records.map(record => {
     const collection = automationJobHistorySegmentCollection(record.jobId);
     const segmentResult = segmentResults.get(collection)!;
@@ -643,6 +647,7 @@ export async function getArchivedAutomationJob(id: string): Promise<AutomationJo
 
 export async function assertAutomationJobHistoryBatchArchived(
     jobs: readonly AutomationJob[],
+    options: { requireAllTerminalIdempotencyIndex?: boolean } = {},
 ): Promise<void> {
   if (!jobs.length) return;
   assertFileHistoryStorage();
@@ -670,15 +675,19 @@ export async function assertAutomationJobHistoryBatchArchived(
       ))) throw new Error('AUTOMATION_JOB_HISTORY_ARCHIVE_VERIFY_FAILED');
     }
   }
-  const successesByIndex = new Map<string, AutomationJob[]>();
-  for (const job of jobs.filter(item => item.status === 'SUCCEEDED')) {
+  const terminalByIndex = new Map<string, AutomationJob[]>();
+  for (const job of jobs) {
+    // Pre-V4.1 archives indexed only successful executions. Keep validation
+    // compatible with those immutable segments, while archive writes in this
+    // release request strict verification for every newly indexed terminal.
+    if (job.status !== 'SUCCEEDED' && !options.requireAllTerminalIdempotencyIndex) continue;
     const keyDigest = idempotencyKeyDigest(job.type, job.idempotencyKey);
     const collection = automationJobHistoryIdempotencyCollection(keyDigest);
-    const group = successesByIndex.get(collection) || [];
+    const group = terminalByIndex.get(collection) || [];
     group.push(job);
-    successesByIndex.set(collection, group);
+    terminalByIndex.set(collection, group);
   }
-  for (const [collection, group] of successesByIndex) {
+  for (const [collection, group] of terminalByIndex) {
     const index = await readBoundedCollectionSnapshot<AutomationJobHistoryIdempotencyRecord>(
         collection,
         { maximumItems: HISTORY_INDEX_MAX_ITEMS, maximumBytes: HISTORY_INDEX_MAX_BYTES },
@@ -728,6 +737,62 @@ export async function getArchivedSuccessfulAutomationJob(
       && automationJobHistoryFingerprint(job) === candidate.jobFingerprint
     ) return job;
   }
+  return null;
+}
+
+/**
+ * Resolve the newest immutable terminal execution for one durable identity.
+ * This is intentionally separate from successful-result reuse: callers must
+ * opt in when a failed/cancelled/blocked execution itself exhausts the
+ * materialization identity (currently workflow reconciliation buckets).
+ */
+export async function getArchivedTerminalAutomationJob(
+    type: AutomationJobType,
+    idempotencyKey: string,
+    nowMs = Date.now(),
+): Promise<AutomationJob | null> {
+  if (getStorageCapabilities().driver !== 'file') return null;
+  const keyDigest = idempotencyKeyDigest(type, idempotencyKey);
+  const snapshot = await readBoundedCollectionSnapshot<AutomationJobHistoryIdempotencyRecord>(
+      automationJobHistoryIdempotencyCollection(keyDigest),
+      { maximumItems: HISTORY_INDEX_MAX_ITEMS, maximumBytes: HISTORY_INDEX_MAX_BYTES },
+  );
+  for (const item of snapshot.items) assertIdempotencyRecord(item);
+  const retentionDays = Math.max(7, Number(process.env.SANDEAL_JOB_RETENTION_DAYS) || 30);
+  const cutoffMs = nowMs - retentionDays * 24 * 60 * 60_000;
+  const candidates = snapshot.items
+      .filter(item => item.keyDigest === keyDigest && item.jobType === type)
+      .filter(item => Date.parse(item.completedAt) >= cutoffMs)
+      .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt));
+  for (const candidate of candidates) {
+    const job = await getArchivedAutomationJob(candidate.jobId);
+    if (
+      job
+      && isTerminalAutomationJobStatus(job.status)
+      && job.type === type
+      && job.idempotencyKey === idempotencyKey
+      && automationJobHistoryFingerprint(job) === candidate.jobFingerprint
+    ) return job;
+  }
+
+  // Releases predating the all-terminal index only indexed SUCCEEDED jobs.
+  // Fall back to the bounded immutable manifest/segments so an already-failed
+  // reconciliation bucket from that format is still a real materialization.
+  // This path is read-only and is reached only when the compact key index has
+  // no usable entry; all newly archived terminal jobs use the fast path above.
+  let legacyMatch: AutomationJob | null = null;
+  await scanLatestArchivedAutomationJobs(job => {
+    if (
+      isTerminalAutomationJobStatus(job.status)
+      && job.type === type
+      && job.idempotencyKey === idempotencyKey
+      && Date.parse(job.completedAt || job.updatedAt) >= cutoffMs
+      && (!legacyMatch
+        || Date.parse(job.completedAt || job.updatedAt)
+          > Date.parse(legacyMatch.completedAt || legacyMatch.updatedAt))
+    ) legacyMatch = job;
+  });
+  if (legacyMatch) return structuredClone(legacyMatch);
   return null;
 }
 

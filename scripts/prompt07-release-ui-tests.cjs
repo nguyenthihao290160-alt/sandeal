@@ -52,10 +52,15 @@ test('KPI chính dùng icon và accent có ý nghĩa từ dữ liệu backend', 
   assert(health.includes('<DashboardIcon name="health"') && health.includes('<DashboardIcon name="emergency"'));
 });
 
-test('drawer mobile có nút đóng, overlay, Esc và vòng focus cơ bản', () => {
+test('drawer mobile không có nút X dư thừa; hamburger, overlay, Esc và vòng focus vẫn hoạt động', () => {
   const layout = read('src/app/dashboard/layout.tsx');
   const css = read('src/app/globals.css');
-  assert(layout.includes('dashboard-sidebar-close'));
+  assert(!layout.includes('dashboard-sidebar-close'));
+  assert(!css.includes('.dashboard-sidebar-close'));
+  assert(layout.includes('dashboard-mobile-menu'));
+  assert(layout.includes("sidebarOpen ? 'Đóng menu bảng điều khiển' : 'Mở menu bảng điều khiển'"));
+  assert(layout.includes('aria-expanded={sidebarOpen}'));
+  assert(layout.includes('aria-controls="dashboard-primary-navigation"'));
   assert(layout.includes("event.key === 'Escape'"));
   assert(layout.includes("event.key === 'Tab'"));
   assert(layout.includes('dashboard-sidebar-backdrop'));

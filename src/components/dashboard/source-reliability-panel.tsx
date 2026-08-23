@@ -5,11 +5,24 @@ import styles from './source-reliability-panel.module.css';
 
 type Row = {
   id: string; provider: string; campaign: string; affiliateGatewayDomain: string; merchantDomain: string;
-  affiliateCircuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN'; merchantCircuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
-  circuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN'; lastSuccessfulProbe?: string; lastFailedProbe?: string;
-  reasonCode?: string; nextProbeAt?: string; pending: number; delayed: number; discarded: number;
+  identityStatus: 'COMPLETE' | 'IDENTITY_INCOMPLETE'; selectable: boolean;
+  affiliateCircuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN' | 'UNKNOWN'; merchantCircuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN' | 'UNKNOWN';
+  circuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN' | 'UNKNOWN';
+  sourceConnectivityHealth: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
+  affiliateGatewayHealth: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
+  merchantHealth: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
+  priceFreshness: 'FRESH' | 'AGING' | 'STALE' | 'UNVERIFIED' | 'MIXED' | 'UNKNOWN';
+  imageHealth: 'HEALTHY' | 'UNHEALTHY' | 'MIXED' | 'UNKNOWN';
+  contentReadiness: 'READY' | 'BLOCKED' | 'MIXED' | 'UNKNOWN';
+  reviewReadiness: 'READY' | 'BLOCKED' | 'MIXED' | 'UNKNOWN';
+  publicationEligibility: 'ELIGIBLE' | 'INELIGIBLE' | 'MIXED' | 'UNKNOWN';
+  lastSuccessfulProbe?: string; lastFailedProbe?: string;
+  reasonCode?: string; transportReasonCode?: string; nextProbeAt?: string;
+  candidateReasonCodes: string[]; productReadinessReasonCodes: string[]; rawDiagnosticReasonCodes: string[];
+  pending: number; delayed: number; discarded: number;
   quarantined: number; published: number; ingestionSkipped: boolean; ingestionSkipReason?: string;
 };
+type Ingestion = { provider: string; ingestionSkipped: boolean; reasonCode: string; nextEligibleAt?: string; updatedAt: string };
 type Diversity = {
   status: 'HEALTHY_DIVERSITY' | 'LIMITED_DIVERSITY' | 'INSUFFICIENT_SOURCE_DIVERSITY' | 'SINGLE_SOURCE' | 'NO_SOURCE';
   discoveredCampaignCount: number;
@@ -23,6 +36,7 @@ type Diversity = {
 type Report = {
   generatedAt: string;
   rows: Row[];
+  ingestion: Ingestion[];
   controls: { maximumPerMerchant: number; maximumPerCampaign: number; pausedDomains: string[]; pausedCampaigns: string[] };
   diversity?: Diversity;
   lastAutoPilotOutcome?: string;
@@ -35,6 +49,10 @@ type Report = {
 function timestamp(value?: string): string {
   if (!value || !Number.isFinite(Date.parse(value))) return '—';
   return new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value));
+}
+
+function diagnostics(values: string[]): string {
+  return values.length ? values.join(' · ') : '—';
 }
 
 export function SourceReliabilityPanel() {
@@ -87,25 +105,27 @@ export function SourceReliabilityPanel() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Không thể lưu kiểm soát nguồn.'); setBusy(false); }
   };
 
-  const skipped = report?.rows.filter(row => row.ingestionSkipped) || [];
+  const skipped = [...new Map((report?.ingestion || [])
+    .filter(state => state.ingestionSkipped)
+    .map(state => [state.provider, state])).values()];
   return <section className={`card ${styles.panel}`} aria-labelledby="source-reliability-title">
     <div className={styles.header}>
       <div>
         <h2 id="source-reliability-title">Source Reliability</h2>
-        <p>Affiliate gateway và merchant được theo dõi độc lập; URL truy vấn luôn được che giá trị.</p>
+        <p>Kết nối nguồn, merchant và affiliate gateway được theo dõi độc lập với mức sẵn sàng nội dung/xuất bản của sản phẩm.</p>
         {report?.diversity && (
           <small style={{ display: 'block', marginTop: '0.25rem', color: 'var(--text-secondary)' }}>
             Đa dạng nguồn: <strong>{report.diversity.status}</strong> · {report.diversity.healthyMerchantCount} merchant khỏe mạnh · {report.diversity.discoveredCampaignCount} campaigns
             {report.lastAutoPilotOutcome && <span> · Lần quét cuối: <strong>{report.lastAutoPilotOutcome}</strong></span>}
             {report.recommendedNextAction && report.recommendedNextAction !== 'NONE' && <span> · Gợi ý: <strong>{report.recommendedNextAction}</strong></span>}
-            {report.sourceIdentityCompleteness === 'INCOMPLETE' && <span> · Định danh: <strong>Thiếu hụt</strong></span>}
+            {report.sourceIdentityCompleteness === 'INCOMPLETE' && <span> · Định danh: <strong>IDENTITY_INCOMPLETE</strong> (vẫn hiển thị để chẩn đoán, không tham gia chọn nguồn)</span>}
             {report.lastDiscoveryAt && <span> · Lúc: {timestamp(report.lastDiscoveryAt)}</span>}
           </small>
         )}
       </div>
       <button type="button" className={`secondary-button ${styles.refresh}`} onClick={() => void load()} disabled={busy}>{busy ? 'Đang tải' : 'Làm mới'}</button>
     </div>
-    {skipped.length > 0 && <div className={styles.notice} role="status"><strong>Ingestion đang được bỏ qua:</strong> {skipped.map(row => row.ingestionSkipReason || 'NO_HEALTHY_PRODUCT_SOURCE').join(' · ')}</div>}
+    {skipped.length > 0 && <div className={styles.notice} role="status"><strong>Ingestion đang bị chặn theo provider:</strong> {skipped.map(state => `${state.provider}: ${state.reasonCode}`).join(' · ')}</div>}
     {error && <div className={styles.error} role="alert">{error}</div>}
     <div className={styles.controls}>
       <label>Giới hạn / merchant<input type="number" min={1} max={25} value={controls.maximumPerMerchant} onChange={event => setControls(current => ({ ...current, maximumPerMerchant: Number(event.target.value) }))} /></label>
@@ -114,9 +134,20 @@ export function SourceReliabilityPanel() {
       <label>Campaign tạm dừng<input value={controls.pausedCampaigns} onChange={event => setControls(current => ({ ...current, pausedCampaigns: event.target.value }))} placeholder="Tên campaign, ..." /></label>
     </div>
     <div className={styles.controlActions}><label className={styles.confirm}><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />Xác nhận cập nhật kiểm soát nguồn</label><button type="button" className="primary-button" onClick={() => void save()} disabled={busy || !confirmed}>Lưu kiểm soát</button></div>
-    <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Provider / campaign</th><th>Gateway</th><th>Merchant</th><th>Circuit</th><th>Probe gần nhất</th><th>Lý do / cooldown</th><th>Trạng thái record</th></tr></thead><tbody>
-      {report?.rows.map(row => <tr key={row.id}><td><strong>{row.provider}</strong><small>{row.campaign}</small></td><td>{row.affiliateGatewayDomain}</td><td>{row.merchantDomain}</td><td><span className={styles.badge} data-state={row.circuitState}>{row.circuitState}</span><small>Gateway {row.affiliateCircuitState} · Merchant {row.merchantCircuitState}</small></td><td>OK {timestamp(row.lastSuccessfulProbe)}<small>Lỗi {timestamp(row.lastFailedProbe)}</small></td><td><strong>{row.reasonCode || '—'}</strong><small>Probe tiếp: {timestamp(row.nextProbeAt)}</small></td><td className={styles.counts}>Chờ {row.pending} · Trễ {row.delayed} · Bỏ {row.discarded}<small>Quarantine {row.quarantined} · Public {row.published}</small></td></tr>)}
-      {report && report.rows.length === 0 && <tr><td colSpan={7} className={styles.empty}>Chưa có bằng chứng probe nguồn.</td></tr>}
+    <div className={styles.scrollHint}>Kéo ngang để xem đầy đủ trạng thái và chẩn đoán kỹ thuật.</div>
+    <div className={styles.tableWrap} tabIndex={0} role="region" aria-label="Bảng Source Reliability có thể cuộn ngang"><table className={styles.table}><thead><tr><th>Provider / campaign</th><th>Gateway</th><th>Merchant</th><th>Kết nối nguồn</th><th>Probe gần nhất</th><th>Lý do kết nối / cooldown</th><th>Mức sẵn sàng sản phẩm</th><th>Chẩn đoán thô</th><th>Trạng thái record</th></tr></thead><tbody>
+      {report?.rows.map(row => <tr key={row.id}>
+        <td className={styles.identityCell}><strong>{row.provider}</strong><small>{row.campaign}</small><span className={styles.identityBadge} data-complete={row.identityStatus === 'COMPLETE'}>{row.identityStatus}</span><small>{row.selectable ? 'Có thể tham gia chọn nguồn' : 'Không tham gia chọn nguồn hiện tại'}</small></td>
+        <td>{row.affiliateGatewayDomain}<small>{row.affiliateGatewayHealth}</small></td>
+        <td>{row.merchantDomain}<small>{row.merchantHealth}</small></td>
+        <td><span className={styles.badge} data-health={row.sourceConnectivityHealth}>{row.sourceConnectivityHealth}</span><small>Circuit {row.circuitState}</small><small>Gateway {row.affiliateCircuitState} · Merchant {row.merchantCircuitState}</small></td>
+        <td>OK {timestamp(row.lastSuccessfulProbe)}<small>Lỗi {timestamp(row.lastFailedProbe)}</small></td>
+        <td><strong>{row.transportReasonCode || '—'}</strong><small>Probe tiếp: {timestamp(row.nextProbeAt)}</small></td>
+        <td className={styles.readiness}>Giá {row.priceFreshness} · Ảnh {row.imageHealth}<small>Nội dung {row.contentReadiness} · Review {row.reviewReadiness}</small><small>Xuất bản {row.publicationEligibility}</small><small className={styles.technical}>{diagnostics(row.productReadinessReasonCodes)}</small></td>
+        <td className={styles.diagnostics}><strong>Candidate</strong><small>{diagnostics(row.candidateReasonCodes)}</small><strong>Raw</strong><small>{diagnostics(row.rawDiagnosticReasonCodes)}</small></td>
+        <td className={styles.counts}>Chờ {row.pending} · Trễ {row.delayed} · Bỏ {row.discarded}<small>Quarantine {row.quarantined} · Public {row.published}</small></td>
+      </tr>)}
+      {report && report.rows.length === 0 && <tr><td colSpan={9} className={styles.empty}>Chưa có bằng chứng probe nguồn.</td></tr>}
     </tbody></table></div>
   </section>;
 }

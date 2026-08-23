@@ -603,6 +603,17 @@ async function main() {
     assert.equal((await products.getProductById(recoveryProduct.id)).lifecycleState, 'PUBLISHING');
     const canaryAfterCrash = await canary.getCanaryState();
     assert.equal(canaryAfterCrash.reservedEffectKeys.length, 1);
+    // Keep the crashed owner out of the filler batch. Its normal retry delay
+    // can elapse while ten evidence-rich fixtures are hydrated, which made the
+    // test intermittently claim the recovery job early and count ten visible
+    // products (the recovered owner plus nine fillers) instead of nine fillers.
+    const deferredRetryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const retry = jobs.find(item => item.id === recoveryJob.job.id);
+      retry.nextRetryAt = deferredRetryAt;
+      retry.runnableAt = deferredRetryAt;
+      return jobs;
+    });
 
     const fillers = [];
     for (const id of Array.from({ length: 10 }, (_, index) => `canary-fill-${index + 1}`)) fillers.push(await hydratePersistedEvidence(readyProduct(id)));
@@ -612,7 +623,12 @@ async function main() {
     assert.equal(fillerRun.succeeded, 10);
     assert.equal((await products.getAllProducts()).filter(product => product.status === 'published' && product.lifecycleState === 'PUBLISHED').length, 9);
 
-    await adapter.runTransaction('automation-jobs', jobs => { const job = jobs.find(item => item.id === recoveryJob.job.id); job.nextRetryAt = new Date(0).toISOString(); return jobs; });
+    await adapter.runTransaction('automation-jobs', jobs => {
+      const retry = jobs.find(item => item.id === recoveryJob.job.id);
+      retry.nextRetryAt = new Date(0).toISOString();
+      retry.runnableAt = retry.nextRetryAt;
+      return jobs;
+    });
     const recovered = await worker.processAutomationBatch('auto-publish-worker-canary-recover', 1);
     assert.equal(recovered.succeeded, 1, JSON.stringify(await store.getAutomationJob(recoveryJob.job.id)));
     assert.equal((await products.getProductById(recoveryProduct.id)).lifecycleState, 'PUBLISHED');
@@ -624,10 +640,16 @@ async function main() {
     const fixture = await prepareRuntimeRecoveryCanary('healthy');
     const publishedRun = await worker.processAutomationBatch(fixture.workerId, 1, fixture.ownership);
     assert.equal(publishedRun.succeeded, 1, JSON.stringify(await store.getAutomationJob(fixture.queued.job.id)));
-    const observing = await products.getProductById(fixture.product.id);
+    let observing = await products.getProductById(fixture.product.id);
     assert.equal(observing.status, 'published');
     assert.equal(observing.lifecycleState, 'PUBLISHED');
     assert.equal(observing.runtimeRecoveryCanaryObservationPending, true);
+    observing = await products.saveCanonicalProduct(observing.id, {
+      consecutiveHealthFailures: 2,
+      healthFailureCounters: {},
+      sourceHealthReason: 'image:image_broken',
+    });
+    assert.equal(observing.consecutiveHealthFailures, 2);
     assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), false);
     assert.equal((await adapter.readCollection('automation-outbound-events')).length, 1);
     const monitorJobs = (await store.getAllAutomationJobs()).filter(job => job.type === 'POST_PUBLISH_MONITOR');
@@ -647,6 +669,10 @@ async function main() {
     const healthy = await products.getProductById(fixture.product.id);
     const permit = await recoveryCanary.getRuntimeRecoveryCanaryPermit(observing.runtimeRecoveryCanaryPermitId);
     assert.equal(healthy.runtimeRecoveryCanaryObservationPending, false);
+    assert.equal(healthy.consecutiveHealthFailures, 0);
+    assert.equal(healthy.healthFailureCounters?.legacy?.consecutiveFailures, 0);
+    assert.ok(healthy.healthFailureCounters?.legacy?.lastFailureAt);
+    assert.ok(healthy.healthFailureCounters?.legacy?.lastHealthyAt);
     const publicFilter = require('../src/lib/publicProductFilter.ts');
     assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), true, JSON.stringify({
       reason: publicFilter.getPublicProductBlockReason(healthy),
@@ -719,6 +745,12 @@ async function main() {
     assert.equal(hidden.status, 'needs_review');
     assert.equal(hidden.publicHidden, true);
     assert.equal(hidden.runtimeRecoveryCanaryObservationPending, false);
+    for (const scope of ['productUrl', 'affiliateUrl', 'image', 'publicPage']) {
+      assert.ok(hidden.healthFailureCounters?.[scope]?.consecutiveFailures > 0, `${scope} failure must remain scoped`);
+    }
+    assert.equal(hidden.consecutiveHealthFailures, Math.max(
+      ...Object.values(hidden.healthFailureCounters).map(counter => counter.consecutiveFailures),
+    ));
     assert.equal((await products.getPublishedProducts()).some(item => item.id === fixture.product.id), false);
     assert.equal(permit.status, 'FAILED');
     assert.equal((await store.getAutomationControl()).publishBlockedByRuntime, true);

@@ -14,6 +14,30 @@ export interface CanonicalSourceIdentity {
   imageHostDomains: string[];
   sourceEndpoint: string;
   sourceItemId: string;
+  identityStatus: SourceIdentityStatus;
+  selectable: boolean;
+}
+
+export type SourceIdentityStatus = 'COMPLETE' | 'IDENTITY_INCOMPLETE';
+
+export type SourceIngestionTruthReason =
+  | 'SOURCE_SCAN_COMPLETED'
+  | 'SOURCE_SCAN_NO_NEW_CANDIDATES'
+  | 'SOURCE_SCAN_NO_RESULTS'
+  | 'SOURCE_SCAN_FAILED'
+  | 'SOURCE_TIMEOUT'
+  | 'SOURCE_RATE_LIMITED'
+  | 'SOURCE_INVALID_CREDENTIAL'
+  | 'SOURCE_QUOTA_EXHAUSTED'
+  | 'SOURCE_CIRCUIT_OPEN'
+  | 'SOURCE_POLICY_PAUSED'
+  | 'AFFILIATE_LINK_UNAVAILABLE'
+  | 'SOURCE_IDENTITY_INCOMPLETE'
+  | 'NO_HEALTHY_PRODUCT_SOURCE';
+
+export interface SourceIngestionTruth {
+  ingestionSkipped: boolean;
+  reasonCode: SourceIngestionTruthReason;
 }
 
 export type SourceDiversityStatus =
@@ -120,6 +144,7 @@ export function extractSourceIdentity(input: {
 
   const sourceEndpoint = normalize(input.sourceEndpoint || payload.sourceEndpoint || 'unknown');
   const sourceItemId = String(input.sourceItemId || payload.sourceItemId || input.sourceId || input.externalId || '').trim().slice(0, 200);
+  const identityStatus = sourceIdentityStatus({ providerId, campaignName, merchantDomain });
 
   return {
     providerId,
@@ -129,7 +154,102 @@ export function extractSourceIdentity(input: {
     imageHostDomains,
     sourceEndpoint,
     sourceItemId,
+    identityStatus,
+    selectable: identityStatus === 'COMPLETE',
   };
+}
+
+const INCOMPLETE_DIMENSIONS = new Set([
+  '',
+  'unknown',
+  'uncategorized',
+  'uncategorized-campaign',
+  'none',
+  'n/a',
+  'na',
+]);
+
+function hasKnownDimension(value: string | undefined): boolean {
+  return !INCOMPLETE_DIMENSIONS.has(String(value || '').trim().toLowerCase());
+}
+
+/**
+ * A source can remain visible for diagnostics without being eligible to
+ * participate in current selection or diversity. Provider, campaign and
+ * merchant are the minimum stable dimensions used by the selector; an
+ * affiliate gateway is intentionally not required for direct sources.
+ */
+export function sourceIdentityStatus(identity: {
+  providerId?: string;
+  campaignName?: string;
+  merchantDomain?: string;
+}): SourceIdentityStatus {
+  return hasKnownDimension(identity.providerId)
+    && hasKnownDimension(identity.campaignName)
+    && hasKnownDimension(identity.merchantDomain)
+    ? 'COMPLETE'
+    : 'IDENTITY_INCOMPLETE';
+}
+
+export function isCompleteSourceIdentity(identity: {
+  providerId?: string;
+  campaignName?: string;
+  merchantDomain?: string;
+}): boolean {
+  return sourceIdentityStatus(identity) === 'COMPLETE';
+}
+
+/**
+ * Transport/source truth must not be inferred from whether a new product was
+ * enqueued. A successful source can legitimately yield only duplicates or
+ * products that are not publication-ready.
+ */
+export function classifySourceIngestionTruth(input: {
+  normalizedCount: number;
+  completeSourceCount: number;
+  transportHealthySourceCount: number;
+  selectionEligibleSourceCount?: number;
+  policyBlockedSourceCount?: number;
+  materializedCount: number;
+  timeoutCount?: number;
+  rateLimitedCount?: number;
+  failureReasonCode?: Extract<SourceIngestionTruthReason,
+    | 'SOURCE_SCAN_FAILED'
+    | 'SOURCE_INVALID_CREDENTIAL'
+    | 'SOURCE_QUOTA_EXHAUSTED'
+    | 'SOURCE_CIRCUIT_OPEN'>;
+}): SourceIngestionTruth {
+  // A scan that did not return a normalizable record must retain the exact
+  // provider outcome. It must not be persisted as a successful/completed
+  // scan merely because there was no candidate-level evidence to classify.
+  if (input.normalizedCount <= 0) {
+    if (input.failureReasonCode) {
+      return { ingestionSkipped: true, reasonCode: input.failureReasonCode };
+    }
+    if (Number(input.rateLimitedCount || 0) > 0) {
+      return { ingestionSkipped: true, reasonCode: 'SOURCE_RATE_LIMITED' };
+    }
+    if (Number(input.timeoutCount || 0) > 0) {
+      return { ingestionSkipped: true, reasonCode: 'SOURCE_TIMEOUT' };
+    }
+    return { ingestionSkipped: false, reasonCode: 'SOURCE_SCAN_NO_RESULTS' };
+  }
+  if (input.normalizedCount > 0 && input.completeSourceCount <= 0) {
+    return { ingestionSkipped: true, reasonCode: 'SOURCE_IDENTITY_INCOMPLETE' };
+  }
+  if (input.completeSourceCount > 0 && input.transportHealthySourceCount <= 0) {
+    return { ingestionSkipped: true, reasonCode: 'NO_HEALTHY_PRODUCT_SOURCE' };
+  }
+  if (input.transportHealthySourceCount > 0
+    && input.selectionEligibleSourceCount !== undefined
+    && input.selectionEligibleSourceCount <= 0
+    && Number(input.policyBlockedSourceCount || 0) > 0) {
+    return { ingestionSkipped: true, reasonCode: 'SOURCE_POLICY_PAUSED' };
+  }
+  if (input.normalizedCount > 0 && input.materializedCount <= 0) {
+    return { ingestionSkipped: false, reasonCode: 'SOURCE_SCAN_NO_NEW_CANDIDATES' };
+  }
+  return { ingestionSkipped: false, reasonCode: 'SOURCE_SCAN_COMPLETED' };
 }
 
 /**
@@ -155,8 +275,13 @@ export function computeSourceDiversity(
   healthy: Array<Pick<CanonicalSourceIdentity, 'campaignName' | 'merchantDomain'>>,
   providersChecked: number,
 ): SourceDiversitySummary {
-  const campaignSet = (items: typeof discovered) => new Set(items.map(i => i.campaignName.toLowerCase()));
-  const merchantSet = (items: typeof discovered) => new Set(items.map(i => i.merchantDomain.toLowerCase()));
+  const complete = (items: typeof discovered) => items.filter(item => isCompleteSourceIdentity({
+    providerId: 'diversity-input',
+    campaignName: item.campaignName,
+    merchantDomain: item.merchantDomain,
+  }));
+  const campaignSet = (items: typeof discovered) => new Set(complete(items).map(i => i.campaignName.toLowerCase()));
+  const merchantSet = (items: typeof discovered) => new Set(complete(items).map(i => i.merchantDomain.toLowerCase()));
 
   const discoveredCampaigns = campaignSet(discovered);
   const discoveredMerchants = merchantSet(discovered);

@@ -1,4 +1,9 @@
 .page { display: grid; width: min(100%, 1440px); gap: 14px; min-width: 0; margin: 0 auto; padding: 14px; color: var(--ds-text, #0f172a); }
+.page [hidden] { display: none !important; }
+.tabs { display: flex; max-width: 100%; gap: 4px; overflow-x: auto; padding: 4px; border: 1px solid var(--ds-border, #e2e8f0); border-radius: 10px; background: #fff; scrollbar-gutter: stable; }
+.tabs button { flex: 0 0 auto; min-height: 38px; padding: 7px 13px; border: 0; border-radius: 7px; color: #64748b; background: transparent; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+.tabs button[aria-selected='true'] { color: #1e40af; background: #eff6ff; }
+.tabs button:focus-visible { outline: 3px solid rgba(59, 130, 246, .35); outline-offset: 1px; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .topbar span,
 .cardHeader span { color: var(--ds-text-muted, #64748b); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
@@ -145,6 +150,9 @@
 .technical { padding: 14px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
 .technicalActions { display: flex; flex-wrap: wrap; gap: 7px; }
 .technical pre { max-height: 420px; margin: 12px 0 0; overflow: auto; padding: 14px; border: 1px solid #e2e8f0; border-radius: 8px; color: #475569; background: #f8fafc; font-size: 11px; }
+.debugSummary { margin-top: 12px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; color: #475569; background: #f8fafc; font-size: 11px; overflow-wrap: anywhere; }
+.debugSummary > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.debugSummary code { padding: 3px 6px; border-radius: 5px; background: #e2e8f0; }
 
 @media (max-width: 1180px) {
   .hero { grid-template-columns: 220px minmax(0, 1fr); }

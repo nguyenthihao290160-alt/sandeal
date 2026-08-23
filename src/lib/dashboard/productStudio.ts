@@ -1,5 +1,6 @@
 import type { PriceSnapshot } from '@/lib/product-intelligence/types';
 import type { Product, ProductOffer } from '@/lib/types';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import {
   buildAffiliateBroadcastCopy,
   buildDealMatrix,
@@ -40,6 +41,7 @@ export interface ProductStudioDetail {
     qualityScore: number | null;
     opportunityScore: number | null;
     dealScore: number | null;
+    priceTruth: ReturnType<typeof derivePersistedPriceTruth>;
     commissionAmount: number | null;
     commissionRate: number | null;
     lifecycleState: string | null;
@@ -139,11 +141,22 @@ function verifiedPrimaryOffer(product: Product): ProductOffer | undefined {
   return selected?.sourceVerified === true && selected.confidence >= 0.8 ? selected : undefined;
 }
 
-function verifiedPlatformDiscount(product: Product): number | null {
-  if (!['FRESH', 'AGING'].includes(product.priceTruthState || '') || product.priceVerificationStatus !== 'VERIFIED') return null;
+function verifiedPlatformDiscountPercent(product: Product, now: number): number | null {
+  if (!derivePersistedPriceTruth(product, now).isVerified) return null;
+  if (!product.priceTruthEvidenceFactIds?.length) return null;
   const sellingPrice = currentPrice(product);
   const originalPrice = positive(product.price);
-  return sellingPrice && originalPrice && originalPrice > sellingPrice ? originalPrice - sellingPrice : null;
+  const verifiedPercent = finite(product.priceTruthDiscountPercent);
+  if (!sellingPrice || !originalPrice || originalPrice <= sellingPrice || !verifiedPercent || verifiedPercent <= 0 || verifiedPercent > 100) return null;
+  const observedPercent = Math.round((1 - sellingPrice / originalPrice) * 100);
+  return Math.abs(observedPercent - verifiedPercent) <= 1 ? Math.round(verifiedPercent) : null;
+}
+
+function verifiedPlatformDiscount(product: Product, now: number): number | null {
+  if (verifiedPlatformDiscountPercent(product, now) === null) return null;
+  const sellingPrice = currentPrice(product);
+  const originalPrice = positive(product.price);
+  return sellingPrice && originalPrice ? originalPrice - sellingPrice : null;
 }
 
 function historyEvents(product: Product): ProductStudioHistoryEvent[] {
@@ -186,6 +199,8 @@ export function buildProductStudioDetail(input: {
 }): ProductStudioDetail {
   const { product } = input;
   const now = input.now ?? Date.now();
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  const verifiedDiscountPercent = verifiedPlatformDiscountPercent(product, now);
   const primaryOffer = verifiedPrimaryOffer(product);
   const critical = [...new Set([
     ...(product.eligibility?.criticalBlockers || product.currentBlockers?.filter(item => item.severity === 'BLOCKER').map(item => item.code) || []),
@@ -200,11 +215,9 @@ export function buildProductStudioDetail(input: {
     ...(product.priceTruthReasons || []),
   ].filter(Boolean))];
   const paymentPromotions = currentVerifiedPaymentPromotions(input.paymentPromotions || [], product.platform, now);
-  const verifiedPromotion = product.priceVerificationStatus === 'VERIFIED'
-    && Number(product.priceTruthDiscountPercent) > 0
-    && Number(product.priceTruthDiscountPercent) <= 100
-    && ['FRESH', 'AGING'].includes(product.priceTruthState || '')
-    ? `Giảm ${product.priceTruthDiscountPercent}% theo giá đã xác minh` : null;
+  const verifiedPromotion = verifiedDiscountPercent !== null
+    && ['FRESH', 'AGING'].includes(priceTruth.state)
+    ? `Giảm ${verifiedDiscountPercent}% theo giá đã xác minh` : null;
   const broadcastCopy = buildAffiliateBroadcastCopy({
     title: product.title,
     price: currentPrice(product),
@@ -227,8 +240,9 @@ export function buildProductStudioDetail(input: {
       sku: product.sku || null,
       score: finite(product.score),
       qualityScore: finite(product.qualityScore),
-      opportunityScore: finite(product.opportunityScore),
+      opportunityScore: finite(product.opportunityScore ?? product.score),
       dealScore: finite(product.dealScore),
+      priceTruth,
       commissionAmount: positive(product.commissionAmount),
       commissionRate: positive(product.commissionRate),
       lifecycleState: product.lifecycleState || null,
@@ -251,7 +265,7 @@ export function buildProductStudioDetail(input: {
         disclaimer: 'Có thể đủ điều kiện nhận cashback theo điều kiện của ngân hàng.',
       },
       economics: calculateDealEconomics({
-        platformDiscount: verifiedPlatformDiscount(product),
+        platformDiscount: verifiedPlatformDiscount(product, now),
         affiliateCommission: positive(product.commissionAmount),
       }),
       urgency: buildVerifiedUrgency({ promotionExpiresAt: primaryOffer?.expiresAt }, now),

@@ -8,6 +8,7 @@ import { commerceQualityScore, isDiscoverableCommerceProduct } from '../product-
 import { publicTaxonomySlug, taxonomyPath } from './taxonomySeo';
 import { futureStructuredDataDate, structuredDataText, verifiedPublicHttpsUrl } from './structuredData';
 import { getFeatureRolloutState } from '../automation/featureRollout';
+import { derivePersistedPriceTruth } from '../autonomous/priceTruthEngine';
 
 export function canonicalProductUrl(product: Pick<Product, 'slug'>): string {
   return new URL(`/deals/${encodeURIComponent(product.slug)}`, config.siteUrl).toString();
@@ -23,13 +24,13 @@ export function getProductIndexingDecision(product?: Product | null): { indexabl
   if (product.imageUrl && !verifiedPublicHttpsUrl(product.imageUrl)) reasons.push('unsafe_image_url');
   if (product.status !== 'published' || product.publicHidden !== false) reasons.push('not_public');
   if (product.runtimeRecoveryCanaryObservationPending) reasons.push('runtime_recovery_canary_observation_pending');
-  if (!isDiscoverableCommerceProduct(product)) reasons.push(`price_or_lifecycle_not_discoverable:${product.priceTruthState || product.lifecycleState || 'unknown'}`);
+  const priceTruth = derivePersistedPriceTruth(product);
+  if (!isDiscoverableCommerceProduct(product)) reasons.push(`price_or_lifecycle_not_discoverable:${priceTruth.state || product.lifecycleState || 'unknown'}`);
   if (product.schemaVersion === 2 && product.autoPublished === true) {
     if (!String(product.category || '').trim()) reasons.push('category_missing');
     if (!String(product.brand || '').trim()) reasons.push('brand_missing');
     if (product.evidenceCoverage !== undefined && Number(product.evidenceCoverage) < 0.8) reasons.push('evidence_coverage_low');
-    const verifiedAt = Date.parse(product.priceObservedAt || product.linkLastCheckedAt || '');
-    if (Number.isFinite(verifiedAt) && Date.now() - verifiedAt > 7 * 24 * 60 * 60_000) reasons.push('verification_stale');
+    if (!priceTruth.isVerified) reasons.push('verification_stale');
   }
   return { indexable: reasons.length === 0, reasons: [...new Set(reasons)] };
 }
@@ -59,13 +60,7 @@ export function buildProductMetadata(product?: Product | null): Metadata {
 export function buildProductJsonLd(product: Product): Record<string, unknown> | null {
   if (!getProductIndexingDecision(product).indexable || !product.reviewContent) return null;
   const currentPrice = Number(product.salePrice || product.price || 0);
-  const priceVerified = currentPrice > 0
-    && ['FRESH', 'AGING'].includes(String(product.priceTruthState || ''))
-    && Number.isFinite(Date.parse(product.priceObservedAt || ''))
-    && (
-      Number(product.confidences?.price || 0) >= 0.75
-      || product.priceVerificationStatus === 'VERIFIED'
-    );
+  const priceVerified = currentPrice > 0 && derivePersistedPriceTruth(product).isVerified;
   const title = structuredDataText(product.title, 240);
   const description = structuredDataText(product.reviewContent.reviewSummary, 4_096);
   if (!title || !description) return null;

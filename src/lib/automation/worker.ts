@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { CandidateRetryScheduledError, processCandidateFromDurableJob, scanSourcesToQueue, selectOperationMode } from '@/lib/bots/productPipeline';
-import { advanceCandidateBridgeGeneration } from '@/lib/storage/candidateQueue';
+import {
+  advanceCandidateBridgeGeneration,
+  MAX_CANDIDATE_DURABLE_JOB_GENERATION,
+} from '@/lib/storage/candidateQueue';
 import { buildDashboardProducts } from '@/lib/dashboard/products';
 import { executeProductIntelligenceJob } from '@/lib/product-intelligence/jobs';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
@@ -252,7 +255,8 @@ function errorCode(error: unknown): string {
 
 function errorCategory(code: string): AutomationErrorCategory {
   if (isInfrastructureContentionCode(code)) return 'STORAGE_ERROR';
-  if (code === 'PRODUCT_SELECTION_SOURCE_CHANGED') return 'STORAGE_ERROR';
+  if (code === 'PRODUCT_SELECTION_SOURCE_CHANGED'
+    || code === 'STORAGE_COLLECTION_SOURCE_CHANGED') return 'STORAGE_ERROR';
   if (code === 'PRODUCT_SELECTION_TARGET_MISSING') return 'VALIDATION_FAILED';
   if (['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'LINK_NOT_FOUND', 'IMAGE_HOTLINK_BLOCKED', 'INVALID_SOURCE_DATA', 'VALIDATION_FAILED', 'DUPLICATE', 'STORAGE_ERROR', 'INTERNAL_CODE_ERROR', 'UNKNOWN_ERROR'].includes(code)) {
     return code as AutomationErrorCategory;
@@ -668,8 +672,13 @@ async function executeJob(
       if (job.dryRun) return dryRunPreview(job);
       await assertKillSwitchInactive();
       const candidateId = typeof job.payload.candidateId === 'string' ? job.payload.candidateId : '';
+      const sourceHash = typeof job.payload.sourceHash === 'string' ? job.payload.sourceHash : '';
+      const generation = job.payload.generation === undefined
+        ? undefined
+        : Math.max(0, Math.floor(Number(job.payload.generation) || 0));
       if (!candidateId) throw new Error('VALIDATION_CANDIDATE_ID_REQUIRED');
-      return { ...(await processCandidateFromDurableJob({ candidateId, jobId: job.id, operationId: job.operationId, workerId, signal: execution?.signal, deadline: execution?.deadline })) };
+      if (!sourceHash) throw new Error('VALIDATION_CANDIDATE_SOURCE_HASH_REQUIRED');
+      return { ...(await processCandidateFromDurableJob({ candidateId, jobId: job.id, operationId: job.operationId, sourceHash, generation, workerId, signal: execution?.signal, deadline: execution?.deadline })) };
     }
     case 'AUTO_SAFE_PUBLISH':
       if (job.dryRun) return dryRunPreview(job);
@@ -1169,8 +1178,25 @@ async function processAutomationBatchInternal(
         return;
       }
       if (job.type === 'PROCESS_CANDIDATE' && failedJob.status === 'FAILED') {
-        const candidateId = typeof job.payload.candidateId === 'string' ? job.payload.candidateId : '';
-        if (candidateId) await advanceCandidateBridgeGeneration(candidateId, job.id);
+        const candidateId = typeof failedJob.payload.candidateId === 'string' ? failedJob.payload.candidateId : '';
+        const sourceHash = typeof failedJob.payload.sourceHash === 'string' ? failedJob.payload.sourceHash : '';
+        const generation = Number(failedJob.payload.generation);
+        if (
+          candidateId
+          && sourceHash
+          && Number.isSafeInteger(generation)
+          && generation >= 0
+          && generation <= MAX_CANDIDATE_DURABLE_JOB_GENERATION
+        ) {
+          await advanceCandidateBridgeGeneration({
+            candidateId,
+            sourceHash,
+            generation,
+            jobId: failedJob.id,
+            durableJobKey: failedJob.idempotencyKey,
+            operationId: failedJob.operationId,
+          });
+        }
       }
       if (projectionMaintenance && failedJob) {
         await markJobHealthProjectionMaintenance({

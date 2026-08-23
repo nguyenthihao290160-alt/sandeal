@@ -370,6 +370,10 @@ export interface AutomationJobHealthView extends AutomationJobHealthSummary {
   staleRunningCount: number;
   stuckPendingCount: number;
   oldestPendingAgeMs: number | null;
+  projectionSyncState: 'IDLE' | 'RUNNING' | 'ABANDONED' | 'MIXED';
+  activeProjectionSyncCount: number;
+  abandonedProjectionSyncCount: number;
+  oldestProjectionSyncStartedAt: string | null;
   activeProjectionGeneration: number | null;
   activeProjectionSlot: AutomationJobProjectionStorageSlot | null;
   /** The authoritative serving generation, derived from the promoted manifest pointer. */
@@ -1447,6 +1451,51 @@ export async function invalidateAutomationJobProjectionMutation(
 
 const ACTIVE_REPAIR_MAX_AGE_MS = 30 * 60_000;
 const STALE_SYNC_OPERATION_AGE_MS = 2 * 60_000;
+const SYNC_OPERATION_FUTURE_TOLERANCE_MS = 60_000;
+
+function projectionSyncLifecycle(
+  manifest: AutomationJobProjectionManifest | null | undefined,
+  now: number,
+): {
+  state: AutomationJobHealthView['projectionSyncState'];
+  activeCount: number;
+  abandonedCount: number;
+  oldestStartedAt: string | null;
+} {
+  if (!manifest?.inFlightSyncTokens.length) {
+    return { state: 'IDLE', activeCount: 0, abandonedCount: 0, oldestStartedAt: null };
+  }
+  const protocolManifest = withProjectionProtocol(manifest);
+  const operationsByToken = new Map(
+    (protocolManifest.inFlightSyncOperations || []).map(operation => [operation.token, operation]),
+  );
+  let activeCount = 0;
+  let abandonedCount = 0;
+  let oldestStartedAtMs: number | null = null;
+  for (const token of protocolManifest.inFlightSyncTokens) {
+    const operation = operationsByToken.get(token);
+    const startedAt = timestamp(operation?.startedAt);
+    if (startedAt !== null) {
+      oldestStartedAtMs = oldestStartedAtMs === null
+        ? startedAt
+        : Math.min(oldestStartedAtMs, startedAt);
+    }
+    const age = startedAt === null ? Number.POSITIVE_INFINITY : now - startedAt;
+    if (age >= -SYNC_OPERATION_FUTURE_TOLERANCE_MS && age <= STALE_SYNC_OPERATION_AGE_MS) {
+      activeCount += 1;
+    } else {
+      abandonedCount += 1;
+    }
+  }
+  return {
+    state: activeCount && abandonedCount
+      ? 'MIXED'
+      : activeCount ? 'RUNNING' : 'ABANDONED',
+    activeCount,
+    abandonedCount,
+    oldestStartedAt: oldestStartedAtMs === null ? null : new Date(oldestStartedAtMs).toISOString(),
+  };
+}
 
 export interface AutomationJobProjectionRepairOwnerInput {
   repairId: string;
@@ -1978,6 +2027,7 @@ function projectionEvidence(input: {
   legacyCount: number;
   manifest: AutomationJobProjectionManifest | null;
   manifestReasonCodes: string[];
+  now: number;
 }): { evidence: AutomationJobProjectionEvidence; reasonCodes: string[] } {
   const range = observedRange(input.items);
   const atCapacity = input.rawCount >= getAutomationJobProjectionLimit();
@@ -1996,6 +2046,7 @@ function projectionEvidence(input: {
   const countMatches = expectedCount === input.rawCount;
   const fingerprintMatches = expectedFingerprint === actualFingerprint;
   const contentFingerprintMatches = expectedContentFingerprint === actualContentFingerprint;
+  const syncLifecycle = projectionSyncLifecycle(input.manifest, input.now);
   const manifestReady = Boolean(
     input.manifest
     && input.manifest.baselineEstablished
@@ -2039,7 +2090,8 @@ function projectionEvidence(input: {
       : []),
     ...(input.manifest?.rebuildToken ? ['JOB_PROJECTION_REBUILD_IN_PROGRESS'] : []),
     ...(input.manifest?.lastRebuildStatus === 'FAILED' ? ['JOB_PROJECTION_REBUILD_LAST_FAILED'] : []),
-    ...(input.manifest?.inFlightSyncTokens.length ? ['JOB_PROJECTION_SYNC_IN_PROGRESS'] : []),
+    ...(syncLifecycle.activeCount ? ['JOB_PROJECTION_SYNC_IN_PROGRESS'] : []),
+    ...(syncLifecycle.abandonedCount ? ['JOB_PROJECTION_SYNC_ABANDONED'] : []),
     ...(input.manifest?.syncFailureCountSinceRebuild ? ['JOB_PROJECTION_SYNC_FAILED_SINCE_REBUILD'] : []),
     ...(input.legacyCount ? ['JOB_PROJECTION_SCHEMA_LEGACY'] : []),
     ...(input.invalidCount ? ['JOB_PROJECTION_INVALID_ITEMS'] : []),
@@ -2473,7 +2525,9 @@ export function validateAutomationJobHealthSummary(value: unknown): value is Aut
   return isHealthSummary(value);
 }
 
-export async function readBoundedAutomationJobProjections(): Promise<BoundedAutomationJobProjectionRead> {
+export async function readBoundedAutomationJobProjections(
+  now = Date.now(),
+): Promise<BoundedAutomationJobProjectionRead> {
   try {
     const manifestRead = await readProjectionManifest();
     const collections = automationJobProjectionStorageCollections(
@@ -2511,6 +2565,7 @@ export async function readBoundedAutomationJobProjections(): Promise<BoundedAuto
       legacyCount: legacyProjectionCount,
       manifest: manifestRead.manifest,
       manifestReasonCodes: manifestRead.reasonCodes,
+      now,
     });
     const reasonCodes = [
       ...evaluated.reasonCodes,
@@ -2543,7 +2598,9 @@ export async function readBoundedAutomationJobProjections(): Promise<BoundedAuto
   }
 }
 
-export async function readBoundedAutomationJobStatuses(): Promise<BoundedAutomationJobStatusRead> {
+export async function readBoundedAutomationJobStatuses(
+  now = Date.now(),
+): Promise<BoundedAutomationJobStatusRead> {
   try {
     const manifestRead = await readProjectionManifest();
     const collections = automationJobProjectionStorageCollections(
@@ -2591,6 +2648,7 @@ export async function readBoundedAutomationJobStatuses(): Promise<BoundedAutomat
       legacyCount,
       manifest: manifestRead.manifest,
       manifestReasonCodes: manifestRead.reasonCodes,
+      now,
     });
     const reasonCodes = [
       ...evaluated.reasonCodes.map(code => code.replace(/^JOB_PROJECTION_/, 'JOB_STATUS_PROJECTION_')),
@@ -2621,7 +2679,7 @@ export async function readBoundedAutomationJobStatuses(): Promise<BoundedAutomat
 }
 
 async function refreshAutomationJobHealthSummaryOnce(now = Date.now()): Promise<AutomationJobHealthSummary> {
-  const projections = await readBoundedAutomationJobProjections();
+  const projections = await readBoundedAutomationJobProjections(now);
   if (projections.availability === 'UNAVAILABLE') {
     throw new Error(projections.reasonCodes[0] || 'JOB_PROJECTION_UNAVAILABLE');
   }
@@ -2794,8 +2852,26 @@ function healthView(
     projectionStatus?: AutomationJobHealthView['projectionStatus'];
   },
 ): AutomationJobHealthView {
-  const hasActiveJobs = ALL_STATUSES.some(status => ACTIVE_STATUSES.has(status) && summary.statusCounts[status] > 0);
-  const staleRunningCount = summary.runningJobs.filter(job => {
+  const requestedProjectionStatus = input.projectionStatus
+    || (input.availability === 'UNAVAILABLE'
+      ? 'UNKNOWN'
+      : input.source === 'summary' && summary.projectionEvidence.currentStateComplete
+        ? 'VALID'
+        : 'INVALID');
+  const currentEvidenceAuthoritative = (requestedProjectionStatus === 'VALID'
+      || requestedProjectionStatus === 'STALE')
+    && summary.projectionEvidence.currentStateComplete;
+  const currentRunningJobs = currentEvidenceAuthoritative ? summary.runningJobs : [];
+  const currentPendingJobs = currentEvidenceAuthoritative ? summary.pendingJobs : [];
+  const currentStatusCounts = currentEvidenceAuthoritative
+    ? summary.statusCounts
+    : Object.fromEntries(ALL_STATUSES.map(status => [
+        status,
+        ACTIVE_STATUSES.has(status) ? 0 : summary.statusCounts[status],
+      ])) as Record<AutomationJobStatus, number>;
+  const hasActiveJobs = currentEvidenceAuthoritative
+    && ALL_STATUSES.some(status => ACTIVE_STATUSES.has(status) && summary.statusCounts[status] > 0);
+  const staleRunningCount = currentRunningJobs.filter(job => {
     const lease = timestamp(job.leaseExpiresAt);
     const heartbeat = timestamp(job.heartbeatAt);
     return lease === null
@@ -2807,7 +2883,7 @@ function healthView(
   const freshnessTimestamp = hasActiveJobs
     ? Math.max(
         timestamp(summary.sourceUpdatedAt) ?? Number.NEGATIVE_INFINITY,
-        ...summary.runningJobs.map(job => timestamp(job.heartbeatAt) ?? Number.NEGATIVE_INFINITY),
+        ...currentRunningJobs.map(job => timestamp(job.heartbeatAt) ?? Number.NEGATIVE_INFINITY),
       )
     : timestamp(summary.updatedAt);
   const summaryAge = freshnessTimestamp === null ? Number.POSITIVE_INFINITY : input.now - freshnessTimestamp;
@@ -2815,34 +2891,34 @@ function healthView(
     || summaryAge < -60_000
     || summaryAge > (hasActiveJobs ? ACTIVE_SUMMARY_FRESHNESS_MS : IDLE_SUMMARY_FRESHNESS_MS)
     || staleRunningCount > 0;
-  const stuckPendingCount = summary.pendingJobs.filter(job => {
+  const stuckPendingCount = currentPendingJobs.filter(job => {
     const eligibleAt = timestamp(job.runnableAt) ?? timestamp(job.createdAt);
     return eligibleAt !== null && eligibleAt <= input.now && input.now - eligibleAt > STUCK_PENDING_MS;
   }).length;
-  const oldestPending = timestamp(summary.oldestPendingAt);
+  const oldestPending = currentEvidenceAuthoritative ? timestamp(summary.oldestPendingAt) : null;
+  const projectionStatus = requestedProjectionStatus === 'VALID' && stale
+    ? 'STALE'
+    : requestedProjectionStatus;
+  const projectionUsable = projectionStatus === 'VALID' || projectionStatus === 'STALE';
+  const currentStateComplete = projectionUsable && summary.projectionEvidence.currentStateComplete;
   const reasonCodes = [
     ...input.reasonCodes,
     ...(stale ? ['JOB_HEALTH_SUMMARY_STALE'] : []),
-    ...(!summary.projectionEvidence.currentStateComplete ? ['JOB_HEALTH_CURRENT_STATE_INCOMPLETE'] : []),
+    ...(!currentStateComplete ? ['JOB_HEALTH_CURRENT_STATE_INCOMPLETE'] : []),
     ...(!summary.projectionEvidence.historyComplete ? ['JOB_HEALTH_HISTORY_BOUNDED'] : []),
     ...(summary.projectionEvidence.truncated ? ['JOB_HEALTH_RETENTION_LIMIT_REACHED'] : []),
     ...(summary.releaseId !== getReleaseIdentity().releaseId ? ['JOB_HEALTH_SUMMARY_RELEASE_MISMATCH'] : []),
     ...(summary.invalidProjectionCount ? ['JOB_HEALTH_SUMMARY_INVALID_PROJECTIONS'] : []),
   ];
-  const requestedProjectionStatus = input.projectionStatus
-    || (input.availability === 'UNAVAILABLE'
-      ? 'UNKNOWN'
-      : input.source === 'summary' && summary.projectionEvidence.currentStateComplete
-        ? 'VALID'
-        : 'INVALID');
-  const projectionStatus = requestedProjectionStatus === 'VALID' && stale
-    ? 'STALE'
-    : requestedProjectionStatus;
-  const projectionUsable = projectionStatus === 'VALID' || projectionStatus === 'STALE';
   const protocolManifest = input.manifest ? withProjectionProtocol(input.manifest) : null;
   const activeRepair = protocolManifest?.activeRepair;
+  const syncLifecycle = projectionSyncLifecycle(protocolManifest, input.now);
   return {
     ...summary,
+    statusCounts: currentStatusCounts,
+    runningJobs: currentRunningJobs,
+    pendingJobs: currentPendingJobs,
+    oldestPendingAt: currentEvidenceAuthoritative ? summary.oldestPendingAt : null,
     availability: input.availability === 'AVAILABLE' && reasonCodes.length ? 'DEGRADED' : input.availability,
     source: input.source,
     projectionStatus,
@@ -2853,7 +2929,7 @@ function healthView(
     evidenceClassification: projectionUsable
       ? summary.projectionEvidence.evidenceClassification
       : projectionStatus === 'UNKNOWN' ? 'UNAVAILABLE' : 'INCOMPLETE',
-    currentStateComplete: projectionUsable && summary.projectionEvidence.currentStateComplete,
+    currentStateComplete,
     historyComplete: projectionUsable && summary.projectionEvidence.historyComplete,
     truncated: summary.projectionEvidence.truncated,
     collectionPresent: summary.projectionEvidence.collectionPresent,
@@ -2864,9 +2940,13 @@ function healthView(
     oldestPendingAgeMs: oldestPending === null || oldestPending > input.now
       ? null
       : input.now - oldestPending,
+    projectionSyncState: syncLifecycle.state,
+    activeProjectionSyncCount: syncLifecycle.activeCount,
+    abandonedProjectionSyncCount: syncLifecycle.abandonedCount,
+    oldestProjectionSyncStartedAt: syncLifecycle.oldestStartedAt,
     activeProjectionGeneration: protocolManifest?.activeGeneration ?? null,
     activeProjectionSlot: protocolManifest?.activeSlot || null,
-    currentServingProjectionValid: projectionStatus === 'VALID' || projectionStatus === 'STALE',
+    currentServingProjectionValid: currentStateComplete,
     currentServingProjectionFingerprint: protocolManifest?.projectionFingerprint || null,
     currentServingProjectionSourceRevision: protocolManifest?.sourceRevision || null,
     pendingProjectionGeneration: activeRepair?.targetGeneration ?? null,
@@ -2943,7 +3023,7 @@ export async function getAutomationJobHealthView(now = Date.now()): Promise<Auto
       maximumItems: 1,
       maximumBytes: SUMMARY_MAXIMUM_BYTES,
     }).then(snapshot => ({ snapshot })).catch((error: unknown) => ({ error })),
-    readBoundedAutomationJobProjections(),
+    readBoundedAutomationJobProjections(now),
   ]);
   if ('snapshot' in summaryRead) {
     const snapshot = summaryRead.snapshot;

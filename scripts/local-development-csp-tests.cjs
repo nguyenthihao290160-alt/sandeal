@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
@@ -98,6 +99,12 @@ test('production security headers and CSP protections remain intact', () => {
     "manifest-src 'self'",
     "worker-src 'self' blob:",
   ]) assert.ok(policy.split(';').map(value => value.trim()).includes(expected), expected);
+});
+
+test('production pages do not depend on a runtime Google Fonts stylesheet', () => {
+  const globalCss = fs.readFileSync(path.join(root, 'src/app/globals.css'), 'utf8');
+  assert.doesNotMatch(globalCss, /fonts\.googleapis\.com|fonts\.gstatic\.com/i);
+  assert.match(globalCss, /--font-sans:\s*-apple-system/);
 });
 
 console.log(`\nLocal development CSP: ${passed} passed, ${failed} failed`);

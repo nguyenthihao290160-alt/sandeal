@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import { getAutomationPolicy } from '@/lib/automation/policyRegistry';
 import type { AutomationJobType, AutonomousMode } from '@/lib/automation/types';
 import { readCollection, runTransaction } from '@/lib/storage/adapter';
+import {
+  CANDIDATE_QUEUE_SCHEMA_VERSION,
+  MAX_CANDIDATE_DURABLE_JOB_GENERATION,
+} from '@/lib/storage/candidateQueue';
 import { createStorageSnapshot } from './backupManager';
 import { runAutonomousSchemaBackfill, type BackfillResult } from './migrations';
 import {
@@ -11,7 +15,7 @@ import {
 } from '@/lib/automation/jobHealthSummary';
 
 export const PERSISTED_ENTITY_SCHEMA_VERSION = 2;
-export const PERSISTED_ENTITY_MIGRATION_ID = 'prompt10-persisted-entities-v2';
+export const PERSISTED_ENTITY_MIGRATION_ID = 'v4-1-persisted-entities-v3';
 
 type EntityName = 'automation-jobs' | 'automation-control' | 'automation-audit' | 'candidate-queue';
 
@@ -44,6 +48,12 @@ export interface PersistedEntityBackfillResult {
 const CHECKPOINTS = 'autonomous-entity-migrations';
 const ENTITIES: EntityName[] = ['automation-jobs', 'automation-control', 'automation-audit', 'candidate-queue'];
 const MODES = new Set<AutonomousMode>(['OBSERVE', 'SHADOW', 'CANARY', 'AUTONOMOUS', 'EMERGENCY_STOP']);
+
+function entitySchemaVersion(entity: EntityName): number {
+  return entity === 'candidate-queue'
+    ? CANDIDATE_QUEUE_SCHEMA_VERSION
+    : PERSISTED_ENTITY_SCHEMA_VERSION;
+}
 
 function checksum(items: unknown[]): string {
   return createHash('sha256').update(JSON.stringify(items.map((item, index) => {
@@ -93,7 +103,26 @@ function migrateRecord(entity: EntityName, value: unknown, now: string): { recor
     return { quarantined: false, record: { ...record, schemaVersion: 2, id: 'automation-control', mode: requestedMode, effectiveMode, publishPaused: record.publishPaused === true, ingestionPaused: record.ingestionPaused === true, workerPaused: record.workerPaused === true, schedulerPaused: record.schedulerPaused !== false, killSwitch: record.killSwitch === true, timezone: 'Asia/Ho_Chi_Minh', updatedAt: now } };
   }
   if (entity === 'automation-audit') return { quarantined: false, record: { ...record, schemaVersion: 2 } };
-  return { quarantined: false, record: { ...record, schemaVersion: 2, durableJobId: record.durableJobId, durableJobKey: record.durableJobKey } };
+  const rawGeneration = record.durableJobGeneration;
+  const generation = rawGeneration === undefined || rawGeneration === null
+    ? 0
+    : Number(rawGeneration);
+  if (
+    !Number.isSafeInteger(generation)
+    || generation < 0
+    || generation > MAX_CANDIDATE_DURABLE_JOB_GENERATION
+  ) throw new Error('CANDIDATE_DURABLE_JOB_GENERATION_INVALID');
+  return {
+    quarantined: false,
+    record: {
+      ...record,
+      schemaVersion: CANDIDATE_QUEUE_SCHEMA_VERSION,
+      durableJobId: record.durableJobId,
+      durableJobKey: record.durableJobKey,
+      durableOperationId: record.durableOperationId,
+      durableJobGeneration: generation,
+    },
+  };
 }
 
 export async function runPersistedEntityBackfill(options: { dryRun?: boolean; limit?: number } = {}): Promise<PersistedEntityBackfillResult> {
@@ -115,7 +144,10 @@ export async function runPersistedEntityBackfill(options: { dryRun?: boolean; li
     for (let offset = 0; offset < slice.length; offset += 1) {
       const value = slice[offset];
       const record = value && typeof value === 'object' ? value as Record<string, unknown> : {};
-      if (record.schemaVersion === PERSISTED_ENTITY_SCHEMA_VERSION) { skipped += 1; continue; }
+      // Never downgrade a record written by this or a newer schema. Unknown
+      // future records remain untouched and therefore fail closed in their
+      // owning reader rather than being rewritten as an older contract.
+      if (Number(record.schemaVersion) >= entitySchemaVersion(entity)) { skipped += 1; continue; }
       try {
         const next = migrateRecord(entity, value, now);
         replacements.set(cursor + offset, next.record);

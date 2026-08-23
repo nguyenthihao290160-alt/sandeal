@@ -77,6 +77,7 @@ function job(index, now, overrides = {}) {
 async function main() {
   const adapter = require('../src/lib/storage/adapter.ts');
   const health = require('../src/lib/automation/jobHealthSummary.ts');
+  const guardian = require('../src/lib/automation/runtimeGuardian.ts');
   const store = require('../src/lib/automation/store.ts');
   const now = Date.now();
 
@@ -271,6 +272,10 @@ async function main() {
     const view = await health.getAutomationJobHealthView(now + 4_001);
     assert.equal(view.currentStateComplete, false);
     assert.equal(view.evidenceClassification, 'INCOMPLETE');
+    assert.equal(view.projectionSyncState, 'RUNNING');
+    assert.equal(view.activeProjectionSyncCount, 1);
+    assert.equal(view.abandonedProjectionSyncCount, 0);
+    assert.ok(view.reasonCodes.includes('JOB_PROJECTION_SYNC_IN_PROGRESS'));
     assert.ok(view.reasonCodes.includes('JOB_HEALTH_SUMMARY_MANIFEST_MISMATCH'));
     await health.finishAutomationJobProjectionSync(token, {
       success: false,
@@ -286,6 +291,74 @@ async function main() {
       sourceUpdatedAt: null,
       retentionBoundary: null,
     }, now + 4_002);
+  });
+
+  await test('an abandoned sync is explicit and stale runnable evidence cannot raise queue stuck', async () => {
+    const stalePending = job(840, now, {
+      status: 'PENDING',
+      claimedAt: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+      createdAt: iso(now - 60 * 60_000),
+      queuedAt: iso(now - 60 * 60_000),
+      scheduledAt: iso(now - 60 * 60_000),
+      runnableAt: iso(now - 60 * 60_000),
+      updatedAt: iso(now - 60 * 60_000),
+    });
+    await adapter.writeCollection('automation-jobs', [stalePending]);
+    await store.rebuildAutomationJobReadModelsFromDurable([stalePending], now + 5_000);
+    await health.refreshAutomationJobHealthSummary(now + 5_100);
+
+    // Simulate the audited state: durable truth is terminal while a formerly
+    // runnable projection is left behind by an interrupted sync.
+    await adapter.writeCollection('automation-jobs', [job(840, now, {
+      status: 'FAILED',
+      completedAt: iso(now + 5_150),
+      updatedAt: iso(now + 5_150),
+    })]);
+    const syncStartedAt = now + 5_200;
+    const token = await health.beginAutomationJobProjectionSync(syncStartedAt);
+    const observedAt = syncStartedAt + 2 * 60_000 + 1;
+    try {
+      const projection = await health.readBoundedAutomationJobProjections(observedAt);
+      assert.equal(projection.currentStateComplete, false);
+      assert.ok(projection.reasonCodes.includes('JOB_PROJECTION_SYNC_ABANDONED'));
+      assert.equal(projection.reasonCodes.includes('JOB_PROJECTION_SYNC_IN_PROGRESS'), false);
+
+      const view = await health.getAutomationJobHealthView(observedAt);
+      assert.equal(view.currentStateComplete, false);
+      assert.equal(view.evidenceClassification, 'INCOMPLETE');
+      assert.equal(view.projectionSyncState, 'ABANDONED');
+      assert.equal(view.activeProjectionSyncCount, 0);
+      assert.equal(view.abandonedProjectionSyncCount, 1);
+      assert.equal(view.statusCounts.PENDING, 0);
+      assert.deepEqual(view.pendingJobs, []);
+      assert.deepEqual(view.runningJobs, []);
+      assert.equal(view.oldestPendingAt, null);
+      assert.equal(view.oldestPendingAgeMs, null);
+      assert.equal(view.stuckPendingCount, 0);
+      assert.equal(view.staleRunningCount, 0);
+      assert.ok(view.reasonCodes.includes('JOB_HEALTH_CURRENT_STATE_INCOMPLETE'));
+      assert.equal(view.reasonCodes.includes('JOB_PROJECTION_SYNC_IN_PROGRESS'), false);
+
+      const runtime = await guardian.runRuntimeGuardian({
+        apply: false,
+        now: observedAt,
+        webAlive: true,
+        publicRouteHealthy: true,
+        schedulerEnabled: false,
+      });
+      assert.equal(runtime.queue.currentStateComplete, false);
+      assert.equal(runtime.queue.pending, 0);
+      assert.equal(runtime.queue.running, 0);
+      assert.equal(runtime.queue.stuck, 0);
+      assert.equal(runtime.queue.staleJobs, 0);
+      assert.equal(runtime.reasons.includes('QUEUE_STUCK'), false);
+      assert.equal(runtime.reasons.includes('STALE_JOB'), false);
+      assert.ok(runtime.reasons.includes('JOB_HEALTH_CURRENT_STATE_INCOMPLETE'));
+    } finally {
+      await health.abortAutomationJobProjectionMutation(token, observedAt + 1);
+    }
   });
 
   await test('normal health reads never parse durable automation-jobs history', async () => {

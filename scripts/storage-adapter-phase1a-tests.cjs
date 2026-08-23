@@ -386,6 +386,62 @@ async function main() {
     );
   });
 
+  await test('paged reads retry only exact source-revision races with a finite bound', async () => {
+    process.env.SANDEAL_STORAGE_DRIVER = 'file';
+    const originalReadCollectionPage = fileStorageAdapter.readCollectionPage;
+    const sourceChanged = () => {
+      const error = new Error('STORAGE_COLLECTION_SOURCE_CHANGED');
+      error.code = 'STORAGE_COLLECTION_SOURCE_CHANGED';
+      return error;
+    };
+    try {
+      let attempts = 0;
+      fileStorageAdapter.readCollectionPage = async () => {
+        attempts += 1;
+        if (attempts < 3) throw sourceChanged();
+        return {
+          items: [{ id: 'coherent' }],
+          totalItems: 1,
+          sourceRevision: 'file:coherent-revision',
+          queryCount: 1,
+        };
+      };
+      const rematerialized = await facade.readCollectionPage('revision-fixture', {
+        page: 1,
+        pageSize: 1,
+      });
+      assert.equal(attempts, 3);
+      assert.deepEqual(rematerialized.items, [{ id: 'coherent' }]);
+
+      attempts = 0;
+      fileStorageAdapter.readCollectionPage = async () => {
+        attempts += 1;
+        throw sourceChanged();
+      };
+      await assert.rejects(
+          () => facade.readCollectionPage('revision-fixture', { page: 1, pageSize: 1 }),
+          error => error instanceof Error
+            && error.code === 'STORAGE_COLLECTION_SOURCE_CHANGED',
+      );
+      assert.equal(attempts, 3);
+
+      attempts = 0;
+      fileStorageAdapter.readCollectionPage = async () => {
+        attempts += 1;
+        const error = new Error('INVALID_STORAGE_QUERY');
+        error.code = 'INVALID_STORAGE_QUERY';
+        throw error;
+      };
+      await assert.rejects(
+          () => facade.readCollectionPage('revision-fixture', { page: 1, pageSize: 1 }),
+          error => error instanceof Error && error.code === 'INVALID_STORAGE_QUERY',
+      );
+      assert.equal(attempts, 1);
+    } finally {
+      fileStorageAdapter.readCollectionPage = originalReadCollectionPage;
+    }
+  });
+
   await test('file capabilities and bounded bulk mutation report per-item partial failures atomically', async () => {
     process.env.SANDEAL_STORAGE_DRIVER = 'file';
     const capabilities = facade.getStorageCapabilities();

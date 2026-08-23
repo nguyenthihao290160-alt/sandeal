@@ -116,7 +116,7 @@ export default async function DealDetailPage({
 
             {!indexing.indexable ? (
               <div className={styles.warningBox} role="note">
-                Trang này chưa đủ điều kiện lập chỉ mục: {indexing.reasons.join(', ')}.
+                Trang này chưa đủ điều kiện lập chỉ mục. Thông tin sản phẩm vẫn được hiển thị theo các bằng chứng công khai hiện có.
               </div>
             ) : null}
 

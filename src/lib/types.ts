@@ -299,6 +299,16 @@ export type ProductScoreLabel =
 
 export type ProductFieldVerificationStatus = 'MISSING' | 'UNVERIFIED' | 'VERIFYING' | 'VERIFIED' | 'STALE' | 'CONFLICT' | 'INVALID';
 
+export type ProductHealthEvidenceScope = 'productUrl' | 'affiliateUrl' | 'image' | 'price' | 'publicPage' | 'source' | 'legacy';
+
+export interface ProductHealthFailureCounter {
+  consecutiveFailures: number;
+  checkedAt: string;
+  lastFailureAt?: string;
+  lastHealthyAt?: string;
+  reason?: string;
+}
+
 export interface ProductFieldProvenance {
   value?: string | number | boolean;
   source: string;
@@ -655,6 +665,8 @@ export interface Product {
   runtimeRecoveryCanaryObservationExpiresAt?: string;
   monitoringScheduledAt?: string;
   consecutiveHealthFailures?: number;
+  /** Per-evidence streaks; the legacy scalar is a bounded derived compatibility field. */
+  healthFailureCounters?: Partial<Record<ProductHealthEvidenceScope, ProductHealthFailureCounter>>;
   lastHealthyAt?: string;
   hiddenAt?: string;
   hiddenReason?: string;

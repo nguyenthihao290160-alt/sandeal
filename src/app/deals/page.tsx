@@ -155,7 +155,7 @@ export default async function DealsPage({ searchParams }: { searchParams: Promis
 
             <div className={styles.resultBar} aria-live="polite">
               <p><strong>{result.pagination.totalItems.toLocaleString('vi-VN')}</strong> sản phẩm phù hợp</p>
-              <p>Trang {result.pagination.page}/{result.pagination.totalPages}</p>
+              {result.pagination.totalItems > 0 ? <p>Trang {result.pagination.page}/{result.pagination.totalPages}</p> : null}
             </div>
 
             {result.items.length > 0 ? (
@@ -164,13 +164,16 @@ export default async function DealsPage({ searchParams }: { searchParams: Promis
                   <DealCard product={product} selectedComparisonIds={selectedIds} comparisonEnabled key={product.id} />
                 ))}
               </div>
-            ) : <DealEmptyState filtered={activeFilters} suggestions={result.suggestions} />}
+            ) : <DealEmptyState
+              filtered={result.totalPublicProducts > 0 && activeFilters}
+              suggestions={result.totalPublicProducts > 0 ? result.suggestions : []}
+            />}
 
-            <DealPagination
+            {result.pagination.totalItems > 0 ? <DealPagination
               page={result.pagination.page}
               totalPages={result.pagination.totalPages}
               query={pageQuery}
-            />
+            /> : null}
             <ProductComparisonTray selectedIds={selectedIds} />
           </div>
         </section>

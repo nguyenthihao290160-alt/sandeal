@@ -456,7 +456,7 @@ async function main() {
     ];
     const summary = productDetail.deriveProductRemediationSummary(blockers, blockers.slice(0, 8), 'KEEP_QUARANTINED');
     assert.deepEqual(summary.rootCauses.slice(0, 8).map((item) => item.id), [
-      'MERCHANT_POLICY', 'PRODUCT_URL', 'AFFILIATE_URL', 'IMAGE', 'PRICE', 'EVIDENCE', 'CONTENT_REVIEW', 'PUBLISHING',
+      'CONTENT_REVIEW', 'PRICE', 'POLICY_PUBLICATION', 'PRODUCT_URL', 'AFFILIATE_URL', 'IMAGE', 'EVIDENCE', 'DATA',
     ]);
     assert.equal(summary.total, blockers.length);
     assert.equal(summary.critical, 8);

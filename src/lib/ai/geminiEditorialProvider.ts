@@ -1,11 +1,12 @@
 import { createHash } from 'crypto';
 import type { Product, ReviewContent } from '../types';
+import { CURRENT_REVIEW_VERSION } from '../editorialReview';
 import { parseStrictEditorialProposal } from './canonicalDataContract';
 import { executeGeminiRequest } from './geminiCredentialRouter';
 import { routeModel, type TaskProfile } from './geminiModels';
 
 export interface GeminiEditorialResult { review: ReviewContent; modelId: string; promptVersion: string; generationFingerprint: string; responseHash: string; generatedAt: string; }
-const PROMPT_VERSION = 'editorial-v2.1';
+export const GEMINI_EDITORIAL_PROMPT_VERSION = 'editorial-v3.0';
 
 export function sanitizeProductForGemini(product: Product): Record<string, unknown> {
   return {
@@ -27,7 +28,13 @@ export async function generateGeminiEditorialReview(
 ): Promise<GeminiEditorialResult | null> {
   const model = routeModel(profile, availableModels); if (!model) return null;
   const publicInput = sanitizeProductForGemini(product);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ sourceHash: product.sourceHash, promptVersion: PROMPT_VERSION, policyVersion: 'product-policy-v2', modelId: model.modelId, reviewVersion: 2 })).digest('hex');
+  const fingerprint = createHash('sha256').update(JSON.stringify({
+    sourceHash: product.sourceHash,
+    promptVersion: GEMINI_EDITORIAL_PROMPT_VERSION,
+    policyVersion: 'product-policy-v2',
+    modelId: model.modelId,
+    reviewVersion: CURRENT_REVIEW_VERSION,
+  })).digest('hex');
   let response: Awaited<ReturnType<typeof executeGeminiRequest>>;
   try {
     response = await executeGeminiRequest({ modelId: model.modelId, taskType: profile.taskType, idempotencyKey: fingerprint, timeoutMs: model.timeoutMs, inputTokenEstimate: profile.inputTokenEstimate, maxFailoverGroups: 2, body: {
@@ -45,9 +52,9 @@ export async function generateGeminiEditorialReview(
   if (!parsed) return null;
   const fallback = localFallback();
   const contentUpdatedAt = new Date().toISOString();
-  const review: ReviewContent = { ...fallback, ...parsed, reviewVersion: 2, reviewMethod: 'source_data_analysis', reviewerType: 'automated_editorial', sourceHash: product.sourceHash || '', reviewedAt: contentUpdatedAt, contentUpdatedAt, reviewContentHash: '' };
+  const review: ReviewContent = { ...fallback, ...parsed, reviewVersion: CURRENT_REVIEW_VERSION, reviewMethod: 'source_data_analysis', reviewerType: 'automated_editorial', sourceHash: product.sourceHash || '', reviewedAt: contentUpdatedAt, contentUpdatedAt, reviewContentHash: '' };
   review.reviewContentHash = createHash('sha256').update(JSON.stringify({ title: review.reviewTitle, summary: review.reviewSummary, verdict: review.reviewVerdict, strengths: review.strengths, limitations: review.limitations, suitableFor: review.suitableFor, buyingConsiderations: review.buyingConsiderations })).digest('hex');
-  return { review, modelId: model.modelId, promptVersion: PROMPT_VERSION, generationFingerprint: fingerprint, responseHash: createHash('sha256').update(JSON.stringify(parsed)).digest('hex'), generatedAt: new Date().toISOString() };
+  return { review, modelId: model.modelId, promptVersion: GEMINI_EDITORIAL_PROMPT_VERSION, generationFingerprint: fingerprint, responseHash: createHash('sha256').update(JSON.stringify(parsed)).digest('hex'), generatedAt: new Date().toISOString() };
 }
 
 function parseReviewResponse(

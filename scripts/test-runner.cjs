@@ -90,7 +90,20 @@ function imageResponse(status = 200, type = 'image/jpeg') { return new Response(
 
   await test('25. không bịa fact ngoài Product', () => { const facts = editorial.extractVerifiedProductFacts(baseProduct({ description: 'Thương hiệu Hư Cấu, titan, tốt nhất thị trường' })); assert(!facts.some((item) => item.id === 'brand')); assert(!JSON.stringify(facts).includes('Hư Cấu')); });
   await test('26. claim thiếu evidence bị loại', () => { const p = baseProduct({ sourceHash: 'claims' }); const review = editorial.generateEditorialReview(p); review.factualClaims.push({ id: 'fake', text: 'Pin 10 ngày.', claimType: 'factual', evidenceFactIds: [], confidence: 'high' }); assert(editorial.validateReviewClaims(review, p).removedClaimIds.includes('fake')); });
-  await test('27. inference được đánh dấu nhận định', () => { const review = editorial.generateEditorialReview(baseProduct({ category: 'Gia dụng', sourceHash: 'infer' })); assert(review.inferredClaims.length > 0); assert(review.inferredClaims.every((item) => item.claimType === 'inferred' && /có thể|theo dữ liệu|nên kiểm tra/i.test(item.text))); });
+  await test('27. inference chỉ được tạo từ bằng chứng và được đánh dấu nhận định', () => {
+    const categoryOnly = editorial.generateEditorialReview(baseProduct({ category: 'Gia dụng', sourceHash: 'infer-category' }));
+    equal(categoryOnly.inferredClaims.length, 0);
+    const review = editorial.generateEditorialReview(baseProduct({
+      price: 100000,
+      salePrice: 90000,
+      priceVerificationStatus: 'VERIFIED',
+      priceTruthDiscountPercent: 10,
+      priceTruthEvidenceFactIds: ['current-price', 'reference-price'],
+      sourceHash: 'infer-price',
+    }));
+    assert(review.inferredClaims.length > 0);
+    assert(review.inferredClaims.every((item) => item.claimType === 'inferred' && /có thể|theo dữ liệu|nên kiểm tra/i.test(item.text)));
+  });
   await test('28. thiếu fact không tạo bài dài', () => { const review = editorial.generateEditorialReview(baseProduct({ price: undefined, originalUrl: undefined, affiliateUrl: undefined, imageUrl: undefined, linkHealthStatus: undefined, affiliateHealthStatus: undefined, imageHealthStatus: undefined, sourceHash: 'thin' })); equal(review.reviewStatus, 'needs_review'); assert(review.reviewBlockReasons.includes('insufficient_facts')); assert(review.reviewSummary.length < 300); });
   await test('29. không dùng hands_on_test giả', () => { const normalized = editorial.normalizeReviewContent({ ...editorial.generateEditorialReview(baseProduct()), reviewMethod: 'hands_on_test' }); equal(normalized.reviewMethod, 'source_data_analysis'); });
   await test('30. không tuyên bố đã dùng thực tế', () => { const text = JSON.stringify(editorial.generateEditorialReview(baseProduct({ sourceHash: 'experience' }))).toLowerCase(); assert(!text.includes('đã sử dụng thực tế')); assert(text.includes('chưa trực tiếp')); });

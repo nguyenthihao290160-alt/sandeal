@@ -1,4 +1,5 @@
 import type { Product } from '@/lib/types';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import type {
   DealScoreResultV2,
@@ -158,12 +159,28 @@ export function calculateDealScore(
 ): DealScoreResultV2 {
   const current = currentPrice(product);
   const original = Number(product.price || 0);
-  const discountPercent = current && original > current ? ((original - current) / original) * 100 : 0;
-  const discountAmount = current && original > current ? original - current : 0;
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  const verifiedDiscount = Number(product.priceTruthDiscountPercent);
+  const observedDiscount = current && original > current
+    ? Math.round((1 - current / original) * 100)
+    : 0;
+  const discountPercent = priceTruth.isVerified
+    && ['FRESH', 'AGING'].includes(priceTruth.state)
+    && Boolean(product.priceTruthEvidenceFactIds?.length)
+    && Boolean(current)
+    && original > Number(current)
+    && Number.isFinite(verifiedDiscount)
+    && verifiedDiscount > 0
+    && verifiedDiscount <= 100
+    && Math.abs(observedDiscount - verifiedDiscount) <= 1
+    ? verifiedDiscount : 0;
+  const discountAmount = discountPercent > 0 && current && original > current
+    ? Math.round(original - current)
+    : 0;
   const positives: string[] = [];
   const negatives: string[] = [];
   const reasons: string[] = [];
-  const suspiciousOriginalPrice = Boolean(current && original / current > CONFIG.thresholds.unusualOriginalPriceRatio);
+  const suspiciousOriginalPrice = Boolean(discountPercent > 0 && current && original / current > CONFIG.thresholds.unusualOriginalPriceRatio);
 
   if (!current || quality.blockers.includes('not_a_product')) {
     return {
@@ -204,10 +221,9 @@ export function calculateDealScore(
     historical = CONFIG.weights.deal.history * 0.25;
   }
 
-  const age = ageInDays(product.priceLastChangedAt || product.lastSeenAt || product.updatedAt, now);
-  const freshness = age !== undefined && age <= CONFIG.freshness.priceDays
+  const freshness = priceTruth.isVerified && priceTruth.state === 'FRESH'
     ? CONFIG.weights.deal.freshness
-    : age !== undefined && age <= CONFIG.freshness.priceDays * 2 ? 7 : 0;
+    : priceTruth.isVerified && priceTruth.state === 'AGING' ? 7 : 0;
   if (!freshness) negatives.push('stale_price');
 
   const linkHealthy = GOOD_HEALTH.has(String(product.linkHealthStatus || product.productHealthStatus || ''));

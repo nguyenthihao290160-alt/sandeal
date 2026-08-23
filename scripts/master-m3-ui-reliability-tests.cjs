@@ -65,6 +65,19 @@ async function run() {
     assert.ok(html.includes('data-image-failure-category="none"'));
   });
 
+  await test('A known-broken legacy image starts on the local placeholder without another remote request', () => {
+    const html = renderToStaticMarkup(React.createElement(SafeProductImage, {
+      originalUrl: 'https://legacy-images.example/missing.jpg',
+      alt: 'Legacy product image',
+      healthStatus: 'not_found',
+      showFailureStatus: true,
+    }));
+    assert.ok(html.includes('src="/product-placeholder.svg"'));
+    assert.ok(!html.includes('legacy-images.example'));
+    assert.ok(html.includes('data-image-failure-category="known_unhealthy"'));
+    assert.ok(html.includes('Ảnh nguồn đã thất bại kiểm tra'));
+  });
+
   await test('Dashboard route highlighting includes nested product detail routes only in Products', () => {
     assert.equal(isDashboardRouteActive('/dashboard/products/abc', '/dashboard/products'), true);
     assert.equal(isDashboardRouteActive('/dashboard/products/abc', '/dashboard'), false);
@@ -116,6 +129,34 @@ async function run() {
     assert.ok(page.includes('role="alert"'));
     assert.ok(css.includes('@media (max-width: 680px)'));
     assert.ok(css.includes('.verificationFeedback'));
+  });
+
+  await test('Product Studio renders current server truth and keeps technical codes in Debug', () => {
+    const page = source('src/app/dashboard/products/[id]/page.tsx');
+    const drawer = source('src/components/dashboard/product-studio-drawer.tsx');
+    assert.ok(page.includes('pipelineTruth ? pipelineTruth.lifecycle.blockers'));
+    assert.ok(page.includes("pipelineTruth.eligibility?.eligibleForPublish !== true"));
+    assert.equal(page.includes('sourceEvidence?.affiliate.reasonCode'), false);
+    assert.equal(page.includes('lastEligibilityDecision?.reasonCodes.join'), false);
+    assert.ok(page.includes("['Review Quality', product.reviewQuality?.qualityScore]"));
+    assert.ok(page.includes("['Content Quality', product.reviewContent?.contentQualityScore]"));
+    assert.ok(page.includes('quality_identity'));
+    assert.equal(page.includes('Khấu trừ chính:'), false);
+    assert.ok(drawer.includes('healthStatus={detail.debug.technicalState.imageHealthStatus || undefined}'));
+  });
+
+  await test('mobile navigation and Source Reliability preserve focus and visible diagnostics', () => {
+    const layout = source('src/app/dashboard/layout.tsx');
+    const globals = source('src/app/globals.css');
+    const reliability = source('src/components/dashboard/source-reliability-panel.module.css');
+    assert.ok(layout.includes('id="dashboard-primary-navigation"'));
+    assert.ok(layout.includes('aria-expanded={sidebarOpen}'));
+    assert.ok(layout.includes('aria-controls="dashboard-primary-navigation"'));
+    assert.ok(globals.includes('visibility: hidden'));
+    assert.ok(globals.includes('pointer-events: none'));
+    assert.ok(reliability.includes('overflow-x: auto'));
+    assert.ok(reliability.includes('var(--surface-primary, var(--bg-card, #fff))'));
+    assert.ok(reliability.includes('var(--border-color, var(--border-primary, #dfe5ec))'));
   });
 
   console.log(`\nM3 UI reliability tests: ${passed} passed, ${failed} failed`);

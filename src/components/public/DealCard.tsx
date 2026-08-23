@@ -201,7 +201,7 @@ export function DealEmptyState({
       <p>
         {filtered
           ? 'Hãy xóa một vài điều kiện hoặc quay lại danh sách mới cập nhật.'
-          : 'SanDeal chưa có sản phẩm vượt qua đầy đủ cổng nguồn, link, ảnh và nội dung. Không có card giả được tạo để lấp chỗ trống.'}
+          : 'Sản phẩm chưa vượt qua đầy đủ bước xác minh để được công khai. SanDeal không hiển thị sản phẩm cách ly hoặc tạo deal giả để lấp chỗ trống.'}
       </p>
       {suggestions.length > 0 ? (
         <div className={styles.emptyActions} aria-label="Goi y tim kiem co san pham">

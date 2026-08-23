@@ -611,7 +611,7 @@ async function main() {
     assert.equal(code.includes('while (true)'), false);
   });
 
-  await test('Product detail blocker summary separates merchant, affiliate, image, price and duplicate concerns', () => {
+  await test('Product detail blocker summary does not turn a merchant transport error into merchant quarantine', () => {
     const blockers = [
       'merchant_connection_reset',
       'affiliate_provenance_missing',
@@ -623,8 +623,9 @@ async function main() {
     const summary = productDetail.deriveProductRemediationSummary(blockers, blockers.slice(0, 5), 'KEEP_QUARANTINED');
     assert.equal(summary.total, 6);
     assert.equal(summary.critical, 5);
-    assert.equal(summary.merchantQuarantined, true);
-    assert.deepEqual(summary.groups.map(group => group.category), ['MERCHANT_POLICY', 'AFFILIATE', 'IMAGE', 'PRICE', 'DUPLICATE', 'DATA']);
+    assert.equal(summary.merchantQuarantined, false);
+    assert.equal(summary.productHeldInQuarantine, false);
+    assert.deepEqual(summary.groups.map(group => group.category), ['PRICE', 'AFFILIATE', 'IMAGE', 'DUPLICATE', 'DATA']);
     assert.match(summary.nextAction, /quarantine/i);
   });
 
@@ -634,11 +635,23 @@ async function main() {
       apiKey: 'must-not-appear',
       nested: { cookie: 'must-not-appear-either' },
       originalUrl: 'https://merchant.example/item?access_token=must-not-appear&sku=42',
+      note: 'probe failed with token=inline-must-not-appear and retry is safe',
+      headerDump: 'Authorization: Basic inline-basic-must-not-appear',
     });
     const serialized = JSON.stringify(safe);
     assert.equal(serialized.includes('must-not-appear'), false);
+    assert.equal(serialized.includes('inline-basic-must-not-appear'), false);
     assert.ok(serialized.includes('[REDACTED]'));
     assert.ok(serialized.includes('sku=42'));
+  });
+
+  await test('content, price and publication blockers keep deterministic truthful groups', () => {
+    const blockers = ['low_originality', 'review_not_approved', 'price_stale', 'price_unverified', 'auto_publish_ineligible', 'publish_confidence_low', 'quarantined'];
+    const summary = productDetail.deriveProductRemediationSummary(blockers, blockers, 'KEEP_QUARANTINED');
+    assert.deepEqual(summary.groups.map(group => group.category), ['CONTENT_REVIEW', 'PRICE', 'POLICY_PUBLICATION']);
+    assert.deepEqual(summary.rootCauses.map(group => group.id), ['CONTENT_REVIEW', 'PRICE', 'POLICY_PUBLICATION']);
+    assert.equal(summary.productHeldInQuarantine, true);
+    assert.equal(summary.merchantQuarantined, false);
   });
 
   await test('UI regression guards expose unambiguous capability, Gemini and candidate mapping semantics', () => {

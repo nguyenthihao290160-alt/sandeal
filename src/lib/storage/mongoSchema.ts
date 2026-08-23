@@ -72,6 +72,7 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'scheduler-state',
   'source-keyword-state',
   'source-quality',
+  'source-reliability-state',
   'token-vault',
 ] as const;
 

@@ -134,12 +134,15 @@ function truthFixture(overrides = {}) {
     assert.doesNotMatch(css, /\.toastRegion[^}]*top:/s);
   });
 
-  await test('Product detail render blocker nhóm và lý do action disabled', () => {
+  await test('Product detail render blocker nhóm và ẩn Safe Publish khi chưa đủ điều kiện', () => {
     const page = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/products/[id]/page.tsx'), 'utf8');
     const css = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/products/[id]/product-detail.module.css'), 'utf8');
     assert.match(page, /blockerGroups/);
     assert.match(page, /title=\{canaryDisabledReason/);
-    assert.match(page, /title=\{publishDisabledReason/);
+    assert.match(page, /pipelineTruth\.eligibility\?\.eligibleForPublish !== true/);
+    assert.match(page, /\{publishDisabledReason \? <>/);
+    assert.match(page, />Xem blockers<\/button>/);
+    assert.match(page, /: <button className="btn btn-primary"[\s\S]{0,240}>Yêu cầu kiểm tra Safe Publish<\/button>/);
     assert.match(css, /@media \(max-width: 900px\)/);
     assert.match(css, /\.operationGrid/);
   });

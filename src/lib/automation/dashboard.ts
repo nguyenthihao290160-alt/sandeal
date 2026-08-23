@@ -21,6 +21,7 @@ import { buildLaunchInventoryOverview } from './launchInventory';
 import { startOfVietnamDay, vietnamActivityLabel } from './timezone';
 import { classifyAutomationJobEvidence, getAutomationTruth } from './truth';
 import { getReleaseIdentity } from '@/lib/releaseIdentity';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import {
   buildTrendingDealLeaderboard,
   mapProductPipelineStage,
@@ -506,8 +507,8 @@ export async function buildAutomationDashboard(range: DashboardRange) {
     inventory,
     business: {
       publicProducts: products.filter(isPublicSafeProduct).length,
-      freshPrice: products.filter(product => product.priceTruthState === 'FRESH').length,
-      stalePrice: products.filter(product => ['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(product.priceTruthState || '')).length,
+      freshPrice: products.filter(product => derivePersistedPriceTruth(product).isFresh).length,
+      stalePrice: products.filter(product => ['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(derivePersistedPriceTruth(product).state)).length,
       healthyAffiliateLinks: products.filter(product => ['ok', 'redirect_ok'].includes(product.affiliateHealthStatus || '') || product.offers?.some(offer => offer.affiliateHealth === 'HEALTHY')).length,
       brokenLinks: products.filter(product => brokenLinkStatuses.has(product.linkHealthStatus || '') || brokenLinkStatuses.has(product.affiliateHealthStatus || '')).length,
       outboundClicks: outboundEvents.filter(event => event.eventType === 'click' || event.eventType === 'OUTBOUND_CLICK').length,

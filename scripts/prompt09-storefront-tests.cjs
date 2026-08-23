@@ -77,6 +77,14 @@ function product(id, overrides = {}) {
     imageLastCheckedAt: TEST_NOW,
     priceObservedAt: TEST_NOW,
     priceTruthState: 'FRESH',
+    priceVerificationStatus: 'VERIFIED',
+    fieldProvenance: {
+      price: {
+        source: 'provider_api',
+        fetchedAt: TEST_NOW,
+        verificationStatus: 'VERIFIED',
+      },
+    },
     lastSeenAt: TEST_NOW,
     priceLastChangedAt: TEST_NOW,
     availability: 'available',
@@ -138,6 +146,33 @@ async function main() {
     assert.throws(() => publicProducts.parsePublicProductQuery(new URLSearchParams('unknown=value')), error => error.field === 'unknown');
   });
 
+  await test('public cards expose discount claims only from coherent verified price truth', () => {
+    const inferredOnly = publicProducts.toPublicProductCardDto(product('discount-inferred-only'));
+    assert.equal(inferredOnly.originalPrice, undefined);
+    assert.equal(inferredOnly.discountPercent, undefined);
+
+    const storedWithoutEvidence = publicProducts.toPublicProductCardDto(product('discount-stored-without-evidence', {
+      priceTruthDiscountPercent: 20,
+    }));
+    assert.equal(storedWithoutEvidence.originalPrice, undefined);
+    assert.equal(storedWithoutEvidence.discountPercent, undefined);
+
+    const verified = publicProducts.toPublicProductCardDto(product('discount-verified', {
+      priceTruthDiscountPercent: 20,
+      priceTruthEvidenceFactIds: ['current-price-fact', 'reference-price-fact'],
+    }));
+    assert.equal(verified.originalPrice, 1_500_000);
+    assert.equal(verified.discountPercent, 20);
+
+    const unverified = publicProducts.toPublicProductCardDto(product('discount-unverified', {
+      priceTruthDiscountPercent: 20,
+      priceVerificationStatus: 'UNVERIFIED',
+      fieldProvenance: { price: { source: 'manual', verificationStatus: 'UNVERIFIED' } },
+    }));
+    assert.equal(unverified.originalPrice, undefined);
+    assert.equal(unverified.discountPercent, undefined);
+  });
+
   await test('public search covers brand SKU category source and specification without loading unsafe products', async () => {
     await reset();
     const searchable = publicProduct('searchable', {
@@ -151,6 +186,39 @@ async function main() {
       assert.deepEqual(result.items.map(item => item.id), ['searchable']);
       assert.equal(JSON.stringify(result).includes('private-marker'), false);
     }
+  });
+
+  await test('global-empty and filtered-empty catalogues remain distinct and private diagnostics never cross the boundary', async () => {
+    await reset();
+    const globallyEmpty = await publicProducts.queryPublicProducts(new URLSearchParams('q=anything'));
+    assert.equal(globallyEmpty.totalPublicProducts, 0);
+    assert.equal(globallyEmpty.pagination.totalItems, 0);
+
+    const safe = publicProduct('zero-semantics-public', { title: 'Public verified fixture' });
+    const quarantined = product('zero-semantics-private', {
+      title: 'Private quarantined fixture',
+      lifecycleState: 'QUARANTINED',
+      publicBlockReasons: ['review_not_indexable', 'CANDIDATE_JOB_MISMATCH'],
+      rawData: { operationId: 'candidate-operation-private', jobId: 'private-job-id' },
+    });
+    const recoveryPending = {
+      ...publicProduct('recovery-canary-private'),
+      runtimeRecoveryCanaryObservationPending: true,
+      rawData: { reasonCode: 'runtime_recovery_canary_observation_pending' },
+    };
+    await adapter.writeCollection('products', [safe, quarantined, recoveryPending]);
+    const filteredEmpty = await publicProducts.queryPublicProducts(new URLSearchParams('q=no-such-public-product'));
+    assert.equal(filteredEmpty.totalPublicProducts, 1);
+    assert.equal(filteredEmpty.pagination.totalItems, 0);
+    assert.equal(await publicProducts.getPublicProductBySlugSafe(recoveryPending.slug), null);
+    const serialized = JSON.stringify(filteredEmpty);
+    assert.equal(serialized.includes('review_not_indexable'), false);
+    assert.equal(serialized.includes('CANDIDATE_JOB_MISMATCH'), false);
+    assert.equal(serialized.includes('private-job-id'), false);
+    assert.equal(serialized.includes('candidate-operation-private'), false);
+    assert.equal(serialized.includes('runtime_recovery_canary_observation_pending'), false);
+    const publicDetailPage = fs.readFileSync(path.join(process.cwd(), 'src/app/deals/[slug]/page.tsx'), 'utf8');
+    assert.equal(publicDetailPage.includes('indexing.reasons.join'), false);
   });
 
   await test('price movement, price-drop sorting and homepage sections use recorded snapshots only', async () => {
@@ -184,6 +252,7 @@ async function main() {
       ],
       rawData: { apiKey: 'must-not-leak' },
       trackingCode: 'private-code',
+      dealReasons: ['CANDIDATE_JOB_MISMATCH', 'runtime_recovery_canary_observation_pending'],
     });
     await adapter.writeCollection('products', [safe]);
     const result = await publicProducts.getPublicProductBySlugSafe(safe.slug);
@@ -200,6 +269,9 @@ async function main() {
     assert.equal(serialized.includes('must-not-leak'), false);
     assert.equal(serialized.includes('private-code'), false);
     assert.equal(serialized.includes('affiliate=fixture'), false);
+    assert.equal(serialized.includes('CANDIDATE_JOB_MISMATCH'), false);
+    assert.equal(serialized.includes('runtime_recovery_canary_observation_pending'), false);
+    assert.ok(result.detail.dealReasons.length > 0);
   });
 
   await test('public API returns public-safe cards and rejects unknown filters', async () => {

@@ -6,7 +6,8 @@ export type ProductBlockerCategory =
   | 'PRICE'
   | 'DUPLICATE'
   | 'MERCHANT_POLICY'
-  | 'CONTENT_POLICY';
+  | 'CONTENT_REVIEW'
+  | 'POLICY_PUBLICATION';
 
 export interface ProductBlockerGroup {
   category: ProductBlockerCategory;
@@ -16,13 +17,13 @@ export interface ProductBlockerGroup {
 
 export type ProductRootCauseId =
   | 'MERCHANT_POLICY'
+  | 'POLICY_PUBLICATION'
   | 'PRODUCT_URL'
   | 'AFFILIATE_URL'
   | 'IMAGE'
   | 'PRICE'
   | 'EVIDENCE'
   | 'CONTENT_REVIEW'
-  | 'PUBLISHING'
   | 'DUPLICATE'
   | 'DATA';
 
@@ -43,7 +44,8 @@ const CATEGORY_LABELS: Record<ProductBlockerCategory, string> = {
   PRICE: 'Giá',
   DUPLICATE: 'Trùng lặp',
   MERCHANT_POLICY: 'Merchant & chính sách',
-  CONTENT_POLICY: 'Nội dung & kiểm duyệt',
+  CONTENT_REVIEW: 'Nội dung / Review',
+  POLICY_PUBLICATION: 'Chính sách / Xuất bản',
 };
 
 const BLOCKER_LABELS: Record<string, string> = {
@@ -114,7 +116,7 @@ const BLOCKER_LABELS: Record<string, string> = {
 const ACTION_LABELS: Record<string, string> = {
   MANUAL_CLASSIFICATION_DECISION: 'Xác nhận đây là sản phẩm cụ thể.',
   FIX_CRITICAL_BLOCKERS: 'Xử lý các blocker nghiêm trọng trước.',
-  KEEP_QUARANTINED: 'Giữ quarantine và xử lý blocker merchant/chính sách.',
+  KEEP_QUARANTINED: 'Giữ sản phẩm trong Quarantine và xử lý điều kiện xuất bản.',
   CLASSIFY_PRODUCT: 'Phân loại lại sản phẩm.',
   RECHECK_LINKS: 'Kiểm tra lại liên kết và provenance.',
   RECHECK_IMAGE: 'Kiểm tra lại ảnh sản phẩm.',
@@ -133,23 +135,28 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 const ROOT_CAUSE_ORDER: ProductRootCauseId[] = [
+  'CONTENT_REVIEW',
+  'PRICE',
+  'POLICY_PUBLICATION',
   'MERCHANT_POLICY',
   'PRODUCT_URL',
   'AFFILIATE_URL',
   'IMAGE',
-  'PRICE',
   'EVIDENCE',
-  'CONTENT_REVIEW',
-  'PUBLISHING',
   'DUPLICATE',
   'DATA',
 ];
 
 const ROOT_CAUSE_META: Record<ProductRootCauseId, Pick<ProductRootCause, 'label' | 'explanation' | 'downstreamEffect'>> = {
   MERCHANT_POLICY: {
-    label: 'Merchant hoặc chính sách',
-    explanation: 'Quarantine và các quyết định chính sách phải được xử lý trước các bước xuất bản.',
-    downstreamEffect: 'Sau khi chính sách được xử lý hợp lệ, các cổng review, CANARY và Safe Publish mới có thể được đánh giá lại.',
+    label: 'Merchant',
+    explanation: 'Bằng chứng hiện tại chỉ ra một blocker ở cấp merchant, tách biệt với trạng thái của sản phẩm.',
+    downstreamEffect: 'Sau khi trạng thái merchant được xác minh lại, các cổng phụ thuộc nguồn mới có thể được đánh giá lại.',
+  },
+  POLICY_PUBLICATION: {
+    label: 'Chính sách / Xuất bản',
+    explanation: 'Sản phẩm đang được giữ trong Quarantine hoặc chưa thỏa điều kiện xuất bản.',
+    downstreamEffect: 'Sản phẩm chỉ rời Quarantine sau khi các điều kiện công khai liên quan được đáp ứng; điều này không kết luận merchant không khỏe.',
   },
   PRODUCT_URL: {
     label: 'URL sản phẩm',
@@ -181,11 +188,6 @@ const ROOT_CAUSE_META: Record<ProductRootCauseId, Pick<ProductRootCause, 'label'
     explanation: 'Review chưa đạt yêu cầu phê duyệt, độ mới, chất lượng hoặc tính nguyên bản.',
     downstreamEffect: 'Review đạt chuẩn sẽ gỡ các blocker chất lượng nội dung; không tự sửa lỗi URL, ảnh, giá hoặc chính sách.',
   },
-  PUBLISHING: {
-    label: 'Điều kiện xuất bản',
-    explanation: 'Cổng xuất bản vẫn đóng do các điều kiện đầu vào chưa hoàn tất.',
-    downstreamEffect: 'Blocker tổng hợp này chỉ được đánh giá lại sau khi các nguyên nhân gốc phía trên đã được xử lý.',
-  },
   DUPLICATE: {
     label: 'Trùng lặp',
     explanation: 'Bằng chứng trùng lặp chưa có quyết định hợp nhất hoặc loại trừ.',
@@ -208,19 +210,20 @@ export function localizeProductBlocker(codeValue: string): string {
     if (BLOCKER_LABELS[detail]) return BLOCKER_LABELS[detail];
     return 'Review có một blocker kỹ thuật chưa được gắn nhãn; mở chi tiết kỹ thuật để xem mã.';
   }
-  if (/quarantin/i.test(normalized)) return 'Merchant hoặc sản phẩm đang bị quarantine theo chính sách.';
+  if (/quarantin/i.test(normalized)) return 'Sản phẩm đang được giữ trong Quarantine vì chưa thỏa điều kiện xuất bản.';
   return 'Blocker kỹ thuật chưa được gắn nhãn; mở chi tiết kỹ thuật để xem mã.';
 }
 
 export function categorizeProductBlocker(codeValue: string): ProductBlockerCategory {
   const code = String(codeValue || '').toLowerCase();
-  if (/merchant|quarant|prohibited|policy/.test(code)) return 'MERCHANT_POLICY';
+  if (/merchant_(?:quarant|block)|blocked_merchant/.test(code)) return 'MERCHANT_POLICY';
+  if (/quarant|prohibited|policy|auto_publish|public_|publish|risk|human/.test(code)) return 'POLICY_PUBLICATION';
   if (/duplicate|trùng/.test(code)) return 'DUPLICATE';
   if (/affiliate/.test(code)) return 'AFFILIATE';
   if (/image|ảnh/.test(code)) return 'IMAGE';
   if (/price|giá/.test(code)) return 'PRICE';
   if (/product_url|link|domain|provenance|source_health/.test(code)) return 'PROVENANCE_LINK';
-  if (/review|claim|content|publish|risk|human/.test(code)) return 'CONTENT_POLICY';
+  if (/review|claim|content|seo|originality/.test(code)) return 'CONTENT_REVIEW';
   return 'DATA';
 }
 
@@ -231,14 +234,14 @@ export function localizeProductRequiredAction(action: string | null | undefined)
 
 function rootCauseForBlocker(codeValue: string): ProductRootCauseId {
   const code = String(codeValue || '').replace(/^(?:stored:)+/, '').replace(/^review:/, '').toLowerCase();
-  if (/merchant|quarant|prohibited|policy/.test(code)) return 'MERCHANT_POLICY';
+  if (/merchant_(?:quarant|block)|blocked_merchant/.test(code)) return 'MERCHANT_POLICY';
+  if (/quarant|prohibited|policy|auto_publish|public_|publish|risk|human/.test(code)) return 'POLICY_PUBLICATION';
   if (/affiliate_disclosure/.test(code)) return 'CONTENT_REVIEW';
   if (/affiliate/.test(code)) return 'AFFILIATE_URL';
   if (/product_url|canonical_url|canonical_provenance|product_health|product_final_domain/.test(code)) return 'PRODUCT_URL';
   if (/image/.test(code)) return 'IMAGE';
   if (/price/.test(code)) return 'PRICE';
   if (/claim|evidence|hands_on/.test(code)) return 'EVIDENCE';
-  if (/auto_publish|public_(?:hidden|blocked)|publish_candidate/.test(code)) return 'PUBLISHING';
   if (/review|content|seo|originality|source_copy|disclosure/.test(code)) return 'CONTENT_REVIEW';
   if (/duplicate/.test(code)) return 'DUPLICATE';
   return 'DATA';
@@ -254,6 +257,7 @@ export function deriveProductRemediationSummary(
   groups: ProductBlockerGroup[];
   rootCauses: ProductRootCause[];
   nextAction: string;
+  productHeldInQuarantine: boolean;
   merchantQuarantined: boolean;
 } {
   const normalizeCode = (value: unknown) => String(value || '').replace(/^(?:stored:)+/, '').trim();
@@ -266,7 +270,7 @@ export function deriveProductRemediationSummary(
     group.blockers.push({ code, label: localizeProductBlocker(code), critical: critical.has(code) });
     groupMap.set(category, group);
   }
-  const order: ProductBlockerCategory[] = ['MERCHANT_POLICY', 'PROVENANCE_LINK', 'AFFILIATE', 'IMAGE', 'PRICE', 'DUPLICATE', 'DATA', 'CONTENT_POLICY'];
+  const order: ProductBlockerCategory[] = ['CONTENT_REVIEW', 'PRICE', 'POLICY_PUBLICATION', 'MERCHANT_POLICY', 'PROVENANCE_LINK', 'AFFILIATE', 'IMAGE', 'DUPLICATE', 'DATA'];
   const groups = order.map((category) => groupMap.get(category)).filter((group): group is ProductBlockerGroup => Boolean(group));
   for (const group of groups) {
     group.blockers.sort((left, right) => Number(right.critical) - Number(left.critical) || left.code.localeCompare(right.code));
@@ -298,18 +302,21 @@ export function deriveProductRemediationSummary(
     groups,
     rootCauses,
     nextAction: localizeProductRequiredAction(requiredAction),
-    merchantQuarantined: uniqueBlockers.some((code) => /merchant|quarant/i.test(code)),
+    productHeldInQuarantine: uniqueBlockers.some((code) => /quarant/i.test(code)),
+    merchantQuarantined: uniqueBlockers.some((code) => /merchant_(?:quarant|block)|blocked_merchant/i.test(code)),
   };
 }
 
-const SECRET_KEY_PATTERN = /(?:api.?key|secret|password|authorization|cookie|encrypted|credential|access.?token|refresh.?token|basic.?auth)/i;
+const SECRET_KEY_PATTERN = /(?:api.?key|private.?key|secret|password|authorization|cookie|encrypted|credential|access.?token|refresh.?token|session.?token|basic.?auth|client.?secret)/i;
 const SECRET_QUERY_PATTERN = /^(?:key|api_?key|token|access_?token|auth|authorization|cookie|secret|password|signature|sig|credential|policy|expires|x-amz-.+)$/i;
+const SECRET_INLINE_ASSIGNMENT_PATTERN = /((?:["']?)(?:api[-_ ]?key|x-api-key|private[-_ ]?key|client[-_ ]?secret|secret|password|authorization|cookie|credential|access[-_ ]?token|refresh[-_ ]?token|session[-_ ]?token|token|signature|basic[-_ ]?auth)(?:["']?)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s&,;}\]]+)/gi;
 
 function sanitizeTechnicalString(value: string): string {
-  const withoutBearer = value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]');
-  if (!/^https?:\/\//i.test(withoutBearer)) return withoutBearer.slice(0, 2_000);
+  const withoutAuthCredentials = value.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [REDACTED]');
+  const withoutInlineSecrets = withoutAuthCredentials.replace(SECRET_INLINE_ASSIGNMENT_PATTERN, '$1[REDACTED]');
+  if (!/^https?:\/\//i.test(withoutInlineSecrets)) return withoutInlineSecrets.slice(0, 2_000);
   try {
-    const url = new URL(withoutBearer);
+    const url = new URL(withoutInlineSecrets);
     url.username = '';
     url.password = '';
     for (const key of [...url.searchParams.keys()]) {
@@ -318,7 +325,7 @@ function sanitizeTechnicalString(value: string): string {
     url.hash = '';
     return url.toString().slice(0, 2_000);
   } catch {
-    return withoutBearer.slice(0, 2_000);
+    return withoutInlineSecrets.slice(0, 2_000);
   }
 }
 

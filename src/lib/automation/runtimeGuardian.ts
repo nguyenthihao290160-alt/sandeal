@@ -224,8 +224,10 @@ export async function runRuntimeGuardian(options: {
     : releaseMatchesBuild === false || release.releaseMismatch ? 'build_mismatch'
     : options.webAlive === false || options.publicRouteHealthy === false ? 'unhealthy'
       : options.webAlive === true && options.publicRouteHealthy === true ? 'ready' : 'alive';
-  const staleJobs = jobHealth.staleRunningCount;
-  const stuck = jobHealth.stuckPendingCount;
+  const currentQueueAuthoritative = jobHealth.currentStateComplete
+    && jobHealth.currentServingProjectionValid;
+  const staleJobs = currentQueueAuthoritative ? jobHealth.staleRunningCount : 0;
+  const stuck = currentQueueAuthoritative ? jobHealth.stuckPendingCount : 0;
   const currentConflicts = conflicts.filter(conflict => {
     const lease = roles.find(item => item.role === conflict.role);
     const processStartedAt = Date.parse(lease?.processStartedAt || lease?.acquiredAt || '');
@@ -245,8 +247,10 @@ export async function runRuntimeGuardian(options: {
   if (schedulerLease?.releaseId && schedulerLease.releaseId !== release.releaseId) reasons.push('SCHEDULER_RELEASE_MISMATCH');
   if (storage.status !== 'healthy') reasons.push(`STORAGE_${storage.status.toUpperCase()}`);
   if (jobHealth.availability === 'UNAVAILABLE') reasons.push('JOB_HEALTH_SUMMARY_UNAVAILABLE');
-  else if (jobHealth.stale) reasons.push('JOB_HEALTH_SUMMARY_STALE');
-  else if (!jobHealth.currentStateComplete) reasons.push('JOB_HEALTH_CURRENT_STATE_INCOMPLETE');
+  else {
+    if (jobHealth.stale) reasons.push('JOB_HEALTH_SUMMARY_STALE');
+    if (!currentQueueAuthoritative) reasons.push('JOB_HEALTH_CURRENT_STATE_INCOMPLETE');
+  }
   if (staleJobs) reasons.push('STALE_JOB');
   if (stuck) reasons.push('QUEUE_STUCK');
   if (duplicateRoles.length) reasons.push('DUPLICATE_PROCESS_ROLE');
@@ -295,8 +299,8 @@ export async function runRuntimeGuardian(options: {
     },
     providers: options.providers || {},
     queue: {
-      pending: jobHealth.statusCounts.PENDING,
-      running: jobHealth.statusCounts.RUNNING,
+      pending: currentQueueAuthoritative ? jobHealth.statusCounts.PENDING : 0,
+      running: currentQueueAuthoritative ? jobHealth.statusCounts.RUNNING : 0,
       stuck,
       staleJobs,
       evidenceClassification: jobHealth.evidenceClassification,

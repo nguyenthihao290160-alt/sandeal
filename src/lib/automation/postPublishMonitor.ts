@@ -28,6 +28,7 @@ import { finalizeRuntimeRecoveryCanaryPermit } from './runtimeRecoveryCanary';
 import type { AutomationJob } from './types';
 import { commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '@/lib/commerce/urlProbe';
 import { recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
+import { updateProductHealthFailureCounters, type ProductHealthObservation } from '@/lib/productHealthFailureCounters';
 
 const RULES_VERSION = 'post-publish-monitor-v2';
 const MINUTE = 60_000;
@@ -620,6 +621,7 @@ async function hideUnhealthyRecoveryCanary(
   workerId: string,
   product: Product,
   result: MonitorProbeResult,
+  scopedHealth: ReturnType<typeof updateProductHealthFailureCounters>,
   permitId: string,
   publicationEffectKey: string | undefined,
   options: PostPublishMonitorExecutionOptions = {},
@@ -654,6 +656,10 @@ async function hideUnhealthyRecoveryCanary(
     currentBlockers: reconciledBlockers,
     blockersCheckedAt: checkedAt,
     quarantineReasons: [...new Set([...(hidden.quarantineReasons || []), reasonCode])],
+    healthFailureCounters: scopedHealth.counters,
+    consecutiveHealthFailures: Math.max(1, scopedHealth.consecutiveFailures),
+    sourceHealthReason: scopedHealth.activeReasons.join(',').slice(0, 500) || reasonCode,
+    lastHealthyAt: scopedHealth.lastHealthyAt,
     nextAutomaticAction: 'RECHECK_HIDDEN_PRODUCT',
     runtimeRecoveryCanaryObservationPending: false,
     runtimeRecoveryCanaryObservationExpiresAt: undefined,
@@ -802,6 +808,22 @@ export async function executePostPublishMonitor(
   product = await persistObservation(product, probeResult, checkedAt, job.id, execution);
   throwIfExecutionAborted(execution.signal);
   const reason = healthReason(probeResult.statuses);
+  const scopedObservations: ProductHealthObservation[] = [
+    { scope: 'productUrl', healthy: HEALTHY_STATUSES.has(probeResult.statuses.product), reason: `product:${probeResult.statuses.product}` },
+    { scope: 'affiliateUrl', healthy: HEALTHY_STATUSES.has(probeResult.statuses.affiliate), reason: `affiliate:${probeResult.statuses.affiliate}` },
+    { scope: 'image', healthy: HEALTHY_STATUSES.has(probeResult.statuses.image), reason: `image:${probeResult.statuses.image}` },
+    ...(probeResult.statuses.publicPage === 'not_applicable' ? [] : [{
+      scope: 'publicPage' as const,
+      healthy: HEALTHY_STATUSES.has(probeResult.statuses.publicPage)
+        && probeResult.statuses.publicPageIdentity !== 'EXPECTED_PRODUCT_MISMATCH',
+      reason: `public:${probeResult.statuses.publicPage}:${probeResult.statuses.publicPageIdentity}`,
+    }]),
+  ];
+  const scopedHealth = updateProductHealthFailureCounters(
+    product,
+    terminalEvent && probeResult.outcome !== 'HEALTHY' ? [] : scopedObservations,
+    Date.parse(checkedAt),
+  );
 
   if (probeResult.outcome === 'HEALTHY') {
     throwIfExecutionAborted(execution.signal);
@@ -809,11 +831,12 @@ export async function executePostPublishMonitor(
       linkHealthStatus: productStatus(probeResult.statuses.product),
       affiliateHealthStatus: productStatus(probeResult.statuses.affiliate),
       imageHealthStatus: productStatus(probeResult.statuses.image),
-      consecutiveHealthFailures: 0,
-      lastHealthyAt: checkedAt,
-      sourceHealthReason: undefined,
-      sourceHealthCooldownUntil: undefined,
-      nextRetryAt: undefined,
+      healthFailureCounters: scopedHealth.counters,
+      consecutiveHealthFailures: scopedHealth.consecutiveFailures,
+      lastHealthyAt: scopedHealth.lastHealthyAt || checkedAt,
+      sourceHealthReason: scopedHealth.activeReasons.length ? scopedHealth.activeReasons.join(',').slice(0, 500) : undefined,
+      sourceHealthCooldownUntil: scopedHealth.consecutiveFailures > 0 ? product.sourceHealthCooldownUntil : undefined,
+      nextRetryAt: scopedHealth.consecutiveFailures > 0 ? product.nextRetryAt : undefined,
     })) || product;
 
     if (recoveryFlow) {
@@ -917,6 +940,7 @@ export async function executePostPublishMonitor(
       workerId,
       product,
       probeResult,
+      scopedHealth,
       recoveryCanaryPermitId,
       recoveryCanaryPublicationEffectKey,
       execution,
@@ -936,14 +960,13 @@ export async function executePostPublishMonitor(
     };
   }
 
-  const failures = terminalEvent
-    ? Math.max(1, Number(product.consecutiveHealthFailures || 0))
-    : Math.max(0, Number(product.consecutiveHealthFailures || 0)) + 1;
+  const failures = Math.max(1, scopedHealth.consecutiveFailures);
   const retainPublic = startedPublic && !recoveryFlow;
   throwIfExecutionAborted(execution.signal);
   await saveCanonicalProduct(productId, {
+    healthFailureCounters: scopedHealth.counters,
     consecutiveHealthFailures: failures,
-    sourceHealthReason: reason,
+    sourceHealthReason: scopedHealth.activeReasons.join(',').slice(0, 500) || reason,
     status: retainPublic ? 'published' : 'needs_review',
     publicHidden: !retainPublic,
     needsVerification: !retainPublic,

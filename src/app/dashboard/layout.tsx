@@ -99,7 +99,7 @@ function Shell({ children }: { children: ReactNode }) {
     if (!sidebarOpen) return;
     const sidebar = sidebarRef.current;
     const initialFocusable = Array.from(sidebar?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])') || []);
-    const initialFocus = sidebar?.querySelector<HTMLElement>('.dashboard-sidebar-close') || initialFocusable[0];
+    const initialFocus = initialFocusable[0];
     window.setTimeout(() => initialFocus?.focus(), 0);
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -178,15 +178,12 @@ function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="app-shell dashboard-shell command-center-shell">
-      <aside ref={sidebarRef} className={`sidebar dashboard-sidebar command-sidebar${sidebarOpen ? ' open' : ''}`}>
+      <aside id="dashboard-primary-navigation" ref={sidebarRef} className={`sidebar dashboard-sidebar command-sidebar${sidebarOpen ? ' open' : ''}`} aria-label="Điều hướng bảng điều khiển">
         <div className="sidebar-brand dashboard-sidebar-brand command-brand">
           <Link href="/dashboard" onClick={closeSidebar} aria-label="Về Bảng điều khiển SanDeal">
             <span className="command-brand-mark" aria-hidden="true">S</span>
             <span><h2>SanDeal</h2><p>COMMAND CENTER PRO</p></span>
           </Link>
-          <button type="button" className="dashboard-sidebar-close" onClick={dismissSidebar} aria-label="Đóng menu bảng điều khiển">
-            <DashboardIcon name="close" size={18} />
-          </button>
         </div>
 
         <nav className="sidebar-nav dashboard-sidebar-nav command-primary-nav" aria-label="Điều hướng chính">
@@ -239,7 +236,7 @@ function Shell({ children }: { children: ReactNode }) {
       <main className="main-content dashboard-main command-main">
         <header className="topbar dashboard-topbar command-topbar">
           <div className="command-topbar-heading">
-            <button ref={menuButtonRef} type="button" className="secondary-button btn-sm dashboard-mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Mở menu bảng điều khiển">
+            <button ref={menuButtonRef} type="button" className="secondary-button btn-sm dashboard-mobile-menu" onClick={() => setSidebarOpen(value => !value)} aria-label={sidebarOpen ? 'Đóng menu bảng điều khiển' : 'Mở menu bảng điều khiển'} aria-expanded={sidebarOpen} aria-controls="dashboard-primary-navigation">
               <DashboardIcon name="menu" size={18} />
             </button>
             <div>

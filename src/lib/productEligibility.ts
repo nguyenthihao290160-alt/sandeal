@@ -7,6 +7,7 @@ import {
 } from './integrations/accesstrade';
 import { evaluateReviewQuality } from './reviewQuality';
 import { canonicalBlockerCodes } from './productBlockers';
+import { derivePersistedPriceTruth } from './autonomous/priceTruthEngine';
 
 export const PRODUCT_ELIGIBILITY_POLICY_VERSION = 'product-eligibility-v3';
 
@@ -269,13 +270,9 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
       || product.fieldProvenance?.price?.verificationStatus === 'INVALID'
       ? 'invalid_price_source' : 'missing_price');
   }
-  const priceObserved = Date.parse(product.priceObservedAt || '');
-  const priceVerified = product.priceVerificationStatus === 'VERIFIED'
-    || (product.priceVerificationStatus === undefined && product.priceTruthState === 'FRESH' && Number.isFinite(priceObserved));
-  if (!priceVerified) dataBlockers.push('price_unverified');
-  if (!Number.isFinite(priceObserved)
-    || now - priceObserved > PRODUCT_INTELLIGENCE_CONFIG.freshness.priceDays * 86_400_000
-    || ['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(String(product.priceTruthState || ''))) dataBlockers.push('price_stale');
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  if (!priceTruth.isVerified) dataBlockers.push('price_unverified');
+  if (['STALE', 'CONFLICTED', 'ANOMALOUS', 'UNAVAILABLE'].includes(priceTruth.state)) dataBlockers.push('price_stale');
   if (product.sourceHealthCooldownUntil && Date.parse(product.sourceHealthCooldownUntil) > now) dataBlockers.push('cooldown');
   if (product.duplicateStatus && product.duplicateStatus !== 'CLEAR') dataBlockers.push('duplicate_unresolved');
 
@@ -300,7 +297,7 @@ export function evaluateProductEligibility(product: Partial<Product>, now = Date
 
   if (!product.productUrlFinalDomain) warningBlockers.push('product_final_domain_missing');
   if (!product.affiliateUrlFinalDomain) warningBlockers.push('affiliate_final_domain_missing');
-  if (product.priceTruthState === 'AGING') warningBlockers.push('price_aging');
+  if (priceTruth.state === 'AGING') warningBlockers.push('price_aging');
   if (product.riskLevel === 'medium') warningBlockers.push('medium_risk');
   warningBlockers.push(...reviewQuality.warnings.map(warning => `review:${warning}`));
 

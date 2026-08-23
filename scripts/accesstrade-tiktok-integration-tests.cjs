@@ -472,7 +472,8 @@ async function main() {
     const linkCalls = [];
     const registry = tiktokRegistry([normalized('auto-a', 'shop-a'), normalized('auto-b', 'shop-b')], successfulLink(linkCalls));
     const result = await pipeline.scanSourcesToQueue('bootstrap', Date.now() + 30_000, { registry, runId: 'tiktok-auto-2', scheduleBucket: 'fixed' });
-    assert.equal(result.reason, 'source_scan_completed');
+    assert.equal(result.reason, 'source_no_new_candidates');
+    assert.notEqual(result.reason, 'NO_HEALTHY_PRODUCT_SOURCE');
     assert.equal(result.healthyMerchantCount, 2);
     assert.equal(result.queued, 0);
     assert.equal(linkCalls.length, 0);

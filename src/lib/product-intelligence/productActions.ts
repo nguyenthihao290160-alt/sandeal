@@ -44,6 +44,12 @@ export async function recordProductAdminAction(input: { productId: string; actio
       priceVerificationStatus: hasObservedPrice ? 'VERIFIED' : 'MISSING',
       priceObservedAt: hasObservedPrice ? verificationAt : product.priceObservedAt,
       priceTruthState: hasObservedPrice ? 'FRESH' : 'UNAVAILABLE',
+      priceTruthEffectivePrice: hasObservedPrice ? observedPrice : undefined,
+      priceTruthConfidence: undefined,
+      priceTruthDiscountPercent: undefined,
+      priceTruthEvidenceFactIds: [],
+      priceTruthReasons: [verificationReason],
+      priceTruthRequiresCrossCheck: undefined,
       fieldProvenance: {
         ...(product.fieldProvenance || {}),
         price: {

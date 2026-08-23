@@ -3,6 +3,7 @@ import { getProductBySlug, getPublishedProducts } from '@/lib/storage/products';
 import { isPublicSafeProduct } from '@/lib/publicProductFilter';
 import { selectRelatedProducts } from '@/lib/seo/productSeo';
 import { publicTaxonomySlug, type PublicTaxonomyKind } from '@/lib/seo/taxonomySeo';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 import { listPriceHistories, listPriceHistory, calculatePriceStatistics } from './priceHistory';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import {
@@ -103,6 +104,8 @@ export interface PublicProductQuery {
 
 export interface PublicSearchResult {
   items: PublicProductCardDto[];
+  /** Count before user filters; distinguishes an empty public catalogue from a zero-match filter. */
+  totalPublicProducts: number;
   pagination: { page: number; requestedPage: number; pageSize: number; totalItems: number; totalPages: number; outOfRange: boolean };
   filters: PublicProductQuery;
   facets: { categories: Array<{ name: string; count: number }>; platforms: Array<{ name: string; count: number }> };
@@ -207,6 +210,38 @@ function price(product: Product): number | undefined {
   return current > 0 && Number.isFinite(current) ? current : undefined;
 }
 
+function verifiedDiscount(product: Product, current: number | undefined): { originalPrice?: number; discountPercent?: number } {
+  const truth = derivePersistedPriceTruth(product);
+  const originalPrice = Number(product.price || 0);
+  const storedPercent = Number(product.priceTruthDiscountPercent);
+  const evidenceFactIds = product.priceTruthEvidenceFactIds || [];
+  if (!truth.isVerified || !current || !Number.isFinite(originalPrice) || originalPrice <= current) return {};
+  if (!evidenceFactIds.length) return {};
+  if (!Number.isFinite(storedPercent) || storedPercent <= 0 || storedPercent > 100) return {};
+  const observedPercent = Math.round((1 - current / originalPrice) * 100);
+  if (Math.abs(observedPercent - storedPercent) > 1) return {};
+  return { originalPrice, discountPercent: Math.round(storedPercent) };
+}
+
+function publicDealReasons(product: Product, movement?: PublicPriceMovementDto): string[] {
+  const current = price(product);
+  const discount = verifiedDiscount(product, current);
+  const reasons: string[] = [];
+  if (discount.discountPercent) {
+    reasons.push(`Giá hiện tại thấp hơn ${discount.discountPercent}% so với giá tham chiếu đã được xác minh.`);
+  }
+  if (movement?.direction === 'down') {
+    reasons.push(`Giá hiện tại thấp hơn ${movement.percent}% so với lần ghi nhận trước đó của SanDeal.`);
+  }
+  if (product.verifiedSource === true || product.sourceVerified === true) {
+    reasons.push('Nguồn sản phẩm đã được xác minh.');
+  }
+  if (current && derivePersistedPriceTruth(product).isVerified) {
+    reasons.push('Giá hiện tại có bằng chứng xác minh còn hiệu lực.');
+  }
+  return [...new Set(reasons)].slice(0, 4);
+}
+
 function publicWarnings(product: Product): string[] {
   const issues = (product.dataIssues || []).map(issue => issue.toLowerCase());
   const warnings: string[] = [];
@@ -247,11 +282,11 @@ function publicImageUrls(product: Product): string[] {
 
 export function toPublicProductCardDto(product: Product, movement?: PublicPriceMovementDto): PublicProductCardDto {
   const current = price(product);
-  const original = product.price && current && product.price > current ? product.price : undefined;
+  const discount = verifiedDiscount(product, current);
   return {
     id: product.id, slug: product.slug, title: product.title, imageUrl: product.imageUrl,
-    platform: product.platform, category: product.category, brand: product.brand, currentPrice: current, originalPrice: original,
-    currency: 'VND', discountPercent: original && current ? Math.round((1 - current / original) * 100) : undefined,
+    platform: product.platform, category: product.category, brand: product.brand, currentPrice: current, originalPrice: discount.originalPrice,
+    currency: 'VND', discountPercent: discount.discountPercent,
     dealScore: product.dealScore, dealBand: product.dealBand, qualityScore: product.qualityScore, opportunityScore: product.opportunityScore,
     verifiedSource: product.verifiedSource === true || product.sourceVerified === true,
     verifiedAt: product.reviewContent?.reviewedAt || product.scoreCalculatedAt || product.linkLastCheckedAt,
@@ -384,7 +419,7 @@ export function summarizePublicTaxonomies(products: Product[], field: 'category'
 }
 
 export async function listPublicTaxonomies(kind: PublicTaxonomyKind): Promise<PublicTaxonomySummary[]> {
-  return summarizePublicTaxonomies((await getPublishedProducts()).filter(isDiscoverableCommerceProduct), kind);
+  return summarizePublicTaxonomies((await getPublishedProducts()).filter(product => isDiscoverableCommerceProduct(product)), kind);
 }
 
 export async function getPublicTaxonomyLanding(
@@ -393,7 +428,7 @@ export async function getPublicTaxonomyLanding(
   page: number,
   pageSize = 12,
 ): Promise<PublicTaxonomyLanding | null> {
-  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
+  const products = (await getPublishedProducts()).filter(product => isDiscoverableCommerceProduct(product));
   const summaries = summarizePublicTaxonomies(products, kind);
   const taxonomy = summaries.find(item => item.slug === slug);
   if (!taxonomy) return null;
@@ -420,7 +455,7 @@ export async function getPublicTaxonomyLanding(
 
 export async function queryPublicProducts(params: URLSearchParams): Promise<PublicSearchResult> {
   const query = parsePublicProductQuery(params);
-  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
+  const products = (await getPublishedProducts()).filter(product => isDiscoverableCommerceProduct(product));
   const movements = await priceMovements(products);
   const ranked = query.q ? rankPublicSearchProducts(products, query.q) : [];
   const searchMatches = query.q ? new Set(ranked.map(item => item.product.id)) : undefined;
@@ -432,6 +467,7 @@ export async function queryPublicProducts(params: URLSearchParams): Promise<Publ
   const page = Math.min(query.page, totalPages); const start = (page - 1) * query.pageSize;
   return {
     items: filtered.slice(start, start + query.pageSize).map(product => toPublicProductCardDto(product, movements.get(product.id))),
+    totalPublicProducts: products.length,
     pagination: { page, requestedPage: query.page, pageSize: query.pageSize, totalItems, totalPages, outOfRange: query.page > totalPages },
     filters: { ...query, page }, facets: { categories: counts(filtered, 'category'), platforms: counts(filtered, 'platform') },
     suggestions: query.q && totalItems === 0 ? buildZeroResultSuggestions(products, query.q) : [],
@@ -440,7 +476,7 @@ export async function queryPublicProducts(params: URLSearchParams): Promise<Publ
 }
 
 export async function getPublicHomepageData(): Promise<PublicHomepageData> {
-  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
+  const products = (await getPublishedProducts()).filter(product => isDiscoverableCommerceProduct(product));
   const movements = await priceMovements(products);
   const card = (product: Product) => toPublicProductCardDto(product, movements.get(product.id));
   const featured = products.filter(product => (product.qualityScore || 0) >= CONFIG.thresholds.qualityFair && ['featured', 'consider'].includes(String(product.dealBand || '')))
@@ -463,8 +499,8 @@ export async function getPublicHomepageData(): Promise<PublicHomepageData> {
 
 export async function getPublicProductBySlugSafe(slug: string): Promise<{ product: Product; detail: PublicProductDetailDto } | null> {
   const product = await getProductBySlug(slug);
-  if (!product || !isPublicSafeProduct(product)) return null;
-  const all = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
+  if (!product || product.runtimeRecoveryCanaryObservationPending === true || !isPublicSafeProduct(product)) return null;
+  const all = (await getPublishedProducts()).filter(product => isDiscoverableCommerceProduct(product));
   const related = selectRelatedProducts(product, all, 4).map(productItem => toPublicProductCardDto(productItem));
   const snapshots = await listPriceHistory(product.id, 365);
   const movement = latestPriceMovement(product.id, snapshots);
@@ -472,7 +508,7 @@ export async function getPublicProductBySlugSafe(slug: string): Promise<{ produc
     product,
     detail: {
       ...toPublicProductCardDto(product, movement), description: product.description, brand: product.brand,
-      gallery: publicImageUrls(product), dealReasons: product.dealReasons || [],
+      gallery: publicImageUrls(product), dealReasons: publicDealReasons(product, movement),
       reviewContent: product.reviewContent ? toPublicReviewContentDto(product.reviewContent) : undefined,
       specifications: product.specifications, updatedAt: product.updatedAt, related,
       priceHistory: snapshots.map(snapshot => ({ capturedAt: snapshot.capturedAt, price: Number(snapshot.salePrice || snapshot.price || 0) })).filter(point => point.price > 0),
@@ -482,7 +518,7 @@ export async function getPublicProductBySlugSafe(slug: string): Promise<{ produc
 
 export async function getPublicComparison(ids: string[]): Promise<PublicComparisonDto[]> {
   const selectedIds = [...new Set(ids.map(String).filter(Boolean))].slice(0, CONFIG.limits.comparisonProducts);
-  const products = (await getPublishedProducts()).filter(isDiscoverableCommerceProduct);
+  const products = (await getPublishedProducts()).filter(product => isDiscoverableCommerceProduct(product));
   return selectedIds.map(id => products.find(product => product.id === id)).filter((product): product is Product => Boolean(product)).map(product => ({
     ...toPublicProductCardDto(product), brand: product.brand, specifications: product.specifications,
     strengths: product.reviewContent?.strengths.map(item => item.text), limitations: product.reviewContent?.limitations.map(item => item.text), updatedAt: product.updatedAt,

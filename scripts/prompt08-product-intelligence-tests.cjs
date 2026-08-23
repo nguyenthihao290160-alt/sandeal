@@ -135,7 +135,24 @@ async function main() {
   }
 
   function makePublicProduct(overrides = {}) {
-    const product = makeProduct(overrides);
+    const base = makeProduct(overrides);
+    const current = Number(base.salePrice || base.price || 0);
+    const original = Number(base.price || 0);
+    const observedDiscount = original > current && current > 0
+      ? Math.round((1 - current / original) * 100)
+      : undefined;
+    const product = {
+      ...base,
+      priceVerificationStatus: 'VERIFIED',
+      fieldProvenance: {
+        ...(base.fieldProvenance || {}),
+        price: { source: 'prompt08_fixture', verificationStatus: 'VERIFIED', fetchedAt: base.priceObservedAt },
+      },
+      ...(observedDiscount ? {
+        priceTruthDiscountPercent: observedDiscount,
+        priceTruthEvidenceFactIds: [`${base.id}:current-price`, `${base.id}:reference-price`],
+      } : {}),
+    };
     const now = product.updatedAt;
     const reviewContent = editorial.generateEditorialReview(product, [], now);
     const published = safePublish.applySafePublishDecision({ ...product, reviewContent }, now);

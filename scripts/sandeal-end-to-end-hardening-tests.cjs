@@ -74,7 +74,7 @@ function approvedProduct(overrides = {}) {
     description: 'Thông tin kỹ thuật được nhà bán công bố và SanDeal đối chiếu theo nguồn ghi rõ.',
     originalUrl: 'https://merchant.example/products/x200', affiliateUrl: 'https://tracking.example/x200',
     affiliateUrlSource: 'manual', affiliateUrlProvider: 'manual', imageUrl: 'https://images.example/x200.jpg',
-    price: 890000, priceObservedAt: now, priceTruthState: 'FRESH', sourceHash,
+    price: 890000, priceObservedAt: now, priceTruthState: 'FRESH', priceVerificationStatus: 'VERIFIED', sourceHash,
     linkHealthStatus: 'ok', linkLastCheckedAt: now, canonicalUrlStatus: 'verified', canonicalUrlVerifiedAt: now,
     productUrlFinalDomain: 'merchant.example', productUrlHttpStatus: 200,
     affiliateHealthStatus: 'ok', affiliateLastCheckedAt: now, affiliateUrlStatus: 'verified', affiliateUrlVerifiedAt: now,
@@ -82,7 +82,7 @@ function approvedProduct(overrides = {}) {
     imageHealthStatus: 'ok', imageLastCheckedAt: now, imageUrlHttpStatus: 200, imageContentType: 'image/jpeg',
     duplicateStatus: 'CLEAR', claimValidationStatus: 'VERIFIED',
     reviewContent: {
-      reviewStatus: 'approved', reviewVersion: 2, reviewMethod: 'source_data_analysis', reviewerType: 'automated_editorial',
+      reviewStatus: 'approved', reviewVersion: 3, reviewMethod: 'source_data_analysis', reviewerType: 'automated_editorial',
       reviewDisclosure: 'SanDeal có thể nhận hoa hồng affiliate qua một số liên kết; giá người mua thanh toán không thay đổi.',
       reviewTitle: 'Đánh giá dữ liệu Tai nghe Bluetooth X200',
       reviewSummary: 'Dữ liệu hiện có cho thấy mẫu tai nghe này có mức giá được ghi nhận rõ, liên kết và hình ảnh đã được kiểm tra. Nhận định dưới đây dựa trên thông tin nguồn, không phải trải nghiệm sử dụng trực tiếp.',

@@ -28,6 +28,7 @@ const {
   presentAutomationJob,
 } = require('../src/lib/dashboard/v4.ts');
 const { buildProductStudioDetail } = require('../src/lib/dashboard/productStudio.ts');
+const { toDashboardProductItem } = require('../src/lib/dashboard/products.ts');
 const { buildDashboardStatusStrip } = require('../src/lib/dashboard/statusStrip.ts');
 const { getAutomationControl } = require('../src/lib/automation/store.ts');
 const { getAutomationSettings } = require('../src/lib/storage/automationSettings.ts');
@@ -282,7 +283,9 @@ void (async () => {
     assert.equal(detail.overview.priceDropSubscription.state, 'COMING_SOON');
     assert.equal(detail.overview.paymentOptimization.state, 'NO_VERIFIED_DATA');
     assert.equal(detail.overview.socialProof.enabled, false);
-    assert.equal(detail.overview.economics.customerSavings, 100_000);
+    // A FRESH label without a persisted observation timestamp is not current
+    // price evidence and cannot support a customer-savings claim.
+    assert.equal(detail.overview.economics.customerSavings, null);
     assert.equal(detail.overview.economics.publisherRevenue, 45_000);
     assert.equal(detail.review.reasons[0].technicalCode, 'review_not_indexable');
     assert.equal(detail.product.brand, 'SanDeal Audio');
@@ -292,6 +295,55 @@ void (async () => {
     assert.match(detail.broadcast.copy, /SanDeal/);
     const serialized = JSON.stringify(detail);
     assert.doesNotMatch(serialized, /test-fixture-never-leaves-server|accessToken|privateToken|rawData/);
+  });
+
+  await test('Product Studio discount economics requires explicit price-truth evidence', () => {
+    const verifiedPrice = {
+      priceObservedAt: iso(-60_000),
+      fieldProvenance: { price: { source: 'provider_api', verificationStatus: 'VERIFIED' } },
+    };
+    const missingEvidence = buildProductStudioDetail({
+      product: product(verifiedPrice),
+      priceSnapshots: [],
+      now,
+    });
+    assert.equal(missingEvidence.overview.economics.customerSavings, null);
+
+    const verified = buildProductStudioDetail({
+      product: product({ ...verifiedPrice, priceTruthEvidenceFactIds: ['current-price-fact', 'reference-price-fact'] }),
+      priceSnapshots: [],
+      now,
+    });
+    assert.equal(verified.overview.economics.customerSavings, 100_000);
+
+    const contradictory = buildProductStudioDetail({
+      product: product({
+        ...verifiedPrice,
+        priceTruthEvidenceFactIds: ['current-price-fact', 'reference-price-fact'],
+        priceTruthDiscountPercent: 40,
+      }),
+      priceSnapshots: [],
+      now,
+    });
+    assert.equal(contradictory.overview.economics.customerSavings, null);
+    assert.doesNotMatch(contradictory.broadcast.copy || '', /Giảm 40%/);
+  });
+
+  await test('legacy score remains Opportunity Score and never masquerades as quality or review quality', () => {
+    const legacy = product({
+      score: 61,
+      opportunityScore: undefined,
+      qualityScore: undefined,
+      reviewQuality: { qualityScore: 73 },
+    });
+    const item = toDashboardProductItem(legacy);
+    assert.equal(item.scores.opportunity, 61);
+    assert.equal(item.scores.quality, null);
+    assert.equal(item.review.score, 73);
+
+    const detail = buildProductStudioDetail({ product: legacy, priceSnapshots: [], now });
+    assert.equal(detail.product.opportunityScore, 61);
+    assert.equal(detail.product.qualityScore, null);
   });
 
   await test('status strip is fail-closed and distinguishes unknown from healthy', () => {

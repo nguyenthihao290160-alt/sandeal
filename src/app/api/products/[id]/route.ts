@@ -9,9 +9,87 @@ import { getProductById, updateProduct } from '@/lib/storage/products';
 import { getServerActor, requirePermission } from '@/lib/auth';
 import { enqueueProductAction } from '@/lib/automation/productActions';
 import { validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
-import type { Product } from '@/lib/types';
+import { sanitizeProductTechnicalDetails } from '@/lib/dashboard/productDetailStatus';
+import type { CommerceUrlProbeEvidence, Product } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
+
+const PRODUCT_DETAIL_FIELDS = [
+  'id', 'title', 'slug', 'description', 'kind', 'platform', 'source',
+  'originalUrl', 'canonicalProductUrl', 'canonicalUrlSource', 'canonicalUrlProvider',
+  'canonicalUrlSourceEndpoint', 'canonicalUrlSourceField', 'canonicalUrlVerifiedAt', 'canonicalUrlStatus',
+  'affiliateUrl', 'affiliateUrlSource', 'affiliateUrlProvider', 'affiliateUrlSourceEndpoint',
+  'affiliateUrlSourceField', 'affiliateUrlVerifiedAt', 'affiliateUrlStatus', 'deepLinkSupported',
+  'imageUrl', 'gallery', 'price', 'salePrice', 'currency', 'priceVerificationStatus', 'priceNote',
+  'category', 'brand', 'merchant', 'tags', 'benefits', 'painPoints', 'targetAudience', 'warnings',
+  'contentAngles', 'complianceNotes', 'affiliateSource', 'campaignName', 'commissionNote',
+  'affiliateDisclosure', 'commissionAmount', 'commissionRate', 'riskLevel', 'status',
+  'sourceFetchedAt', 'providerUpdatedAt', 'merchantDomain', 'sourceQualityScore',
+  'linkHealthStatus', 'linkLastCheckedAt', 'productHealthStatus', 'productUrlHttpStatus',
+  'productUrlFinalDomain', 'affiliateHealthStatus', 'affiliateLastCheckedAt', 'affiliateUrlHttpStatus',
+  'affiliateUrlFinalDomain', 'affiliateGatewayDomain', 'imageHealthStatus', 'imageLastCheckedAt',
+  'imageUrlHttpStatus', 'imageContentType', 'imageValidationState', 'archivedReason',
+  'qualityScore', 'qualityBand', 'opportunityScore', 'score', 'scoreBreakdown',
+  'reviewContent', 'reviewQuality', 'eligibility', 'currentBlockers', 'lastEligibilityDecision',
+  'lifecycleState', 'lifecycleUpdatedAt', 'quarantineReasons', 'nextRetryAt', 'relatedJobId',
+  'priceTruthState', 'priceObservedAt', 'priceTruthConfidence', 'priceTruthEffectivePrice',
+  'priceTruthDiscountPercent', 'priceTruthEvidenceFactIds', 'priceTruthReasons', 'priceTruthRuleVersion',
+  'priceTruthRequiresCrossCheck', 'publicationJobId', 'publicationEffectKey', 'lastReprocessOperationId',
+  'evidenceFactIds', 'evidenceCoverage', 'evidenceSnapshotAt', 'evidenceSnapshotHash',
+  'createdAt', 'updatedAt',
+] as const satisfies readonly (keyof Product)[];
+
+function safeProbeEvidence(probe: CommerceUrlProbeEvidence | undefined) {
+  if (!probe) return undefined;
+  return {
+    classification: probe.classification,
+    httpStatus: probe.httpStatus,
+    affiliateGatewayDomain: probe.affiliateGatewayDomain,
+    merchantDomain: probe.merchantDomain,
+    redirectCount: probe.redirectCount,
+    elapsedMs: probe.elapsedMs,
+    retryable: probe.retryable,
+    reasonCode: probe.reasonCode,
+    checkedAt: probe.checkedAt,
+    retryAfter: probe.retryAfter,
+  };
+}
+
+function toAdminProductDetailDto(product: Product): Product {
+  const detail: Record<string, unknown> = {};
+  for (const field of PRODUCT_DETAIL_FIELDS) {
+    if (product[field] !== undefined) detail[field] = product[field];
+  }
+  if (product.identity) {
+    detail.identity = {
+      sourceId: product.identity.sourceId,
+      externalId: product.identity.externalId,
+      canonicalUrl: product.identity.canonicalUrl,
+      affiliateUrl: product.identity.affiliateUrl,
+      sku: product.identity.sku,
+      brand: product.identity.brand,
+      model: product.identity.model,
+      gtin: product.identity.gtin,
+      normalizedTitle: product.identity.normalizedTitle,
+      merchant: product.identity.merchant,
+      imageFingerprint: product.identity.imageFingerprint,
+      identityHash: product.identity.identityHash,
+      ruleVersion: product.identity.ruleVersion,
+    };
+  }
+  if (product.fieldProvenance?.price) detail.fieldProvenance = { price: product.fieldProvenance.price };
+  if (product.sourceEvidence) {
+    detail.sourceEvidence = {
+      schemaVersion: product.sourceEvidence.schemaVersion,
+      ruleVersion: product.sourceEvidence.ruleVersion,
+      checkedAt: product.sourceEvidence.checkedAt,
+      expiresAt: product.sourceEvidence.expiresAt,
+      affiliate: safeProbeEvidence(product.sourceEvidence.affiliate),
+      merchant: safeProbeEvidence(product.sourceEvidence.merchant),
+    };
+  }
+  return sanitizeProductTechnicalDetails(detail) as Product;
+}
 
 const EDITABLE_FIELDS = new Set([
   'title', 'description', 'originalUrl', 'affiliateUrl', 'imageUrl', 'gallery',
@@ -164,6 +242,27 @@ function readinessInvalidation(product: Product, updates: Partial<Product>): Par
     claimValidationStatus: 'MISSING_EVIDENCE',
     duplicateStatus: identityChanged ? 'UNRESOLVED' : product.duplicateStatus,
     priceTruthState: priceChanged ? 'STALE' : product.priceTruthState,
+    ...(priceChanged ? {
+      priceVerificationStatus: 'UNVERIFIED' as const,
+      priceObservedAt: undefined,
+      priceTruthEffectivePrice: undefined,
+      priceTruthConfidence: undefined,
+      priceTruthDiscountPercent: undefined,
+      priceTruthEvidenceFactIds: [],
+      priceTruthReasons: ['owner_factual_edit_requires_reverification'],
+      priceTruthRequiresCrossCheck: true,
+      fieldProvenance: {
+        ...(product.fieldProvenance || {}),
+        price: {
+          ...(product.fieldProvenance?.price || {}),
+          value: updates.salePrice ?? updates.price,
+          source: 'operator_edit',
+          verificationStatus: 'UNVERIFIED' as const,
+          verifiedAt: undefined,
+          verificationReason: 'OWNER_FACTUAL_EDIT_REQUIRES_REVERIFICATION',
+        },
+      },
+    } : {}),
     reviewContent,
     nextAutomaticAction: 'REVERIFY_OWNER_EDIT',
     nextRetryAt: undefined,
@@ -186,7 +285,7 @@ export async function GET(
     if (!product) {
       return errorResponse('Không tìm thấy sản phẩm.', undefined, 404);
     }
-    return successResponse('Đã tải sản phẩm.', product);
+    return successResponse('Đã tải sản phẩm.', toAdminProductDetailDto(product));
   } catch (err) {
     return serverErrorResponse('Không thể tải sản phẩm.', err);
   }
@@ -238,7 +337,7 @@ export async function PATCH(
     if (nextPrice && nextSalePrice && nextSalePrice > nextPrice) {
       return NextResponse.json({ ok: false, code: 'PRODUCT_FIELDS_NOT_EDITABLE', error: 'PRODUCT_FIELDS_NOT_EDITABLE', message: 'Giá bán không được lớn hơn giá gốc.', field: 'salePrice' }, { status: 400 });
     }
-    if (!valuesDiffer(current, editableUpdates)) return successResponse('Dữ liệu sản phẩm không thay đổi.', current);
+    if (!valuesDiffer(current, editableUpdates)) return successResponse('Dữ liệu sản phẩm không thay đổi.', toAdminProductDetailDto(current));
 
     const invalidated = await updateProduct(id, { ...editableUpdates, ...readinessInvalidation(current, editableUpdates) });
     if (!invalidated) return errorResponse('Không tìm thấy sản phẩm.', undefined, 404);
@@ -252,7 +351,7 @@ export async function PATCH(
       reason: 'Owner factual edit requires server-side re-verification.',
     });
     const linked = await updateProduct(id, { relatedJobId: verification.job.id, nextAutomaticAction: 'RECHECK_PRODUCT_HEALTH' });
-    return successResponse('Đã cập nhật sản phẩm và đưa kiểm tra lại vào hàng đợi.', linked || invalidated);
+    return successResponse('Đã cập nhật sản phẩm và đưa kiểm tra lại vào hàng đợi.', toAdminProductDetailDto(linked || invalidated));
   } catch (err) {
     return serverErrorResponse('Không thể cập nhật sản phẩm.', err);
   }

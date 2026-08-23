@@ -3,6 +3,14 @@
 import { useMemo, useState } from 'react';
 
 const FALLBACK = '/product-placeholder.svg';
+const KNOWN_UNHEALTHY_IMAGE_STATES = new Set([
+  'broken',
+  'not_found',
+  'invalid_image',
+  'image_broken',
+  'unhealthy',
+  'failed',
+]);
 
 export interface SafeProductImageProps {
   originalUrl?: string | null;
@@ -37,9 +45,13 @@ function safeHttpUrl(value: string | null | undefined): string | null {
 }
 
 export function SafeProductImage({ originalUrl, candidates = [], alt, healthStatus, className, showFailureStatus = false }: SafeProductImageProps) {
-  const sourceInputKey = [originalUrl, ...candidates].map(value => String(value || '')).join('\u001f');
+  const normalizedHealth = String(healthStatus || '').trim().toLowerCase();
+  const knownUnhealthy = KNOWN_UNHEALTHY_IMAGE_STATES.has(normalizedHealth);
+  const sourceInputKey = [normalizedHealth, originalUrl, ...candidates].map(value => String(value || '')).join('\u001f');
   const sources = useMemo(
-    () => [...new Set([originalUrl, ...candidates].map(safeHttpUrl).filter((value): value is string => Boolean(value)))],
+    () => knownUnhealthy
+      ? []
+      : [...new Set([originalUrl, ...candidates].map(safeHttpUrl).filter((value): value is string => Boolean(value)))],
     // sourceInputKey intentionally normalizes caller arrays that may be recreated on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sourceInputKey],
@@ -55,6 +67,8 @@ export function SafeProductImage({ originalUrl, candidates = [], alt, healthStat
   const hadInput = Boolean(originalUrl || candidates.some(Boolean));
   const failureCategory = !fallback
     ? 'none'
+    : knownUnhealthy
+      ? 'known_unhealthy'
     : sources.length
       ? 'remote_load_failed'
       : hadInput
@@ -94,6 +108,8 @@ export function SafeProductImage({ originalUrl, candidates = [], alt, healthStat
         <span className="safe-product-image-status" role="status">
           {failureCategory === 'remote_load_failed'
             ? 'Không tải được ảnh nguồn · đang dùng ảnh thay thế'
+            : failureCategory === 'known_unhealthy'
+              ? 'Ảnh nguồn đã thất bại kiểm tra · đang dùng ảnh thay thế'
             : failureCategory === 'unsafe_or_invalid_url'
               ? 'URL ảnh không an toàn hoặc không hợp lệ'
               : 'Chưa có ảnh nguồn'}

@@ -1,4 +1,5 @@
 import type { Product } from '@/lib/types';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 
 export const PUBLIC_SEARCH_RANKING_VERSION = 'public-search-ranking-v2';
 
@@ -140,10 +141,11 @@ function sourceScore(product: Product): number {
   return product.verifiedSource === true || product.sourceVerified === true ? 0.9 : 0.25;
 }
 
-function priceFreshnessScore(product: Product): number {
-  if (product.priceTruthState === 'FRESH') return 1;
-  if (product.priceTruthState === 'AGING') return 0.65;
-  if (!product.priceTruthState) return 0.5;
+function priceFreshnessScore(product: Product, now: number): number {
+  const truth = derivePersistedPriceTruth(product, now);
+  if (truth.isFresh) return 1;
+  if (truth.isVerified && truth.state === 'AGING') return 0.65;
+  if (!product.priceTruthState && !product.priceObservedAt) return 0.5;
   return 0;
 }
 
@@ -165,15 +167,20 @@ function recencyScore(product: Product, now: number): number {
   return 0.2;
 }
 
-export function isDiscoverableCommerceProduct(product: Product): boolean {
-  if (NON_DISCOVERABLE_PRICE_STATES.has(String(product.priceTruthState || ''))) return false;
+function isDiscoverableCommerceProductAt(product: Product, now: number): boolean {
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  if (!priceTruth.isVerified || NON_DISCOVERABLE_PRICE_STATES.has(priceTruth.state)) return false;
   if (['QUARANTINED', 'HIDDEN', 'CONFIRMED_BROKEN'].includes(String(product.lifecycleState || ''))) return false;
   return true;
 }
 
+export function isDiscoverableCommerceProduct(product: Product): boolean {
+  return isDiscoverableCommerceProductAt(product, Date.now());
+}
+
 export function commerceQualityScore(product: Product, now = Date.now()): number {
   return sourceScore(product) * 0.22
-    + priceFreshnessScore(product) * 0.2
+    + priceFreshnessScore(product, now) * 0.2
     + Math.max(0, Math.min(1, Number(product.qualityScore || 0) / 100)) * 0.18
     + Math.max(0, Math.min(1, Number(product.dealScore || 0) / 100)) * 0.14
     + healthScore(product) * 0.16
@@ -182,13 +189,13 @@ export function commerceQualityScore(product: Product, now = Date.now()): number
 
 export function rankPublicSearchProducts(products: Product[], query: string, now = Date.now()): RankedPublicProduct[] {
   return products
-    .filter(isDiscoverableCommerceProduct)
+    .filter(product => isDiscoverableCommerceProductAt(product, now))
     .map(product => {
       const text = textRelevance(product, query);
       const score: PublicSearchScore = {
         text,
         source: sourceScore(product),
-        priceFreshness: priceFreshnessScore(product),
+        priceFreshness: priceFreshnessScore(product, now),
         quality: Math.max(0, Math.min(1, Number(product.qualityScore || 0) / 100)),
         deal: Math.max(0, Math.min(1, Number(product.dealScore || 0) / 100)),
         health: healthScore(product),
@@ -205,7 +212,8 @@ export function rankPublicSearchProducts(products: Product[], query: string, now
 }
 
 export function buildZeroResultSuggestions(products: Product[], query: string, limit = 5): PublicSearchSuggestion[] {
-  const eligible = products.filter(isDiscoverableCommerceProduct);
+  const now = Date.now();
+  const eligible = products.filter(product => isDiscoverableCommerceProductAt(product, now));
   const candidates = new Map<string, PublicSearchSuggestion>();
   for (const product of eligible) {
     for (const [reason, value] of [['brand', product.brand], ['category', product.category]] as const) {

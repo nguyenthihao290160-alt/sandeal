@@ -13,6 +13,7 @@ import { readCollection } from '@/lib/storage/adapter';
 import { getProductById } from '@/lib/storage/products';
 import type { Product } from '@/lib/types';
 import { evaluateProductEligibility } from '@/lib/productEligibility';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 
 export type ProductAdminActionType = 'reviewed' | 'data_verified' | 'price_verified' | 'canary_ready' | 'safe_publish_requested' | 'publish_approved';
 export interface ProductAdminActionRecord {
@@ -83,6 +84,14 @@ export function buildProductPipelineTruth(input: {
   const canonicalUrl = product.canonicalProductUrl || product.originalUrl;
   const productLinkHealth = verifiedUrlHealth(product.linkHealthStatus, Boolean(canonicalUrl), product.canonicalUrlStatus === 'verified');
   const affiliateLinkHealth = verifiedUrlHealth(product.affiliateHealthStatus, Boolean(product.affiliateUrl), product.affiliateUrlStatus === 'verified');
+  const priceTruth = derivePersistedPriceTruth(product, now);
+  const hasGeneratedContent = Boolean(product.reviewContent || product.generatedContent);
+  const contentBlocked = blockers.some(code => /review|claim|content|seo|originality|source_copy|disclosure/i.test(code));
+  const contentHealth = hasGeneratedContent
+    ? contentBlocked || product.reviewContent?.reviewStatus !== 'approved'
+      ? 'CONTENT_EXISTS_NOT_PUBLICATION_READY'
+      : 'READY'
+    : product.contentWorkflowStatus || 'insufficient_data';
   const requiredAction = classification.recordType !== 'PRODUCT' ? 'MANUAL_CLASSIFICATION_DECISION'
     : criticalBlockers.length ? eligibility.nextRequiredAction
       : !reviewed ? 'MARK_REVIEWED'
@@ -112,9 +121,11 @@ export function buildProductPipelineTruth(input: {
       productLink: productLinkHealth,
       affiliateLink: affiliateLinkHealth,
       image: health(product.imageHealthStatus, Boolean(product.imageUrl)),
-      price: health(product.priceTruthState, Number(product.salePrice || product.price) > 0),
+      price: priceTruth.state,
+      priceFreshness: priceTruth.state,
+      priceVerification: priceTruth.verificationStatus,
       source: product.verifiedSource || product.sourceVerified ? 'HEALTHY' : 'UNVERIFIED',
-      content: product.contentWorkflowStatus || 'insufficient_data',
+      content: contentHealth,
     },
     requiredAction,
     humanActionRequired: Boolean(requiredAction && !['FIX_CRITICAL_BLOCKERS'].includes(requiredAction)),

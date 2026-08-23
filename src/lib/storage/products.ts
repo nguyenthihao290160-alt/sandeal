@@ -756,6 +756,15 @@ export class StaleProductRepairError extends Error {
   }
 }
 
+export class StaleProductWriteError extends Error {
+  readonly code = 'STORAGE_PRODUCT_REVISION_CHANGED';
+
+  constructor() {
+    super('STORAGE_PRODUCT_REVISION_CHANGED');
+    this.name = 'StaleProductWriteError';
+  }
+}
+
 export interface ProductEvidenceRepairOptions {
   expectedUpdatedAt: string;
   verifiedFields: Partial<Record<ProductRepairEvidenceField, boolean>>;
@@ -1006,7 +1015,7 @@ export async function updateProduct(id: string, updates: Partial<Product>): Prom
 export async function saveCanonicalProduct(
   id: string,
   updates: Partial<Product>,
-  options: { evaluate?: boolean; verifiedHealthUpdate?: boolean } = {},
+  options: { evaluate?: boolean; verifiedHealthUpdate?: boolean; expectedUpdatedAt?: string } = {},
 ): Promise<Product | null> {
   if (options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
@@ -1014,7 +1023,13 @@ export async function saveCanonicalProduct(
     await runTransaction<Partial<Product>>(COLLECTION, stored => {
       const products = stored.map(item => normalizeCanonicalProduct(item));
       const index = products.findIndex((item) => item.id === id);
-      if (index < 0) return undefined;
+      if (index < 0) {
+        if (options.expectedUpdatedAt) throw new StaleProductWriteError();
+        return undefined;
+      }
+      if (options.expectedUpdatedAt && products[index].updatedAt !== options.expectedUpdatedAt) {
+        throw new StaleProductWriteError();
+      }
       const alreadyPublic = products[index].status === 'published' && products[index].publicHidden === false;
       if (requestsPublicProductState(updates) && !alreadyPublic) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
       const now = new Date().toISOString();

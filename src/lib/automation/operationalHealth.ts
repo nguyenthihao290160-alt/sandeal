@@ -85,6 +85,8 @@ export interface AutomationOperationalHealth {
     pickupLatencyFeatureMode: FeatureRolloutMode;
   } | null;
   workerPool: {
+    currentStateComplete: boolean;
+    evidenceClassification: AutomationJobHealthView['evidenceClassification'];
     featureMode: FeatureRolloutMode;
     configuredMode: FeatureRolloutMode;
     effectiveMode: FeatureRolloutMode;
@@ -394,7 +396,9 @@ export async function buildAutomationOperationalHealth(
     control.publishBlockedByPolicy ? control.publishPolicyReasons || [] : [],
   );
   const projectionQualityWarnings = uniqueReasons(summary.reasonCodes);
-  const runningJobs = summary.runningJobs;
+  const workerPoolCurrentStateComplete = summary.currentStateComplete
+    && summary.currentServingProjectionValid;
+  const runningJobs = workerPoolCurrentStateComplete ? summary.runningJobs : [];
   const activeCriticalSlots = runningJobs.filter(job =>
     job.executionCritical === true || isCriticalAutomationJob(job.type)).length;
   const maximumSlots = settings.maxConcurrency;
@@ -469,6 +473,8 @@ export async function buildAutomationOperationalHealth(
       pickupLatencyFeatureMode: latestSlo.pickupLatencyFeatureMode || 'SHADOW',
     } : null,
     workerPool: {
+      currentStateComplete: workerPoolCurrentStateComplete,
+      evidenceClassification: summary.evidenceClassification,
       featureMode: workerPoolRollout.effectiveMode,
       configuredMode: workerPoolRollout.configuredMode,
       effectiveMode: workerPoolRollout.effectiveMode,
@@ -476,11 +482,11 @@ export async function buildAutomationOperationalHealth(
       implementationActive: workerPoolRollout.implementationActive,
       maximumSlots,
       activeSlots,
-      availableSlots: Math.max(0, maximumSlots - activeSlots),
+      availableSlots: workerPoolCurrentStateComplete ? Math.max(0, maximumSlots - activeSlots) : 0,
       criticalReservedCapacity,
       activeCriticalSlots,
       activeNormalSlots,
-      normalAvailableSlots: Math.max(0, normalCapacity - activeNormalSlots),
+      normalAvailableSlots: workerPoolCurrentStateComplete ? Math.max(0, normalCapacity - activeNormalSlots) : 0,
       rolloutCohort: workerPoolRollout.rolloutCohort,
       disabledReason: workerPoolRollout.disabledReason,
       activationControl: workerPoolRollout.activationControl,

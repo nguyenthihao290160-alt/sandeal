@@ -32,6 +32,12 @@ import {
   type RuntimeRoleOwnership,
 } from './runtimeRoles';
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
+import {
+  candidateDurableJobKey,
+  candidateDurableOperationId,
+  MAX_CANDIDATE_DURABLE_JOB_GENERATION,
+  requestCandidateBridgeGenerationAdvance,
+} from '@/lib/storage/candidateQueue';
 import { releaseProductProcessingCapacity, reserveProductProcessingCapacity } from './businessUsage';
 import { IDEMPOTENCY_KEY_PATTERN } from './idempotency';
 import { getFeatureRolloutState } from './featureRollout';
@@ -96,6 +102,7 @@ import {
   getAllArchivedAutomationJobs,
   getArchivedAutomationJob,
   getArchivedSuccessfulAutomationJob,
+  getArchivedTerminalAutomationJob,
   readAutomationJobHistoryManifest,
   scanLatestArchivedAutomationJobs,
 } from './jobHistoryArchive';
@@ -1899,6 +1906,11 @@ async function syncJobReadModelsBatchBestEffort(
         && error instanceof Error
         && ['JOB_PROJECTION_MUTATION_SUPERSEDED', 'JOB_PROJECTION_MUTATION_GENERATION_SUPERSEDED'].includes(error.message)
     ) {
+      // The superseded generation can no longer be completed. Remove its
+      // in-flight token before beginning the one bounded retry against the
+      // serving generation, otherwise maintenance can remain stuck behind an
+      // abandoned sync token.
+      await abortAutomationJobProjectionMutation(mutation).catch(() => undefined);
       await syncJobReadModelsBatchBestEffort(versionedJobs, {
         removeHeartbeatJobIds: input.removeHeartbeatJobIds,
         sourceMutationCommitted: true,
@@ -2572,6 +2584,8 @@ export interface CreateAutomationJobInput {
   capability?: string;
   requestedExecutionMode?: RequestedExecutionMode;
   executionPlan?: AutomationExecutionPlanStep[];
+  /** Internal two-phase materialization for PROCESS_CANDIDATE only. */
+  preparedCandidate?: boolean;
 }
 
 const RISK_RANK: Record<AutomationRiskLevel, number> = { LOW: 0, MEDIUM: 1, HIGH: 2, BLOCKER: 3 };
@@ -2656,6 +2670,35 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
   const requestedBy = typeof input.requestedBy === 'string' ? input.requestedBy.trim().slice(0, 160) : '';
   if (!requestedBy) rejectAutomationJob('AUTOMATION_JOB_REQUESTED_BY_REQUIRED', ['requestedBy is required']);
   const payload = sanitizeAutomationData(input.payload || {}) as Record<string, unknown>;
+  if (input.preparedCandidate) {
+    if (input.type !== 'PROCESS_CANDIDATE') {
+      rejectAutomationJob('PREPARED_CANDIDATE_JOB_TYPE_INVALID', ['preparedCandidate is restricted to PROCESS_CANDIDATE']);
+    }
+    const candidateId = typeof payload.candidateId === 'string' ? payload.candidateId : '';
+    const sourceHash = typeof payload.sourceHash === 'string' ? payload.sourceHash : '';
+    const generation = payload.generation;
+    const validGeneration = typeof generation === 'number'
+      && Number.isSafeInteger(generation)
+      && generation >= 0
+      && generation <= MAX_CANDIDATE_DURABLE_JOB_GENERATION;
+    const expectedKey = validGeneration
+      ? candidateDurableJobKey(candidateId, sourceHash, generation)
+      : '';
+    const expectedOperationId = validGeneration
+      ? candidateDurableOperationId(candidateId, sourceHash, generation)
+      : '';
+    const requestedOperationId = typeof input.operationId === 'string' ? input.operationId.trim() : '';
+    if (
+      !candidateId
+      || !sourceHash
+      || !validGeneration
+      || key !== expectedKey
+      || requestedOperationId !== expectedOperationId
+    ) {
+      rejectAutomationJob('PREPARED_CANDIDATE_CONTRACT_INVALID', ['prepared candidate identity must match candidate/source/generation']);
+    }
+    payload.candidateMaterializationProtocol = 'candidate-bridge-v1';
+  }
   if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_PAYLOAD_BYTES) rejectAutomationJob('PAYLOAD_TOO_LARGE', [`payload exceeds ${MAX_PAYLOAD_BYTES} bytes`]);
   let jobPolicy;
   try {
@@ -2670,7 +2713,7 @@ export function createAutomationJobRecord(input: CreateAutomationJobInput, nowMs
       : jobPolicy.capability;
   const now = new Date(nowMs).toISOString();
   const approvalStatus: ApprovalStatus = approvalStatusForPolicy(jobPolicy, risk);
-  const status: AutomationJobStatus = initialStatusForPolicy(jobPolicy, risk);
+  const status: AutomationJobStatus = input.preparedCandidate ? 'PAUSED' : initialStatusForPolicy(jobPolicy, risk);
   const requestedPlan = input.executionPlan?.length ? input.executionPlan : input.type === 'AUTO_PILOT' ? buildAutoPilotExecutionPlan() : [{
     id: capability.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'execute-job',
     capability,
@@ -2779,13 +2822,19 @@ export async function createAutomationJob(input: CreateAutomationJobInput): Prom
       const sameKey = items
           .filter(item => item.type === input.type && item.idempotencyKey === job.idempotencyKey)
           .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
-      const archivedSuccess = await getArchivedSuccessfulAutomationJob(
-          job.type,
-          job.idempotencyKey,
-      );
-      const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
-          || sameKey.find(item => item.status === 'SUCCEEDED')
-          || archivedSuccess;
+      const currentExisting = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
+          || sameKey.find(item => item.status === 'SUCCEEDED');
+      const terminalIdentityIsSticky = isWorkflowReconciliationJob(job)
+        || isCandidateMaterializationJob(job);
+      const stickyCurrentTerminal = terminalIdentityIsSticky
+        ? sameKey.find(item => TERMINAL.has(item.status))
+        : undefined;
+      const archivedExisting = currentExisting || stickyCurrentTerminal
+        ? undefined
+        : terminalIdentityIsSticky
+          ? await getArchivedTerminalAutomationJob(job.type, job.idempotencyKey)
+          : await getArchivedSuccessfulAutomationJob(job.type, job.idempotencyKey);
+      const existing = currentExisting || stickyCurrentTerminal || archivedExisting;
       if (existing) {
         response = { job: existing, created: false, code: existing.status === 'SUCCEEDED' ? 'ALREADY_PROCESSED' : 'IN_PROGRESS' };
         return undefined;
@@ -2872,13 +2921,18 @@ export async function createAutomationJobsBatch(
         const sameKey = known
             .filter(item => item.type === job.type && item.idempotencyKey === job.idempotencyKey)
             .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
-        const archivedSuccess = await getArchivedSuccessfulAutomationJob(
-            job.type,
-            job.idempotencyKey,
-        );
-        const existing = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
-            || sameKey.find(item => item.status === 'SUCCEEDED')
-            || archivedSuccess;
+        const currentExisting = sameKey.find(item => ACTIVE_SCAN_STATUSES.has(item.status))
+            || sameKey.find(item => item.status === 'SUCCEEDED');
+        const terminalIdentityIsSticky = isWorkflowReconciliationJob(job);
+        const stickyCurrentTerminal = terminalIdentityIsSticky
+          ? sameKey.find(item => TERMINAL.has(item.status))
+          : undefined;
+        const archivedExisting = currentExisting || stickyCurrentTerminal
+          ? undefined
+          : terminalIdentityIsSticky
+            ? await getArchivedTerminalAutomationJob(job.type, job.idempotencyKey)
+            : await getArchivedSuccessfulAutomationJob(job.type, job.idempotencyKey);
+        const existing = currentExisting || stickyCurrentTerminal || archivedExisting;
         const equivalentActive = existing || known.find(item => isEquivalentActiveScan(item, job));
         if (equivalentActive) {
           responses.set(job.id, {
@@ -2962,9 +3016,69 @@ function payloadProductIds(payload: Record<string, unknown>): Set<string> {
   return new Set(payload.productIds.map(value => String(value || '').trim()).filter(Boolean));
 }
 
-function isWorkflowReconciliationJob(job: Pick<AutomationJob, 'type' | 'payload'>): boolean {
-  return job.type === 'RECONCILE_AUTOMATION'
-    && job.payload.maintenanceTask !== 'JOB_HEALTH_PROJECTION_REBUILD';
+function isWorkflowReconciliationJob(
+    job: Pick<AutomationJob, 'type' | 'payload' | 'idempotencyKey' | 'operationId' | 'requestedBy'>,
+): boolean {
+  const bucket = job.payload.scheduleBucket;
+  if (
+    job.type !== 'RECONCILE_AUTOMATION'
+    || job.requestedBy !== 'scheduler'
+    || job.payload.reconciliationKind !== 'WORKFLOW'
+    || typeof bucket !== 'number'
+    || !Number.isSafeInteger(bucket)
+    || bucket < 0
+  ) return false;
+  const identity = `scheduler:workflow-reconciliation:${bucket}`;
+  return job.idempotencyKey === identity && job.operationId === identity;
+}
+
+function isCandidateMaterializationJob(
+    job: Pick<AutomationJob, 'type' | 'payload' | 'idempotencyKey' | 'operationId'>,
+): boolean {
+  if (job.type !== 'PROCESS_CANDIDATE' || job.payload.candidateMaterializationProtocol !== 'candidate-bridge-v1') return false;
+  const candidateId = typeof job.payload.candidateId === 'string' ? job.payload.candidateId : '';
+  const sourceHash = typeof job.payload.sourceHash === 'string' ? job.payload.sourceHash : '';
+  const generation = job.payload.generation;
+  if (
+    !candidateId
+    || !sourceHash
+    || typeof generation !== 'number'
+    || !Number.isSafeInteger(generation)
+    || generation < 0
+    || generation > MAX_CANDIDATE_DURABLE_JOB_GENERATION
+  ) return false;
+  return job.idempotencyKey === candidateDurableJobKey(candidateId, sourceHash, generation)
+    && job.operationId === candidateDurableOperationId(candidateId, sourceHash, generation);
+}
+
+async function requestFailedCandidateGenerationAdvance(
+    job: AutomationJob,
+    reasonCode: string,
+    requestedBy: string,
+): Promise<void> {
+  if (job.status !== 'FAILED' || !isCandidateMaterializationJob(job)) return;
+  const candidateId = String(job.payload.candidateId);
+  const sourceHash = String(job.payload.sourceHash);
+  const generation = Number(job.payload.generation);
+  try {
+    await requestCandidateBridgeGenerationAdvance({
+      candidateId,
+      sourceHash,
+      generation,
+      jobId: job.id,
+      durableJobKey: job.idempotencyKey,
+      operationId: job.operationId,
+    }, reasonCode, requestedBy);
+  } catch (error) {
+    // The failed durable job remains authoritative if the separate candidate
+    // CAS cannot be persisted. Reconciliation then stays fail-closed instead
+    // of inventing a generation transition without durable retry intent.
+    console.error(JSON.stringify({
+      type: 'candidate_generation_advance_intent_failed',
+      jobId: job.id,
+      reasonCode: sanitizeErrorMessage(error instanceof Error ? error.message : 'unknown_error'),
+    }));
+  }
 }
 
 /** Prevent overlapping health/source scans even when callers use different time-based keys. */
@@ -2978,6 +3092,73 @@ export function isEquivalentActiveScan(existing: AutomationJob, requested: Autom
   const requestedIds = payloadProductIds(requested.payload);
   if (!existingIds.size || !requestedIds.size) return true;
   return [...requestedIds].some(id => existingIds.has(id));
+}
+
+export interface PreparedCandidateJobIdentity {
+  jobId: string;
+  candidateId: string;
+  sourceHash: string;
+  generation: number;
+  idempotencyKey: string;
+  operationId: string;
+}
+
+function preparedCandidateJobMatches(job: AutomationJob, input: PreparedCandidateJobIdentity): boolean {
+  return job.id === input.jobId
+    && job.type === 'PROCESS_CANDIDATE'
+    && job.idempotencyKey === input.idempotencyKey
+    && job.operationId === input.operationId
+    && job.payload.candidateMaterializationProtocol === 'candidate-bridge-v1'
+    && job.payload.candidateId === input.candidateId
+    && job.payload.sourceHash === input.sourceHash
+    && Math.max(0, Math.floor(Number(job.payload.generation) || 0)) === input.generation;
+}
+
+/**
+ * Publish a prepared candidate job to the runnable queue only after the
+ * candidate binding and operation journal have converged. Replays after the
+ * activation commit return the same job without creating another mutation.
+ */
+export async function activatePreparedCandidateAutomationJob(
+    input: PreparedCandidateJobIdentity,
+    options: { withCommitGuard?: StorageCommitGuard } = {},
+): Promise<AutomationJob | null> {
+  let output: AutomationJob | null = null;
+  let changed = false;
+  const now = new Date().toISOString();
+  const projectionMutation = await runAutomationJobSourceStreamingTransaction(job => {
+    if (job.id !== input.jobId) return false;
+    if (!preparedCandidateJobMatches(job, input)) throw new Error('CANDIDATE_JOB_CONTRACT_MISMATCH');
+    if (job.status === 'PAUSED') {
+      job.status = 'PENDING';
+      job.scheduledAt = now;
+      job.runnableAt = now;
+      job.runnableReason = 'CREATED_AT';
+      job.updatedAt = now;
+      changed = true;
+      output = { ...job, payload: { ...job.payload } };
+      return true;
+    }
+    if (ACTIVE_SCAN_STATUSES.has(job.status)) {
+      output = { ...job, payload: { ...job.payload } };
+      return false;
+    }
+    return false;
+  }, {
+    withCommitGuard: options.withCommitGuard,
+    operationCategory: 'candidate_job_materialization_activate',
+  });
+  const activated = output as AutomationJob | null;
+  if (!activated || !changed) {
+    await abortAutomationJobProjectionMutation(projectionMutation).catch(() => undefined);
+    return activated;
+  }
+  await syncJobReadModelsBestEffort(activated, false, projectionMutation);
+  logAutomationJobEvent('job_requeued', activated, {
+    workerId: activated.requestedBy,
+    reasonCode: 'CANDIDATE_MATERIALIZATION_COMPLETED',
+  });
+  return activated;
 }
 
 export async function getAutomationJob(id: string): Promise<AutomationJob | null> {
@@ -5445,6 +5626,7 @@ export async function failAutomationJob(
       console.error(JSON.stringify({ type: 'automation_job_failure_audit_failed', jobId: failedJob.id, reasonCode: sanitizeErrorMessage(auditError instanceof Error ? auditError.message : 'unknown_error') }));
     }
     if (TERMINAL.has(failedJob.status)) {
+      await requestFailedCandidateGenerationAdvance(failedJob, code, workerId);
       await archiveTerminalJobAfterMutationBestEffort(failedJob, guard.ownership);
     }
   } else await abortAutomationJobProjectionMutation(projectionMutation);

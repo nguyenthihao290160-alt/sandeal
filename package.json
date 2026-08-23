@@ -45,6 +45,7 @@
     "test:post-m3": "node scripts/post-m3-reconciliation-product-flow-tests.cjs",
     "test:round3:runtime": "node scripts/round3-runtime-recovery-tests.cjs",
     "test:round3:v4": "node scripts/round3-v4-presentation-tests.cjs",
+    "test:round3:v4-1": "node scripts/round3-v4-1-candidate-identity-tests.cjs && node scripts/round3-v4-1-regression-tests.cjs",
     "test:local-dev-csp": "node scripts/local-development-csp-tests.cjs",
     "test:m3.1.2:projection-repair": "node scripts/m3-1-2-convergent-projection-repair-tests.cjs",
     "test:m3.1.2:projection-performance": "node --expose-gc scripts/m3-1-2-projection-repair-performance-tests.cjs",

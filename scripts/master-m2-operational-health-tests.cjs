@@ -178,6 +178,7 @@ async function main() {
       {
         id: 'guardian-running',
         type: 'RUNTIME_GUARDIAN',
+        payload: {},
         status: 'RUNNING',
         requestedBy: 'scheduler',
         priority: 100,
@@ -191,6 +192,7 @@ async function main() {
       {
         id: 'candidate-running',
         type: 'PROCESS_CANDIDATE',
+        payload: {},
         status: 'RUNNING',
         requestedBy: 'scheduler',
         priority: 50,
@@ -235,10 +237,17 @@ async function main() {
       'RESOLVED_RUNTIME_REASON',
     ]);
     assert.ok(!result.currentActiveReasons.includes('RESOLVED_RUNTIME_REASON'));
+    assert.equal(result.workerPool.currentStateComplete, false);
+    assert.equal(result.workerPool.activeSlots, 0);
+    assert.equal(result.workerPool.availableSlots, 0);
   });
 
   await test('operational health reports recovery, SLO, canary, pool, feature, and release truth', async () => {
     await seedBase();
+    await store.rebuildAutomationJobReadModelsFromDurable(
+      await adapter.readCollection('automation-jobs'),
+      now,
+    );
     const result = await health.buildAutomationOperationalHealth(now);
     assert.equal(result.recovery.state, 'RECOVERY_OBSERVING');
     assert.equal(result.recovery.consecutiveHealthyCount, 2);
@@ -251,6 +260,7 @@ async function main() {
     assert.equal(result.canary.activeCount, 1);
     assert.equal(result.canary.latest.status, 'CONSUMED');
     assert.equal(result.workerPool.featureMode, 'ACTIVE');
+    assert.equal(result.workerPool.currentStateComplete, true);
     assert.equal(result.workerPool.activeSlots, 2);
     assert.equal(result.workerPool.activeCriticalSlots, 1);
     assert.equal(result.workerPool.availableSlots, 2);
@@ -290,6 +300,12 @@ async function main() {
     assert.ok(!result.currentActiveReasons.includes('STALE_SNAPSHOT_REASON'));
     assert.ok(result.historicalAuditReasons.includes('STALE_SNAPSHOT_REASON'));
     assert.equal(result.release.matchStatus, 'MISMATCH');
+  });
+
+  await test('Health UI renders incomplete worker-pool evidence as unknown', () => {
+    const page = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/app-health/page.tsx'), 'utf8');
+    assert.ok(page.includes('workerPool.currentStateComplete'));
+    assert.ok(page.includes('UNKNOWN / INCOMPLETE'));
   });
 
   console.log(`\nM2 operational health truth: ${passed} passed, ${failed} failed`);

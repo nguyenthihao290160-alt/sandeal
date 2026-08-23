@@ -15,15 +15,25 @@ import { clientRequestMessage, requestClientJson } from '@/lib/dashboard/clientR
 import { pollScanJob } from '@/lib/dashboard/scanPolling';
 import styles from './product-detail.module.css';
 import { canonicalBlockerCodes } from '@/lib/productBlockers';
+import { derivePersistedPriceTruth } from '@/lib/autonomous/priceTruthEngine';
 
 type PipelineTruth = {
   classification: { type: string; confidence: number | null; reasonCodes: string[] };
   lifecycle: { stage: string; blockers: string[]; reviewed: boolean; dataVerified: boolean; canaryReady: boolean; safePublishRequested: boolean; publishApproved: boolean; published: boolean; publicHidden: boolean };
   automation: { currentJobId: string | null; status: string | null; attempts: number; maxAttempts: number | null; nextRetryAt: string | null; workerOwner: string | null; lastProcessedAt: string | null };
-  health: { link: string; productLink: string; affiliateLink: string; image: string; price: string; source: string; content: string };
+  health: { link: string; productLink: string; affiliateLink: string; image: string; price: string; priceFreshness?: string; priceVerification?: string; source: string; content: string };
   requiredAction: string | null;
   remediationAvailable: boolean;
-  eligibility?: { criticalBlockers: string[]; warningBlockers: string[]; nextRequiredAction: string };
+  eligibility?: {
+    eligibleForReview: boolean;
+    eligibleForCanary: boolean;
+    eligibleForPublish: boolean;
+    eligibleForPublic: boolean;
+    qualityScore: number;
+    criticalBlockers: string[];
+    warningBlockers: string[];
+    nextRequiredAction: string;
+  };
   safety: { publishingEnabled: boolean; launchEnabled: boolean; effectiveMode: string };
 };
 
@@ -72,6 +82,8 @@ function isPublicHttpUrl(value?: string): boolean {
 const STATUS_LABELS: Record<string, string> = {
   QUARANTINED: 'Đang cách ly theo chính sách',
   UNVERIFIED: 'Chưa xác minh',
+  VERIFIED: 'Đã xác minh',
+  CONFLICT: 'Có xung đột',
   UNHEALTHY: 'Không đạt kiểm tra',
   HEALTHY: 'Hoạt động tốt',
   FAILED: 'Thất bại',
@@ -80,6 +92,11 @@ const STATUS_LABELS: Record<string, string> = {
   PENDING: 'Đang chờ',
   RETRY_SCHEDULED: 'Đã lên lịch thử lại',
   STALE: 'Đã quá hạn',
+  FRESH: 'Còn mới',
+  AGING: 'Sắp quá hạn',
+  CONFLICTED: 'Giá đang xung đột',
+  ANOMALOUS: 'Giá cần đối chiếu',
+  UNAVAILABLE: 'Không có giá đáng tin cậy',
   MISSING: 'Chưa có dữ liệu',
   DISABLED: 'Đang tắt',
   ENABLED: 'Đang bật',
@@ -103,6 +120,8 @@ const STATUS_LABELS: Record<string, string> = {
   pending_review: 'Đang chờ duyệt nội dung',
   blocked: 'Nội dung đang bị chặn',
   approved: 'Nội dung đã duyệt',
+  CONTENT_EXISTS_NOT_PUBLICATION_READY: 'Nội dung đã có nhưng chưa sẵn sàng xuất bản',
+  READY: 'Nội dung sẵn sàng',
 };
 
 const SCORE_DIMENSION_LABELS: Record<string, string> = {
@@ -117,12 +136,38 @@ const SCORE_DIMENSION_LABELS: Record<string, string> = {
   review: 'Review',
   originality: 'Tính nguyên bản',
   seo: 'Mức sẵn sàng SEO',
+  quality_identity: 'Product Quality · Nhận diện sản phẩm',
+  quality_commerce: 'Product Quality · Giá và đường dẫn',
+  quality_media: 'Product Quality · Hình ảnh',
+  quality_classification: 'Product Quality · Phân loại',
+  quality_specifications: 'Product Quality · Mô tả và thông số',
+  quality_provenance: 'Product Quality · Nguồn và provenance',
+  quality_health: 'Product Quality · Sức khỏe liên kết và ảnh',
+  quality_freshness: 'Product Quality · Độ mới dữ liệu',
+  opportunity_quality: 'Opportunity · Product Quality',
+  opportunity_deal: 'Opportunity · Deal Score',
+  opportunity_freshness: 'Opportunity · Độ mới dữ liệu',
+  opportunity_contentReadiness: 'Opportunity · Mức sẵn sàng nội dung',
+  opportunity_provenance: 'Opportunity · Nguồn và provenance',
+  opportunity_analytics: 'Opportunity · Phân tích',
+  opportunity_risk: 'Opportunity · Rủi ro',
+  deal_discount: 'Deal · Tín hiệu giảm giá',
+  deal_history: 'Deal · Lịch sử giá',
+  deal_freshness: 'Deal · Độ mới giá',
+  deal_health: 'Deal · Sức khỏe liên kết',
+  deal_provenance: 'Deal · Nguồn và provenance',
+  deal_quality: 'Deal · Product Quality',
 };
+
+function scoreDimensionLabel(value: string): string | null {
+  const key = String(value || '').replace(/^(?:stored:)+/, '');
+  return SCORE_DIMENSION_LABELS[key] || null;
+}
 
 function localizeStatus(value?: string | null): string {
   const normalized = String(value || '').trim();
   if (!normalized) return 'Chưa có dữ liệu';
-  return STATUS_LABELS[normalized] || 'Trạng thái kỹ thuật khác';
+  return STATUS_LABELS[normalized] || STATUS_LABELS[normalized.toUpperCase()] || 'Trạng thái kỹ thuật khác';
 }
 
 function formatTimestamp(value?: string | null): string {
@@ -154,6 +199,7 @@ export default function ProductDetailPage() {
   const [loadError, setLoadError] = useState('');
   const [toast, setToast] = useState<{ type: string; message: string } | null>(null);
   const [showTechnical, setShowTechnical] = useState(false);
+  const [activeTab, setActiveTab] = useState<'overview' | 'review' | 'affiliate' | 'history' | 'debug'>('overview');
   const [actionBusy, setActionBusy] = useState('');
   const mountedRef = useRef(true);
   const productRef = useRef<Product | null>(null);
@@ -223,6 +269,7 @@ export default function ProductDetailPage() {
       setProduct(null);
       setPipelineTruth(null);
       setVerificationFeedback(null);
+      setActiveTab('overview');
       void loadProduct(true);
     }, 0);
     return () => {
@@ -443,7 +490,7 @@ export default function ProductDetailPage() {
           ? 'Kết quả xác minh link affiliate đã cũ hoặc chưa có.'
           : product.affiliateUrlStatus !== 'verified' || !HEALTHY_LINK.has(String(product.affiliateHealthStatus || ''))
           ? 'Link affiliate chưa vượt qua kiểm tra an toàn.' : '';
-  const blockers = canonicalBlockerCodes(product.currentBlockers?.length ? product.currentBlockers : pipelineTruth?.lifecycle.blockers || []);
+  const blockers = canonicalBlockerCodes(pipelineTruth ? pipelineTruth.lifecycle.blockers : product.currentBlockers || []);
   const verificationInProgress = Boolean(
     verificationFeedback
       && !['SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED', 'STATUS_UNAVAILABLE'].includes(verificationFeedback.status),
@@ -452,20 +499,37 @@ export default function ProductDetailPage() {
     : product.status === 'archived' ? `Đã lưu trữ${product.archivedReason ? ` · ${localizeProductBlocker(product.archivedReason)}` : ''}`
       : product.lifecycleState === 'QUARANTINED' ? `Đang cách ly · ${product.quarantineReasons?.map(localizeProductBlocker).join(', ') || 'chờ xác minh'}`
         : `Đang ẩn · ${blockers.length} blocker hiện hành`;
-  const criticalBlockers = pipelineTruth?.eligibility?.criticalBlockers || product.eligibility?.criticalBlockers || blockers;
+  const criticalBlockers = pipelineTruth ? pipelineTruth.eligibility?.criticalBlockers || blockers : product.eligibility?.criticalBlockers || blockers;
   const remediation = deriveProductRemediationSummary(blockers, criticalBlockers, pipelineTruth?.requiredAction);
   // Preserve the established grouped-blocker view contract while each group
   // now carries root-cause priority and downstream-impact metadata.
   const blockerGroups = remediation.rootCauses;
   const canaryDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth; CANARY vẫn bị khóa.'
-    : pipelineTruth.lifecycle.canaryReady ? 'Sản phẩm đã ở danh sách xét CANARY.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.` : '';
+    : pipelineTruth.lifecycle.canaryReady ? 'Sản phẩm đã ở danh sách xét CANARY.'
+      : pipelineTruth.eligibility?.eligibleForCanary !== true ? `Server chưa xác nhận đủ điều kiện CANARY. ${remediation.nextAction}` : '';
   const publishDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth; Safe Publish vẫn bị khóa.'
-    : pipelineTruth.lifecycle.safePublishRequested ? 'Đã có yêu cầu Safe Publish.' : blockers.length ? `Còn ${blockers.length} blocker cần xử lý.`
+    : pipelineTruth.lifecycle.safePublishRequested ? 'Đã có yêu cầu Safe Publish.'
+      : pipelineTruth.eligibility?.eligibleForPublish !== true ? `Server chưa xác nhận đủ điều kiện Safe Publish. ${remediation.nextAction}`
       : !pipelineTruth.safety.publishingEnabled ? 'Publishing đang bị khóa bởi chính sách vận hành.' : '';
   const reviewedDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth.' : pipelineTruth.lifecycle.reviewed ? 'Đã ghi nhận người vận hành xem sản phẩm.' : '';
   const dataVerifiedDisabledReason = !pipelineTruth ? 'Chưa tải được operational truth.' : pipelineTruth.lifecycle.dataVerified ? 'Dữ liệu đã được xác nhận.' : '';
-  const priceVerified = product.priceVerificationStatus === 'VERIFIED' && verificationIsFresh(product.priceObservedAt);
-  const priceVerificationDisabledReason = priceVerified ? 'Giá đã được xác minh và còn mới.'
+  const priceTruth = derivePersistedPriceTruth(product);
+  const priceVerified = priceTruth.isVerified;
+  const currentPrice = Number(product.salePrice || product.price || 0);
+  const referencePrice = Number(product.price || 0);
+  const verifiedDiscountPercent = Number(product.priceTruthDiscountPercent);
+  const observedDiscountPercent = currentPrice > 0 && referencePrice > currentPrice
+    ? Math.round((1 - currentPrice / referencePrice) * 100)
+    : 0;
+  const verifiedReferencePrice = priceTruth.isVerified
+    && Boolean(product.priceTruthEvidenceFactIds?.length)
+    && Number.isFinite(verifiedDiscountPercent)
+    && verifiedDiscountPercent > 0
+    && verifiedDiscountPercent <= 100
+    && Math.abs(observedDiscountPercent - verifiedDiscountPercent) <= 1
+    ? referencePrice
+    : undefined;
+  const priceVerificationDisabledReason = priceTruth.isFresh ? 'Giá đã được xác minh và còn mới.'
     : !(Number(product.salePrice || product.price || 0) > 0) || product.currency !== 'VND' ? 'Không có giá VND hợp lệ để xác minh.' : '';
   const productRecheckDisabledReason = isPublicHttpUrl(canonicalUrl) ? '' : 'Không có URL sản phẩm công khai hợp lệ để kiểm tra.';
   const affiliateRecheckDisabledReason = isPublicHttpUrl(product.affiliateUrl) ? '' : 'Không có URL affiliate công khai hợp lệ; cần sửa hoặc tạo lại từ nguồn.';
@@ -473,15 +537,35 @@ export default function ProductDetailPage() {
   const publishingLabel = pipelineTruth?.lifecycle.published ? 'Đã đăng'
     : pipelineTruth?.lifecycle.publishApproved ? 'Đã phê duyệt'
       : pipelineTruth?.lifecycle.safePublishRequested ? 'Đang chờ kiểm tra Safe Publish'
-        : blockers.length ? 'Đang bị chặn' : 'Chưa yêu cầu đăng';
+        : pipelineTruth?.eligibility?.eligibleForPublish === true ? 'Đủ điều kiện yêu cầu Safe Publish' : 'Đang bị chặn';
   const riskLabel = product.riskLevel === 'low' ? 'Thấp' : product.riskLevel === 'medium' ? 'Trung bình' : product.riskLevel === 'high' ? 'Cao' : 'Chưa xác định';
   const blockerSeverityLabel = remediation.critical > 0 ? `${remediation.critical} blocker nghiêm trọng`
     : remediation.total > 0 ? `${remediation.total} cảnh báo/blocker` : 'Không có blocker hiện hành';
   const scoreBreakdown = Object.entries(product.scoreBreakdown || {})
-    .filter((entry): entry is [string, number] => Number.isFinite(entry[1]))
-    .sort((left, right) => left[1] - right[1])
+    .flatMap(([key, value]) => {
+      const label = scoreDimensionLabel(key);
+      return Number.isFinite(value) && value !== 0 && label ? [{ key, value, label }] : [];
+    })
+    .sort((left, right) => left.value - right.value)
     .slice(0, 5);
-  const technicalJson = JSON.stringify(sanitizeProductTechnicalDetails({ product, operationalTruth: pipelineTruth }), null, 2);
+  const scoreMetricCandidates: Array<[string, number | undefined]> = [
+    ['Opportunity Score', product.opportunityScore ?? product.score],
+    ['Product Quality', product.qualityScore],
+    ['Review Quality', product.reviewQuality?.qualityScore],
+    ['Content Quality', product.reviewContent?.contentQualityScore],
+    ['Source Quality', product.sourceQualityScore],
+    ['Data Quality', product.reviewContent?.dataQualityScore],
+  ];
+  const scoreMetrics = scoreMetricCandidates.filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]));
+  const primaryScore = scoreMetrics[0]?.[1];
+  const tabs = [
+    ['overview', 'Tổng quan'],
+    ['review', 'Review'],
+    ['affiliate', 'Affiliate'],
+    ['history', 'Lịch sử'],
+    ['debug', 'Debug'],
+  ] as const;
+  const technicalJson = JSON.stringify(sanitizeProductTechnicalDetails({ product, operationalTruth: pipelineTruth, sessionVerification: verificationFeedback }), null, 2);
 
   return (
     <main className={styles.page}>
@@ -489,7 +573,29 @@ export default function ProductDetailPage() {
       <header className={styles.topbar}><div><span>Danh mục sản phẩm</span><h1>Chi tiết vận hành</h1></div><Link href="/dashboard/products" className="btn btn-secondary btn-sm">← Quay lại danh sách</Link></header>
       {loadError && <div className={styles.refreshError} role="alert"><span>{loadError}</span><button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadProduct()}>Thử tải lại</button></div>}
 
-      <section className={styles.hero}>
+      <nav className={styles.tabs} role="tablist" aria-label="Chi tiết Product Studio Pro">
+        {tabs.map(([tab, label], index) => <button
+          key={tab}
+          id={`product-tab-${tab}`}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === tab}
+          aria-controls={`product-panel-${tab}`}
+          tabIndex={activeTab === tab ? 0 : -1}
+          onClick={() => setActiveTab(tab)}
+          onKeyDown={event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+              : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            const next = tabs[nextIndex][0];
+            setActiveTab(next);
+            document.getElementById(`product-tab-${next}`)?.focus();
+          }}
+        >{label}</button>)}
+      </nav>
+
+      <section className={styles.hero} id="product-panel-overview" role="tabpanel" aria-labelledby="product-tab-overview" hidden={activeTab !== 'overview'}>
         <figure className={styles.imagePanel}>
           <SafeProductImage
             originalUrl={product.imageUrl}
@@ -507,8 +613,8 @@ export default function ProductDetailPage() {
         <div className={styles.heroMain}>
           <div className={styles.badges}><span className="badge badge-neutral">{product.platform}</span><span className="badge badge-neutral">{inferredKind === 'product' ? 'Sản phẩm' : inferredKind === 'voucher' ? 'Voucher' : inferredKind === 'campaign' ? 'Chiến dịch' : 'Chưa phân loại'}</span><span className={`badge ${product.status === 'approved' ? 'badge-success' : product.status === 'needs_review' ? 'badge-warning' : product.status === 'published' ? 'badge-info' : 'badge-neutral'}`}>{statusLabel}</span>{inferredKind !== 'product' && <span className="badge badge-warning">Chưa phải sản phẩm cụ thể</span>}</div>
           <h2>{product.title}</h2>
-          <p>{product.description || 'Chưa có mô tả sản phẩm.'}</p>
-          <div className={styles.priceRow}><strong>{formatPrice(product.salePrice || product.price)}</strong>{product.salePrice && product.price && product.price !== product.salePrice && <del>{formatPrice(product.price)}</del>}<span className={`badge ${priceVerified ? 'badge-success' : 'badge-warning'}`}>{priceVerified ? 'Giá đã xác minh' : 'Giá chưa xác minh'}</span>{product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}</div>
+          <p>{product.description || 'Nguồn không cung cấp mô tả sản phẩm gốc. Nội dung review được hiển thị riêng trong tab Review.'}</p>
+          <div className={styles.priceRow}><strong>{formatPrice(product.salePrice || product.price)}</strong>{verifiedReferencePrice && <del>{formatPrice(verifiedReferencePrice)}</del>}<span className={`badge ${priceTruth.isFresh ? 'badge-success' : 'badge-warning'}`}>Giá: {localizeStatus(priceTruth.state)}</span><span className={`badge ${priceVerified ? 'badge-success' : 'badge-warning'}`}>{priceVerified ? 'Đã xác minh' : 'Chưa xác minh'}</span>{product.priceNote && <span className="badge badge-warning">{product.priceNote}</span>}</div>
           <dl className={styles.heroFacts}>
             <div><dt>Nguồn / merchant</dt><dd>{product.source || '—'} · {product.merchant || product.identity?.merchant || product.campaignName || 'chưa rõ'}</dd></div>
             <div><dt>ID sản phẩm</dt><dd className={styles.identifier}>{truncateIdentifier(product.id)}</dd></div>
@@ -529,20 +635,20 @@ export default function ProductDetailPage() {
           </div>
         </div>
         <aside className={styles.scoreSummary}>
-          <span>Điểm chất lượng</span>
-          <strong className={product.score != null && product.score >= 75 ? styles.goodScore : product.score != null && product.score >= 45 ? styles.mediumScore : styles.lowScore}>{product.score ?? '—'}</strong>
-          <small>{product.scoreLabel || 'Chưa có nhãn điểm'}</small>
+          <span>{scoreMetrics[0]?.[0] || 'Chưa có điểm'}</span>
+          <strong className={primaryScore != null && primaryScore >= 75 ? styles.goodScore : primaryScore != null && primaryScore >= 45 ? styles.mediumScore : styles.lowScore}>{primaryScore ?? '—'}</strong>
+          <small>Các thước đo được giữ riêng, không gộp thành một “điểm chất lượng” chung.</small>
           <div className={styles.scoreExplanation}>
-            <b>Giải thích điểm</b>
-            {scoreBreakdown.length ? scoreBreakdown.map(([key, value]) => <span key={key}>{SCORE_DIMENSION_LABELS[key] || 'Thành phần khác'}: {value}</span>)
-              : blockerGroups.slice(0, 3).map(rootCause => <span key={rootCause.id}>Khấu trừ chính: {rootCause.label}</span>)}
-            {!scoreBreakdown.length && !blockerGroups.length && <span>Chưa có breakdown được lưu.</span>}
+            <b>Thước đo hiện có</b>
+            {scoreMetrics.map(([label, value]) => <span key={label}>{label}: {value}</span>)}
+            {scoreBreakdown.map(item => <span key={item.key}>{item.label}: {item.value}</span>)}
+            {!scoreBreakdown.length && <span>Chưa có thành phần chấm điểm có tên được lưu.</span>}
           </div>
           <small>Chấm lại chỉ cập nhật điểm; không sửa link, ảnh, giá hay bằng chứng.</small>
         </aside>
       </section>
 
-      <section className={styles.remediationSummary} aria-labelledby="remediation-title">
+      <section className={styles.remediationSummary} aria-labelledby="remediation-title" hidden={activeTab !== 'overview'}>
         <div className={styles.remediationHeader}>
           <div><span>Tóm tắt cần xử lý theo nguyên nhân gốc</span><h2 id="remediation-title">Việc cần sửa trước</h2></div>
           <div className={styles.remediationCounts}>
@@ -550,9 +656,9 @@ export default function ProductDetailPage() {
             <span className={remediation.critical ? styles.criticalCount : styles.clearCount}><strong>{remediation.critical}</strong> nghiêm trọng</span>
           </div>
         </div>
-        {remediation.merchantQuarantined && (
+        {remediation.productHeldInQuarantine && (
           <div className={styles.merchantNotice}>
-            Merchant đang bị quarantine theo policy. Đây là blocker merchant/chính sách, không phải lỗi worker hay scheduler.
+            Sản phẩm đang được giữ trong Quarantine vì các điều kiện xuất bản chưa được đáp ứng. Trạng thái này không có nghĩa merchant hoặc nguồn đang không khỏe.
           </div>
         )}
         {blockerGroups.length ? (
@@ -568,10 +674,6 @@ export default function ProductDetailPage() {
                     {rootCause.blockers.slice(0, 6).map(blocker => <li key={blocker.code} className={blocker.critical ? styles.criticalBlocker : undefined}>{blocker.label}</li>)}
                     {rootCause.blockers.length > 6 && <li>{rootCause.blockers.length - 6} blocker khác vẫn được giữ trong chi tiết kỹ thuật bên dưới.</li>}
                   </ul>
-                  <details className={styles.technicalCodes}>
-                    <summary>Mã kỹ thuật ({rootCause.blockers.length})</summary>
-                    <div>{rootCause.blockers.map(blocker => <code key={blocker.code}>{blocker.code}</code>)}</div>
-                  </details>
                 </div>
               </article>
             ))}
@@ -580,7 +682,7 @@ export default function ProductDetailPage() {
         <p className={styles.nextAction}>Hành động được khuyến nghị tiếp theo: <strong>{remediation.nextAction}</strong></p>
       </section>
 
-      <section className={styles.operationGrid}>
+      <section className={styles.operationGrid} hidden={activeTab !== 'overview'}>
         <article className={styles.card}>
           <div className={styles.cardHeader}><div><span>Runtime và bằng chứng</span><h3>Trạng thái vận hành</h3></div><span className={`badge ${blockers.length ? 'badge-warning' : 'badge-success'}`}>{blockers.length ? `${blockers.length} blocker` : 'Không có blocker'}</span></div>
           {pipelineTruth ? <>
@@ -589,21 +691,21 @@ export default function ProductDetailPage() {
               <div><dt>Retry</dt><dd>{pipelineTruth.automation.attempts}/{pipelineTruth.automation.maxAttempts ?? '—'}</dd></div>
               <div><dt>Worker</dt><dd className={styles.identifier}>{truncateIdentifier(pipelineTruth.automation.workerOwner)}</dd></div>
               <div><dt>Chất lượng dữ liệu</dt><dd>{localizeStatus(product.qualityBand || (remediation.critical ? 'blocked' : 'good'))}</dd></div>
-              <div><dt>Chính sách</dt><dd>{remediation.merchantQuarantined ? 'Đang cách ly; cần quyết định chính sách' : 'Không có quarantine merchant hiện hành'}</dd></div>
+              <div><dt>Chính sách / xuất bản</dt><dd>{remediation.productHeldInQuarantine ? 'Sản phẩm đang được giữ trong Quarantine' : 'Không có product quarantine hiện hành'}</dd></div>
               <div><dt>Sẵn sàng xuất bản</dt><dd>{publishingLabel}</dd></div>
               <div><dt>AI / nội dung</dt><dd>{localizeStatus(pipelineTruth.health.content)}</dd></div>
               <div><dt>Publishing gate</dt><dd>{pipelineTruth.safety.publishingEnabled ? 'Đang bật' : 'Đang khóa; dịch vụ vẫn có thể hoạt động'}</dd></div>
-              <div><dt>Nguồn dữ liệu</dt><dd>{localizeStatus(pipelineTruth.health.source)}</dd></div>
+              <div><dt>Xác minh nguồn / provenance</dt><dd>{localizeStatus(pipelineTruth.health.source)}</dd></div>
             </dl>
             <div className={styles.healthStrip}>
               <span>URL sản phẩm <strong>{localizeStatus(pipelineTruth.health.productLink)}</strong><small>{product.productUrlFinalDomain || 'Chưa có tên miền đích'} · {product.productUrlHttpStatus ? `HTTP ${product.productUrlHttpStatus}` : 'Chưa có phản hồi HTTP'} · Kiểm tra: {formatTimestamp(product.linkLastCheckedAt)}</small></span>
               <span>URL affiliate <strong>{localizeStatus(pipelineTruth.health.affiliateLink)}</strong><small>{product.affiliateUrlFinalDomain || 'Chưa có tên miền đích'} · {product.affiliateUrlHttpStatus ? `HTTP ${product.affiliateUrlHttpStatus}` : 'Chưa có phản hồi HTTP'} · Kiểm tra: {formatTimestamp(product.affiliateLastCheckedAt)}</small></span>
               <span>Ảnh <strong>{localizeStatus(pipelineTruth.health.image)}</strong><small>{imageFailureReason(product)} Kiểm tra: {formatTimestamp(product.imageLastCheckedAt)}</small></span>
-              <span>Giá <strong>{priceVerified ? 'Đã xác minh' : localizeStatus(pipelineTruth.health.price)}</strong><small>Quan sát/xác minh: {formatTimestamp(product.priceObservedAt)}</small></span>
-              <span>Nguồn <strong>{localizeStatus(pipelineTruth.health.source)}</strong><small>Nhận dữ liệu: {formatTimestamp(product.sourceFetchedAt || product.providerUpdatedAt)}</small></span>
-              <span>Affiliate gateway <strong>{product.sourceEvidence?.affiliate.classification || 'Chưa có probe'}</strong><small>{product.affiliateGatewayDomain || product.sourceEvidence?.affiliate.affiliateGatewayDomain || 'Chưa xác định'} · {product.sourceEvidence?.affiliate.reasonCode || 'Không có lý do'} · Retry: {product.sourceEvidence?.affiliate.retryable ? 'có' : 'không'} · {formatTimestamp(product.sourceEvidence?.affiliate.checkedAt)}</small></span>
-              <span>Merchant source <strong>{product.sourceEvidence?.merchant?.classification || 'Chưa có probe'}</strong><small>{product.sourceEvidence?.merchant?.merchantDomain || product.merchantDomain || 'Chưa xác định'} · {product.sourceEvidence?.merchant?.reasonCode || 'Không có lý do'} · Retry: {product.sourceEvidence?.merchant?.retryable ? 'có' : 'không'} · {formatTimestamp(product.sourceEvidence?.merchant?.checkedAt)}</small></span>
-              <span>Quyết định publish <strong>{product.lastEligibilityDecision?.eligible ? 'Đủ điều kiện' : 'Đang bị chặn'}</strong><small>{product.lastEligibilityDecision?.reasonCodes.join(' · ') || 'Không có blocker'} · {formatTimestamp(product.lastEligibilityDecision?.checkedAt)} · Retry job: {formatTimestamp(product.nextRetryAt)}</small></span>
+              <span>Độ mới của giá <strong>{localizeStatus(priceTruth.state)}</strong><small>Xác minh: {localizeStatus(priceTruth.verificationStatus)} · Quan sát: {formatTimestamp(priceTruth.observedAt)}</small></span>
+              <span>Xác minh nguồn <strong>{localizeStatus(pipelineTruth.health.source)}</strong><small>Provenance sản phẩm · Nhận dữ liệu: {formatTimestamp(product.sourceFetchedAt || product.providerUpdatedAt)}</small></span>
+              <span>Kết nối affiliate gateway <strong>{localizeStatus(product.sourceEvidence?.affiliate.classification) || 'Chưa có probe'}</strong><small>{product.affiliateGatewayDomain || product.sourceEvidence?.affiliate.affiliateGatewayDomain || 'Chưa xác định'} · Retry: {product.sourceEvidence?.affiliate.retryable ? 'có' : 'không'} · {formatTimestamp(product.sourceEvidence?.affiliate.checkedAt)}</small></span>
+              <span>Kết nối merchant <strong>{localizeStatus(product.sourceEvidence?.merchant?.classification) || 'Chưa có probe'}</strong><small>{product.sourceEvidence?.merchant?.merchantDomain || product.merchantDomain || 'Chưa xác định'} · Retry: {product.sourceEvidence?.merchant?.retryable ? 'có' : 'không'} · {formatTimestamp(product.sourceEvidence?.merchant?.checkedAt)}</small></span>
+              <span>Quyết định publish <strong>{pipelineTruth.eligibility?.eligibleForPublish === true ? 'Đủ điều kiện yêu cầu Safe Publish' : 'Đang bị chặn'}</strong><small>Đánh giá từ operational truth hiện tại · Hành động tiếp theo: {remediation.nextAction} · Retry: {formatTimestamp(product.nextRetryAt)}</small></span>
             </div>
             <p className={styles.requiredAction}>Hành động được khuyến nghị: <strong>{remediation.nextAction}</strong></p>
           </> : <p className={styles.clearState}>Chưa tải được operational truth. Các hành động nhạy cảm vẫn bị khóa.</p>}
@@ -621,7 +723,7 @@ export default function ProductDetailPage() {
             <div className={styles.verificationFeedback} role="status">
               <strong>{verificationFeedback.target === 'image' ? 'Kiểm tra ảnh' : verificationFeedback.target === 'affiliate' ? 'Kiểm tra affiliate' : 'Kiểm tra URL'} · {verificationFeedback.status}</strong>
               <span>{verificationFeedback.message}</span>
-              <small>Job {truncateIdentifier(verificationFeedback.jobId)}</small>
+              <small>Tham chiếu tác vụ được giữ trong tab Debug.</small>
             </div>
           )}
           </div>
@@ -632,20 +734,31 @@ export default function ProductDetailPage() {
             <button className="btn btn-secondary" onClick={() => handleAction('score')} disabled={Boolean(actionBusy)}>{actionBusy === 'score' ? 'Đang chấm…' : 'Chấm lại điểm'}</button>
           </div><small>Chấm lại điểm không sửa dữ liệu, liên kết, ảnh, bằng chứng hoặc quarantine.</small></div>
           <div className={styles.actionGroup}><strong>Xác nhận của người vận hành</strong><div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('reviewed')} disabled={Boolean(actionBusy) || Boolean(reviewedDisabledReason)} title={reviewedDisabledReason || undefined}>Đánh dấu đã xem</button>{reviewedDisabledReason && <small>{reviewedDisabledReason}</small>}</div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('data_verified')} disabled={Boolean(actionBusy) || Boolean(dataVerifiedDisabledReason)} title={dataVerifiedDisabledReason || undefined}>Xác nhận dữ liệu</button>{dataVerifiedDisabledReason ? <small>{dataVerifiedDisabledReason}</small> : <small>Xác nhận này áp dụng cho toàn bộ dữ liệu bắt buộc; không tự xuất bản.</small>}</div></div></div>
-          <div className={styles.actionGroup}><strong>Canary & Safe Publish</strong><div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || Boolean(canaryDisabledReason)} title={canaryDisabledReason || undefined}>Đưa vào danh sách xét CANARY</button>{canaryDisabledReason && <small>{canaryDisabledReason}</small>}</div><div className={styles.actionItem}><button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy) || Boolean(publishDisabledReason)} title={publishDisabledReason || undefined}>Yêu cầu kiểm tra Safe Publish</button>{publishDisabledReason && <small>{publishDisabledReason}</small>}</div></div></div>
+          <div className={styles.actionGroup}><strong>Canary & Safe Publish</strong><div><div className={styles.actionItem}><button className="btn btn-secondary" onClick={() => handleAction('canary_ready')} disabled={Boolean(actionBusy) || Boolean(canaryDisabledReason)} title={canaryDisabledReason || undefined}>Đưa vào danh sách xét CANARY</button>{canaryDisabledReason && <small>{canaryDisabledReason}</small>}</div><div className={styles.actionItem}>{publishDisabledReason ? <><button className="btn btn-secondary" type="button" onClick={() => { setActiveTab('overview'); document.getElementById('remediation-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>Xem blockers</button><small>Chưa đủ điều kiện Safe Publish · {publishDisabledReason}</small></> : <button className="btn btn-primary" onClick={() => handleAction('safe_publish_requested')} disabled={Boolean(actionBusy)}>Yêu cầu kiểm tra Safe Publish</button>}</div></div></div>
           <div className={`${styles.actionGroup} ${styles.archiveGroup}`}><strong>Lưu trữ</strong>{archivePending ? <div className={styles.inlineConfirm}><span>Lưu trữ sản phẩm này? Sản phẩm sẽ không được đăng.</span><button className="btn btn-secondary" onClick={() => { setArchivePending(false); void handleAction('archive'); }} disabled={Boolean(actionBusy)}>Xác nhận lưu trữ</button><button className="btn btn-ghost" onClick={() => setArchivePending(false)}>Huỷ</button></div> : <div><button className="btn btn-secondary" onClick={() => setArchivePending(true)} disabled={Boolean(actionBusy)}>Lưu trữ sản phẩm</button></div>}</div>
         </article>
       </section>
 
-      <section className={styles.contentGrid}>
+      <section className={styles.contentGrid} id="product-panel-review" role="tabpanel" aria-labelledby="product-tab-review" hidden={activeTab !== 'review'}>
+        <article className={styles.card}><div className={styles.cardHeader}><div><span>Nội dung được tạo khác mô tả nguồn</span><h3>Review & bằng chứng</h3></div></div><dl className={styles.truthGrid}><div><dt>Trạng thái review</dt><dd>{localizeStatus(product.reviewContent?.reviewStatus || product.status)}</dd></div><div><dt>Phê duyệt</dt><dd>{product.reviewContent?.reviewStatus === 'approved' ? 'Đã phê duyệt' : 'Chưa phê duyệt'}</dd></div><div><dt>Review Quality</dt><dd>{product.reviewQuality?.qualityScore ?? '—'}</dd></div><div><dt>Content Quality</dt><dd>{product.reviewContent?.contentQualityScore ?? '—'}</dd></div><div><dt>Originality</dt><dd>{product.reviewContent?.originalityScore ?? '—'}</dd></div><div><dt>Editorial confidence</dt><dd>{product.reviewContent?.editorialConfidence ?? '—'}</dd></div></dl>{product.reviewContent?.reviewSummary ? <><h4>{product.reviewContent.reviewTitle || 'Review tổng hợp'}</h4><p>{product.reviewContent.reviewSummary}</p>{product.reviewContent.reviewVerdict ? <p><strong>Kết luận:</strong> {product.reviewContent.reviewVerdict}</p> : null}</> : <p className={styles.emptyText}>Chưa có review được tạo từ bằng chứng hiện có. Điều này không đồng nghĩa nguồn thiếu mô tả gốc.</p>}</article>
         <article className={styles.card}><div className={styles.cardHeader}><h3>Lợi ích & cảnh báo</h3></div>{product.benefits?.length ? <div><h4>Lợi ích chính</h4><ul className="detail-list">{product.benefits.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : <p className={styles.emptyText}>Chưa có lợi ích được xác minh.</p>}{product.warnings?.length ? <div className={styles.warningList}><h4>Cảnh báo / không được nói quá</h4><ul className="detail-list detail-list-warning">{product.warnings.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}</article>
         <article className={styles.card}><div className={styles.cardHeader}><h3>Content intelligence</h3></div><div className={styles.intelligenceGrid}><div><h4>Pain points</h4>{product.painPoints?.length ? <ul className="detail-list">{product.painPoints.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div><div><h4>Đối tượng</h4>{product.targetAudience?.length ? <ul className="detail-list">{product.targetAudience.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div><div><h4>Góc nội dung</h4>{product.contentAngles?.length ? <ul className="detail-list">{product.contentAngles.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div><div><h4>Ghi chú kiểm duyệt</h4>{product.complianceNotes?.length ? <ul className="detail-list">{product.complianceNotes.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>Chưa có</p>}</div></div></article>
         <article className={styles.card}><div className={styles.cardHeader}><h3>Thông tin bổ sung</h3></div><dl className={styles.metaList}><div><dt>Tags</dt><dd>{product.tags?.join(', ') || '—'}</dd></div><div><dt>Chiến dịch</dt><dd>{product.campaignName || '—'}</dd></div><div><dt>Hoa hồng</dt><dd>{product.commissionNote || '—'}</dd></div><div><dt>Disclosure</dt><dd>{product.affiliateDisclosure || '—'}</dd></div><div><dt>Tạo lúc</dt><dd>{new Date(product.createdAt).toLocaleString('vi-VN')}</dd></div><div><dt>Cập nhật</dt><dd>{new Date(product.updatedAt).toLocaleString('vi-VN')}</dd></div></dl></article>
       </section>
 
-      <section className={styles.technical}>
+      <section className={styles.contentGrid} id="product-panel-affiliate" role="tabpanel" aria-labelledby="product-tab-affiliate" hidden={activeTab !== 'affiliate'}>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Liên kết & provenance</h3></div><dl className={styles.metaList}><div><dt>Product URL</dt><dd>{canonicalUrl || '—'}</dd></div><div><dt>Affiliate URL</dt><dd>{product.affiliateUrl || '—'}</dd></div><div><dt>Gateway</dt><dd>{product.affiliateGatewayDomain || product.sourceEvidence?.affiliate.affiliateGatewayDomain || '—'}</dd></div><div><dt>Product URL verification</dt><dd>{localizeStatus(product.canonicalUrlStatus)} · {formatTimestamp(product.canonicalUrlVerifiedAt || product.linkLastCheckedAt)}</dd></div><div><dt>Affiliate verification</dt><dd>{localizeStatus(product.affiliateUrlStatus || product.affiliateHealthStatus)} · {formatTimestamp(product.affiliateUrlVerifiedAt || product.affiliateLastCheckedAt)}</dd></div></dl></article>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Hoa hồng & disclosure</h3></div><dl className={styles.metaList}><div><dt>Mạng</dt><dd>{product.affiliateUrlProvider || product.affiliateSource || product.source || '—'}</dd></div><div><dt>Commission amount</dt><dd>{product.commissionAmount ? formatPrice(product.commissionAmount) : '—'}</dd></div><div><dt>Commission rate</dt><dd>{product.commissionRate != null ? `${product.commissionRate}%` : '—'}</dd></div><div><dt>Disclosure</dt><dd>{product.affiliateDisclosure || 'SanDeal có thể nhận hoa hồng khi người dùng mua qua liên kết; đây không phải khoản tiết kiệm của khách hàng.'}</dd></div></dl></article>
+      </section>
+
+      <section className={styles.contentGrid} id="product-panel-history" role="tabpanel" aria-labelledby="product-tab-history" hidden={activeTab !== 'history'}>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Lịch sử vòng đời & kiểm tra</h3></div><dl className={styles.metaList}><div><dt>Phát hiện</dt><dd>{formatTimestamp(product.createdAt)}</dd></div><div><dt>Cập nhật gần nhất</dt><dd>{formatTimestamp(product.updatedAt)}</dd></div><div><dt>Nhận dữ liệu nguồn</dt><dd>{formatTimestamp(product.sourceFetchedAt || product.providerUpdatedAt)}</dd></div><div><dt>Kiểm tra URL</dt><dd>{formatTimestamp(product.linkLastCheckedAt)}</dd></div><div><dt>Kiểm tra affiliate</dt><dd>{formatTimestamp(product.affiliateLastCheckedAt)}</dd></div><div><dt>Kiểm tra ảnh</dt><dd>{formatTimestamp(product.imageLastCheckedAt)}</dd></div><div><dt>Quan sát giá</dt><dd>{formatTimestamp(priceTruth.observedAt)}</dd></div><div><dt>Lifecycle</dt><dd>{localizeStatus(product.lifecycleState)} · {formatTimestamp(product.lifecycleUpdatedAt)}</dd></div></dl></article>
+        <article className={styles.card}><div className={styles.cardHeader}><h3>Lịch sử tác vụ</h3></div><dl className={styles.metaList}><div><dt>Tác vụ hiện tại</dt><dd>{pipelineTruth?.automation.status ? localizeStatus(pipelineTruth.automation.status) : 'Không có tác vụ hiện tại'}</dd></div><div><dt>Xử lý gần nhất</dt><dd>{formatTimestamp(pipelineTruth?.automation.lastProcessedAt)}</dd></div><div><dt>Lần thử</dt><dd>{pipelineTruth ? `${pipelineTruth.automation.attempts}/${pipelineTruth.automation.maxAttempts ?? '—'}` : '—'}</dd></div><div><dt>Kiểm tra lại gần nhất</dt><dd>{verificationFeedback ? `${verificationFeedback.status} · ${verificationFeedback.message}` : 'Chưa có trong phiên này'}</dd></div></dl></article>
+      </section>
+
+      <section className={styles.technical} id="product-panel-debug" role="tabpanel" aria-labelledby="product-tab-debug" hidden={activeTab !== 'debug'}>
         <div className={styles.technicalActions}>
-          <strong>Chi tiết kỹ thuật</strong>
+          <strong>Debug · mã lý do và tham chiếu kỹ thuật</strong>
           <button className="btn btn-ghost btn-sm" onClick={() => setShowTechnical(!showTechnical)} aria-expanded={showTechnical}>{showTechnical ? 'Thu gọn' : 'Mở'} chi tiết kỹ thuật</button>
           <button className="btn btn-ghost btn-sm" onClick={async () => {
             try {
@@ -654,8 +767,9 @@ export default function ProductDetailPage() {
             } catch {
               showToast('error', 'Không thể sao chép chi tiết kỹ thuật.');
             }
-          }}>Sao chép JSON an toàn</button>
+          }}>Copy safe JSON</button>
         </div>
+        <div className={styles.debugSummary}><p><strong>Reason codes</strong></p><div>{blockers.map(code => <code key={code}>{code}</code>)}</div><p>Job: <code>{pipelineTruth?.automation.currentJobId || product.relatedJobId || 'none'}</code> · Publication job: <code>{product.publicationJobId || 'none'}</code> · Verification job: <code>{verificationFeedback?.jobId || 'none'}</code></p></div>
         {showTechnical && <pre data-secret-sanitized="true">{technicalJson}</pre>}
       </section>
     </main>

@@ -42,7 +42,13 @@ import { throwIfExecutionAborted } from '../automation/executionBudget';
 import { selectDiversifiedSources, type SourceSelectionCandidate } from '../commerce/sourceSelection';
 import { recordSourceIngestionState, sourceReliabilityEvent } from '../commerce/sourceReliability';
 import { commerceProbeBlockerCode, commerceProbeIsPermanent, commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '../commerce/urlProbe';
-import { computeSourceDiversity, type SourceDiversitySummary } from '../commerce/sourceIdentity';
+import {
+  classifySourceIngestionTruth,
+  computeSourceDiversity,
+  isCompleteSourceIdentity,
+  type SourceDiversitySummary,
+  type SourceIngestionTruthReason,
+} from '../commerce/sourceIdentity';
 import {
   ACCESSTRADE_TIKTOK_SOURCE,
   AccessTradeTikTokError,
@@ -309,6 +315,46 @@ export function fastReject(payload: CandidatePayload, options: { affiliateRequir
   return null;
 }
 
+interface ObservedSourceTruth {
+  providerId: string;
+  campaignName: string;
+  merchantDomain: string;
+  identityComplete: boolean;
+  transportHealthy: boolean;
+  policyEligible: boolean;
+  selectionEligible: boolean;
+}
+
+function sourceFailureReasonCode(sourceStatus: SourceProviderStatus, failed: number): Extract<SourceIngestionTruthReason,
+  | 'SOURCE_SCAN_FAILED'
+  | 'SOURCE_INVALID_CREDENTIAL'
+  | 'SOURCE_QUOTA_EXHAUSTED'
+  | 'SOURCE_CIRCUIT_OPEN'> | undefined {
+  if (sourceStatus === 'invalid_credential') return 'SOURCE_INVALID_CREDENTIAL';
+  if (sourceStatus === 'quota_exhausted') return 'SOURCE_QUOTA_EXHAUSTED';
+  if (sourceStatus === 'circuit_open') return 'SOURCE_CIRCUIT_OPEN';
+  return failed > 0 ? 'SOURCE_SCAN_FAILED' : undefined;
+}
+
+function sourceRunReason(reasonCode: SourceIngestionTruthReason): string {
+  if (reasonCode === 'NO_HEALTHY_PRODUCT_SOURCE') return reasonCode;
+  const reasons: Record<Exclude<SourceIngestionTruthReason, 'NO_HEALTHY_PRODUCT_SOURCE'>, string> = {
+    SOURCE_SCAN_COMPLETED: 'source_scan_completed',
+    SOURCE_SCAN_NO_NEW_CANDIDATES: 'source_no_new_candidates',
+    SOURCE_SCAN_NO_RESULTS: 'source_no_results',
+    SOURCE_SCAN_FAILED: 'source_scan_failed',
+    SOURCE_TIMEOUT: 'source_timeout',
+    SOURCE_RATE_LIMITED: 'source_rate_limited',
+    SOURCE_INVALID_CREDENTIAL: 'source_invalid_credential',
+    SOURCE_QUOTA_EXHAUSTED: 'source_quota_exhausted',
+    SOURCE_CIRCUIT_OPEN: 'source_circuit_open',
+    SOURCE_POLICY_PAUSED: 'source_policy_paused',
+    AFFILIATE_LINK_UNAVAILABLE: 'affiliate_link_unavailable',
+    SOURCE_IDENTITY_INCOMPLETE: 'source_identity_incomplete',
+  };
+  return reasons[reasonCode];
+}
+
 function normalizeKeywordStat(keyword: string, cursor: number, stored?: Partial<KeywordYieldStat> & { empty?: number }): KeywordYieldStat {
   const numeric = (key: keyof KeywordYieldStat) => Math.max(0, Number(stored?.[key]) || 0);
   const valid = numeric('valid');
@@ -436,15 +482,27 @@ async function scanLegacyAccessTradeToQueue(
   const registry = options.registry || createDefaultSourceAdapterRegistry();
   const adapter = registry.get<NormalizedAccessTradeItem, NormalizedAccessTradeItem>('accesstrade');
   if (!adapter) {
+    await recordSourceIngestionState({
+      provider: 'accesstrade', ingestionSkipped: true, reasonCode: 'SOURCE_ADAPTER_UNAVAILABLE',
+      observed: 0, selected: 0, skipped: 0, operationId: options.runId,
+    });
     return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus: 'adapter_unavailable', reason: 'source_adapter_unavailable', resultTypes };
   }
   const sourceHealth = await adapter.healthCheck();
   sourceStatus = sourceHealth.status;
   if (!(await adapter.isConfigured())) {
+    await recordSourceIngestionState({
+      provider: adapter.id, ingestionSkipped: true, reasonCode: 'SOURCE_NOT_CONFIGURED',
+      observed: 0, selected: 0, skipped: 0, operationId: options.runId,
+    });
     return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus, reason: 'source_not_configured', resultTypes };
   }
   if (sourceBudgetRemaining <= 0) {
     const nextEligibleAt = new Date(startedMs + 24 * 60 * 60_000).toISOString();
+    await recordSourceIngestionState({
+      provider: adapter.id, ingestionSkipped: true, reasonCode: 'SOURCE_BUDGET_EXHAUSTED',
+      observed: 0, selected: 0, skipped: 0, nextEligibleAt, operationId: options.runId,
+    });
     return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus, reason: 'source_budget_exhausted', nextEligibleAt, resultTypes };
   }
   const keywordCount = mode === 'bootstrap' ? settings.bootstrapKeywordCount : settings.steadyKeywordCount;
@@ -453,6 +511,10 @@ async function scanLegacyAccessTradeToQueue(
   const selected = selectSourceKeywords(stats, keywordCount, startedMs);
   if (!selected.length) {
     const nextEligibleAt = stats.map(item => item.nextEligibleAt).filter((item): item is string => Boolean(item)).sort()[0];
+    await recordSourceIngestionState({
+      provider: adapter.id, ingestionSkipped: true, reasonCode: 'SOURCE_KEYWORDS_EXHAUSTED',
+      observed: 0, selected: 0, skipped: 0, nextEligibleAt, operationId: options.runId,
+    });
     return { ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs, sourceStatus, reason: 'source_keywords_exhausted', nextEligibleAt, resultTypes };
   }
   const products = await getAllProducts();
@@ -477,6 +539,7 @@ async function scanLegacyAccessTradeToQueue(
   const qualitySnapshot = await getSourceQualitySnapshot(adapter.id);
   const poolLimit = Math.min(240, candidateLimit * settings.sourceDiscoveryPoolMultiplier);
   const perKeywordLimit = Math.max(10, Math.min(50, Math.ceil(poolLimit / selected.length)));
+  const transportSources: ObservedSourceTruth[] = [];
   const discoveryPool: Array<SourceSelectionCandidate<{
     item: NormalizedAccessTradeItem;
     payload: CandidatePayload;
@@ -516,6 +579,23 @@ async function scanLegacyAccessTradeToQueue(
         normalized++;
         stat.normalized += 1;
         const payload = toPayload(item);
+        const merchant = payload.merchantDomain || merchantFromUrl(payload.originalUrl);
+        const campaign = String(payload.campaignName || payload.affiliateUrlCampaignId || 'uncategorized').toLowerCase();
+        const completeIdentity = isCompleteSourceIdentity({ providerId: adapter.id, campaignName: campaign, merchantDomain: merchant });
+        const policyReason = domainPaused(merchant) ? 'SOURCE_DOMAIN_PAUSED'
+          : pausedCampaigns.has(campaign) ? 'SOURCE_CAMPAIGN_PAUSED'
+            : undefined;
+        const transportReason = openMerchantDomains.has(merchant) ? 'MERCHANT_CIRCUIT_OPEN' : undefined;
+        const pauseReason = !completeIdentity ? 'SOURCE_IDENTITY_INCOMPLETE' : policyReason || transportReason;
+        transportSources.push({
+          providerId: adapter.id,
+          campaignName: campaign,
+          merchantDomain: merchant,
+          identityComplete: completeIdentity,
+          transportHealthy: completeIdentity && !transportReason,
+          policyEligible: completeIdentity && !policyReason,
+          selectionEligible: completeIdentity && !policyReason && !transportReason,
+        });
         const earlyReason = fastReject(payload);
         if (!earlyReason) { stat.valid++; validCandidates++; } else {
           rejected++; stat.fastRejected += 1;
@@ -548,18 +628,12 @@ async function scanLegacyAccessTradeToQueue(
           continue;
         }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.affiliateUrl, payload.imageUrl].filter(Boolean).length;
-        const merchant = payload.merchantDomain || merchantFromUrl(payload.originalUrl);
         const category = String(payload.category || 'uncategorized').toLowerCase();
         const merchantPenalty = Math.min(40, (merchantCounts.get(merchant) || 0) * 4);
         const categoryBoost = Math.max(0, 12 - Math.min(12, categoryCounts.get(category) || 0));
         const basePriority = Math.max(1, complete * 20 + (payload.verifiedSource ? 20 : 0) + Math.min(19, stat.published * 2 + stat.valid) + categoryBoost - merchantPenalty - (earlyReason ? 25 : 0));
         const priority = applySourceQualityPriority(basePriority, qualitySnapshot).effectivePriority;
         const readiness = scoreCandidateReadiness(payload);
-        const campaign = String(payload.campaignName || payload.affiliateUrlCampaignId || 'uncategorized').toLowerCase();
-        const pauseReason = domainPaused(merchant) ? 'SOURCE_DOMAIN_PAUSED'
-          : pausedCampaigns.has(campaign) ? 'SOURCE_CAMPAIGN_PAUSED'
-            : openMerchantDomains.has(merchant) ? 'MERCHANT_CIRCUIT_OPEN'
-              : undefined;
         discoveryPool.push({
           value: { item, payload, priority, readiness, keyword: stat.keyword },
           provider: adapter.id,
@@ -595,6 +669,7 @@ async function scanLegacyAccessTradeToQueue(
         stat.requests += requestCount;
         retryAfter = error.requests.map((request) => request.retryAfter).filter((value): value is string => Boolean(value)).sort().at(-1) || retryAfter;
         resultTypes[error.resultType] = (resultTypes[error.resultType] || 0) + 1;
+        sourceStatus = adapter.classifyError(error);
         if (error.resultType === 'timeout') { timeoutStreak++; timeout++; stat.timeout += 1; } else timeoutStreak = 0;
         if (error.resultType === 'rate_limited') { rateLimited++; stat.rateLimited += 1; }
         stat.nextEligibleAt = retryAfter || new Date(startedMs + (error.resultType === 'rate_limited' ? 60 : 30) * 60_000).toISOString();
@@ -669,16 +744,33 @@ async function scanLegacyAccessTradeToQueue(
       if (stat) stat.duplicate += 1;
     }
   }
-  const noHealthySource = normalized > 0 && diversified.selected.length === 0;
   const sourceNextEligibleAt = retryAfter
     || diversified.skipped.map(skip => circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skip.candidate.merchantDomain)?.nextProbeAt)
       .filter((value): value is string => Boolean(value)).sort()[0];
 
   // Compute source diversity from the discovery pool
-  const discoveredSources = discoveryPool.map(c => ({ campaignName: c.campaign || 'uncategorized', merchantDomain: c.merchantDomain || 'unknown' }));
-  const eligibleSources = discoveryPool.filter(c => c.eligible !== false).map(c => ({ campaignName: c.campaign || 'uncategorized', merchantDomain: c.merchantDomain || 'unknown' }));
-  const healthySources = diversified.selected.map(c => ({ campaignName: c.campaign || 'uncategorized', merchantDomain: c.merchantDomain || 'unknown' }));
+  const discoveredSources = transportSources.map(source => ({ campaignName: source.campaignName, merchantDomain: source.merchantDomain }));
+  const eligibleSources = transportSources.filter(source => source.selectionEligible)
+    .map(source => ({ campaignName: source.campaignName, merchantDomain: source.merchantDomain }));
+  const healthySources = transportSources.filter(source => source.transportHealthy)
+    .map(source => ({ campaignName: source.campaignName, merchantDomain: source.merchantDomain }));
   const sourceDiversity = computeSourceDiversity(discoveredSources, eligibleSources, healthySources, 1);
+  const completeSourceCount = transportSources.filter(source => source.identityComplete).length;
+  const transportHealthySourceCount = transportSources.filter(source => source.transportHealthy).length;
+  const selectionEligibleSourceCount = transportSources.filter(source => source.selectionEligible).length;
+  const policyBlockedSourceCount = transportSources.filter(source => source.identityComplete && !source.policyEligible).length;
+  const ingestionTruth = classifySourceIngestionTruth({
+    normalizedCount: normalized,
+    completeSourceCount,
+    transportHealthySourceCount,
+    selectionEligibleSourceCount,
+    policyBlockedSourceCount,
+    materializedCount: counters.queued,
+    timeoutCount: timeout,
+    rateLimitedCount: rateLimited,
+    failureReasonCode: sourceFailureReasonCode(sourceStatus, counters.failed),
+  });
+  const noHealthySource = ingestionTruth.reasonCode === 'NO_HEALTHY_PRODUCT_SOURCE';
 
   // Determine the dominant campaign/merchant from the discovery pool for quality tracking
   const dominantCampaign = discoveredSources.length > 0
@@ -696,10 +788,10 @@ async function scanLegacyAccessTradeToQueue(
 
   await recordSourceIngestionState({
     provider: adapter.id,
-    ingestionSkipped: noHealthySource,
-    reasonCode: noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE' : 'SOURCE_SCAN_COMPLETED',
-    observed: discoveryPool.length,
-    selected: diversified.selected.length,
+    ingestionSkipped: ingestionTruth.ingestionSkipped,
+    reasonCode: ingestionTruth.reasonCode,
+    observed: transportSources.length,
+    selected: counters.queued,
     skipped: diversified.skipped.length,
     nextEligibleAt: sourceNextEligibleAt,
     operationId: options.runId,
@@ -722,7 +814,15 @@ async function scanLegacyAccessTradeToQueue(
   });
 
   // Emit one aggregate discovery summary instead of per-candidate logs
-  const recommendedNextAction = noHealthySource
+  const recommendedNextAction = ingestionTruth.reasonCode === 'SOURCE_IDENTITY_INCOMPLETE'
+    ? 'COMPLETE_SOURCE_IDENTITY'
+    : ingestionTruth.reasonCode === 'SOURCE_POLICY_PAUSED'
+      ? 'REVIEW_SOURCE_POLICY'
+      : ingestionTruth.reasonCode === 'SOURCE_RATE_LIMITED'
+        ? 'WAIT_FOR_RATE_LIMIT_RESET'
+        : ['SOURCE_TIMEOUT', 'SOURCE_SCAN_FAILED'].includes(ingestionTruth.reasonCode)
+          ? 'RETRY_SOURCE_SCAN'
+    : noHealthySource
     ? (sourceDiversity.discoveredCampaignCount <= 1 ? 'CONFIGURE_ADDITIONAL_PRODUCT_SOURCE' : 'WAIT_FOR_CIRCUIT_RECOVERY')
     : 'NONE';
   sourceReliabilityEvent('auto_pilot_source_discovery_summary', {
@@ -735,7 +835,7 @@ async function scanLegacyAccessTradeToQueue(
       `campaigns:${sourceDiversity.discoveredCampaignCount}`,
       `merchants:${sourceDiversity.discoveredMerchantCount}`,
       `healthy_merchants:${sourceDiversity.healthyMerchantCount}`,
-      `created:${diversified.selected.length}`,
+      `created:${counters.queued}`,
       `diversity:${sourceDiversity.status}`,
       `excluded_circuit:${excludedByMerchantCircuit}`,
       `excluded_policy:${excludedByPolicy}`,
@@ -746,12 +846,7 @@ async function scanLegacyAccessTradeToQueue(
   });
 
   const durationMs = Date.now() - startedMs;
-  const reason = noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE'
-    : rateLimited > 0 ? 'source_rate_limited'
-    : timeout > 0 && counters.found === 0 ? 'source_timeout'
-    : counters.failed > 0 ? 'source_partial_failure'
-    : counters.found === 0 ? 'source_no_results'
-    : 'source_scan_completed';
+  const reason = sourceRunReason(ingestionTruth.reasonCode);
   const nextEligibleAt = sourceNextEligibleAt || (counters.found === 0 ? new Date(startedMs + 15 * 60_000).toISOString() : undefined);
   return {
     ...counters, normalized, rejected, timeout, rateLimited, durationMs, sourceStatus, reason, nextEligibleAt, resultTypes, retryAfter,
@@ -955,6 +1050,10 @@ export async function scanAccessTradeTikTokToQueue(
   const registry = options.registry || createDefaultSourceAdapterRegistry();
   const adapter = registry.get<NormalizedAccessTradeTikTokProduct, NormalizedAccessTradeTikTokProduct>(ACCESSTRADE_TIKTOK_SOURCE);
   if (!adapter) {
+    await recordSourceIngestionState({
+      provider: ACCESSTRADE_TIKTOK_SOURCE, ingestionSkipped: true, reasonCode: 'SOURCE_ADAPTER_UNAVAILABLE',
+      observed: 0, selected: 0, skipped: 0, operationId: options.runId,
+    });
     return {
       ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs,
       sourceStatus: 'adapter_unavailable', reason: 'source_adapter_unavailable', resultTypes,
@@ -963,6 +1062,10 @@ export async function scanAccessTradeTikTokToQueue(
   const sourceHealth = await adapter.healthCheck();
   sourceStatus = sourceHealth.status;
   if (!(await adapter.isConfigured())) {
+    await recordSourceIngestionState({
+      provider: adapter.id, ingestionSkipped: true, reasonCode: 'SOURCE_NOT_CONFIGURED',
+      observed: 0, selected: 0, skipped: 0, operationId: options.runId,
+    });
     return {
       ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs,
       sourceStatus, reason: 'source_not_configured', resultTypes,
@@ -972,9 +1075,14 @@ export async function scanAccessTradeTikTokToQueue(
   const usage = await getDailyPipelineUsage();
   const sourceBudgetRemaining = Math.max(0, settings.sourceRequestBudgetPerDay - usage.sourceRequests);
   if (sourceBudgetRemaining <= 0) {
+    const nextEligibleAt = new Date(startedMs + 24 * 60 * 60_000).toISOString();
+    await recordSourceIngestionState({
+      provider: adapter.id, ingestionSkipped: true, reasonCode: 'SOURCE_BUDGET_EXHAUSTED',
+      observed: 0, selected: 0, skipped: 0, nextEligibleAt, operationId: options.runId,
+    });
     return {
       ...counters, normalized, rejected, timeout, rateLimited, durationMs: Date.now() - startedMs,
-      sourceStatus, reason: 'source_budget_exhausted', nextEligibleAt: new Date(startedMs + 24 * 60 * 60_000).toISOString(), resultTypes,
+      sourceStatus, reason: 'source_budget_exhausted', nextEligibleAt, resultTypes,
     };
   }
 
@@ -1019,12 +1127,7 @@ export async function scanAccessTradeTikTokToQueue(
     readiness: ReturnType<typeof scoreCandidateReadiness>;
     keyword: string;
   }>> = [];
-  const knownDuplicates: Array<{
-    campaignName: string;
-    merchantDomain: string;
-    eligible: boolean;
-    healthy: boolean;
-  }> = [];
+  const transportSources: ObservedSourceTruth[] = [];
   let sourceFailureStreak = 0;
 
   for (const strategy of strategies) {
@@ -1048,6 +1151,24 @@ export async function scanAccessTradeTikTokToQueue(
         const item = adapter.normalize(sourceItem);
         normalized += 1;
         const payload = toPayload(item);
+        const merchantIdentity = merchantCircuitIdentity(payload);
+        const merchantDomain = payload.merchantDomain || merchantFromUrl(payload.originalUrl);
+        const campaign = ACCESSTRADE_TIKTOK_SOURCE;
+        const completeIdentity = isCompleteSourceIdentity({ providerId: adapter.id, campaignName: campaign, merchantDomain: merchantIdentity });
+        const policyReason = domainPaused(merchantDomain) ? 'SOURCE_DOMAIN_PAUSED'
+          : pausedCampaigns.has(campaign) ? 'SOURCE_CAMPAIGN_PAUSED'
+            : undefined;
+        const transportReason = openMerchants.has(merchantIdentity) ? 'MERCHANT_CIRCUIT_OPEN' : undefined;
+        const pauseReason = !completeIdentity ? 'SOURCE_IDENTITY_INCOMPLETE' : policyReason || transportReason;
+        transportSources.push({
+          providerId: adapter.id,
+          campaignName: campaign,
+          merchantDomain: merchantIdentity,
+          identityComplete: completeIdentity,
+          transportHealthy: completeIdentity && !transportReason,
+          policyEligible: completeIdentity && !policyReason,
+          selectionEligible: completeIdentity && !policyReason && !transportReason,
+        });
         const earlyReason = fastReject(payload, { affiliateRequired: false });
         if (earlyReason) {
           rejected += 1;
@@ -1060,14 +1181,7 @@ export async function scanAccessTradeTikTokToQueue(
         const existingProduct = products.find(product => product.source === ACCESSTRADE_TIKTOK_SOURCE
           && (product.sourceId === item.id || product.externalId === item.id));
         const discoveryHash = sourceSnapshotHash(payload);
-        const merchantIdentity = merchantCircuitIdentity(payload);
-        const merchantDomain = payload.merchantDomain || merchantFromUrl(payload.originalUrl);
         const category = String(payload.category || 'uncategorized').toLowerCase();
-        const campaign = ACCESSTRADE_TIKTOK_SOURCE;
-        const pauseReason = domainPaused(merchantDomain) ? 'SOURCE_DOMAIN_PAUSED'
-          : pausedCampaigns.has(campaign) ? 'SOURCE_CAMPAIGN_PAUSED'
-            : openMerchants.has(merchantIdentity) ? 'MERCHANT_CIRCUIT_OPEN'
-              : undefined;
         const unchangedCandidate = existingCandidate
           && sourceSnapshotHash(existingCandidate.payload) === discoveryHash
           && reusableTikTokAffiliateProvenance(existingCandidate.payload, payload.originalUrl);
@@ -1077,16 +1191,6 @@ export async function scanAccessTradeTikTokToQueue(
         if (unchangedCandidate || unchangedProduct) {
           counters.duplicate += 1;
           counters.unchanged += 1;
-          const existingHealthy = Boolean(
-            (unchangedCandidate && existingCandidate && !['discarded', 'failed', 'delayed'].includes(existingCandidate.status))
-            || (unchangedProduct && existingProduct && existingProduct.status !== 'archived' && existingProduct.lifecycleState !== 'QUARANTINED'),
-          );
-          knownDuplicates.push({
-            campaignName: campaign,
-            merchantDomain: merchantIdentity,
-            eligible: !pauseReason,
-            healthy: !pauseReason && existingHealthy,
-          });
           continue;
         }
         const complete = [payload.title, payload.price || payload.salePrice, payload.originalUrl, payload.imageUrl, payload.merchantIdentity].filter(Boolean).length;
@@ -1212,30 +1316,39 @@ export async function scanAccessTradeTikTokToQueue(
     });
   }
 
-  const discovered = [
-    ...discoveryPool.map(candidate => ({ campaignName: candidate.campaign || ACCESSTRADE_TIKTOK_SOURCE, merchantDomain: candidate.merchantDomain || 'unknown' })),
-    ...knownDuplicates.map(candidate => ({ campaignName: candidate.campaignName, merchantDomain: candidate.merchantDomain })),
-  ];
-  const eligible = [
-    ...discoveryPool.filter(candidate => candidate.eligible !== false)
-      .map(candidate => ({ campaignName: candidate.campaign || ACCESSTRADE_TIKTOK_SOURCE, merchantDomain: candidate.merchantDomain || 'unknown' })),
-    ...knownDuplicates.filter(candidate => candidate.eligible)
-      .map(candidate => ({ campaignName: candidate.campaignName, merchantDomain: candidate.merchantDomain })),
-  ];
-  const healthy = [
-    ...acceptedSelections.map(candidate => ({ campaignName: candidate.campaign || ACCESSTRADE_TIKTOK_SOURCE, merchantDomain: candidate.merchantDomain || 'unknown' })),
-    ...knownDuplicates.filter(candidate => candidate.healthy)
-      .map(candidate => ({ campaignName: candidate.campaignName, merchantDomain: candidate.merchantDomain })),
-  ];
+  const discovered = transportSources.map(source => ({ campaignName: source.campaignName, merchantDomain: source.merchantDomain }));
+  const eligible = transportSources.filter(source => source.selectionEligible)
+    .map(source => ({ campaignName: source.campaignName, merchantDomain: source.merchantDomain }));
+  const healthy = transportSources.filter(source => source.transportHealthy)
+    .map(source => ({ campaignName: source.campaignName, merchantDomain: source.merchantDomain }));
   const sourceDiversity = computeSourceDiversity(discovered, eligible, healthy, 1);
-  const noHealthySource = normalized > 0 && healthy.length === 0;
+  const completeSourceCount = transportSources.filter(source => source.identityComplete).length;
+  const transportHealthySourceCount = transportSources.filter(source => source.transportHealthy).length;
+  const selectionEligibleSourceCount = transportSources.filter(source => source.selectionEligible).length;
+  const policyBlockedSourceCount = transportSources.filter(source => source.identityComplete && !source.policyEligible).length;
+  const classifiedIngestionTruth = classifySourceIngestionTruth({
+    normalizedCount: normalized,
+    completeSourceCount,
+    transportHealthySourceCount,
+    selectionEligibleSourceCount,
+    policyBlockedSourceCount,
+    materializedCount: acceptedSelections.length,
+    timeoutCount: timeout,
+    rateLimitedCount: rateLimited,
+    failureReasonCode: sourceFailureReasonCode(sourceStatus, counters.failed),
+  });
+  const ingestionTruth = classifiedIngestionTruth.reasonCode === 'SOURCE_SCAN_NO_NEW_CANDIDATES'
+    && affiliateFailures > 0 && acceptedSelections.length === 0
+    ? { ingestionSkipped: true, reasonCode: 'AFFILIATE_LINK_UNAVAILABLE' as const }
+    : classifiedIngestionTruth;
+  const noHealthySource = ingestionTruth.reasonCode === 'NO_HEALTHY_PRODUCT_SOURCE';
   const sourceNextEligibleAt = retryAfter || diversified.skipped
     .map(skip => circuitStates.find(state => state.role === 'MERCHANT' && state.domain === skip.candidate.merchantDomain)?.nextProbeAt)
     .filter((value): value is string => Boolean(value)).sort()[0];
   await recordSourceIngestionState({
     provider: adapter.id,
-    ingestionSkipped: noHealthySource,
-    reasonCode: noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE' : 'SOURCE_SCAN_COMPLETED',
+    ingestionSkipped: ingestionTruth.ingestionSkipped,
+    reasonCode: ingestionTruth.reasonCode,
     observed: discovered.length,
     selected: acceptedSelections.length,
     skipped: diversified.skipped.length + affiliateFailures,
@@ -1265,11 +1378,7 @@ export async function scanAccessTradeTikTokToQueue(
     nextProbeAt: sourceNextEligibleAt,
   });
   const durationMs = Date.now() - startedMs;
-  const reason = noHealthySource ? 'NO_HEALTHY_PRODUCT_SOURCE'
-    : rateLimited ? 'source_rate_limited'
-      : timeout && counters.found === 0 ? 'source_timeout'
-        : counters.found === 0 ? 'source_no_results'
-          : 'source_scan_completed';
+  const reason = sourceRunReason(ingestionTruth.reasonCode);
   return {
     ...counters,
     normalized,
@@ -1290,7 +1399,12 @@ export async function scanAccessTradeTikTokToQueue(
     excludedByMerchantCircuit: diversified.skipped.filter(skip => skip.reason === 'MERCHANT_CIRCUIT_OPEN').length,
     excludedByPolicy: diversified.skipped.filter(skip => ['SOURCE_DOMAIN_PAUSED', 'SOURCE_CAMPAIGN_PAUSED'].includes(skip.reason)).length,
     sourceDiversityStatus: sourceDiversity.status,
-    recommendedNextAction: noHealthySource ? 'WAIT_FOR_CIRCUIT_RECOVERY' : 'NONE',
+    recommendedNextAction: ingestionTruth.reasonCode === 'SOURCE_IDENTITY_INCOMPLETE' ? 'COMPLETE_SOURCE_IDENTITY'
+      : ingestionTruth.reasonCode === 'AFFILIATE_LINK_UNAVAILABLE' ? 'VERIFY_AFFILIATE_GATEWAY'
+        : ingestionTruth.reasonCode === 'SOURCE_POLICY_PAUSED' ? 'REVIEW_SOURCE_POLICY'
+          : ingestionTruth.reasonCode === 'SOURCE_RATE_LIMITED' ? 'WAIT_FOR_RATE_LIMIT_RESET'
+            : ['SOURCE_TIMEOUT', 'SOURCE_SCAN_FAILED'].includes(ingestionTruth.reasonCode) ? 'RETRY_SOURCE_SCAN'
+              : noHealthySource ? 'WAIT_FOR_CIRCUIT_RECOVERY' : 'NONE',
   };
 }
 
@@ -1360,9 +1474,23 @@ export async function scanSourcesToQueue(
   }
   counters.queueSize = Math.max(...results.map(result => result.queueSize));
   const diversity = combinedDiversity(results);
-  const statusOrder: SourceProviderStatus[] = ['ready', 'configured', 'degraded', 'rate_limited', 'circuit_open', 'invalid_credential', 'last_check_failed', 'not_configured', 'adapter_unavailable'];
+  const statusOrder: SourceProviderStatus[] = ['ready', 'configured', 'degraded', 'rate_limited', 'circuit_open', 'quota_exhausted', 'invalid_credential', 'last_check_failed', 'not_configured', 'adapter_unavailable'];
   const sourceStatus = [...results].sort((left, right) => statusOrder.indexOf(left.sourceStatus) - statusOrder.indexOf(right.sourceStatus))[0].sourceStatus;
-  const foundHealthySupply = results.some(result => result.queued > 0 || result.reason === 'source_scan_completed');
+  const foundHealthySupply = results.some(result => (result.healthyMerchantCount || 0) > 0
+    || ['source_scan_completed', 'source_no_new_candidates'].includes(result.reason));
+  const combinedReason = results.some(result => result.reason === 'source_scan_completed') ? 'source_scan_completed'
+    : results.some(result => result.reason === 'source_no_new_candidates') ? 'source_no_new_candidates'
+      : results.some(result => result.reason === 'source_policy_paused') ? 'source_policy_paused'
+        : results.some(result => result.reason === 'affiliate_link_unavailable') ? 'affiliate_link_unavailable'
+          : results.some(result => result.reason === 'source_identity_incomplete') ? 'source_identity_incomplete'
+            : results.some(result => result.reason === 'source_rate_limited') ? 'source_rate_limited'
+              : results.some(result => result.reason === 'source_timeout') ? 'source_timeout'
+                : results.some(result => result.reason === 'source_invalid_credential') ? 'source_invalid_credential'
+                  : results.some(result => result.reason === 'source_quota_exhausted') ? 'source_quota_exhausted'
+                    : results.some(result => result.reason === 'source_circuit_open') ? 'source_circuit_open'
+                      : results.some(result => result.reason === 'source_scan_failed') ? 'source_scan_failed'
+                        : results.every(result => result.reason === 'NO_HEALTHY_PRODUCT_SOURCE') ? 'NO_HEALTHY_PRODUCT_SOURCE'
+                          : 'source_no_results';
   const retryTimes = results.flatMap(result => [result.retryAfter, result.nextEligibleAt]).filter((value): value is string => Boolean(value)).sort();
   return {
     ...counters,
@@ -1372,10 +1500,7 @@ export async function scanSourcesToQueue(
     rateLimited: results.reduce((sum, result) => sum + result.rateLimited, 0),
     durationMs: results.reduce((sum, result) => sum + result.durationMs, 0),
     sourceStatus,
-    reason: foundHealthySupply ? 'source_scan_completed'
-      : results.every(result => result.reason === 'NO_HEALTHY_PRODUCT_SOURCE') ? 'NO_HEALTHY_PRODUCT_SOURCE'
-        : results.some(result => result.reason === 'source_rate_limited') ? 'source_rate_limited'
-          : 'source_no_results',
+    reason: combinedReason,
     nextEligibleAt: retryTimes[0],
     retryAfter: results.map(result => result.retryAfter).filter((value): value is string => Boolean(value)).sort()[0],
     resultTypes: mergeResultTypes(...results.map(result => result.resultTypes)),
@@ -1387,7 +1512,13 @@ export async function scanSourcesToQueue(
     excludedByMerchantCircuit: results.reduce((sum, result) => sum + (result.excludedByMerchantCircuit || 0), 0),
     excludedByPolicy: results.reduce((sum, result) => sum + (result.excludedByPolicy || 0), 0),
     sourceDiversityStatus: diversity?.status,
-    recommendedNextAction: foundHealthySupply ? 'NONE' : 'WAIT_FOR_CIRCUIT_RECOVERY',
+    recommendedNextAction: combinedReason === 'source_policy_paused' ? 'REVIEW_SOURCE_POLICY'
+        : combinedReason === 'affiliate_link_unavailable' ? 'VERIFY_AFFILIATE_GATEWAY'
+        : results.some(result => result.reason === 'source_identity_incomplete') ? 'COMPLETE_SOURCE_IDENTITY'
+          : foundHealthySupply ? 'NONE'
+          : ['source_rate_limited'].includes(combinedReason) ? 'WAIT_FOR_RATE_LIMIT_RESET'
+            : ['source_timeout', 'source_scan_failed'].includes(combinedReason) ? 'RETRY_SOURCE_SCAN'
+              : 'WAIT_FOR_CIRCUIT_RECOVERY',
   };
 }
 
@@ -1509,7 +1640,7 @@ async function reviewAutonomousCandidate(
   item: CandidateQueueItem,
   counters: PipelineCounters,
   workerId: string,
-  execution: { signal?: AbortSignal; deadline?: number } = {},
+  execution: { operationId?: string; jobId?: string; signal?: AbortSignal; deadline?: number } = {},
 ): Promise<CandidateReviewOutcome> {
   throwIfExecutionAborted(execution.signal);
   const { payload } = item;
@@ -1585,8 +1716,11 @@ async function reviewAutonomousCandidate(
     return { status: 'discarded', terminal: true, reason: minimumBlockers.join(','), productId: existing?.id };
   }
 
-  const operationId = `candidate-operation:${item.id}:${item.sourceHash}`.slice(0, 160);
-  const probeOptions = { operationId, jobId: item.durableJobId, correlationId: item.id, signal: execution.signal };
+  const generation = Math.max(0, Math.floor(Number(item.durableJobGeneration) || 0));
+  const operationId = execution.operationId
+    || item.durableOperationId
+    || `candidate-operation:${item.id}:${item.sourceHash}:g${generation}`.slice(0, 160);
+  const probeOptions = { operationId, jobId: execution.jobId || item.durableJobId, correlationId: item.id, signal: execution.signal };
   const affiliateCircuit = await getDomainCircuitDecision(payload.affiliateUrl, Date.now(), { ...probeOptions, role: 'AFFILIATE_GATEWAY' });
   if (!affiliateCircuit.allowed) {
     const nextRetryAt = affiliateCircuit.retryAt || new Date(Date.now() + 30 * 60_000).toISOString();
@@ -2566,6 +2700,8 @@ export async function processCandidateFromDurableJob(input: {
   candidateId: string;
   jobId: string;
   operationId: string;
+  sourceHash: string;
+  generation?: number;
   workerId: string;
   signal?: AbortSignal;
   deadline?: number;
@@ -2574,6 +2710,15 @@ export async function processCandidateFromDurableJob(input: {
   const existing = await getCandidateById(input.candidateId);
   if (!existing) throw new Error('CANDIDATE_NOT_FOUND');
   if (existing.durableJobId !== input.jobId) throw new Error('CANDIDATE_JOB_MISMATCH');
+  const candidateGeneration = Math.max(0, Math.floor(Number(existing.durableJobGeneration) || 0));
+  const expectedOperationId = existing.durableOperationId
+    || `candidate-operation:${existing.id}:${existing.sourceHash}:g${candidateGeneration}`.slice(0, 160);
+  if (
+    existing.sourceHash !== input.sourceHash
+    || (input.generation !== undefined
+      && candidateGeneration !== Math.max(0, Math.floor(input.generation)))
+    || input.operationId !== expectedOperationId
+  ) throw new Error('CANDIDATE_GENERATION_MISMATCH');
   const item = await claimCandidateForDurableJob(input.candidateId, input.jobId);
   if (!item) throw new Error('CANDIDATE_CLAIM_CONFLICT');
   const counters = emptyCounters();
