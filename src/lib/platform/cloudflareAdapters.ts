@@ -1,5 +1,6 @@
 import type { JobQueueAdapter, SchedulerAdapter } from './types';
 import { D1JobStore } from '../storage/d1/d1JobStore';
+import { D1DealStore } from '../storage/d1/d1DealStore';
 import { cloudflareContext, type CloudflareEnvironment } from '../runtime/cloudflare/context';
 import { EVENT_LIMITS, EventJobError, makeMessage, validTime, validateInput,
   type EventJob, type EventJobInput, type EventTickResult, type QueueBinding } from './cloudflareContracts';
@@ -37,11 +38,13 @@ export function createCloudflareJobQueueAdapter(env: CloudflareEnvironment): Job
     } };
 }
 export function createCloudflareSchedulerAdapter(env: CloudflareEnvironment): SchedulerAdapter<EventTickResult> {
-  const { jobs } = eventContext(env), queue = createCloudflareJobQueueAdapter(env);
+  const { jobs, db } = eventContext(env), queue = createCloudflareJobQueueAdapter(env);
   return { id: 'cloudflare-indexed-cron', runtime: 'cloudflare', async tick(now = Date.now()) {
     validTime(now); const tasks = await jobs.due(now); let created = 0;
     for (const task of tasks) if (await jobs.materialize(task, now)) created++;
+    const deals = env.SANDEAL_DEAL_INTELLIGENCE_ENABLED === 'true' ? await new D1DealStore(db).materializeDue(now) : 0;
+    created += deals;
     const enqueued = await queue.dispatch(now);
-    return { due: tasks.length, created, enqueued };
+    return { due: tasks.length + deals, created, enqueued };
   } };
 }

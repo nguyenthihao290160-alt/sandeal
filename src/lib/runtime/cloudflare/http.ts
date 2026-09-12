@@ -6,6 +6,7 @@ import type { SettingsKey } from '../../storage/settingsStore';
 import { D1AffiliateStore } from '../../storage/d1/d1AffiliateStore';
 import { prepareMoneyRedirect } from '../../affiliate/money/redirect';
 import { MoneyError } from '../../affiliate/money/types';
+import { D1DealStore, type DealRanking } from '../../storage/d1/d1DealStore';
 
 const securityHeaders = {
   'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -64,6 +65,18 @@ export async function cloudflareFetch(request: Request, env: CloudflareEnvironme
     return await context.run(async () => {
       if (pathname.startsWith('/api/admin/')) {
         protect(request, env);
+        if (pathname === '/api/admin/deals' && request.method === 'GET' && env.SANDEAL_DEAL_INTELLIGENCE_ENABLED === 'true') {
+          const allowed = ['kind', 'provider', 'platform', 'recommendation', 'priority', 'limit', 'productId'];
+          for (const key of url.searchParams.keys()) if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw new CloudflareRequestError('INVALID_DEAL_QUERY', 400);
+          const store = new D1DealStore(context.db), productId = url.searchParams.get('productId');
+          if (productId) {
+            if (!/^[a-z0-9-]{1,160}$/i.test(productId) || [...url.searchParams.keys()].length !== 1) throw new CloudflareRequestError('INVALID_DEAL_QUERY', 400);
+            return json({ ok: true, data: await store.latest(productId, Date.now()), recommendationOnly: true });
+          }
+          const filter = Object.fromEntries([...url.searchParams.entries()].filter(([key]) => key !== 'limit'));
+          try { return json({ ok: true, ...(await store.rank({ kind: 'TOP', ...filter } as DealRanking, Number(url.searchParams.get('limit') || 20), Date.now())), recommendationOnly: true }); }
+          catch (error) { if (error && typeof error === 'object' && 'code' in error && String(error.code).startsWith('DEAL_RANKING_')) throw new CloudflareRequestError(String(error.code), 400); throw error; }
+        }
         const settings = pathname.match(/^\/api\/admin\/settings\/(automation|scheduler)$/);
         if (settings && ['GET', 'PUT'].includes(request.method)) {
           const key = settings[1] as SettingsKey;

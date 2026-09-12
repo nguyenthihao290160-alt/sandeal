@@ -1,5 +1,5 @@
 import type { Product } from '../../types';
-import { isPublicSafeProduct } from '../../publicProductFilter';
+import { isPublicSafeProductAt } from '../../publicProductFilter';
 import { normalizeProductIdentityUrl } from '../../storage/productIdentity';
 import { MONEY_LIMITS, type NormalizedAffiliateOffer, type ProviderObservation } from './types';
 import { safeMoneyUrl, safeAffiliateDestination, validOfferProvenance } from './validation';
@@ -10,7 +10,7 @@ export function selectMoneyRoute(product: Product, observations: ProviderObserva
   const offers = (product.offers || []).flatMap(offer => offer.monetization ? [offer.monetization] : []);
   const candidates = offers.map(offer => {
     const reasons: string[] = [], observation = observations.find(row => row.health.provider === offer.provider);
-    if (!isPublicSafeProduct(product) || product.runtimeRecoveryCanaryObservationPending === true) reasons.push('REJECTED_UNPUBLISHED');
+    if (!isPublicSafeProductAt(product, now) || product.runtimeRecoveryCanaryObservationPending === true) reasons.push('REJECTED_UNPUBLISHED');
     if (!['accesstrade', 'tiktok'].includes(offer.provider)) reasons.push('REJECTED_PROVIDER_DISABLED');
     if (!observation || !observation.health.enabled || !observation.health.ready || observation.health.state !== 'READY') reasons.push('REJECTED_PROVIDER_DISABLED');
     if (observation && (!observation.capabilities.discovery || observation.origin !== offer.origin)) reasons.push('REJECTED_PROVIDER_CAPABILITY');

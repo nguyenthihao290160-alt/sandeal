@@ -19,6 +19,7 @@ export interface CloudflareEnvironment {
   SANDEAL_AUTOPILOT_ENABLED?: string;
   JOB_QUEUE?: QueueBinding;
   SANDEAL_MONEY_ENGINE_ENABLED?: string;
+  SANDEAL_DEAL_INTELLIGENCE_ENABLED?: string;
 }
 
 export class CloudflareRequestError extends Error {

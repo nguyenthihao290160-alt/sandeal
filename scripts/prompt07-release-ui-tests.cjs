@@ -155,7 +155,11 @@ test('release CI có đủ gate và tuyệt đối không deploy', () => {
 test('env example chỉ chứa placeholder rỗng hoặc default storage không nhạy cảm', () => {
   const lines = read('.env.example').split(/\r?\n/).filter(line => /^[A-Z][A-Z0-9_]*=/.test(line));
   const safeDefaults = new Set([
+    'SANDEAL_RUNTIME=legacy',
     'SANDEAL_STORAGE_DRIVER=file',
+    'SHOPEE_AFFILIATE_ENABLED=false',
+    'SANDEAL_LOCAL_ONLY=true',
+    'SANDEAL_PRODUCTION=false',
     'MONGODB_DATABASE=sandeal',
     'RUNTIME_RECOVERY_V2=SHADOW',
     'RECOVERY_CANARY=OFF',

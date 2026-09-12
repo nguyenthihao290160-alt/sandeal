@@ -9,11 +9,12 @@ export class EventJobError extends Error {
 }
 export type EventJobStatus = Extract<AutomationJobStatus, 'PENDING' | 'RUNNING' | 'RETRY_SCHEDULED' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED'>;
 export interface EventJobInput {
-  type: 'CAPTURE_PRICE_HISTORY' | 'AGGREGATE_GROWTH_METRICS';
+  type: 'CAPTURE_PRICE_HISTORY' | 'AGGREGATE_GROWTH_METRICS' | 'DEAL_EVALUATE';
   idempotencyKey: string;
   payload: { productId: string };
 }
-export interface EventJob extends Pick<AutomationJob, 'id' | 'type' | 'idempotencyKey' | 'createdAt' | 'attemptCount'> {
+export interface EventJob extends Pick<AutomationJob, 'id' | 'idempotencyKey' | 'createdAt' | 'attemptCount'> {
+  type: EventJobInput['type'];
   status: EventJobStatus;
   payload: { productId: string };
   payloadVersion: 1;
@@ -24,7 +25,7 @@ export interface EventJob extends Pick<AutomationJob, 'id' | 'type' | 'idempoten
   dispatchCount: number;
   dispatchAt: number;
   lastErrorCode: string | null;
-  result: { snapshotCreated: boolean } | { revenueEvents: number; lastSequence: number } | null;
+  result: { snapshotCreated: boolean } | { revenueEvents: number; lastSequence: number } | { evidenceFingerprint: string } | null;
 }
 export interface JobMessage {
   jobId: string;
@@ -57,7 +58,7 @@ export function validatePayload(value: unknown): asserts value is EventJobInput[
   }
 }
 export function validateInput(input: EventJobInput) {
-  if (!input || !['CAPTURE_PRICE_HISTORY','AGGREGATE_GROWTH_METRICS'].includes(input.type)) throw new EventJobError('UNKNOWN_JOB_TYPE', 'QUARANTINE');
+  if (!input || !['CAPTURE_PRICE_HISTORY','AGGREGATE_GROWTH_METRICS','DEAL_EVALUATE'].includes(input.type)) throw new EventJobError('UNKNOWN_JOB_TYPE', 'QUARANTINE');
   if (typeof input.idempotencyKey !== 'string' || !/^[a-z0-9:_-]{1,200}$/i.test(input.idempotencyKey)) throw new EventJobError('INVALID_IDEMPOTENCY_KEY', 'QUARANTINE');
   validatePayload(input.payload);
   if (input.type === 'AGGREGATE_GROWTH_METRICS' && input.payload.productId !== 'revenue-all') throw new EventJobError('INVALID_REVENUE_SCOPE', 'QUARANTINE');
@@ -69,7 +70,7 @@ export function makeMessage(job: EventJob): JobMessage {
 }
 export function validateMessage(value: unknown): asserts value is JobMessage {
   if (!objectKeys(value, ['jobId', 'jobType', 'idempotencyKey', 'attempt', 'createdAt', 'payloadVersion'])) throw new EventJobError('MALFORMED_MESSAGE', 'QUARANTINE');
-  if (!['CAPTURE_PRICE_HISTORY','AGGREGATE_GROWTH_METRICS'].includes(String(value.jobType))) throw new EventJobError('UNKNOWN_JOB_TYPE', 'QUARANTINE');
+  if (!['CAPTURE_PRICE_HISTORY','AGGREGATE_GROWTH_METRICS','DEAL_EVALUATE'].includes(String(value.jobType))) throw new EventJobError('UNKNOWN_JOB_TYPE', 'QUARANTINE');
   if (typeof value.idempotencyKey !== 'string' || !/^[a-z0-9:_-]{1,200}$/i.test(value.idempotencyKey)
     || value.jobId !== jobId(value.idempotencyKey) || value.payloadVersion !== 1
     || !Number.isInteger(value.attempt) || Number(value.attempt) < 1 || Number(value.attempt) > EVENT_LIMITS.attempts

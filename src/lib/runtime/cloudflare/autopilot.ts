@@ -4,6 +4,7 @@ import { EVENT_LIMITS, EventJobError, classifyEventError, validateInput, validat
   type QueueBatch, type QueueDelivery } from '../../platform/cloudflareContracts';
 import type { CloudflareEnvironment } from './context';
 import { MoneyError } from '../../affiliate/money/types';
+import { D1DealStore } from '../../storage/d1/d1DealStore';
 
 export async function cloudflareScheduled(controller: { scheduledTime: number }, env: CloudflareEnvironment) {
   try { await createCloudflareSchedulerAdapter(env).tick(controller.scheduledTime); }
@@ -28,8 +29,15 @@ export async function consumeDelivery(delivery: QueueDelivery, env: CloudflareEn
   const job = await jobs.claim(stored, now);
   if (!job) { delivery.retry({ delaySeconds: Math.max(1, Math.min(60, Math.ceil((Math.max(stored.availableAt, stored.leaseExpiresAt) - now) / 1000))) }); return 'DEFERRED'; }
   try {
-    validateInput({ type: job.type as 'CAPTURE_PRICE_HISTORY' | 'AGGREGATE_GROWTH_METRICS', payload: job.payload, idempotencyKey: job.idempotencyKey });
-    if (job.type === 'AGGREGATE_GROWTH_METRICS') {
+    validateInput({ type: job.type, payload: job.payload, idempotencyKey: job.idempotencyKey });
+    if (job.type === 'DEAL_EVALUATE') {
+      if (env.SANDEAL_DEAL_INTELLIGENCE_ENABLED !== 'true') throw new EventJobError('DEAL_INTELLIGENCE_DISABLED', 'FINAL');
+      if (!env.JOB_QUEUE || typeof env.JOB_QUEUE.send !== 'function') throw new EventJobError('QUEUE_BINDING_UNAVAILABLE', 'RETRYABLE');
+      const store = new D1DealStore(context.db, options.moneyTestOnly === true);
+      const prepared = await store.prepare(job.payload.productId, (env.AFFILIATE_REDIRECT_HOSTS || '').split(',').map(host => host.trim()).filter(Boolean), now);
+      await options.beforeCommit?.();
+      await store.commit(prepared, validTime(clock()), job);
+    } else if (job.type === 'AGGREGATE_GROWTH_METRICS') {
       await options.beforeCommit?.();
       await jobs.commitRevenueSnapshot(job, validTime(clock()), options.moneyTestOnly === true);
     } else {

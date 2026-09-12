@@ -856,6 +856,7 @@ function getStoredBlockReason(
 
 export function getPublicProductBlockReason(
     product?: Product | null,
+    now = Date.now(),
 ): string {
   if (!product) {
     return 'Không có dữ liệu sản phẩm.';
@@ -1037,7 +1038,7 @@ export function getPublicProductBlockReason(
         affiliateHealthStatus: 'ok',
         imageHealthStatus: 'ok',
       }
-    : product);
+    : product, now);
   if (!eligibility.eligibleForPublic) {
     const blocker = eligibility.criticalBlockers[0]
       || (product.publicHidden !== false ? 'public_hidden' : 'public_blocked');
@@ -1053,4 +1054,8 @@ export function isPublicSafeProduct(
   return (
       getPublicProductBlockReason(product) === ''
   );
+}
+
+export function isPublicSafeProductAt(product: Product, now: number): boolean {
+  return getPublicProductBlockReason(product, now) === '';
 }
