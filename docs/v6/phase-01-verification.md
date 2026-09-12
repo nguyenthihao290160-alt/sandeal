@@ -1,6 +1,6 @@
 # SanDeal V6 Phase 01.5 verification lock
 
-Audit date: 2026-09-07 (Asia/Saigon). Repository: `C:\duan\sandeal`.
+Audit date: 2026-09-07 (Asia/Saigon). Repository: SanDeal.
 
 RESULT=FAIL
 
@@ -119,9 +119,7 @@ Entry `git diff --stat`:
 
 ### Attribution evidence
 
-The original local Phase 1 transcript is:
-
-`C:/Users/huydj/.codex/sessions/2026/09/06/rollout-2026-09-06T19-32-15-01a076b4-7fa0-7ee1-9bbb-03097ea39e95.jsonl`.
+The original local Phase 1 transcript was reviewed for the attribution findings below. Its machine-specific location and session identifier are omitted; the transcript is not a repository artifact.
 
 Evidence is stronger than the previous report alone:
 

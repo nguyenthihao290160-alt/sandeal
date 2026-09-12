@@ -30,7 +30,7 @@ async function test(name, run) {
 function response(status, body = {}, headers = {}) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 }
-const rawKey = 'AIza-isolated-complete-key-must-never-escape-1234';
+const rawKey = 'test-only-gemini-credential-do-not-use-1234';
 function credential(overrides = {}) {
   return {
     id: 'gemini-safe-test', platform: 'gemini', credentialType: 'api_key', role: 'primary', label: 'Gemini isolated',
