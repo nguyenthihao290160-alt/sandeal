@@ -9,6 +9,8 @@ import type {
   StorageBoundedCollectionOptions,
   StorageBoundedCollectionResult,
   StorageCapabilities,
+  StorageExclusiveOptions,
+  StorageExclusiveWork,
   StoragePage,
   StoragePageOptions,
   StorageScanResult,
@@ -146,6 +148,23 @@ export function runStreamingTransaction<T>(
     options?: StorageStreamingTransactionOptions<T>,
 ): Promise<{ changed: boolean; itemCount: number }> {
   return getStorageAdapter().runStreamingTransaction(collection, fn, options);
+}
+
+/**
+ * Hold one adapter-owned cross-process coordination scope across bounded work.
+ * The returned handle lets callers fence each dependent child commit against
+ * loss of that scope without claiming multi-collection atomicity.
+ */
+export function runExclusive<T>(
+    scope: string,
+    work: StorageExclusiveWork<T>,
+    options?: StorageExclusiveOptions,
+): Promise<T> {
+  const adapter = getStorageAdapter();
+  if (!adapter.runExclusive) {
+    throw new Error(`STORAGE_EXCLUSIVE_SCOPE_UNSUPPORTED:${adapter.driver}`);
+  }
+  return adapter.runExclusive(scope, work, options);
 }
 
 /**

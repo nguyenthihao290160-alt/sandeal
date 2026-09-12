@@ -1,9 +1,13 @@
-import { fileStorageAdapter } from './fileStorageAdapter';
 import {
   getStorageConfig,
   type MongoStorageConfig,
 } from './storageConfig';
 import type { StorageAdapter } from './types';
+import { getSandealRuntime } from '../runtime/config';
+import { DomainStorageError, type DomainStorage } from './domainStorage';
+import { createRuntimeStorage, currentStorageScope, RuntimeStorageError, type StorageDependencies } from './runtimeStorage';
+import { createD1StorageAdapter } from './d1/d1StorageAdapter';
+export { withStorageAdapter } from './runtimeStorage';
 
 let mongoAdapter: StorageAdapter | undefined;
 let mongoAdapterConfigKey: string | undefined;
@@ -45,8 +49,32 @@ function loadMongoAdapter(config: MongoStorageConfig): StorageAdapter {
   return adapter;
 }
 
-export function getStorageAdapter(): StorageAdapter {
+function createLegacyStorage(): StorageAdapter {
   const config = getStorageConfig();
-  if (config.driver === 'file') return fileStorageAdapter;
+  if (config.driver === 'file') {
+    // Legacy-only dependencies are never loaded while constructing D1 storage.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return (require('./fileStorageAdapter') as typeof import('./fileStorageAdapter')).fileStorageAdapter;
+  }
   return loadMongoAdapter(config);
+}
+
+export function createStorage(dependencies: StorageDependencies): StorageAdapter {
+  return createRuntimeStorage({ ...dependencies, createD1: dependencies.createD1 || createD1StorageAdapter }, createLegacyStorage);
+}
+
+export function getStorageAdapter(): StorageAdapter {
+  const runtime = getSandealRuntime();
+  const scoped = currentStorageScope();
+  if (scoped) {
+    if (runtime === 'cloudflare' && scoped.driver !== 'd1') throw new RuntimeStorageError('CLOUDFLARE_STORAGE_CAPABILITY_MISMATCH');
+    return scoped;
+  }
+  return createStorage({ runtime });
+}
+
+export function getDomainStorage(): DomainStorage {
+  const domain = getStorageAdapter().domain;
+  if (!domain) throw new DomainStorageError('DOMAIN_STORAGE_UNSUPPORTED');
+  return domain;
 }

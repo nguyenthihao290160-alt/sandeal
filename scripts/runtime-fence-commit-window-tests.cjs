@@ -19,6 +19,7 @@ process.env.SANDEAL_RELEASE_ID = releaseId;
 process.env.GIT_COMMIT_SHA = releaseId;
 process.env.NEXT_PUBLIC_SANDEAL_RELEASE_ID = releaseId;
 process.env.ALLOW_PAID_AI = 'false';
+process.env.SANDEAL_ROLE_FENCE_LEASE_MS = '15000';
 require('./register-typescript.cjs');
 
 const COLLECTIONS = [
@@ -115,6 +116,18 @@ async function main() {
     }, 'runtime-fence-test');
   }
 
+  async function holdCollectionLock(collection) {
+    const entered = deferred();
+    const release = deferred();
+    const operation = adapter.runTransaction(collection, async () => {
+      entered.resolve();
+      await release.promise;
+      return undefined;
+    });
+    await within(entered.promise, 2_000, `${collection.toUpperCase()}_LOCK_NOT_ACQUIRED`);
+    return { operation, release };
+  }
+
   async function acquireWorker(suffix, options = {}) {
     const workerId = `runtime-fence-worker-${suffix}`;
     const role = await roles.acquireRuntimeRole({
@@ -177,6 +190,129 @@ async function main() {
       },
     });
     assert.deepEqual(order, ['prepared', 'authority-acquired', 'authority-released']);
+  });
+
+  await test('production role lease time is captured after waiting for the durable runtime fence', async () => {
+    await reset();
+    const holder = await holdCollectionLock('runtime-role-fencing');
+    const realDateNow = Date.now;
+    const base = realDateNow();
+    let offsetMs = 0;
+    const waiting = deferred();
+    Date.now = () => base + offsetMs;
+    fileStorage.setFileStorageTransactionTestHookForTests(input => {
+      if (input.collection === 'runtime-role-fencing'
+          && input.phase === 'COLLECTION_LOCK_WAIT_STARTED') {
+        waiting.resolve();
+      }
+    });
+    let acquired;
+    try {
+      const acquisition = roles.acquireRuntimeRole({
+        role: 'SCHEDULER',
+        ownerId: 'runtime-fence-wait-owner',
+        instanceId: 'runtime-fence-wait-instance',
+        releaseId,
+        leaseMs: 5_000,
+      });
+      await within(waiting.promise, 2_000, 'RUNTIME_FENCE_WAIT_NOT_OBSERVED');
+      offsetMs = 6_000;
+      holder.release.resolve();
+      await within(holder.operation, 2_000, 'RUNTIME_FENCE_HOLDER_DID_NOT_RELEASE');
+      acquired = await within(acquisition, 3_000, 'POST_FENCE_WAIT_ACQUISITION_STUCK');
+      assert.equal(acquired.acquired, true);
+      assert.equal(Date.parse(acquired.lease.acquiredAt), base + offsetMs);
+      assert.equal(Date.parse(acquired.lease.expiresAt), base + offsetMs + 5_000);
+      assert.equal(await roles.isRuntimeRoleOwner('SCHEDULER', acquired.ownership, base + offsetMs), true);
+      assert.equal(await roles.releaseRuntimeRole('SCHEDULER', acquired.ownership, base + offsetMs + 1), true);
+    } finally {
+      holder.release.resolve();
+      await holder.operation.catch(() => undefined);
+      fileStorage.setFileStorageTransactionTestHookForTests(undefined);
+      Date.now = realDateNow;
+    }
+  });
+
+  await test('production role lease cannot be born expired after waiting for its collection lock', async () => {
+    await reset();
+    const holder = await holdCollectionLock('runtime-role-leases');
+    const realDateNow = Date.now;
+    const base = realDateNow();
+    let offsetMs = 0;
+    const waiting = deferred();
+    Date.now = () => base + offsetMs;
+    fileStorage.setFileStorageTransactionTestHookForTests(input => {
+      if (input.collection === 'runtime-role-leases'
+          && input.phase === 'COLLECTION_LOCK_WAIT_STARTED') {
+        waiting.resolve();
+      }
+    });
+    let acquired;
+    try {
+      const acquisition = roles.acquireRuntimeRole({
+        role: 'WORKER',
+        ownerId: 'runtime-role-wait-owner',
+        instanceId: 'runtime-role-wait-instance',
+        releaseId,
+        leaseMs: 5_000,
+      });
+      await within(waiting.promise, 2_000, 'RUNTIME_ROLE_WAIT_NOT_OBSERVED');
+      offsetMs = 6_000;
+      holder.release.resolve();
+      await within(holder.operation, 2_000, 'RUNTIME_ROLE_HOLDER_DID_NOT_RELEASE');
+      acquired = await within(acquisition, 3_000, 'POST_ROLE_WAIT_ACQUISITION_STUCK');
+      assert.equal(acquired.acquired, true);
+      assert.equal(Date.parse(acquired.lease.acquiredAt), base + offsetMs);
+      assert.equal(Date.parse(acquired.lease.expiresAt), base + offsetMs + 5_000);
+      assert.equal(await roles.isRuntimeRoleOwner('WORKER', acquired.ownership, base + offsetMs), true);
+      assert.equal(await roles.releaseRuntimeRole('WORKER', acquired.ownership, base + offsetMs + 1), true);
+    } finally {
+      holder.release.resolve();
+      await holder.operation.catch(() => undefined);
+      fileStorage.setFileStorageTransactionTestHookForTests(undefined);
+      Date.now = realDateNow;
+    }
+  });
+
+  await test('same-instance renewal preserves its epoch while expired and released reacquisition advance it', async () => {
+    await reset();
+    const base = Date.now();
+    const identity = {
+      role: 'WORKER',
+      ownerId: 'runtime-epoch-owner',
+      instanceId: 'runtime-epoch-instance',
+      releaseId,
+      leaseMs: 5_000,
+    };
+    const first = await roles.acquireRuntimeRole({ ...identity, now: base });
+    assert.equal(first.event, 'ACQUIRED');
+
+    const renewed = await roles.acquireRuntimeRole({ ...identity, now: base + 1_000 });
+    assert.equal(renewed.event, 'RENEWED');
+    assert.equal(renewed.ownership.fencingToken, first.ownership.fencingToken);
+    assert.equal(renewed.lease.acquiredAt, first.lease.acquiredAt);
+    assert.equal(renewed.lease.startedAt, first.lease.startedAt);
+
+    const afterExpiry = await roles.acquireRuntimeRole({ ...identity, now: base + 6_001 });
+    assert.equal(afterExpiry.event, 'ACQUIRED');
+    assert.ok(afterExpiry.ownership.fencingToken > renewed.ownership.fencingToken);
+    assert.equal(Date.parse(afterExpiry.lease.acquiredAt), base + 6_001);
+    assert.equal(await roles.heartbeatRuntimeRole('WORKER', renewed.ownership, 5_000, base + 6_002), false);
+    assert.equal(await roles.releaseRuntimeRole('WORKER', renewed.ownership, base + 6_002), false);
+
+    await assert.rejects(
+        () => roles.withRuntimeRoleAuthority('WORKER', renewed.ownership, async () => undefined),
+        /WORKER_FENCING_REJECTED/,
+    );
+
+    assert.equal(await roles.releaseRuntimeRole('WORKER', afterExpiry.ownership, base + 6_002), true);
+    const afterRelease = await roles.acquireRuntimeRole({ ...identity, now: base + 6_003 });
+    assert.equal(afterRelease.event, 'ACQUIRED');
+    assert.ok(afterRelease.ownership.fencingToken > afterExpiry.ownership.fencingToken);
+    assert.equal(Date.parse(afterRelease.lease.acquiredAt), base + 6_003);
+    assert.equal(await roles.heartbeatRuntimeRole('WORKER', afterExpiry.ownership, 5_000, base + 6_004), false);
+    assert.equal(await roles.releaseRuntimeRole('WORKER', afterExpiry.ownership, base + 6_004), false);
+    assert.equal(await roles.releaseRuntimeRole('WORKER', afterRelease.ownership, base + 6_004), true);
   });
 
   await test('large retained history mutation does not block authoritative lease renewal', async () => {
@@ -534,6 +670,72 @@ async function main() {
       assert.equal(leases.length, 1);
       assert.equal(leases[0].releaseId, commitB);
       assert.equal(leases[0].status, 'RELEASED');
+    }
+  });
+
+  await test('runtime-fence finally stays bounded when its internal heartbeat never settles', async () => {
+    await reset();
+    const { role } = await acquireWorker('hung-runtime-fence-heartbeat');
+    const originalRunTransaction = adapter.runTransaction;
+    const heartbeatEntered = deferred();
+    const neverSettles = new Promise(() => undefined);
+    const keepAlive = setInterval(() => undefined, 1_000);
+    let interceptFenceHeartbeat = false;
+    let intercepted = false;
+
+    adapter.runTransaction = function runTransactionWithHungFenceHeartbeat(
+        collection,
+        work,
+        options,
+    ) {
+      if (interceptFenceHeartbeat
+          && !intercepted
+          && collection === 'runtime-role-fencing') {
+        intercepted = true;
+        heartbeatEntered.resolve();
+        return neverSettles;
+      }
+      return originalRunTransaction(collection, work, options);
+    };
+
+    const startedAt = Date.now();
+    try {
+      const guarded = roles.withRuntimeRoleAuthority(
+          'WORKER',
+          role.ownership,
+          async () => {
+            await within(
+                heartbeatEntered.promise,
+                7_000,
+                'RUNTIME_FENCE_HEARTBEAT_DID_NOT_START',
+            );
+            return 'work-completed';
+          },
+          Date.now(),
+          undefined,
+          () => {
+            interceptFenceHeartbeat = true;
+          },
+      );
+
+      assert.equal(
+          await within(guarded, 9_000, 'RUNTIME_FENCE_FINALLY_WAITED_FOREVER'),
+          'work-completed',
+      );
+      const elapsedMs = Date.now() - startedAt;
+      assert.ok(elapsedMs >= 5_000, `heartbeat did not reach the hung path: ${elapsedMs}ms`);
+      assert.ok(elapsedMs < 9_000, `bounded release took ${elapsedMs}ms`);
+
+      const fences = await adapter.readCollection('runtime-role-fencing');
+      const abandoned = fences.find(item => item.role === 'WORKER');
+      assert.ok(abandoned);
+      assert.equal(abandoned.status, 'ACTIVE');
+      assert.equal(abandoned.instanceId, role.ownership.instanceId);
+      assert.ok(Date.parse(abandoned.expiresAt) > Date.now());
+      assert.ok(Date.parse(abandoned.expiresAt) <= startedAt + 16_000);
+    } finally {
+      clearInterval(keepAlive);
+      adapter.runTransaction = originalRunTransaction;
     }
   });
 

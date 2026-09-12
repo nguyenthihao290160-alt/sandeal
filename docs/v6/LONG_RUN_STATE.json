@@ -1,0 +1,1372 @@
+{
+  "program": "SANDEAL_V6_PHASE_5_AFFILIATE_MONEY_ENGINE",
+  "currentPhase": "PHASE_5",
+  "currentStep": "Phase 5 Affiliate Money Engine complete locally; stopped before Phase 6",
+  "result": "PASS",
+  "completedCheckpoints": [
+    "PHASE_3: Focused reconstruction checks: 159 passed, zero failures/skips",
+    "PHASE_3_5: Local shadow parity, immutable source and failure proof: 14 PASS",
+    "PHASE_4: Runtime, routing and required regressions complete: 207 PASS",
+    "PHASE_4_5: Event-driven Queue/Cron foundation complete: 32 phase cases plus 76 critical/affected regressions, 108 PASS, zero failures/skips",
+    "PHASE_5: AccessTrade-first Affiliate Money Engine complete locally: 57 phase cases plus 223 affected regressions, 280 PASS, zero failures/skips"
+  ],
+  "verifiedTestEvidence": [
+    {
+      "name": "v6-migration",
+      "path": "docs/v6/evidence/v6-migration.json",
+      "command": "node scripts/v6-migration-tests.cjs",
+      "exit": 0,
+      "passed": 22,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-G7YPyr/v6-migration.log"
+    },
+    {
+      "name": "storage-adapter-phase1a",
+      "path": "docs/v6/evidence/storage-adapter-phase1a.json",
+      "command": "node scripts/storage-adapter-phase1a-tests.cjs",
+      "exit": 0,
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-G7YPyr/storage-adapter-phase1a.log"
+    },
+    {
+      "name": "storage-adapter-mongo",
+      "path": "docs/v6/evidence/storage-adapter-mongo.json",
+      "command": "node scripts/storage-adapter-mongo-tests.cjs",
+      "exit": 0,
+      "passed": 51,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-G7YPyr/storage-adapter-mongo.log"
+    },
+    {
+      "name": "storage-migration",
+      "path": "docs/v6/evidence/storage-migration.json",
+      "command": "node scripts/storage-migration-tests.cjs",
+      "exit": 0,
+      "passed": 42,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-G7YPyr/storage-migration.log"
+    },
+    {
+      "name": "v6-shadow-migration",
+      "path": "docs/v6/evidence/v6-shadow-migration.json",
+      "command": "node scripts/v6-shadow-migration-tests.cjs",
+      "exit": 0,
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-iY9h4P/v6-shadow-migration.log"
+    },
+    {
+      "name": "v6-cloudflare-site",
+      "path": "docs/v6/evidence/v6-cloudflare-site.json",
+      "command": "node scripts/v6-cloudflare-site-tests.cjs",
+      "exit": 0,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-SnTU7e/v6-cloudflare-site.log"
+    },
+    {
+      "name": "v6-zero-vps-storage",
+      "path": "docs/v6/evidence/v6-zero-vps-storage.json",
+      "command": "node scripts/v6-zero-vps-storage-tests.cjs",
+      "exit": 0,
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-SnTU7e/v6-zero-vps-storage.log"
+    },
+    {
+      "name": "v6-stabilization",
+      "path": "docs/v6/evidence/v6-stabilization.json",
+      "command": "node scripts/v6-stabilization-tests.cjs",
+      "exit": 0,
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-SnTU7e/v6-stabilization.log"
+    },
+    {
+      "name": "scheduler-incumbent-regression",
+      "path": "docs/v6/evidence/scheduler-incumbent-regression.json",
+      "command": "node scripts/scheduler-incumbent-regression-tests.cjs",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-SnTU7e/scheduler-incumbent-regression.log"
+    },
+    {
+      "name": "scheduler-role-heartbeat-regression",
+      "path": "docs/v6/evidence/scheduler-role-heartbeat-regression.json",
+      "command": "node scripts/scheduler-role-heartbeat-regression-tests.cjs",
+      "exit": 0,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-SnTU7e/scheduler-role-heartbeat-regression.log"
+    },
+    {
+      "name": "prompt10-runtime",
+      "path": "docs/v6/evidence/prompt10-runtime.json",
+      "command": "node scripts/prompt10-runtime-tests.cjs",
+      "exit": 0,
+      "passed": 18,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-SnTU7e/prompt10-runtime.log"
+    },
+    {
+      "name": "phase45-resume-audit",
+      "path": "docs/v6/evidence/phase45-resume-audit.json",
+      "firstUnverifiedStep": "Cron/Queue evidence invalidated by cloudflareAdapters.ts and Cron-test changes; rerun those and affected D1 tests, then current-source quality/build gates.",
+      "branch": "master",
+      "head": "3f2ee7d8bd1ef57fa9207f021cc03519b7eecde7",
+      "smoke": {
+        "path": "docs/v6/evidence/v6-cloudflare-autopilot.json",
+        "log": ".test-tmp/v6-resume-3-1m9xr8/v6-cloudflare-autopilot.log",
+        "passed": 4,
+        "failed": 0,
+        "disposition": "REUSED",
+        "allSourceTestAndConfigHashesMatch": true,
+        "noNewSourceFiles": true
+      },
+      "criticalRegressions": [
+        {
+          "name": "scheduler-incumbent-regression",
+          "passed": 1,
+          "failed": 0,
+          "exit": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/scheduler-incumbent-regression.log",
+          "sourceAndTestChanges": [
+            "scripts/v6-cloudflare-runtime-tests.cjs",
+            "scripts/v6-d1-tests.cjs",
+            "src/lib/platform/types.ts",
+            "src/lib/runtime/cloudflare/context.ts"
+          ],
+          "disposition": "REUSED",
+          "reason": "Suite and legacy/storage implementation unchanged. Differences are unrelated Cloudflare-only files, two other test scripts, and compile-time platform adapter generic types; TypeScript revalidated separately."
+        },
+        {
+          "name": "scheduler-role-heartbeat-regression",
+          "passed": 3,
+          "failed": 0,
+          "exit": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/scheduler-role-heartbeat-regression.log",
+          "sourceAndTestChanges": [
+            "scripts/v6-cloudflare-runtime-tests.cjs",
+            "scripts/v6-d1-tests.cjs",
+            "src/lib/platform/types.ts",
+            "src/lib/runtime/cloudflare/context.ts"
+          ],
+          "disposition": "REUSED",
+          "reason": "Suite and legacy/storage implementation unchanged. Differences are unrelated Cloudflare-only files, two other test scripts, and compile-time platform adapter generic types; TypeScript revalidated separately."
+        },
+        {
+          "name": "prompt10-runtime",
+          "passed": 18,
+          "failed": 0,
+          "exit": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/prompt10-runtime.log",
+          "sourceAndTestChanges": [
+            "scripts/v6-cloudflare-runtime-tests.cjs",
+            "scripts/v6-d1-tests.cjs",
+            "src/lib/platform/types.ts",
+            "src/lib/runtime/cloudflare/context.ts"
+          ],
+          "disposition": "REUSED",
+          "reason": "Suite and legacy/storage implementation unchanged. Differences are unrelated Cloudflare-only files, two other test scripts, and compile-time platform adapter generic types; TypeScript revalidated separately."
+        },
+        {
+          "name": "v6-stabilization",
+          "passed": 20,
+          "failed": 0,
+          "exit": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/v6-stabilization.log",
+          "sourceAndTestChanges": [
+            "scripts/v6-cloudflare-runtime-tests.cjs",
+            "scripts/v6-d1-tests.cjs",
+            "src/lib/platform/types.ts",
+            "src/lib/runtime/cloudflare/context.ts"
+          ],
+          "disposition": "REUSED",
+          "reason": "Suite and legacy/storage implementation unchanged. Differences are unrelated Cloudflare-only files, two other test scripts, and compile-time platform adapter generic types; TypeScript revalidated separately."
+        },
+        {
+          "name": "v6-zero-vps-storage",
+          "passed": 9,
+          "failed": 0,
+          "exit": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/v6-zero-vps-storage.log",
+          "sourceAndTestChanges": [
+            "scripts/v6-cloudflare-runtime-tests.cjs",
+            "scripts/v6-d1-tests.cjs",
+            "src/lib/platform/types.ts",
+            "src/lib/runtime/cloudflare/context.ts"
+          ],
+          "disposition": "REUSED",
+          "reason": "Suite and legacy/storage implementation unchanged. Differences are unrelated Cloudflare-only files, two other test scripts, and compile-time platform adapter generic types; TypeScript revalidated separately."
+        }
+      ],
+      "testIntegrity": {
+        "files": [
+          "scripts/v6-cloudflare-cron-tests.cjs",
+          "scripts/v6-cloudflare-queue-tests.cjs",
+          "scripts/v6-cloudflare-autopilot-tests.cjs",
+          "scripts/lib/cloudflare-autopilot-test.cjs"
+        ],
+        "skipped": 0,
+        "exclusive": 0,
+        "assertionsWeakened": false,
+        "safetyGatesRelaxed": false,
+        "review": "Exact domain counts, attempts=3, dispatches=5, batch=10 retained; assertion failures increment failed and set nonzero exit. No source or tests edited during closure."
+      },
+      "legacyPreserved": [
+        "scripts/automation-worker.cjs",
+        "scripts/automation-scheduler.cjs",
+        "ecosystem.config.cjs",
+        "src/lib/platform/legacyAdapters.ts",
+        "src/lib/automation/store.ts",
+        "src/lib/automation/scheduler.ts"
+      ]
+    },
+    {
+      "name": "phase45-exact-message-smoke",
+      "path": "docs/v6/evidence/phase45-exact-message-smoke.json",
+      "command": "node -e <source>",
+      "source": "const assert = require('node:assert/strict');\nconst { fixture, delivery } = require('./scripts/lib/cloudflare-autopilot-test.cjs');\nconst { cloudflareScheduled, cloudflareQueue } = require('./src/lib/runtime/cloudflare/autopilot.ts');\nconst { jobId } = require('./src/lib/platform/cloudflareContracts.ts');\n(async () => {\n  await fixture(async context => {\n    await context.store.createTask({ id: 'exact-replay-smoke', type: context.input.type, payload: context.input.payload, enabled: true, nextRunAt: context.now, intervalMs: 3600000 });\n    const controller = { scheduledTime: context.now };\n    await cloudflareScheduled(controller, context.env);\n    await cloudflareScheduled(controller, context.env);\n    assert.equal(context.sent.length, 1);\n    assert.equal((await context.db.prepare('SELECT COUNT(*) AS n FROM automation_jobs').first()).n, 1);\n    const capturedBody = context.sent[0];\n    const serializedBody = JSON.stringify(capturedBody);\n    assert.equal(capturedBody.jobId, jobId('cron:exact-replay-smoke:' + context.now));\n    assert.equal((await context.store.get(capturedBody.jobId)).status, 'PENDING');\n    const message = delivery(capturedBody, 'exact-original-message');\n    const batch = { queue: 'sandeal-local-jobs', messages: [message] };\n    await cloudflareQueue(batch, context.env);\n    assert.equal(message.ackCount, 1);\n    assert.deepEqual(message.retries, []);\n    assert.equal((await context.history()).length, 1);\n    const completed = await context.store.get(capturedBody.jobId);\n    assert.equal(completed.status, 'SUCCEEDED');\n    assert.equal(completed.attemptCount, 1);\n    assert.deepEqual(completed.result, { snapshotCreated: true });\n    await cloudflareQueue(batch, context.env);\n    assert.equal(message.ackCount, 2);\n    assert.deepEqual(message.retries, []);\n    assert.equal(JSON.stringify(message.body), serializedBody);\n    assert.equal(message.body, capturedBody);\n    assert.equal((await context.history()).length, 1);\n    assert.equal((await context.store.get(capturedBody.jobId)).attemptCount, 1);\n    assert.equal((await context.store.get(capturedBody.jobId)).status, 'SUCCEEDED');\n    console.log('PASS exact captured Cron-to-Queue message replay completes one D1 domain effect');\n    console.log(JSON.stringify({ CRON: 'PASS', QUEUE: 'PASS', D1: 'PASS', JOB_STATE: 'SUCCEEDED', DUPLICATE_CRON: 'SAFE', DUPLICATE_DELIVERY: 'SAFE', DUPLICATE_DOMAIN_EFFECT: 0, EXACT_MESSAGE_REPLAY: true }));\n  });\n})().catch(error => { console.error('FAIL exact message replay', error); process.exitCode = 1; });",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/phase45-exact-message-smoke.log",
+      "CRON": "PASS",
+      "QUEUE": "PASS",
+      "D1": "PASS",
+      "JOB_STATE": "SUCCEEDED",
+      "DUPLICATE_CRON": "SAFE",
+      "DUPLICATE_DELIVERY": "SAFE",
+      "DUPLICATE_DOMAIN_EFFECT": 0,
+      "EXACT_MESSAGE_REPLAY": true
+    },
+    {
+      "name": "phase45-final-secret-scan",
+      "path": "docs/v6/evidence/phase45-final-secret-scan.json",
+      "command": "node scripts/release-validation.cjs secret-scan",
+      "exit": 0,
+      "log": ".test-tmp/phase45-final-secret-scan.log"
+    },
+    {
+      "name": "phase45-final-validation",
+      "path": "docs/v6/evidence/phase45-final-validation.json",
+      "result": "PASS",
+      "checkpoint": "docs/v6/phase-04-autopilot-foundation.md",
+      "passed": 108,
+      "failed": 0,
+      "skipped": 0,
+      "phase45Cases": 32,
+      "executedCases": 53,
+      "reusedCases": 55,
+      "suites": [
+        {
+          "name": "v6-cloudflare-cron",
+          "path": "docs/v6/evidence/v6-cloudflare-cron.json",
+          "command": "node scripts/v6-cloudflare-cron-tests.cjs",
+          "exit": 0,
+          "passed": 10,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-YlQfgA/v6-cloudflare-cron.log",
+          "disposition": "EXECUTED"
+        },
+        {
+          "name": "v6-cloudflare-queue",
+          "path": "docs/v6/evidence/v6-cloudflare-queue.json",
+          "command": "node scripts/v6-cloudflare-queue-tests.cjs",
+          "exit": 0,
+          "passed": 17,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-YlQfgA/v6-cloudflare-queue.log",
+          "disposition": "EXECUTED"
+        },
+        {
+          "name": "v6-cloudflare-autopilot",
+          "path": "docs/v6/evidence/v6-cloudflare-autopilot.json",
+          "command": "node scripts/v6-cloudflare-autopilot-tests.cjs",
+          "exit": 0,
+          "passed": 4,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-1m9xr8/v6-cloudflare-autopilot.log",
+          "disposition": "REUSED"
+        },
+        {
+          "name": "phase45-exact-message-smoke",
+          "path": "docs/v6/evidence/phase45-exact-message-smoke.json",
+          "command": "node -e <source>",
+          "exit": 0,
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/phase45-exact-message-smoke.log",
+          "CRON": "PASS",
+          "QUEUE": "PASS",
+          "D1": "PASS",
+          "JOB_STATE": "SUCCEEDED",
+          "DUPLICATE_CRON": "SAFE",
+          "DUPLICATE_DELIVERY": "SAFE",
+          "DUPLICATE_DOMAIN_EFFECT": 0,
+          "EXACT_MESSAGE_REPLAY": true,
+          "disposition": "EXECUTED"
+        },
+        {
+          "name": "v6-d1",
+          "path": "docs/v6/evidence/v6-d1.json",
+          "command": "node scripts/v6-d1-tests.cjs",
+          "exit": 0,
+          "passed": 25,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-YlQfgA/v6-d1.log",
+          "disposition": "EXECUTED"
+        },
+        {
+          "name": "scheduler-incumbent-regression",
+          "path": "docs/v6/evidence/scheduler-incumbent-regression.json",
+          "command": "node scripts/scheduler-incumbent-regression-tests.cjs",
+          "exit": 0,
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/scheduler-incumbent-regression.log",
+          "disposition": "REUSED"
+        },
+        {
+          "name": "scheduler-role-heartbeat-regression",
+          "path": "docs/v6/evidence/scheduler-role-heartbeat-regression.json",
+          "command": "node scripts/scheduler-role-heartbeat-regression-tests.cjs",
+          "exit": 0,
+          "passed": 3,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/scheduler-role-heartbeat-regression.log",
+          "disposition": "REUSED"
+        },
+        {
+          "name": "prompt10-runtime",
+          "path": "docs/v6/evidence/prompt10-runtime.json",
+          "command": "node scripts/prompt10-runtime-tests.cjs",
+          "exit": 0,
+          "passed": 18,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/prompt10-runtime.log",
+          "disposition": "REUSED"
+        },
+        {
+          "name": "v6-stabilization",
+          "path": "docs/v6/evidence/v6-stabilization.json",
+          "command": "node scripts/v6-stabilization-tests.cjs",
+          "exit": 0,
+          "passed": 20,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/v6-stabilization.log",
+          "disposition": "REUSED"
+        },
+        {
+          "name": "v6-zero-vps-storage",
+          "path": "docs/v6/evidence/v6-zero-vps-storage.json",
+          "command": "node scripts/v6-zero-vps-storage-tests.cjs",
+          "exit": 0,
+          "passed": 9,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-SnTU7e/v6-zero-vps-storage.log",
+          "disposition": "REUSED"
+        }
+      ],
+      "quality": [
+        {
+          "name": "phase4-typecheck",
+          "path": "docs/v6/evidence/phase4-typecheck.json",
+          "command": "node C:\\duan\\sandeal\\node_modules\\typescript\\bin\\tsc --noEmit",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-y4p87q/typecheck.log"
+        },
+        {
+          "name": "phase4-lint",
+          "path": "docs/v6/evidence/phase4-lint.json",
+          "command": "node C:\\duan\\sandeal\\node_modules\\eslint\\bin\\eslint.js",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-y4p87q/lint.log"
+        },
+        {
+          "name": "phase4-build-legacy",
+          "path": "docs/v6/evidence/phase4-build-legacy.json",
+          "command": "node scripts/validate-dirty-build.cjs",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-y4p87q/build-legacy.log"
+        },
+        {
+          "name": "phase4-build-worker",
+          "path": "docs/v6/evidence/phase4-build-worker.json",
+          "command": "node scripts/v6-cloudflare-build.cjs worker",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-y4p87q/build-worker.log"
+        },
+        {
+          "name": "build-cloudflare-site",
+          "path": "docs/v6/evidence/build-cloudflare-site.json",
+          "exit": 0,
+          "log": ".test-tmp/v6-cloudflare-worker/site-build.log"
+        },
+        {
+          "name": "phase45-final-secret-scan",
+          "command": "node scripts/release-validation.cjs secret-scan",
+          "exit": 0,
+          "log": ".test-tmp/phase45-final-secret-scan.log"
+        }
+      ],
+      "sourceAndTestsEditedDuringResume": false,
+      "productionResourceCreated": false,
+      "deployed": false,
+      "phase5Started": false
+    },
+    {
+      "name": "phase5-starting-state",
+      "path": "docs/v6/evidence/phase5-starting-state.json",
+      "branch": "master",
+      "head": "3f2ee7d8bd1ef57fa9207f021cc03519b7eecde7",
+      "CURRENT_AFFILIATE_BOUNDARY": "AffiliateProvider v1 + provider registry and existing AccessTrade/TikTok source adapters",
+      "EXISTING_PROVIDERS": "accesstrade,tiktok,shopee fail-closed",
+      "EXISTING_CLICK_PATH": "Legacy /go integrity/growth event; Cloudflare /go validated stored affiliate URL without click persistence",
+      "EXISTING_REVENUE_PATH": "Legacy revenueIntegrity diagnostics; revenueAvailable=false; no conversion/commission ledger",
+      "REUSABLE_COMPONENTS": "AffiliateOffer/ProductOffer, canonical product identity, publication gate, URL validator, D1 product offer projections, Queue/Cron claim lifecycle",
+      "MISSING_COMPONENTS": "Explicit provider capabilities, normalized monetization metadata, deterministic router, D1 attribution/evidence/state ledger, indexed incremental revenue snapshots, snapshot event job"
+    },
+    {
+      "name": "phase4-typecheck",
+      "path": "docs/v6/evidence/phase4-typecheck.json",
+      "command": "node C:\\duan\\sandeal\\node_modules\\typescript\\bin\\tsc --noEmit",
+      "exit": 0,
+      "log": ".test-tmp/v6-runtime-quality-QDd0LF/typecheck.log"
+    },
+    {
+      "name": "phase4-lint",
+      "path": "docs/v6/evidence/phase4-lint.json",
+      "command": "node C:\\duan\\sandeal\\node_modules\\eslint\\bin\\eslint.js",
+      "exit": 0,
+      "log": ".test-tmp/v6-runtime-quality-QDd0LF/lint.log"
+    },
+    {
+      "name": "phase4-secret-scan",
+      "path": "docs/v6/evidence/phase4-secret-scan.json",
+      "command": "node scripts/release-validation.cjs secret-scan",
+      "exit": 0,
+      "log": ".test-tmp/v6-runtime-quality-QDd0LF/secret-scan.log"
+    },
+    {
+      "name": "phase5-local-money-proof",
+      "path": "docs/v6/evidence/phase5-local-money-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "SHOPEE_LIVE_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
+      "name": "phase4-build-legacy",
+      "path": "docs/v6/evidence/phase4-build-legacy.json",
+      "command": "node scripts/validate-dirty-build.cjs",
+      "exit": 0,
+      "log": ".test-tmp/v6-runtime-quality-QDd0LF/build-legacy.log"
+    },
+    {
+      "name": "build-cloudflare-worker",
+      "path": "docs/v6/evidence/build-cloudflare-worker.json",
+      "exit": 0,
+      "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
+      "bytes": 174968,
+      "fileStorageModules": 0,
+      "filesystemSettingsModules": 0
+    },
+    {
+      "name": "phase4-build-worker",
+      "path": "docs/v6/evidence/phase4-build-worker.json",
+      "command": "node scripts/v6-cloudflare-build.cjs worker",
+      "exit": 0,
+      "log": ".test-tmp/v6-runtime-quality-QDd0LF/build-worker.log"
+    },
+    {
+      "name": "build-cloudflare-site",
+      "path": "docs/v6/evidence/build-cloudflare-site.json",
+      "exit": 0,
+      "log": ".test-tmp/v6-cloudflare-worker/site-build.log"
+    },
+    {
+      "name": "phase5-accesstrade-shopee-proof",
+      "path": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
+      "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "PROVIDER": "accesstrade",
+      "PLATFORM": "shopee",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "DIRECT_SHOPEE_API_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
+      "name": "v6-money-engine",
+      "path": "docs/v6/evidence/v6-money-engine.json",
+      "command": "node scripts/v6-money-engine-tests.cjs",
+      "exit": 0,
+      "passed": 57,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-money-engine.log"
+    },
+    {
+      "name": "v6-d1",
+      "path": "docs/v6/evidence/v6-d1.json",
+      "command": "node scripts/v6-d1-tests.cjs",
+      "exit": 0,
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-d1.log"
+    },
+    {
+      "name": "v6-cloudflare-cron",
+      "path": "docs/v6/evidence/v6-cloudflare-cron.json",
+      "command": "node scripts/v6-cloudflare-cron-tests.cjs",
+      "exit": 0,
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-cron.log"
+    },
+    {
+      "name": "v6-cloudflare-queue",
+      "path": "docs/v6/evidence/v6-cloudflare-queue.json",
+      "command": "node scripts/v6-cloudflare-queue-tests.cjs",
+      "exit": 0,
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-queue.log"
+    },
+    {
+      "name": "autopilot-local-smoke",
+      "path": "docs/v6/evidence/autopilot-local-smoke.json",
+      "CRON": "PASS",
+      "QUEUE": "PASS",
+      "D1": "PASS",
+      "JOB_STATE": "SUCCEEDED",
+      "DUPLICATE_DELIVERY": "SAFE",
+      "DUPLICATE_DOMAIN_EFFECT": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "FILESYSTEM_SETTINGS_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "PRODUCTION_QUEUE_CREATED": "NO",
+      "PRODUCTION_CRON_CREATED": "NO",
+      "DEPLOYED": "NO"
+    },
+    {
+      "name": "v6-cloudflare-autopilot",
+      "path": "docs/v6/evidence/v6-cloudflare-autopilot.json",
+      "command": "node scripts/v6-cloudflare-autopilot-tests.cjs",
+      "exit": 0,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-autopilot.log"
+    },
+    {
+      "name": "v6-cloudflare-runtime",
+      "path": "docs/v6/evidence/v6-cloudflare-runtime.json",
+      "command": "node scripts/v6-cloudflare-runtime-tests.cjs",
+      "exit": 0,
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-runtime.log"
+    },
+    {
+      "name": "v6-cloudflare-routing",
+      "path": "docs/v6/evidence/v6-cloudflare-routing.json",
+      "command": "node scripts/v6-cloudflare-routing-tests.cjs",
+      "exit": 0,
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-routing.log"
+    },
+    {
+      "name": "accesstrade-link-safety",
+      "path": "docs/v6/evidence/accesstrade-link-safety.json",
+      "command": "node scripts/accesstrade-link-safety-tests.cjs",
+      "exit": 0,
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/accesstrade-link-safety.log"
+    },
+    {
+      "name": "accesstrade-tiktok-integration",
+      "path": "docs/v6/evidence/accesstrade-tiktok-integration.json",
+      "command": "node scripts/accesstrade-tiktok-integration-tests.cjs",
+      "exit": 0,
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/accesstrade-tiktok-integration.log"
+    },
+    {
+      "name": "prompt10-autopublish",
+      "path": "docs/v6/evidence/prompt10-autopublish.json",
+      "command": "node scripts/prompt10-autopublish-tests.cjs",
+      "exit": 0,
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/prompt10-autopublish.log"
+    },
+    {
+      "name": "product-first-pipeline-worker",
+      "path": "docs/v6/evidence/product-first-pipeline-worker.json",
+      "command": "node scripts/product-first-pipeline-worker-tests.cjs",
+      "exit": 0,
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/product-first-pipeline-worker.log"
+    },
+    {
+      "name": "prompt08-import-dedupe",
+      "path": "docs/v6/evidence/prompt08-import-dedupe.json",
+      "command": "node scripts/prompt08-import-dedupe-tests.cjs",
+      "exit": 0,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/prompt08-import-dedupe.log"
+    },
+    {
+      "name": "prompt10-revenue-integrity",
+      "path": "docs/v6/evidence/prompt10-revenue-integrity.json",
+      "command": "node scripts/prompt10-revenue-integrity-tests.cjs",
+      "exit": 0,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/prompt10-revenue-integrity.log"
+    },
+    {
+      "name": "v6-phase1-foundation",
+      "path": "docs/v6/evidence/v6-phase1-foundation.json",
+      "command": "node scripts/v6-phase1-foundation-tests.cjs",
+      "exit": 0,
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "log": ".test-tmp/v6-resume-3-ItB0NK/v6-phase1-foundation.log"
+    },
+    {
+      "name": "phase5-completion",
+      "path": "docs/v6/evidence/phase5-completion.json",
+      "result": "PASS",
+      "checkpoint": "docs/v6/phase-05-affiliate-money-engine.md",
+      "evidence": "docs/v6/evidence/phase5-completion.json",
+      "primaryProvider": "AccessTrade",
+      "secondaryProvider": "TikTok",
+      "directShopeeStatus": "DISABLED_NO_CREDENTIALS",
+      "accessTrade": "PASS",
+      "tiktok": "PASS",
+      "directShopee": "PASS_FAIL_CLOSED",
+      "accessTradeShopeeSupport": "Provider-returned datafeed/offers destinations, no synthetic live links",
+      "accessTradeShopeeNormalization": "PASS",
+      "accessTradeShopeeProvenance": "provider=accesstrade; platform=shopee; sourceEvidence.provider=accesstrade",
+      "offerNormalization": "PASS",
+      "productToMultipleOffers": "PASS",
+      "confidenceScale": "ProductOffer 0..1; normalized money source score 0..100; explicit /100 projection",
+      "moneyRouter": "PASS",
+      "clickAttribution": "PASS",
+      "conversionAttribution": "PASS",
+      "commissionLedger": "PASS",
+      "commissionStates": [
+        "UNKNOWN",
+        "ESTIMATED",
+        "PENDING",
+        "APPROVED",
+        "REJECTED",
+        "PAID"
+      ],
+      "revenueSnapshots": "PASS_PROVIDER_PLATFORM_MERCHANT_CAMPAIGN_PRODUCT",
+      "eventDrivenSync": "BOUNDED_REVENUE_SNAPSHOT_USING_EXISTING_AGGREGATE_GROWTH_METRICS_JOB",
+      "liveConversionSync": "NOT_SUPPORTED",
+      "liveCommissionSync": "NOT_SUPPORTED",
+      "duplicateConversionEffect": 0,
+      "duplicateCommissionEffect": 0,
+      "duplicateRevenueEffect": 0,
+      "dueWorkFullScan": "NO",
+      "revenueHotPathFullScan": "NO",
+      "snapshotEventsPerJob": 10,
+      "snapshotDaysPerRead": 31,
+      "heartbeatWrites": 0,
+      "continuousPolling": "NO",
+      "fileStorageCalls": 0,
+      "filesystemSettingsCalls": 0,
+      "pm2Required": "NO",
+      "vpsRequired": "NO",
+      "longRunningProcessRequired": "NO",
+      "directShopeeApiCalls": 0,
+      "legacyWorkerPreserved": true,
+      "legacySchedulerPreserved": true,
+      "legacyQueueAndPm2Preserved": true,
+      "newCasesPassed": 57,
+      "newCasesFailed": 0,
+      "casesAddedDuringResume": 15,
+      "criticalRegressionsPassed": 223,
+      "testsPassed": 280,
+      "testsFailed": 0,
+      "testsSkipped": 0,
+      "assertionsWeakened": false,
+      "moneyAssertionsWeakened": false,
+      "safetyGatesRelaxed": false,
+      "fakeProductionRevenue": false,
+      "fakeDirectShopeeProductionData": false,
+      "typescript": "PASS",
+      "eslint": "PASS_0_ERRORS_34_EXISTING_WARNINGS",
+      "secretScan": "PASS",
+      "buildLegacy": "PASS_VALIDATION_ONLY",
+      "buildCloudflare": "PASS_STATIC_AND_WORKER",
+      "productionResourceCreated": false,
+      "realMoneyTransactionCreated": false,
+      "realProductionDataMigrated": false,
+      "cloudflareLoginUsed": false,
+      "deployed": false,
+      "committed": false,
+      "pushed": false,
+      "dnsChanged": false,
+      "safeForPhase6": "YES_LOCAL_FOUNDATION_ONLY",
+      "blockers": [],
+      "phase6Started": false,
+      "nextPhaseRequiresSeparateAuthorization": true,
+      "suites": [
+        {
+          "name": "v6-money-engine",
+          "command": "node scripts/v6-money-engine-tests.cjs",
+          "exit": 0,
+          "passed": 57,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-money-engine.log"
+        },
+        {
+          "name": "v6-d1",
+          "command": "node scripts/v6-d1-tests.cjs",
+          "exit": 0,
+          "passed": 25,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-d1.log"
+        },
+        {
+          "name": "v6-cloudflare-cron",
+          "command": "node scripts/v6-cloudflare-cron-tests.cjs",
+          "exit": 0,
+          "passed": 10,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-cron.log"
+        },
+        {
+          "name": "v6-cloudflare-queue",
+          "command": "node scripts/v6-cloudflare-queue-tests.cjs",
+          "exit": 0,
+          "passed": 17,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-queue.log"
+        },
+        {
+          "name": "v6-cloudflare-autopilot",
+          "command": "node scripts/v6-cloudflare-autopilot-tests.cjs",
+          "exit": 0,
+          "passed": 4,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-autopilot.log"
+        },
+        {
+          "name": "v6-cloudflare-runtime",
+          "command": "node scripts/v6-cloudflare-runtime-tests.cjs",
+          "exit": 0,
+          "passed": 14,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-runtime.log"
+        },
+        {
+          "name": "v6-cloudflare-routing",
+          "command": "node scripts/v6-cloudflare-routing-tests.cjs",
+          "exit": 0,
+          "passed": 11,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-cloudflare-routing.log"
+        },
+        {
+          "name": "accesstrade-link-safety",
+          "command": "node scripts/accesstrade-link-safety-tests.cjs",
+          "exit": 0,
+          "passed": 34,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/accesstrade-link-safety.log"
+        },
+        {
+          "name": "accesstrade-tiktok-integration",
+          "command": "node scripts/accesstrade-tiktok-integration-tests.cjs",
+          "exit": 0,
+          "passed": 43,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/accesstrade-tiktok-integration.log"
+        },
+        {
+          "name": "prompt10-autopublish",
+          "command": "node scripts/prompt10-autopublish-tests.cjs",
+          "exit": 0,
+          "passed": 25,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/prompt10-autopublish.log"
+        },
+        {
+          "name": "product-first-pipeline-worker",
+          "command": "node scripts/product-first-pipeline-worker-tests.cjs",
+          "exit": 0,
+          "passed": 16,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/product-first-pipeline-worker.log"
+        },
+        {
+          "name": "prompt08-import-dedupe",
+          "command": "node scripts/prompt08-import-dedupe-tests.cjs",
+          "exit": 0,
+          "passed": 6,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/prompt08-import-dedupe.log"
+        },
+        {
+          "name": "prompt10-revenue-integrity",
+          "command": "node scripts/prompt10-revenue-integrity-tests.cjs",
+          "exit": 0,
+          "passed": 5,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/prompt10-revenue-integrity.log"
+        },
+        {
+          "name": "v6-phase1-foundation",
+          "command": "node scripts/v6-phase1-foundation-tests.cjs",
+          "exit": 0,
+          "passed": 13,
+          "failed": 0,
+          "skipped": 0,
+          "log": ".test-tmp/v6-resume-3-ItB0NK/v6-phase1-foundation.log"
+        }
+      ],
+      "qualityCommands": [
+        {
+          "name": "typecheck",
+          "command": "node C:\\duan\\sandeal\\node_modules\\typescript\\bin\\tsc --noEmit",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-QDd0LF/typecheck.log"
+        },
+        {
+          "name": "lint",
+          "command": "node C:\\duan\\sandeal\\node_modules\\eslint\\bin\\eslint.js",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-QDd0LF/lint.log"
+        },
+        {
+          "name": "secret-scan",
+          "command": "node scripts/release-validation.cjs secret-scan",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-QDd0LF/secret-scan.log"
+        },
+        {
+          "name": "build-legacy",
+          "command": "node scripts/validate-dirty-build.cjs",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-QDd0LF/build-legacy.log"
+        },
+        {
+          "name": "build-worker",
+          "command": "node scripts/v6-cloudflare-build.cjs worker",
+          "exit": 0,
+          "log": ".test-tmp/v6-runtime-quality-QDd0LF/build-worker.log"
+        }
+      ],
+      "staticBuild": {
+        "command": "node scripts/v6-cloudflare-build.cjs site",
+        "exit": 0,
+        "log": ".test-tmp/phase5-completion-static.log"
+      },
+      "secretScanEvidence": "docs/v6/evidence/phase5-final-secret-scan.json",
+      "hashAudit": [
+        {
+          "name": "v6-money-engine",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-d1",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-cloudflare-cron",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-cloudflare-queue",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-cloudflare-autopilot",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-cloudflare-runtime",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-cloudflare-routing",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "accesstrade-link-safety",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "accesstrade-tiktok-integration",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "prompt10-autopublish",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "product-first-pipeline-worker",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "prompt08-import-dedupe",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "prompt10-revenue-integrity",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "v6-phase1-foundation",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "phase4-typecheck",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "phase4-lint",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "phase4-build-legacy",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "phase4-build-worker",
+          "sourceTestConfigUnchanged": true
+        },
+        {
+          "name": "build-cloudflare-site",
+          "sourceTestConfigUnchanged": true
+        }
+      ],
+      "phase5ChangedFiles": [
+        "config/cloudflare/wrangler.runtime.local.jsonc",
+        "docs/v6/CLOUDFLARE_ROUTE_MAP.md",
+        "package.json",
+        "scripts/v6-d1-tests.cjs",
+        "src/lib/affiliate/accessTradeProviders.ts",
+        "src/lib/affiliate/shopeeAffiliateProvider.ts",
+        "src/lib/affiliate/types.ts",
+        "src/lib/integrations/accesstrade.ts",
+        "src/lib/platform/cloudflareContracts.ts",
+        "src/lib/runtime/cloudflare/autopilot.ts",
+        "src/lib/runtime/cloudflare/context.ts",
+        "src/lib/runtime/cloudflare/http.ts",
+        "src/lib/storage/d1/d1JobStore.ts",
+        "src/lib/types.ts",
+        "docs/v6/phase-05-affiliate-money-engine.md",
+        "scripts/fixtures/v6-money-engine.cjs",
+        "scripts/v6-money-engine-tests.cjs",
+        "src/lib/affiliate/money/offers.ts",
+        "src/lib/affiliate/money/providers.ts",
+        "src/lib/affiliate/money/redirect.ts",
+        "src/lib/affiliate/money/router.ts",
+        "src/lib/affiliate/money/types.ts",
+        "src/lib/affiliate/money/validation.ts",
+        "src/lib/storage/d1/d1AffiliateStore.ts",
+        "src/lib/storage/d1/migrations/0003_affiliate_money.sql",
+        "src/lib/storage/d1/migrations/0004_money_snapshot_jobs.sql",
+        "src/lib/storage/d1/migrations/0005_money_platform.sql"
+      ],
+      "phase5StartingEvidence": "docs/v6/evidence/phase5-starting-state.json",
+      "testIntegrity": {
+        "skipOnlyFitFdescribeMatches": 0,
+        "emptyCatchMatches": 0,
+        "assertionsWeakened": false,
+        "moneyAssertionsWeakened": false,
+        "safetyGatesRelaxed": false,
+        "workloadEventsUnchanged": 25
+      },
+      "legacyPreservation": [
+        {
+          "path": "scripts/automation-worker.cjs",
+          "unchangedFromPhase5Start": true
+        },
+        {
+          "path": "scripts/automation-scheduler.cjs",
+          "unchangedFromPhase5Start": true
+        },
+        {
+          "path": "ecosystem.config.cjs",
+          "unchangedFromPhase5Start": true
+        },
+        {
+          "path": "src/lib/platform/legacyAdapters.ts",
+          "unchangedFromPhase5Start": true
+        },
+        {
+          "path": "src/lib/automation/store.ts",
+          "unchangedFromPhase5Start": true
+        },
+        {
+          "path": "src/lib/automation/scheduler.ts",
+          "unchangedFromPhase5Start": true
+        }
+      ],
+      "proofs": [
+        "docs/v6/evidence/phase5-local-money-proof.json",
+        "docs/v6/evidence/phase5-accesstrade-shopee-proof.json"
+      ],
+      "diffCheckExit": 0,
+      "phase3MigrationMatricesRerun": false
+    },
+    {
+      "name": "phase5-final-secret-scan",
+      "path": "docs/v6/evidence/phase5-final-secret-scan.json",
+      "command": "node scripts/release-validation.cjs secret-scan",
+      "exit": 0,
+      "log": ".test-tmp/phase5-final-secret-scan.log",
+      "phase": "PHASE_5",
+      "afterCheckpointAndCompletionEvidence": true
+    }
+  ],
+  "nextStep": "STOP. Phase 6 requires separate authorization; no AI Brain, autonomous SEO, commit, push or deployment.",
+  "blockers": [],
+  "phase5Gate": {
+    "result": "PASS",
+    "checkpoint": "docs/v6/phase-05-affiliate-money-engine.md",
+    "evidence": "docs/v6/evidence/phase5-completion.json",
+    "primaryProvider": "AccessTrade",
+    "secondaryProvider": "TikTok",
+    "directShopeeStatus": "DISABLED_NO_CREDENTIALS",
+    "accessTrade": "PASS",
+    "tiktok": "PASS",
+    "directShopee": "PASS_FAIL_CLOSED",
+    "accessTradeShopeeSupport": "Provider-returned datafeed/offers destinations, no synthetic live links",
+    "accessTradeShopeeNormalization": "PASS",
+    "accessTradeShopeeProvenance": "provider=accesstrade; platform=shopee; sourceEvidence.provider=accesstrade",
+    "offerNormalization": "PASS",
+    "productToMultipleOffers": "PASS",
+    "confidenceScale": "ProductOffer 0..1; normalized money source score 0..100; explicit /100 projection",
+    "moneyRouter": "PASS",
+    "clickAttribution": "PASS",
+    "conversionAttribution": "PASS",
+    "commissionLedger": "PASS",
+    "commissionStates": [
+      "UNKNOWN",
+      "ESTIMATED",
+      "PENDING",
+      "APPROVED",
+      "REJECTED",
+      "PAID"
+    ],
+    "revenueSnapshots": "PASS_PROVIDER_PLATFORM_MERCHANT_CAMPAIGN_PRODUCT",
+    "eventDrivenSync": "BOUNDED_REVENUE_SNAPSHOT_USING_EXISTING_AGGREGATE_GROWTH_METRICS_JOB",
+    "liveConversionSync": "NOT_SUPPORTED",
+    "liveCommissionSync": "NOT_SUPPORTED",
+    "duplicateConversionEffect": 0,
+    "duplicateCommissionEffect": 0,
+    "duplicateRevenueEffect": 0,
+    "dueWorkFullScan": "NO",
+    "revenueHotPathFullScan": "NO",
+    "snapshotEventsPerJob": 10,
+    "snapshotDaysPerRead": 31,
+    "heartbeatWrites": 0,
+    "continuousPolling": "NO",
+    "fileStorageCalls": 0,
+    "filesystemSettingsCalls": 0,
+    "pm2Required": "NO",
+    "vpsRequired": "NO",
+    "longRunningProcessRequired": "NO",
+    "directShopeeApiCalls": 0,
+    "legacyWorkerPreserved": true,
+    "legacySchedulerPreserved": true,
+    "legacyQueueAndPm2Preserved": true,
+    "newCasesPassed": 57,
+    "newCasesFailed": 0,
+    "casesAddedDuringResume": 15,
+    "criticalRegressionsPassed": 223,
+    "testsPassed": 280,
+    "testsFailed": 0,
+    "testsSkipped": 0,
+    "assertionsWeakened": false,
+    "moneyAssertionsWeakened": false,
+    "safetyGatesRelaxed": false,
+    "fakeProductionRevenue": false,
+    "fakeDirectShopeeProductionData": false,
+    "typescript": "PASS",
+    "eslint": "PASS_0_ERRORS_34_EXISTING_WARNINGS",
+    "secretScan": "PASS",
+    "buildLegacy": "PASS_VALIDATION_ONLY",
+    "buildCloudflare": "PASS_STATIC_AND_WORKER",
+    "productionResourceCreated": false,
+    "realMoneyTransactionCreated": false,
+    "realProductionDataMigrated": false,
+    "cloudflareLoginUsed": false,
+    "deployed": false,
+    "committed": false,
+    "pushed": false,
+    "dnsChanged": false,
+    "safeForPhase6": "YES_LOCAL_FOUNDATION_ONLY",
+    "blockers": [],
+    "phase6Started": false,
+    "nextPhaseRequiresSeparateAuthorization": true
+  },
+  "phase5Resume": {
+    "currentPhase": "PHASE_5",
+    "lastCompletedStep": "57 focused cases and 223 affected regressions; current-source quality, static/Worker and legacy builds passed",
+    "lastVerifiedTest": ".test-tmp/v6-resume-3-ItB0NK/results.json: 280 passed, 0 failed, 0 skipped",
+    "initialFirstUnverifiedStep": "VALIDATE_SAVED_CONFIDENCE_SCALE_FIX_THEN_ACCESSTRADE_SHOPEE_PROVENANCE_AND_PLATFORM_SUMMARIES",
+    "firstUnverifiedStep": "NONE_WITHIN_PHASE_5",
+    "confidenceAudit": "ProductOffer.confidence expects 0..1; normalized money score uses 0..100. Saved projection /100 and exact test assertion are present but postdate last passing evidence.",
+    "blockers": [],
+    "preserveDirtyWorktree": true,
+    "phase6Authorized": false
+  },
+  "firstUnverifiedStep": "NONE_WITHIN_PHASE_5",
+  "phase4Gate": {
+    "result": "PASS",
+    "safeForPhase4_5": "YES",
+    "testsPassed": 207,
+    "testsFailed": 0,
+    "checkpoint": "docs/v6/phase-04-cloudflare-runtime.md"
+  },
+  "resumeAudit": {
+    "branchAndHeadMatch": true,
+    "phase3Evidence": "REUSED_159_PASS; migration and storage implementation hashes unchanged",
+    "phase3_5Evidence": "REUSED_14_PASS; migration implementation, fixture, and shadow test hashes unchanged",
+    "persistedSiteEvidence": "Phase 4 routing evidence retained; static and Worker builds pass on current Phase 4.5 sources",
+    "phase4": "PASS_FORMALLY_RECORDED_REUSED",
+    "phase4_5": "PASS_CLOSED; invalidated Cron/Queue and affected D1 tests rerun; native smoke and critical unchanged regressions reused; exact captured-message full-flow proof passes; current quality and both builds pass",
+    "authorizedScope": "LOCAL_ONLY_NO_LOGIN_NO_PRODUCTION_NO_DEPLOY_NO_COMMIT_NO_PUSH"
+  },
+  "phase4_5Gate": {
+    "result": "PASS",
+    "checkpoint": "docs/v6/phase-04-autopilot-foundation.md",
+    "validationEvidence": "docs/v6/evidence/phase45-final-validation.json",
+    "resumeEvidence": "docs/v6/evidence/phase45-resume-audit.json",
+    "schedulerAdapter": "cloudflare-indexed-cron",
+    "queueAdapter": "cloudflare-d1-outbox-queue",
+    "cron": "PASS",
+    "queue": "PASS",
+    "localAutopilot": "PASS",
+    "d1": "PASS",
+    "jobState": "SUCCEEDED",
+    "jobStateModel": [
+      "PENDING",
+      "RUNNING",
+      "RETRY_SCHEDULED",
+      "SUCCEEDED",
+      "FAILED",
+      "BLOCKED"
+    ],
+    "idempotency": "DETERMINISTIC_JOB_TASK_CAS_CLAIM_TOKEN_ATOMIC_D1_DOMAIN_AND_TERMINAL_COMMIT",
+    "retryModel": [
+      "RETRYABLE",
+      "FINAL",
+      "QUARANTINE"
+    ],
+    "maxRetryBehavior": "3 business attempts, 5 outbox dispatch reservations, 3 transport retries per enqueue, 24-hour lifetime",
+    "poisonMessageBehavior": "Durable sanitized quarantine before acknowledgement; no domain effect",
+    "unknownJobBehavior": "Quarantine then acknowledge; no execution",
+    "duplicateCron": "SAFE",
+    "duplicateDelivery": "SAFE",
+    "duplicateDomainEffect": 0,
+    "exactCapturedMessageReplay": "PASS",
+    "dueTaskFullScan": "NO",
+    "jobFullScan": "NO",
+    "heartbeatWrites": 0,
+    "continuousPolling": "NO",
+    "boundedCronBatch": 10,
+    "boundedQueueBatch": 10,
+    "fileStorageCalls": 0,
+    "filesystemSettingsCalls": 0,
+    "pm2Required": "NO",
+    "vpsRequired": "NO",
+    "longRunningProcessRequired": "NO",
+    "legacyWorkerPreserved": true,
+    "legacySchedulerPreserved": true,
+    "legacyQueueAndPm2Preserved": true,
+    "phase45CasesPassed": 32,
+    "phase45CasesFailed": 0,
+    "testsPassed": 108,
+    "testsFailed": 0,
+    "testsSkipped": 0,
+    "casesExecutedDuringResume": 53,
+    "casesReused": 55,
+    "assertionsWeakened": false,
+    "safetyGatesRelaxed": false,
+    "typescript": "PASS",
+    "eslint": "PASS_0_ERRORS_34_EXISTING_WARNINGS",
+    "secretScan": "PASS",
+    "buildLegacy": "PASS_VALIDATION_ONLY",
+    "buildCloudflare": "PASS_STATIC_AND_WORKER",
+    "productionQueueCreated": false,
+    "productionCronCreated": false,
+    "productionWorkerCreated": false,
+    "deployed": false,
+    "safeForNextPhase": "YES",
+    "phase5Started": false,
+    "nextPhaseRequiresSeparateAuthorization": true
+  },
+  "branch": "master",
+  "head": "3f2ee7d8bd1ef57fa9207f021cc03519b7eecde7",
+  "workingTreeFingerprint": "c89347ffa0d0d688b55bbb87d4636207fa84a618d739f28ce81c9bbd80c445d6",
+  "workingTreeFingerprintPolicy": "SHA256 of sorted Git tracked and nonignored untracked path/content hashes; excludes this generated state, evidence, and secret environment files",
+  "filesChangedSinceEvidence": [
+    ".gitignore",
+    "eslint.config.mjs",
+    "package.json",
+    "scripts/v6-d1-tests.cjs",
+    "scripts/v6-shadow-migration-tests.cjs",
+    "src/lib/affiliate/accessTradeProviders.ts",
+    "src/lib/affiliate/shopeeAffiliateProvider.ts",
+    "src/lib/affiliate/types.ts",
+    "src/lib/integrations/accesstrade.ts",
+    "src/lib/platform/types.ts",
+    "src/lib/types.ts",
+    "cloudflare/site/app/deals/page.tsx",
+    "cloudflare/site/app/layout.tsx",
+    "cloudflare/site/app/page.tsx",
+    "cloudflare/site/app/product/page.tsx",
+    "cloudflare/site/app/review-methodology/page.tsx",
+    "cloudflare/site/app/thong-tin/[slug]/page.tsx",
+    "cloudflare/site/next.config.mjs",
+    "cloudflare/site/tsconfig.json",
+    "cloudflare/worker.ts",
+    "config/cloudflare/wrangler.runtime.local.jsonc",
+    "docs/v6/CLOUDFLARE_ROUTE_MAP.md",
+    "docs/v6/CLOUDFLARE_RUNTIME_DECISION.md",
+    "docs/v6/phase-03-shadow-migration.md",
+    "docs/v6/phase-04-autopilot-foundation.md",
+    "docs/v6/phase-04-cloudflare-runtime.md",
+    "docs/v6/phase-05-affiliate-money-engine.md",
+    "docs/v6/resume-long-run-3.md",
+    "scripts/fixtures/v6-cloudflare-product.cjs",
+    "scripts/fixtures/v6-money-engine.cjs",
+    "scripts/lib/cloudflare-autopilot-test.cjs",
+    "scripts/lib/cloudflare-local.cjs",
+    "scripts/v6-cloudflare-autopilot-tests.cjs",
+    "scripts/v6-cloudflare-build.cjs",
+    "scripts/v6-cloudflare-cron-tests.cjs",
+    "scripts/v6-cloudflare-local.cjs",
+    "scripts/v6-cloudflare-queue-tests.cjs",
+    "scripts/v6-cloudflare-routing-tests.cjs",
+    "scripts/v6-cloudflare-runtime-tests.cjs",
+    "scripts/v6-cloudflare-site-tests.cjs",
+    "scripts/v6-money-engine-tests.cjs",
+    "scripts/v6-route-audit.cjs",
+    "scripts/v6-runtime-quality.cjs",
+    "src/components/public/CloudflareStorefront.tsx",
+    "src/lib/affiliate/money/offers.ts",
+    "src/lib/affiliate/money/providers.ts",
+    "src/lib/affiliate/money/redirect.ts",
+    "src/lib/affiliate/money/router.ts",
+    "src/lib/affiliate/money/types.ts",
+    "src/lib/affiliate/money/validation.ts",
+    "src/lib/platform/cloudflareAdapters.ts",
+    "src/lib/platform/cloudflareContracts.ts",
+    "src/lib/runtime/cloudflare/autopilot.ts",
+    "src/lib/runtime/cloudflare/context.ts",
+    "src/lib/runtime/cloudflare/http.ts",
+    "src/lib/runtime/cloudflare/publicCatalogue.ts",
+    "src/lib/runtime/cloudflare/storageFactory.ts",
+    "src/lib/storage/d1/d1AffiliateStore.ts",
+    "src/lib/storage/d1/d1JobStore.ts",
+    "src/lib/storage/d1/migrations/0002_event_jobs.sql",
+    "src/lib/storage/d1/migrations/0003_affiliate_money.sql",
+    "src/lib/storage/d1/migrations/0004_money_snapshot_jobs.sql",
+    "src/lib/storage/d1/migrations/0005_money_platform.sql"
+  ],
+  "filesChangedSinceEvidenceBaseline": "docs/v6/evidence/resume-3-baseline.json",
+  "updatedAt": "2026-09-12T00:02:35.405Z",
+  "phase5Plan": [
+    "Extend existing provider/offer contracts without new discovery internals",
+    "Attach normalized provider offers to the existing canonical product aggregate",
+    "Implement durable exact attribution and append-safe evidence with incremental indexed summaries",
+    "Reuse /go security and event claims; schedule only local revenue snapshot work",
+    "Prove fixture-only conversions and commissions, no Shopee calls, no duplicated money",
+    "Run focused validation and record Phase 5 checkpoint"
+  ]
+}

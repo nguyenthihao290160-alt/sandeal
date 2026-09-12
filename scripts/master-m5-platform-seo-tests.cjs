@@ -76,7 +76,9 @@ function offerProduct(overrides = {}) {
 }
 
 function draft(id, overrides = {}) {
-  const now = '2026-07-26T08:00:00.000Z';
+  // SEO checks freshness against the runtime clock; offer tests below inject
+  // their own fixed clock independently. Keep this positive fixture fresh.
+  const now = new Date().toISOString();
   return {
     id,
     title: `Verified product ${id}`,
@@ -370,6 +372,17 @@ async function run() {
     assert.equal(decision.indexable, false);
     assert.ok(decision.reasons.includes('unsafe_image_url'));
     assert.equal(productSeo.buildProductJsonLd(unsafe), null);
+  });
+
+  await test('Stale verified product remains noindex and cannot emit V2', () => {
+    const product = indexableProduct('stale');
+    const stale = new Date(Date.now() - 60 * 24 * 60 * 60_000).toISOString();
+    const expired = { ...product, lastSeenAt: stale, priceObservedAt: stale,
+      linkLastCheckedAt: stale, affiliateLastCheckedAt: stale, imageLastCheckedAt: stale,
+      canonicalUrlVerifiedAt: stale, affiliateUrlVerifiedAt: stale, updatedAt: stale };
+    assert.equal(productSeo.getProductIndexingDecision(expired).indexable, false);
+    assert.equal(productSeo.buildProductJsonLd(expired), null);
+    assert.equal(productSeo.getProgrammaticSeoV2State(expired, { PROGRAMMATIC_SEO_V2: 'ACTIVE' }).emitsV2, false);
   });
 
   await test('Programmatic SEO V2 stays SHADOW by default and only emits under explicit ACTIVE', async () => {

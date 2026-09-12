@@ -52,7 +52,7 @@ let inventoryFileCollections;
 let createMigrationManifest;
 let validateMigrationManifest;
 let normalizeCollectionPayload;
-let MONGO_LOGICAL_COLLECTIONS;
+let MONGO_MIGRATION_COLLECTIONS;
 let mongoClientPath;
 
 function loadStorageModules() {
@@ -72,7 +72,7 @@ function loadStorageModules() {
     normalizeCollectionPayload,
   } = require('../src/lib/storage/mongoSerialization.ts'));
   ({
-    MONGO_LOGICAL_COLLECTIONS,
+    MONGO_MIGRATION_COLLECTIONS,
   } = require('../src/lib/storage/mongoSchema.ts'));
 
   mongoClientPath = require.resolve(
@@ -365,7 +365,7 @@ async function main() {
   const inventory = await inventoryFileCollections({
     dataDir,
     sourceRoot: path.join(process.cwd(), 'src'),
-    schemaCollections: MONGO_LOGICAL_COLLECTIONS,
+    schemaCollections: MONGO_MIGRATION_COLLECTIONS,
   });
 
   assertMongoClientNotInitialized();

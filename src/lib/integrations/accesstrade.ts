@@ -15,7 +15,7 @@ import { getRawPrimaryCredentialValue } from '../storage/tokenVault';
 import type { Product, ProductKind, ProductPlatform } from '../types';
 import { classifyProductKind, looksLikeVoucherOrCampaign } from '../sourceItemClassifier';
 import { getDomainCircuitDecision, recordDomainHealth } from '../bots/domainCircuitBreaker';
-import { validateExternalUrl } from '../product-intelligence/urlSafety';
+import { validateExternalUrl } from '../product-intelligence/urlValidation';
 
 // ---- Types ----
 
@@ -1638,6 +1638,7 @@ export function normalizeAccessTradeItem(
     campaignName: campaignName || undefined,
     merchantDomain: normalizeMerchantDomain(getFirstText(item, ['domain']))
       || safeHostname(originalUrl || affiliateDestinationUrl),
+    available: typeof item.available === 'boolean' ? item.available : undefined,
     shopId: shopId || undefined,
     shopName: shopName || undefined,
     sku: sku || undefined,

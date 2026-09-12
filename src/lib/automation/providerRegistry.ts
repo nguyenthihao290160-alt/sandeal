@@ -32,6 +32,45 @@ export interface ProviderDeclaration {
   retry: ProviderRetryDeclaration;
 }
 
+export type AiProviderHealthState =
+  | 'READY'
+  | 'CONFIGURED_NOT_READY'
+  | 'NOT_CONFIGURED'
+  | 'DISABLED_BY_POLICY'
+  | 'DEGRADED';
+
+export interface AiProviderHealth {
+  provider: ProviderId;
+  state: AiProviderHealthState;
+  configured: boolean;
+  ready: boolean;
+  checkedAt: string;
+  reasonCode?: string;
+}
+
+export type AiProviderResult<T> =
+  | { ok: true; provider: ProviderId; data: T }
+  | {
+      ok: false;
+      provider: ProviderId;
+      error: {
+        type: 'AI_PROVIDER_UNAVAILABLE';
+        code: string;
+        retryable: boolean;
+      };
+    };
+
+/**
+ * Executable AI boundary. ProviderDeclaration remains the immutable registry
+ * metadata while implementations satisfy this runtime contract incrementally.
+ */
+export interface AiProvider<TInput = unknown, TOutput = unknown> {
+  readonly id: ProviderId;
+  readonly declaration: ProviderDeclaration;
+  healthCheck(): Promise<AiProviderHealth>;
+  execute(input: TInput): Promise<AiProviderResult<TOutput>>;
+}
+
 const TRANSIENT_CODES = [
   'NETWORK_ERROR',
   'PROVIDER_UNAVAILABLE',

@@ -19,14 +19,20 @@ import { canonicalBlockerCodes, preserveFailClosedProductBlockers } from '@/lib/
 import { evaluateSafePublish } from '@/lib/safePublish';
 import { fetchExternalSafely, validateExternalUrl } from '@/lib/product-intelligence/urlSafety';
 import { getProductById, saveCanonicalProduct } from '@/lib/storage/products';
-import type { LinkHealthStatus, Product, ProductLifecycleState } from '@/lib/types';
+import type { LinkHealthStatus, Product, ProductLifecycleState, ProductOffer } from '@/lib/types';
 import type { CommerceSourceEvidence, CommerceUrlProbeEvidence } from '@/lib/types';
 import { getFeatureRolloutState } from './featureRollout';
 import { createAutomationJob, getAutomationControl } from './store';
 import { throwIfExecutionAborted } from './executionBudget';
 import { finalizeRuntimeRecoveryCanaryPermit } from './runtimeRecoveryCanary';
 import type { AutomationJob } from './types';
-import { commerceProbeToLegacyLinkResult, probeCommerceUrl, type CommerceUrlProbeResult } from '@/lib/commerce/urlProbe';
+import {
+  commerceProbeToLegacyLinkResult,
+  probeCommerceUrl,
+  type CommerceUrlProbeOptions,
+  type CommerceUrlProbeResult,
+  type CommerceUrlProbeRole,
+} from '@/lib/commerce/urlProbe';
 import { recordDomainHealth } from '@/lib/bots/domainCircuitBreaker';
 import { updateProductHealthFailureCounters, type ProductHealthObservation } from '@/lib/productHealthFailureCounters';
 
@@ -34,6 +40,7 @@ const RULES_VERSION = 'post-publish-monitor-v2';
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+const MAX_COMMERCE_LINK_CANDIDATES = 8;
 const HEALTHY_STATUSES = new Set(['ok', 'redirect_ok', 'redirected', 'healthy']);
 const PERMANENT_LINK_STATUSES = new Set(['broken', 'not_found']);
 const PERMANENT_IMAGE_STATUSES = new Set(['image_broken', 'invalid_image']);
@@ -67,6 +74,8 @@ interface LinkProbeResolution {
   selectedUrl: string;
   result: { status: string; ok: boolean; retryable?: boolean; reason: string };
   attempts: number;
+  probe?: CommerceUrlProbeResult;
+  checked?: Array<{ url: string; probe: CommerceUrlProbeResult }>;
 }
 
 export interface PostPublishMonitorExecutionOptions {
@@ -111,6 +120,53 @@ function classifyPublicStatus(status: number): string {
 
 function linkCheckOptions() {
   return { resolveDns: process.env.NODE_ENV !== 'test' };
+}
+
+async function resolveCommerceUrlCandidate(
+  candidates: Array<string | undefined>,
+  role: CommerceUrlProbeRole,
+  options: Omit<CommerceUrlProbeOptions, 'role'>,
+): Promise<LinkProbeResolution> {
+  const retainedUrl = String(candidates[0] || '').trim();
+  const urls = [...new Set(candidates.map(value => String(value || '').trim()).filter(Boolean))]
+    .slice(0, MAX_COMMERCE_LINK_CANDIDATES);
+  const checked: Array<{ url: string; probe: CommerceUrlProbeResult }> = [];
+  for (const url of urls) {
+    throwIfExecutionAborted(options.signal);
+    const probe = await probeCommerceUrl(url, { ...options, role });
+    checked.push({ url, probe });
+    if (probe.classification === 'HEALTHY') {
+      return {
+        selectedUrl: url,
+        result: commerceProbeToLegacyLinkResult(probe),
+        attempts: checked.length,
+        probe,
+        checked,
+      };
+    }
+  }
+  const preferred = checked[0];
+  return {
+    selectedUrl: retainedUrl,
+    result: preferred
+      ? commerceProbeToLegacyLinkResult(preferred.probe)
+      : { status: 'error', ok: false, retryable: false, reason: 'No URL candidate' },
+    attempts: checked.length,
+    probe: preferred?.url === retainedUrl ? preferred.probe : undefined,
+    checked,
+  };
+}
+
+function alternateOffers(product: Product): ProductOffer[] {
+  return [...(product.offers || [])]
+    .filter(offer => offer.affiliateUrl && offer.affiliateUrl !== product.affiliateUrl)
+    .sort((left, right) => {
+      const healthRank = (offer: ProductOffer) => offer.health === 'HEALTHY' ? 2 : offer.health === 'DEGRADED' ? 1 : 0;
+      return healthRank(right) - healthRank(left)
+        || right.confidence - left.confidence
+        || Date.parse(right.observedAt) - Date.parse(left.observedAt)
+        || left.id.localeCompare(right.id);
+    });
 }
 
 function configuredPublicPageUrl(product: Product): { url: string; loopback: boolean; configured: boolean } {
@@ -241,32 +297,41 @@ async function probe(
       correlationId: product.id,
       resolveDns: process.env.NODE_ENV !== 'test',
     };
-    const [merchantProbe, affiliateProbe] = await Promise.all([
-      probeCommerceUrl(product.canonicalProductUrl || product.originalUrl || '', { ...probeOptions, role: 'MERCHANT' }),
-      probeCommerceUrl(product.affiliateUrl || '', { ...probeOptions, role: 'AFFILIATE' }),
+    const offers = alternateOffers(product);
+    const merchantUrl = product.canonicalProductUrl || product.originalUrl;
+    [productResolution, affiliateResolution] = await Promise.all([
+      resolveCommerceUrlCandidate([
+        merchantUrl,
+        product.canonicalProductUrl,
+        product.originalUrl,
+        product.identity?.canonicalUrl,
+      ], 'MERCHANT', probeOptions),
+      resolveCommerceUrlCandidate([
+        product.affiliateUrl,
+        ...offers.map(offer => offer.affiliateUrl),
+      ], 'AFFILIATE', probeOptions),
     ]);
     throwIfExecutionAborted(options.signal);
-    const merchantResult = commerceProbeToLegacyLinkResult(merchantProbe);
-    const affiliateResult = commerceProbeToLegacyLinkResult(affiliateProbe);
-    productResolution = {
-      selectedUrl: String(product.canonicalProductUrl || product.originalUrl || ''),
-      result: merchantResult,
-      attempts: 1,
-    };
-    affiliateResolution = {
-      selectedUrl: String(product.affiliateUrl || ''),
-      result: affiliateResult,
-      attempts: 1,
-    };
+    const merchantProbe = productResolution.probe;
+    const affiliateProbe = affiliateResolution.probe;
+    selectedOfferId = affiliateResolution.result.ok
+      ? offers.find(offer => offer.affiliateUrl === affiliateResolution.selectedUrl)?.id
+      : undefined;
     await Promise.all([
-      recordDomainHealth(productResolution.selectedUrl, merchantProbe.classification === 'HEALTHY' ? 'healthy' : merchantProbe.classification.toLowerCase(), Date.now(), {
-        role: 'MERCHANT', retryAfter: merchantProbe.retryAfter, operationId: job.operationId, jobId: job.id,
-      }),
-      recordDomainHealth(affiliateResolution.selectedUrl, affiliateProbe.classification === 'HEALTHY' ? 'healthy'
-        : affiliateProbe.retryable && affiliateProbe.classification === 'AFFILIATE_LINK_REJECTED' ? 'network_error'
-          : affiliateProbe.classification.toLowerCase(), Date.now(), {
-        role: 'AFFILIATE_GATEWAY', retryAfter: affiliateProbe.retryAfter, operationId: job.operationId, jobId: job.id,
-      }),
+      ...(productResolution.checked || []).map(item => recordDomainHealth(
+        item.url,
+        item.probe.classification === 'HEALTHY' ? 'healthy' : item.probe.classification.toLowerCase(),
+        Date.now(),
+        { role: 'MERCHANT', retryAfter: item.probe.retryAfter, operationId: job.operationId, jobId: job.id },
+      )),
+      ...(affiliateResolution.checked || []).map(item => recordDomainHealth(
+        item.url,
+        item.probe.classification === 'HEALTHY' ? 'healthy'
+          : item.probe.retryable && item.probe.classification === 'AFFILIATE_LINK_REJECTED' ? 'network_error'
+            : item.probe.classification.toLowerCase(),
+        Date.now(),
+        { role: 'AFFILIATE_GATEWAY', retryAfter: item.probe.retryAfter, operationId: job.operationId, jobId: job.id },
+      )),
     ]);
     imageResolution = await resolveHealthyImageCandidate([product.imageUrl, ...(product.gallery || [])], { ...linkCheckOptions(), signal: options.signal });
     sourceRequests = productResolution.attempts + affiliateResolution.attempts + imageResolution.attempts;

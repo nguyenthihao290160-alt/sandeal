@@ -1,7 +1,7 @@
 import { getAutomationSettings } from '@/lib/storage/automationSettings';
 import { createAutomationJob, createAutomationJobsBatch, getAutomationControl, updateAutomationControl } from './store';
 import { getAutomationPolicy } from './policyRegistry';
-import { heartbeatRuntimeRole, isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
+import { isRuntimeRoleOwner, type RuntimeRoleOwnership } from './runtimeRoles';
 import type { AutomationJobType } from './types';
 import { getProductProcessingCapacity } from './businessUsage';
 import { withAutomationCycleReadModel } from './cycleReadModel';
@@ -208,13 +208,14 @@ export async function runOwnedSchedulerCycle(
   const storageBefore = getStorageDiagnosticsSnapshot();
   const flight = withAutomationCycleReadModel(async (): Promise<OwnedSchedulerCycleResult> => {
     const startedAt = Date.now();
-    if (!await heartbeatRuntimeRole('SCHEDULER', ownership, undefined, now)) return { status: 'role_lost' };
+    // The entrypoint owns renewal. A cycle only verifies persisted authority.
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership)) return { status: 'role_lost' };
     const guardian = await runRuntimeControlSchedulerTick(now);
-    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian };
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership)) return { status: 'role_lost', guardian };
     const reconciliation = await runAutomationReconciliationSchedulerTick(now);
-    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, reconciliation };
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership)) return { status: 'role_lost', guardian, reconciliation };
     const automation = await runAutomationSchedulerTick(now);
-    if (!await isRuntimeRoleOwner('SCHEDULER', ownership, now)) return { status: 'role_lost', guardian, reconciliation, automation };
+    if (!await isRuntimeRoleOwner('SCHEDULER', ownership)) return { status: 'role_lost', guardian, reconciliation, automation };
     const intelligence = await runProductIntelligenceSchedulerTick(now);
     const storageAfter = getStorageDiagnosticsSnapshot();
     const fullReadsByCollection: Record<string, number> = {};

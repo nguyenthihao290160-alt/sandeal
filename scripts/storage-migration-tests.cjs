@@ -309,6 +309,12 @@ async function main() {
     assert.equal(manifest.collections.find(item => item.logicalName === 'products').sourceCount, 2);
   });
 
+  await test('migration domain inventory includes settings without changing production index requirements', () => {
+    const { MONGO_MIGRATION_COLLECTIONS, planMongoSchema } = require('../src/lib/storage/mongoSchema.ts');
+    assert.equal(MONGO_MIGRATION_COLLECTIONS.includes('system-settings'), true);
+    assert.equal(planMongoSchema().some(index => index.collection === 'system-settings'), false);
+  });
+
   await test('canonical checksum is deterministic', () => {
     const value = [{ id: 'one', nested: { enabled: false } }];
     assert.equal(checksumCollection(value), checksumCollection(structuredClone(value)));

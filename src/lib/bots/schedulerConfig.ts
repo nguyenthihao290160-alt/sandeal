@@ -3,11 +3,7 @@
 // Default OFF. Min interval 30 min. No in-memory loops.
 // ===========================================
 
-import { promises as fs } from 'fs';
-import path from 'path';
-import { ensureDataDir, getDataDir } from '../storage/adapter';
-
-function getConfigFile() { return path.join(getDataDir(), 'scheduler-config.json'); }
+import { getSettingsStore, validateSettingsValue, type SettingsStore } from '../storage/settingsStore';
 
 export type SchedulerMode =
   | 'full_safe_run'
@@ -43,27 +39,16 @@ function getDefaultConfig(): SchedulerConfig {
   };
 }
 
-export async function getSchedulerConfig(): Promise<SchedulerConfig> {
-  await ensureDataDir();
-  try {
-    const raw = await fs.readFile(getConfigFile(), 'utf-8');
-    const data = JSON.parse(raw);
-    if (data && typeof data === 'object') {
-      return {
-        ...getDefaultConfig(),
-        ...data,
-      };
-    }
-    return getDefaultConfig();
-  } catch {
-    return getDefaultConfig();
-  }
+export async function getSchedulerConfig(store: SettingsStore = getSettingsStore()): Promise<SchedulerConfig> {
+  const data = await store.read('scheduler');
+  if (!data || typeof data !== 'object') return getDefaultConfig();
+  validateSettingsValue('scheduler', data);
+  return { ...getDefaultConfig(), ...data };
 }
 
-async function saveConfig(config: SchedulerConfig): Promise<void> {
-  await ensureDataDir();
-  const content = JSON.stringify(config, null, 2);
-  await fs.writeFile(getConfigFile(), content, 'utf-8');
+async function saveConfig(config: SchedulerConfig, store: SettingsStore): Promise<void> {
+  validateSettingsValue('scheduler', config);
+  await store.write('scheduler', config);
 }
 
 export function isValidInterval(value: unknown): value is SchedulerInterval {
@@ -86,8 +71,10 @@ export interface SchedulerConfigUpdate {
  */
 export async function updateSchedulerConfig(
   input: SchedulerConfigUpdate,
+  store: SettingsStore = getSettingsStore(),
 ): Promise<{ config: SchedulerConfig; error?: string }> {
-  const current = await getSchedulerConfig();
+  validateSettingsValue('scheduler', input);
+  const current = await getSchedulerConfig(store);
 
   if (input.intervalMinutes !== undefined) {
     if (!isValidInterval(input.intervalMinutes)) {
@@ -124,7 +111,7 @@ export async function updateSchedulerConfig(
   }
 
   current.updatedAt = new Date().toISOString();
-  await saveConfig(current);
+  await saveConfig(current, store);
 
   return { config: current };
 }
@@ -133,15 +120,15 @@ export async function updateSchedulerConfig(
  * Mark that the scheduler has completed a run.
  * Updates lastRunAt and calculates nextRunAt.
  */
-export async function markSchedulerRunCompleted(): Promise<SchedulerConfig> {
-  const config = await getSchedulerConfig();
+export async function markSchedulerRunCompleted(store: SettingsStore = getSettingsStore()): Promise<SchedulerConfig> {
+  const config = await getSchedulerConfig(store);
   const now = new Date();
 
   config.lastRunAt = now.toISOString();
   config.nextRunAt = calculateNextRunAt(now.toISOString(), config.intervalMinutes);
   config.updatedAt = now.toISOString();
 
-  await saveConfig(config);
+  await saveConfig(config, store);
   return config;
 }
 

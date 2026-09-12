@@ -1,10 +1,10 @@
 import { createHash } from 'crypto';
 import type { Product } from '@/lib/types';
-import { generateId, readCollection, runTransaction } from '@/lib/storage/adapter';
+import { generateId } from '@/lib/storage/adapter';
+import { getDomainStorage } from '@/lib/storage/storageFactory';
+import { DomainStorageError, type DomainStorage, type PriceHistoryQuery } from '@/lib/storage/domainStorage';
 import { PRODUCT_INTELLIGENCE_CONFIG as CONFIG } from './config';
 import type { PriceSnapshot, PriceStatistics } from './types';
-
-const COLLECTION = 'price-history';
 
 function effectivePrice(snapshot: Pick<PriceSnapshot, 'price' | 'salePrice'>): number | undefined {
   const value = Number(snapshot.salePrice || snapshot.price || 0);
@@ -25,73 +25,62 @@ export async function capturePriceSnapshot(
   product: Product,
   operationId: string,
   options: { forceCheckpoint?: boolean; capturedAt?: string } = {},
+  storage: DomainStorage = getDomainStorage(),
 ): Promise<{ created: boolean; priceChanged: boolean; snapshot?: PriceSnapshot; reason?: string }> {
   const capturedAt = options.capturedAt || new Date().toISOString();
   if (!Number(product.price || product.salePrice || 0)) return { created: false, priceChanged: false, reason: 'missing_price' };
   const sourceHash = snapshotHash(product);
-  let response: { created: boolean; priceChanged: boolean; snapshot?: PriceSnapshot; reason?: string } = { created: false, priceChanged: false };
-  await runTransaction<PriceSnapshot>(COLLECTION, items => {
-    const existing = items.filter(item => item.productId === product.id)
-      .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))[0];
-    const checkpointElapsed = !existing || Date.parse(capturedAt) - Date.parse(existing.capturedAt)
-      >= CONFIG.cooldown.priceCheckpointHours * 60 * 60_000;
-    if (existing?.sourceHash === sourceHash && !(options.forceCheckpoint && checkpointElapsed)) {
-      response = { created: false, priceChanged: false, reason: 'unchanged' };
-      return undefined;
-    }
-    const snapshot: PriceSnapshot = {
-      id: generateId(),
-      productId: product.id,
-      source: product.source,
-      price: product.price,
-      salePrice: product.salePrice,
-      currency: 'VND',
-      availability: product.availability || 'unknown',
-      capturedAt,
-      operationId: operationId.slice(0, 160),
-      sourceHash,
-    };
-    const previousPrice = existing ? effectivePrice(existing) : undefined;
-    const nextPrice = effectivePrice(snapshot);
-    const priceChanged = previousPrice !== undefined && nextPrice !== undefined && previousPrice !== nextPrice;
-    const cutoff = Date.parse(capturedAt) - CONFIG.retention.priceHistoryDays * 86_400_000;
-    let next = items.filter(item => Date.parse(item.capturedAt) >= cutoff);
-    next.push(snapshot);
-    const grouped = new Map<string, PriceSnapshot[]>();
-    for (const item of next) grouped.set(item.productId, [...(grouped.get(item.productId) || []), item]);
-    next = [...grouped.values()].flatMap(group => group
-      .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))
-      .slice(0, CONFIG.limits.priceSnapshotsPerProduct));
-    next.sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt));
-    response = { created: true, priceChanged, snapshot };
-    return next.slice(-CONFIG.limits.collectionRecords);
+  const snapshot: PriceSnapshot = {
+    id: generateId(),
+    productId: product.id,
+    source: product.source,
+    price: product.price,
+    salePrice: product.salePrice,
+    currency: 'VND',
+    availability: product.availability || 'unknown',
+    capturedAt,
+    operationId: operationId.slice(0, 160),
+    sourceHash,
+  };
+  // The adapter compares and appends inside its own commit boundary. Separating
+  // a latest-value read from an append here would admit duplicate concurrent writes.
+  const result = await storage.appendPriceSnapshot(snapshot, {
+    forceCheckpoint: options.forceCheckpoint === true,
+    checkpointHours: CONFIG.cooldown.priceCheckpointHours,
   });
-  return response;
+  if (!result.created) return { created: false, priceChanged: false, reason: 'unchanged' };
+  const previousPrice = result.previous ? effectivePrice(result.previous) : undefined;
+  const nextPrice = effectivePrice(snapshot);
+  const priceChanged = previousPrice !== undefined && nextPrice !== undefined && previousPrice !== nextPrice;
+  return { created: true, priceChanged, snapshot: result.snapshot || snapshot };
 }
 
-export async function listPriceHistory(productId: string, limit = 365): Promise<PriceSnapshot[]> {
-  return (await readCollection<PriceSnapshot>(COLLECTION))
-    .filter(item => item.productId === productId)
-    .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt))
-    .slice(-Math.max(1, Math.min(limit, CONFIG.limits.priceSnapshotsPerProduct)));
+function historyLimit(limit: number): number {
+  if (!Number.isFinite(limit)) throw new DomainStorageError('DOMAIN_QUERY_LIMIT_INVALID');
+  return Math.max(1, Math.min(Math.trunc(limit), CONFIG.limits.priceSnapshotsPerProduct));
+}
+
+export async function listPriceHistory(
+  productId: string,
+  limit = 365,
+  storage: DomainStorage = getDomainStorage(),
+  before?: PriceHistoryQuery['before'],
+): Promise<PriceSnapshot[]> {
+  return storage.getPriceHistory({ productId, limit: historyLimit(limit), ...(before ? { before } : {}) });
 }
 
 export async function listPriceHistories(
   productIds: string[],
   limitPerProduct = 365,
+  storage: DomainStorage = getDomainStorage(),
 ): Promise<Map<string, PriceSnapshot[]>> {
   const ids = new Set(productIds.map(String).filter(Boolean).slice(0, 2_000));
-  const limit = Math.max(1, Math.min(limitPerProduct, CONFIG.limits.priceSnapshotsPerProduct));
+  const limit = historyLimit(limitPerProduct);
   const grouped = new Map<string, PriceSnapshot[]>();
   if (!ids.size) return grouped;
-  for (const snapshot of await readCollection<PriceSnapshot>(COLLECTION)) {
-    if (!ids.has(snapshot.productId)) continue;
-    grouped.set(snapshot.productId, [...(grouped.get(snapshot.productId) || []), snapshot]);
-  }
-  for (const [productId, snapshots] of grouped) {
-    grouped.set(productId, snapshots
-      .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt))
-      .slice(-limit));
+  for (const productId of ids) {
+    const snapshots = await storage.getPriceHistory({ productId, limit });
+    if (snapshots.length) grouped.set(productId, snapshots);
   }
   return grouped;
 }
@@ -124,6 +113,6 @@ export function calculatePriceStatistics(productId: string, snapshots: PriceSnap
   };
 }
 
-export async function getPriceStatistics(productId: string): Promise<PriceStatistics> {
-  return calculatePriceStatistics(productId, await listPriceHistory(productId));
+export async function getPriceStatistics(productId: string, storage: DomainStorage = getDomainStorage()): Promise<PriceStatistics> {
+  return calculatePriceStatistics(productId, await listPriceHistory(productId, 365, storage));
 }

@@ -16,6 +16,11 @@ const ROLE_FENCE_SAFETY_MARGIN_MS = Math.max(
     1_000,
     Math.min(10_000, Math.floor(ROLE_FENCE_LEASE_MS / 6)),
 );
+const ROLE_FENCE_RELEASE_WAIT_MS = Math.max(
+    250,
+    Math.min(2_000, Math.floor(ROLE_FENCE_SAFETY_MARGIN_MS / 2)),
+);
+
 export const RUNTIME_ROLE_SCHEMA_VERSION = 3;
 export const DEFAULT_ROLE_LEASE_MS = 45_000;
 
@@ -158,6 +163,23 @@ interface RuntimeFenceHandle {
   release: () => Promise<void>;
 }
 
+async function settlesWithin(
+    operation: Promise<unknown>,
+    maximumWaitMs: number,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation.then(() => true, () => true),
+      new Promise<false>(resolve => {
+        timeout = setTimeout(() => resolve(false), maximumWaitMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 /**
  * Serialize role takeover and final fenced job mutations without holding the
  * role-lease collection lock across the business mutation. The role lease is
@@ -180,16 +202,21 @@ async function acquireRuntimeFence(
   let knownExpiresAtMs = 0;
 
   while (!acquired && Date.now() - startedAt < boundedMaximumWaitMs) {
-    const nowMs = Date.now();
-    const now = new Date(nowMs).toISOString();
-    const nextExpiresAtMs = nowMs + ROLE_FENCE_LEASE_MS;
+    let acquiredExpiresAtMs = 0;
 
     await runTransaction<RuntimeRoleFenceLease>(ROLE_FENCE_COLLECTION, items => {
+      const transactionNowMs = Date.now();
+      if (transactionNowMs - startedAt >= boundedMaximumWaitMs) {
+        return undefined;
+      }
+
       const current = items.find(item => item.id === role);
       const live = current?.status === 'ACTIVE'
-          && Date.parse(current.expiresAt) > nowMs;
+          && Date.parse(current.expiresAt) > transactionNowMs;
       if (live && current?.token !== token) return undefined;
 
+      const now = new Date(transactionNowMs).toISOString();
+      acquiredExpiresAtMs = transactionNowMs + ROLE_FENCE_LEASE_MS;
       const next: RuntimeRoleFenceLease = {
         schemaVersion: 1,
         id: role,
@@ -200,7 +227,7 @@ async function acquireRuntimeFence(
         status: 'ACTIVE',
         acquiredAt: now,
         heartbeatAt: now,
-        expiresAt: new Date(nextExpiresAtMs).toISOString(),
+        expiresAt: new Date(acquiredExpiresAtMs).toISOString(),
         updatedAt: now,
       };
       acquired = true;
@@ -208,7 +235,7 @@ async function acquireRuntimeFence(
     });
 
     if (acquired) {
-      knownExpiresAtMs = nextExpiresAtMs;
+      knownExpiresAtMs = acquiredExpiresAtMs;
       break;
     }
 
@@ -230,10 +257,11 @@ async function acquireRuntimeFence(
   if (!acquired) throw new Error('ROLE_FENCE_LOCK_TIMEOUT');
 
   let lost = false;
+  let closing = false;
   let heartbeatInFlight: Promise<void> | undefined;
 
   const renew = async (): Promise<void> => {
-    if (lost) return;
+    if (lost || closing) return;
 
     if (shouldRenew) {
       let authorized = false;
@@ -251,12 +279,16 @@ async function acquireRuntimeFence(
       }
     }
 
+    if (lost || closing) return;
+
     let renewed = false;
     let nextExpiresAtMs = knownExpiresAtMs;
     try {
       await runTransaction<RuntimeRoleFenceLease>(
           ROLE_FENCE_COLLECTION,
           items => {
+            if (lost || closing) return undefined;
+
             const transactionNowMs = Date.now();
             const current = items.find(item => item.id === role);
             if (
@@ -284,6 +316,11 @@ async function acquireRuntimeFence(
       return;
     }
 
+    if (closing) {
+      lost = true;
+      return;
+    }
+
     if (!renewed) {
       lost = true;
       return;
@@ -293,7 +330,7 @@ async function acquireRuntimeFence(
   };
 
   const heartbeat = setInterval(() => {
-    if (heartbeatInFlight || lost) return;
+    if (heartbeatInFlight || lost || closing) return;
     heartbeatInFlight = renew().finally(() => {
       heartbeatInFlight = undefined;
     });
@@ -327,9 +364,25 @@ async function acquireRuntimeFence(
   return {
     assertHeld,
     release: async () => {
+      closing = true;
+      lost = true;
       clearInterval(heartbeat);
-      await heartbeatInFlight?.catch(() => undefined);
-      await runTransaction<RuntimeRoleFenceLease>(
+
+      const pendingHeartbeat = heartbeatInFlight;
+      if (
+          pendingHeartbeat
+          && !await settlesWithin(pendingHeartbeat, ROLE_FENCE_RELEASE_WAIT_MS)
+      ) {
+        /*
+         * Promise timeouts cannot cancel storage work. Do not queue a release
+         * behind a hung renewal on the same collection; abandon this token to
+         * its finite durable expiry. `closing` prevents a delayed renewal that
+         * has not crossed its commit boundary from extending the fence.
+         */
+        return;
+      }
+
+      const releaseOperation = runTransaction<RuntimeRoleFenceLease>(
           ROLE_FENCE_COLLECTION,
           items => {
             const current = items.find(item => item.id === role);
@@ -341,6 +394,7 @@ async function acquireRuntimeFence(
             return items;
           },
       ).catch(() => undefined);
+      await settlesWithin(releaseOperation, ROLE_FENCE_RELEASE_WAIT_MS);
     },
   };
 }
@@ -353,7 +407,13 @@ async function withRuntimeFence<T>(
     shouldRenew?: () => Promise<boolean>,
     maximumWaitMs?: number,
 ): Promise<T> {
-  const fence = await acquireRuntimeFence(role, ownerId, instanceId, shouldRenew, maximumWaitMs);
+  const fence = await acquireRuntimeFence(
+      role,
+      ownerId,
+      instanceId,
+      shouldRenew,
+      maximumWaitMs,
+  );
   try {
     await fence.assertHeld();
     return await work(fence.assertHeld);
@@ -385,9 +445,9 @@ export async function acquireRuntimeRole(input: {
   const instanceId = (input.instanceId || input.holderId || ownerId).trim();
   if (!ownerId) throw new Error('RUNTIME_ROLE_OWNER_REQUIRED');
   if (!instanceId) throw new Error('RUNTIME_ROLE_INSTANCE_REQUIRED');
-  const nowMs = input.now ?? Date.now();
-  const now = new Date(nowMs).toISOString();
+
   const leaseMs = normalizeRuntimeRoleLeaseMs(input.leaseMs);
+
   let output!: {
     acquired: boolean;
     lease: RuntimeRoleLease;
@@ -396,66 +456,151 @@ export async function acquireRuntimeRole(input: {
     staleLease?: RuntimeRoleLease;
     reason?: 'ROLE_ALREADY_ACTIVE';
   };
-  await withRuntimeFence(input.role, `acquire:${ownerId}`, instanceId, async () => {
-    await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
-      const stored = leases.find(item => item.role === input.role);
-      const existing = stored ? normalizeLease(stored) : undefined;
-      const sameInstance = existing && instanceOf(existing) === instanceId;
-      const active = existing?.status === 'ACTIVE' && Date.parse(expiryOf(existing)) > nowMs;
-      if (existing && active && !sameInstance) {
-        output = { acquired: false, lease: clone(existing), reason: 'ROLE_ALREADY_ACTIVE' };
-        return undefined;
-      }
-      const takeover = Boolean(existing && !sameInstance);
-      const takeoverHistory = [
-        ...(existing?.takeoverHistory || []),
-        ...(takeover ? [now] : []),
-      ].filter(value => Number.isFinite(Date.parse(value))).slice(-100);
-      const fencingToken = sameInstance
-          ? Math.max(1, existing?.fencingToken || 1)
-          : Math.max(1, (existing?.fencingToken || 0) + 1);
-      const lease: RuntimeRoleLease = {
-        schemaVersion: RUNTIME_ROLE_SCHEMA_VERSION,
-        id: input.role,
-        role: input.role,
-        ownerId,
-        instanceId,
-        holderId: ownerId,
-        hostname: input.hostname,
-        pid: input.pid,
-        releaseId: input.releaseId || getReleaseIdentity().releaseId,
-        status: 'ACTIVE',
-        processStartedAt: input.processStartedAt,
-        acquiredAt: sameInstance ? existing.acquiredAt : now,
-        startedAt: sameInstance ? existing.startedAt : now,
-        heartbeatAt: now,
-        expiresAt: new Date(nowMs + leaseMs).toISOString(),
-        leaseExpiresAt: new Date(nowMs + leaseMs).toISOString(),
-        fencingToken,
-        previousHolderId: takeover && existing ? ownerOf(existing) : existing?.previousHolderId,
-        previousInstanceId: takeover && existing ? instanceOf(existing) : existing?.previousInstanceId,
-        takeoverHistory,
-        lastTakeoverAt: takeover ? now : existing?.lastTakeoverAt,
-        takeoverCount: (existing?.takeoverCount || 0) + (takeover ? 1 : 0),
-        updatedAt: now,
-      };
-      if (stored) Object.assign(stored, lease); else leases.push(lease);
-      output = {
-        acquired: true,
-        lease: clone(lease),
-        ownership: { ownerId, instanceId, fencingToken, releaseId: lease.releaseId },
-        event: takeover ? 'TAKEN_OVER' : sameInstance ? 'RENEWED' : 'ACQUIRED',
-        staleLease: takeover ? existing : undefined,
-      };
-      return leases;
-    });
-  });
+
+  let observedAt = new Date(input.now ?? Date.now()).toISOString();
+
+  await withRuntimeFence(
+      input.role,
+      `acquire:${ownerId}`,
+      instanceId,
+      async () => {
+        /*
+         * Capture production wall-clock time after the fence has actually
+         * been acquired. Waiting for the fence must never consume the newly
+         * issued role lease before that lease is committed.
+         *
+         * Explicit input.now remains deterministic for tests/recovery probes.
+         */
+        await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
+          const transactionNowMs = input.now ?? Date.now();
+          const now = new Date(transactionNowMs).toISOString();
+          observedAt = now;
+
+          const stored = leases.find(item => item.role === input.role);
+          const existing = stored ? normalizeLease(stored) : undefined;
+
+          const sameInstance = Boolean(
+              existing && instanceOf(existing) === instanceId,
+          );
+
+          const active = Boolean(
+              existing
+              && existing.status === 'ACTIVE'
+              && Date.parse(expiryOf(existing)) > transactionNowMs,
+          );
+
+          const continuingLease = Boolean(
+              existing && sameInstance && active,
+          );
+
+          if (existing && active && !sameInstance) {
+            output = {
+              acquired: false,
+              lease: clone(existing),
+              reason: 'ROLE_ALREADY_ACTIVE',
+            };
+            return undefined;
+          }
+
+          const takeover = Boolean(existing && !sameInstance);
+
+          const takeoverHistory = [
+            ...(existing?.takeoverHistory || []),
+            ...(takeover ? [now] : []),
+          ]
+              .filter(value => Number.isFinite(Date.parse(value)))
+              .slice(-100);
+
+          /*
+           * Reuse a fencing epoch only for a genuinely live renewal by the
+           * exact same process instance. Expired/released authority always
+           * receives a new fencing token.
+           */
+          const fencingToken = continuingLease
+              ? Math.max(1, existing?.fencingToken || 1)
+              : Math.max(1, (existing?.fencingToken || 0) + 1);
+
+          const expiresAt = new Date(
+              transactionNowMs + leaseMs,
+          ).toISOString();
+
+          const lease: RuntimeRoleLease = {
+            schemaVersion: RUNTIME_ROLE_SCHEMA_VERSION,
+            id: input.role,
+            role: input.role,
+            ownerId,
+            instanceId,
+            holderId: ownerId,
+            hostname: input.hostname,
+            pid: input.pid,
+            releaseId: input.releaseId || getReleaseIdentity().releaseId,
+            status: 'ACTIVE',
+            processStartedAt: input.processStartedAt,
+            acquiredAt: continuingLease ? existing!.acquiredAt : now,
+            startedAt: continuingLease ? existing!.startedAt : now,
+            heartbeatAt: now,
+            expiresAt,
+            leaseExpiresAt: expiresAt,
+            fencingToken,
+            previousHolderId: takeover && existing
+                ? ownerOf(existing)
+                : existing?.previousHolderId,
+            previousInstanceId: takeover && existing
+                ? instanceOf(existing)
+                : existing?.previousInstanceId,
+            takeoverHistory,
+            lastTakeoverAt: takeover
+                ? now
+                : existing?.lastTakeoverAt,
+            takeoverCount: (existing?.takeoverCount || 0)
+                + (takeover ? 1 : 0),
+            updatedAt: now,
+          };
+
+          if (stored) Object.assign(stored, lease);
+          else leases.push(lease);
+
+          output = {
+            acquired: true,
+            lease: clone(lease),
+            ownership: {
+              ownerId,
+              instanceId,
+              fencingToken,
+              releaseId: lease.releaseId,
+            },
+            event: takeover
+                ? 'TAKEN_OVER'
+                : continuingLease
+                    ? 'RENEWED'
+                    : 'ACQUIRED',
+            staleLease: takeover ? existing : undefined,
+          };
+
+          return leases;
+        });
+      },
+  );
+
   if (!output.acquired) {
-    await runTransaction<RuntimeRoleConflict>(CONFLICT_COLLECTION, conflicts => [...conflicts.slice(-499), {
-      schemaVersion: 2, id: generateId(), role: input.role, activeHolderId: ownerOf(output.lease),
-      rejectedHolderId: ownerId, activeInstanceId: instanceOf(output.lease), rejectedInstanceId: instanceId, observedAt: now,
-    }]);
+    await runTransaction<RuntimeRoleConflict>(
+        CONFLICT_COLLECTION,
+        conflicts => [
+          ...conflicts.slice(-499),
+          {
+            schemaVersion: 2,
+            id: generateId(),
+            role: input.role,
+            activeHolderId: ownerOf(output.lease),
+            rejectedHolderId: ownerId,
+            activeInstanceId: instanceOf(output.lease),
+            rejectedInstanceId: instanceId,
+            observedAt,
+          },
+        ],
+    );
   }
+
   return output;
 }
 
@@ -463,60 +608,121 @@ export async function heartbeatRuntimeRole(
     role: RuntimeRole,
     ownership: RuntimeRoleOwnership,
     leaseMs = DEFAULT_ROLE_LEASE_MS,
-    nowMs = Date.now(),
+    nowMs?: number,
 ): Promise<boolean> {
   let updated = false;
   const startedAt = Date.now();
+
   try {
     const currentReleaseId = getReleaseIdentity().releaseId;
+
     await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
+      /*
+       * Production time is captured after the storage transaction has gained
+       * authority over ROLE_COLLECTION. Lock wait time must not allow an
+       * already-expired role to be resurrected.
+       *
+       * Explicit nowMs remains deterministic for tests.
+       */
+      const transactionNowMs = nowMs ?? Date.now();
+
       const lease = leases.find(item => item.role === role);
-      if (!lease
+
+      if (
+          !lease
           || lease.status !== 'ACTIVE'
           || !ownsLease(lease, ownership)
           || (ownership.releaseId && currentReleaseId !== ownership.releaseId)
-          || Date.parse(expiryOf(lease)) <= nowMs) return undefined;
-      lease.heartbeatAt = new Date(nowMs).toISOString();
+          || Date.parse(expiryOf(lease)) <= transactionNowMs
+      ) {
+        return undefined;
+      }
+
+      const heartbeatAt = new Date(transactionNowMs).toISOString();
+
+      lease.heartbeatAt = heartbeatAt;
       lease.releaseId = currentReleaseId;
       lease.expiresAt = new Date(
-          nowMs + normalizeRuntimeRoleLeaseMs(leaseMs),
+          transactionNowMs + normalizeRuntimeRoleLeaseMs(leaseMs),
       ).toISOString();
       lease.leaseExpiresAt = lease.expiresAt;
-      lease.updatedAt = lease.heartbeatAt;
+      lease.updatedAt = heartbeatAt;
       updated = true;
+
       return leases;
     });
   } finally {
     recordRoleHeartbeatRenewal(Date.now() - startedAt, updated);
   }
+
   return updated;
 }
 
-export async function releaseRuntimeRole(role: RuntimeRole, ownership: RuntimeRoleOwnership, nowMs = Date.now()): Promise<boolean> {
+export async function releaseRuntimeRole(
+    role: RuntimeRole,
+    ownership: RuntimeRoleOwnership,
+    nowMs?: number,
+): Promise<boolean> {
   let released = false;
-  await withRuntimeFence(role, `release:${ownership.ownerId}`, ownership.instanceId, async () => {
-    await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
-      const lease = leases.find(item => item.role === role);
-      if (!lease || lease.status !== 'ACTIVE' || !ownsLease(lease, ownership)) return undefined;
-      lease.status = 'RELEASED';
-      lease.heartbeatAt = new Date(nowMs).toISOString();
-      lease.expiresAt = lease.heartbeatAt;
-      lease.leaseExpiresAt = lease.heartbeatAt;
-      lease.updatedAt = lease.heartbeatAt;
-      released = true;
-      return leases;
-    });
-  });
+
+  await withRuntimeFence(
+      role,
+      `release:${ownership.ownerId}`,
+      ownership.instanceId,
+      async () => {
+        await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
+          const lease = leases.find(item => item.role === role);
+
+          if (
+              !lease
+              || lease.status !== 'ACTIVE'
+              || !ownsLease(lease, ownership)
+          ) {
+            return undefined;
+          }
+
+          /*
+           * Capture release time only after the role transaction has actually
+           * started, unless a deterministic test time was explicitly supplied.
+           */
+          const transactionNowMs = nowMs ?? Date.now();
+          const releasedAt = new Date(transactionNowMs).toISOString();
+
+          lease.status = 'RELEASED';
+          lease.heartbeatAt = releasedAt;
+          lease.expiresAt = releasedAt;
+          lease.leaseExpiresAt = releasedAt;
+          lease.updatedAt = releasedAt;
+          released = true;
+
+          return leases;
+        });
+      },
+  );
+
   return released;
 }
 
-export async function isRuntimeRoleOwner(role: RuntimeRole, ownership: RuntimeRoleOwnership, nowMs = Date.now()): Promise<boolean> {
+export async function isRuntimeRoleOwner(
+    role: RuntimeRole,
+    ownership: RuntimeRoleOwnership,
+    nowMs?: number,
+): Promise<boolean> {
   const lease = await readRuntimeRoleLease(role);
-  return Boolean(lease
+
+  /*
+   * For live production checks, evaluate expiry after the storage read has
+   * completed so read latency cannot make an expired lease appear current.
+   */
+  const evaluationNowMs = nowMs ?? Date.now();
+
+  return Boolean(
+      lease
       && lease.status === 'ACTIVE'
-      && Date.parse(expiryOf(lease)) > nowMs
+      && Date.parse(expiryOf(lease)) > evaluationNowMs
       && ownsLease(lease, ownership)
-      && (!ownership.releaseId || lease.releaseId === ownership.releaseId));
+      && (!ownership.releaseId || lease.releaseId === ownership.releaseId),
+  );
 }
 
 /**
@@ -532,35 +738,52 @@ export async function withRuntimeRoleAuthority<T>(
     maximumWaitMs?: number,
     onFenceAcquired?: () => void,
 ): Promise<T> {
-  return withRuntimeFence(role, `authority:${ownership.ownerId}`, ownership.instanceId, async assertFence => {
-    onFenceAcquired?.();
-    let authorized = false;
-    await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
-      const lease = leases.find(item => item.role === role);
-      if (!lease
-          || lease.status !== 'ACTIVE'
-          || Date.parse(expiryOf(lease)) <= Math.max(nowMs, Date.now())
-          || !ownsLease(lease, ownership)
-          || (ownership.releaseId && lease.releaseId !== ownership.releaseId)) {
-        return undefined;
-      }
-      authorized = true;
-      return undefined;
-    });
-    if (!authorized) {
-      recordFencingRejection();
-      throw new Error('WORKER_FENCING_REJECTED');
-    }
-    const assertAuthority: RuntimeFenceAssertion = async () => {
-      await assertFence();
-      if (!await isRuntimeRoleOwner(role, ownership)) {
-        recordFencingRejection();
-        throw new Error('WORKER_FENCING_REJECTED');
-      }
-    };
-    await assertAuthority();
-    return work(assertAuthority);
-  }, () => isRuntimeRoleOwner(role, ownership), maximumWaitMs);
+  return withRuntimeFence(
+      role,
+      `authority:${ownership.ownerId}`,
+      ownership.instanceId,
+      async assertFence => {
+        onFenceAcquired?.();
+
+        let authorized = false;
+
+        await runTransaction<RuntimeRoleLease>(ROLE_COLLECTION, leases => {
+          const lease = leases.find(item => item.role === role);
+
+          if (
+              !lease
+              || lease.status !== 'ACTIVE'
+              || Date.parse(expiryOf(lease)) <= Math.max(nowMs, Date.now())
+              || !ownsLease(lease, ownership)
+              || (ownership.releaseId && lease.releaseId !== ownership.releaseId)
+          ) {
+            return undefined;
+          }
+
+          authorized = true;
+          return undefined;
+        });
+
+        if (!authorized) {
+          recordFencingRejection();
+          throw new Error('WORKER_FENCING_REJECTED');
+        }
+
+        const assertAuthority: RuntimeFenceAssertion = async () => {
+          await assertFence();
+
+          if (!await isRuntimeRoleOwner(role, ownership)) {
+            recordFencingRejection();
+            throw new Error('WORKER_FENCING_REJECTED');
+          }
+        };
+
+        await assertAuthority();
+        return work(assertAuthority);
+      },
+      () => isRuntimeRoleOwner(role, ownership),
+      maximumWaitMs,
+  );
 }
 
 export async function listRuntimeRoleLeases(): Promise<RuntimeRoleLease[]> {
@@ -568,13 +791,22 @@ export async function listRuntimeRoleLeases(): Promise<RuntimeRoleLease[]> {
       ROLE_COLLECTION,
       { maximumItems: 10, maximumBytes: 128 * 1024 },
   );
+
   return snapshot.items.map(item => clone(normalizeLease(item)));
 }
 
-export async function listRecentRuntimeRoleConflicts(sinceMs: number): Promise<RuntimeRoleConflict[]> {
-  const snapshot = await readBoundedCollectionSnapshot<RuntimeRoleConflict>(CONFLICT_COLLECTION, {
-    maximumItems: 500,
-    maximumBytes: 512 * 1024,
-  });
-  return snapshot.items.filter(item => Date.parse(item.observedAt) >= sinceMs);
+export async function listRecentRuntimeRoleConflicts(
+    sinceMs: number,
+): Promise<RuntimeRoleConflict[]> {
+  const snapshot = await readBoundedCollectionSnapshot<RuntimeRoleConflict>(
+      CONFLICT_COLLECTION,
+      {
+        maximumItems: 500,
+        maximumBytes: 512 * 1024,
+      },
+  );
+
+  return snapshot.items.filter(
+      item => Date.parse(item.observedAt) >= sinceMs,
+  );
 }

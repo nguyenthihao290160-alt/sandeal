@@ -1,4 +1,6 @@
-export type StorageDriver = 'file' | 'mongo';
+import type { DomainStorage } from './domainStorage';
+import type { SettingsStore } from './settingsStore';
+export type StorageDriver = 'file' | 'mongo' | 'd1';
 
 export type StorageTransaction<T> = (
     items: T[],
@@ -14,6 +16,26 @@ export type StorageCommitGuard = <T>(
     context: { authorityAcquired(): void },
 ) => Promise<T>;
 
+/**
+ * A renewable adapter-owned coordination scope. This handle does not make
+ * child collection writes atomic: callers must assert it immediately before
+ * every irreversible child commit that depends on the scope's exclusivity.
+ */
+export interface StorageExclusiveHandle {
+  assertHeld(): Promise<void>;
+}
+
+export type StorageExclusiveWork<T> = (
+    handle: StorageExclusiveHandle,
+) => Promise<T> | T;
+
+export interface StorageExclusiveOptions {
+  /** Bounded, payload-free diagnostic category for the coordinated work. */
+  operationCategory?: string;
+}
+
+export type StorageTransactionSourcePolicy = 'RECOVER_BACKUPS' | 'PRIMARY_ONLY';
+
 export interface StorageTransactionOptions {
   /** Runs after expensive preparation and before acquiring the commit guard. */
   beforeCommit?: () => Promise<void> | void;
@@ -21,6 +43,12 @@ export interface StorageTransactionOptions {
   withCommitGuard?: StorageCommitGuard;
   /** Bounded, payload-free diagnostic category for the durable operation. */
   operationCategory?: string;
+  /**
+   * Selects the durable source accepted by the transaction. The legacy
+   * default may recover from retained backups. PRIMARY_ONLY treats an absent
+   * primary as empty and fails closed on a malformed primary.
+   */
+  sourcePolicy?: StorageTransactionSourcePolicy;
 }
 
 export type StorageScanVisitor<T> = (
@@ -53,7 +81,7 @@ export interface StorageStreamingTransactionOptions<T> extends StorageTransactio
    * The transaction is known to append only. Implementations may use a
    * bounded-copy append path, but must preserve item count, ordering, callback
    * behavior, and the same atomic/durable result as the normal transaction.
-   */
+  */
   appendOnly?: boolean;
 }
 
@@ -200,6 +228,8 @@ export interface StorageBulkResult {
 export interface StorageAdapter {
   readonly driver: StorageDriver;
   readonly capabilities: StorageCapabilities;
+  readonly domain?: DomainStorage;
+  readonly settingsStore?: SettingsStore;
 
   getDataDir(): string;
   ensureDataDir(): Promise<void>;
@@ -240,6 +270,15 @@ export interface StorageAdapter {
       fn: StorageStreamingTransaction<T>,
       options?: StorageStreamingTransactionOptions<T>,
   ): Promise<StorageStreamingTransactionResult>;
+  /**
+   * Optionally hold one adapter-owned cross-process scope across bounded work.
+   * FileStorage implements this with its existing renewable collection lock.
+   */
+  runExclusive?<T>(
+      scope: string,
+      work: StorageExclusiveWork<T>,
+      options?: StorageExclusiveOptions,
+  ): Promise<T>;
 
   bulkMutateCollection?<T extends { id: string }>(
       collection: string,

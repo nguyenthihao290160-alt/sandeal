@@ -1,0 +1,37 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "sandeal-runtime-local-only",
+  "main": "../../.test-tmp/v6-cloudflare-worker/worker.mjs",
+  "no_bundle": true,
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "send_metrics": false,
+  "vars": {
+    "SANDEAL_RUNTIME": "cloudflare",
+    "SANDEAL_LOCAL_ONLY": "true",
+    "SANDEAL_PRODUCTION": "false",
+    "SHOPEE_AFFILIATE_ENABLED": "false",
+    "SANDEAL_AUTOPILOT_ENABLED": "false",
+    "SANDEAL_MONEY_ENGINE_ENABLED": "false",
+    "AFFILIATE_REDIRECT_HOSTS": ""
+  },
+  "assets": {
+    "directory": "../../cloudflare/site/out",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api", "/api/*", "/go", "/go/*", "/dashboard", "/dashboard/*", "/deals/*"],
+    "not_found_handling": "404-page"
+  },
+  "d1_databases": [{
+    "binding": "DB", "database_name": "sandeal-runtime-local",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "../../src/lib/storage/d1/migrations", "remote": false
+  }],
+  "queues": {
+    "producers": [{ "binding": "JOB_QUEUE", "queue": "sandeal-local-jobs" }],
+    "consumers": [{ "queue": "sandeal-local-jobs", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 3 }]
+  },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "env": { "production": { "vars": { "SANDEAL_PRODUCTION": "true" }, "d1_databases": [], "queues": { "producers": [], "consumers": [] }, "triggers": { "crons": [] } } }
+}

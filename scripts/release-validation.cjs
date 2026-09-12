@@ -22,7 +22,7 @@ function relative(file) {
 }
 
 function secretScan() {
-  const extensions = new Set(['.js', '.cjs', '.mjs', '.ts', '.tsx', '.json', '.yml', '.yaml', '.md', '.sh', '.ps1', '.css', '.html']);
+  const extensions = new Set(['.js', '.cjs', '.mjs', '.ts', '.tsx', '.json', '.jsonc', '.sql', '.yml', '.yaml', '.md', '.sh', '.ps1', '.css', '.html']);
   const files = walk(root).filter(file => extensions.has(path.extname(file).toLowerCase()) || path.basename(file) === '.env.example');
   const findings = [];
   const rules = [
@@ -54,6 +54,8 @@ function secretScan() {
     // These are public, non-credential defaults that document the safe local
     // storage mode. Every other populated example value remains a finding.
     const publicExampleDefaults = new Set([
+      'SANDEAL_RUNTIME=legacy',
+      'SHOPEE_AFFILIATE_ENABLED=false',
       'SANDEAL_STORAGE_DRIVER=file',
       'MONGODB_DATABASE=sandeal',
       'RUNTIME_RECOVERY_V2=SHADOW',

@@ -76,6 +76,12 @@ export const MONGO_LOGICAL_COLLECTIONS = [
   'token-vault',
 ] as const;
 
+/** Migration domain ownership is not a request to change deployed v1 indexes.
+ * The bounded two-singleton SettingsStore uses the existing generic revision
+ * envelope. Its migration inventory must not confuse that with an unknown domain.
+ */
+export const MONGO_MIGRATION_COLLECTIONS = [...MONGO_LOGICAL_COLLECTIONS, 'system-settings'] as const;
+
 interface MongoSchemaDocument extends Document {
   _id: typeof MONGO_STORAGE_SCHEMA_KEY;
   kind: 'schema';

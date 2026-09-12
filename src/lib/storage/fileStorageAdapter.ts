@@ -28,6 +28,8 @@ import type {
   StorageBulkResult,
   StorageBoundedCollectionOptions,
   StorageBoundedCollectionResult,
+  StorageExclusiveOptions,
+  StorageExclusiveWork,
   StoragePageOptions,
   StorageScanResult,
   StorageStreamingTransaction,
@@ -379,7 +381,10 @@ async function acquireCollectionFileLock(
   throw error;
 }
 
-async function readCollectionUnlocked<T>(collection: string): Promise<T[]> {
+async function readCollectionUnlocked<T>(
+    collection: string,
+    sourcePolicy: StorageTransactionOptions['sourcePolicy'] = 'RECOVER_BACKUPS',
+): Promise<T[]> {
   recordFullCollectionRead(collection);
   const filePath = getFilePath(collection);
   let originalError: unknown;
@@ -392,12 +397,14 @@ async function readCollectionUnlocked<T>(collection: string): Promise<T[]> {
     originalError = error;
   }
 
-  for (const backupPath of [`${filePath}.bak`, `${filePath}.bak.2`]) {
-    try {
-      const backup = JSON.parse(await fs.readFile(backupPath, 'utf8'));
-      if (Array.isArray(backup)) return backup as T[];
-    } catch {
-      // Try the next rollback snapshot.
+  if (sourcePolicy !== 'PRIMARY_ONLY') {
+    for (const backupPath of [`${filePath}.bak`, `${filePath}.bak.2`]) {
+      try {
+        const backup = JSON.parse(await fs.readFile(backupPath, 'utf8'));
+        if (Array.isArray(backup)) return backup as T[];
+      } catch {
+        // Try the next rollback snapshot.
+      }
     }
   }
   if ((originalError as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
@@ -413,7 +420,7 @@ async function readCollection<T>(collection: string): Promise<T[]> {
  * arrays of JSON objects; tracking string/nesting state avoids retaining the
  * raw file or parsed collection while keeping crash recovery fail-closed.
  */
-async function* iterateJsonArrayMemberTexts(filePath: string): AsyncGenerator<string> {
+async function* iterateJsonArrayMemberTexts(filePath: string, maximumChars = Infinity, strictDelimiters = false): AsyncGenerator<string> {
   const stream = createReadStream(filePath, { encoding: 'utf8' });
   let started = false;
   let closed = false;
@@ -439,6 +446,7 @@ async function* iterateJsonArrayMemberTexts(filePath: string): AsyncGenerator<st
     const text = String(chunk);
     for (let offset = 0; offset < text.length; offset += 1) {
       const character = text[offset];
+      if (itemText.length > maximumChars) throw new Error('collection_member_limit');
       if (!started) {
         if (/\s/.test(character)) continue;
         if (character !== '[') throw new Error('collection_root_must_be_array');
@@ -461,6 +469,7 @@ async function* iterateJsonArrayMemberTexts(filePath: string): AsyncGenerator<st
           closed = true;
           continue;
         }
+        if (strictDelimiters && hasItem && !afterComma) throw new Error('collection_delimiter_required');
         itemText = character;
         hasItem = true;
         afterComma = false;
@@ -514,12 +523,14 @@ async function* iterateJsonArrayMemberTexts(filePath: string): AsyncGenerator<st
   }
 }
 
-async function scanJsonArrayFile<T>(
+export async function scanJsonArrayFile<T>(
     filePath: string,
     visitor: (item: T, index: number) => Promise<void> | void,
+    options?: { maximumMemberBytes: number; strictDelimiters: boolean },
 ): Promise<number> {
   let itemIndex = 0;
-  for await (const raw of iterateJsonArrayMemberTexts(filePath)) {
+  for await (const raw of iterateJsonArrayMemberTexts(filePath, options?.maximumMemberBytes, options?.strictDelimiters)) {
+    if (options && Buffer.byteLength(raw, 'utf8') > options.maximumMemberBytes) throw new Error('collection_member_limit');
     const item = JSON.parse(raw) as T;
     await visitor(item, itemIndex);
     itemIndex += 1;
@@ -1240,6 +1251,24 @@ async function writeCollection<T>(collection: string, data: T[]): Promise<void> 
       writeCollectionUnlocked(collection, data, {}, assertLockHeld));
 }
 
+async function runExclusive<T>(
+    scope: string,
+    work: StorageExclusiveWork<T>,
+    options: StorageExclusiveOptions = {},
+): Promise<T> {
+  const hookOptions: StorageTransactionOptions = {
+    operationCategory: options.operationCategory,
+  };
+  await invokeTransactionTestHook('COLLECTION_LOCK_WAIT_STARTED', scope, hookOptions);
+  return withCollectionLock(scope, async assertHeld => {
+    await invokeTransactionTestHook('COLLECTION_LOCK_ACQUIRED', scope, hookOptions);
+    await assertHeld();
+    const result = await work({ assertHeld });
+    await assertHeld();
+    return result;
+  });
+}
+
 async function backupCollection(collection: string, label: string): Promise<string> {
   const safeLabel = label.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'manual';
   return withCollectionLock(collection, async assertLockHeld => {
@@ -1280,7 +1309,7 @@ async function runTransaction<T>(
     await withCollectionLock(collection, async assertLockHeld => {
       timing.collectionLockAcquiredAt = Date.now();
       await invokeTransactionTestHook('COLLECTION_LOCK_ACQUIRED', collection, options);
-      const items = await readCollectionUnlocked<T>(collection);
+      const items = await readCollectionUnlocked<T>(collection, options.sourcePolicy);
       const updated = await fn(items);
       if (updated !== undefined) {
         await writeCollectionUnlocked(collection, updated, options, assertLockHeld, timing);
@@ -1309,7 +1338,9 @@ async function runStreamingTransaction<T>(
       await invokeTransactionTestHook('COLLECTION_LOCK_ACQUIRED', collection, options);
       await ensureDataDir();
       const filePath = getFilePath(collection);
-      const source = [filePath, `${filePath}.bak`, `${filePath}.bak.2`];
+      const source = options.sourcePolicy === 'PRIMARY_ONLY'
+        ? [filePath]
+        : [filePath, `${filePath}.bak`, `${filePath}.bak.2`];
       let sourcePath: string | undefined;
       for (const candidate of source) {
         const stat = await fs.stat(candidate).catch(error => {
@@ -1416,6 +1447,14 @@ async function checkHealth() {
 
 export const fileStorageAdapter: StorageAdapter = {
   driver: 'file',
+  get domain() {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return (require('./legacyDomainStorage') as typeof import('./legacyDomainStorage')).createLegacyDomainStorage(fileStorageAdapter);
+  },
+  get settingsStore() {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return (require('./legacySettingsStore') as typeof import('./legacySettingsStore')).createLegacySettingsStore(fileStorageAdapter);
+  },
   capabilities: {
     schemaVersion: 1,
     driver: 'file',
@@ -1437,6 +1476,7 @@ export const fileStorageAdapter: StorageAdapter = {
   backupCollection,
   runTransaction,
   runStreamingTransaction,
+  runExclusive,
   bulkMutateCollection,
   checkHealth,
 };

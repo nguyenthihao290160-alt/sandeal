@@ -129,6 +129,7 @@ async function main() {
     'products', 'evidence-facts', 'product-lifecycle-events', 'automation-jobs',
     'automation-control', 'automation-audit', 'automation-canary', 'operation-journal',
     'automation-outbound-events', 'publication-audit', 'manual-tasks', 'source-quality',
+    'domain-circuit-breakers',
   ];
 
   const forbidNetwork = () => {
@@ -138,7 +139,8 @@ async function main() {
   async function reset(mode = 'AUTONOMOUS') {
     forbidNetwork();
     for (const collection of collections) await adapter.writeCollection(collection, []);
-    await settings.updateAutomationSettings({ launchEnabled: mode === 'CANARY' || mode === 'AUTONOMOUS' });
+    const enabled = mode === 'CANARY' || mode === 'AUTONOMOUS';
+    await settings.updateAutomationSettings({ enabled, launchEnabled: enabled });
     await store.updateAutomationControl({
       mode,
       effectiveMode: mode,
@@ -349,6 +351,7 @@ async function main() {
     await reset();
     const now = new Date().toISOString();
     const canonicalUrl = 'https://merchant.example/products/fallback-canonical';
+    const rejectedAffiliate = 'https://rejected-merchant.example/products/fallback?ref=sandeal';
     const alternateAffiliate = 'https://backup-merchant.example/products/fallback?ref=sandeal';
     const galleryImage = 'https://merchant.example/assets/fallback-gallery.jpg';
     const seeded = await seed('fallback', {
@@ -357,15 +360,24 @@ async function main() {
         normalizedTitle: 'auralink pro wireless noise cancelling headphones', merchant: 'merchant.example',
         identityHash: sourceHash('fallback-identity'), ruleVersion: 'product-identity-v2',
       },
-      offers: [{
-        id: 'offer-backup', source: 'manual', merchant: 'backup-merchant.example', price: 1200000,
-        originalPrice: 1500000, affiliateUrl: alternateAffiliate, health: 'HEALTHY', observedAt: now,
-        expiresAt: new Date(Date.now() + 48 * 60 * 60_000).toISOString(), confidence: 0.97, primary: false,
-      }],
+      offers: [
+        {
+          id: 'offer-rejected', source: 'manual', merchant: 'rejected-merchant.example', price: 1190000,
+          originalPrice: 1500000, affiliateUrl: rejectedAffiliate, health: 'HEALTHY', observedAt: now,
+          expiresAt: new Date(Date.now() + 48 * 60 * 60_000).toISOString(), confidence: 0.99, primary: false,
+        },
+        {
+          id: 'offer-backup', source: 'manual', merchant: 'backup-merchant.example', price: 1200000,
+          originalPrice: 1500000, affiliateUrl: alternateAffiliate, health: 'HEALTHY', observedAt: now,
+          expiresAt: new Date(Date.now() + 48 * 60 * 60_000).toISOString(), confidence: 0.97, primary: false,
+        },
+      ],
       gallery: [galleryImage],
     });
+    const fetchCalls = [];
     global.fetch = async (input, options = {}) => {
       const url = String(input);
+      fetchCalls.push(url);
       const healthy = [canonicalUrl, alternateAffiliate, galleryImage].includes(url);
       if (healthy) {
         const image = url === galleryImage;
@@ -395,6 +407,177 @@ async function main() {
     assert.equal(active.find(fact => fact.field === 'originalUrl').value, canonicalUrl);
     assert.equal(active.find(fact => fact.field === 'affiliateUrl').value, alternateAffiliate);
     assert.equal(active.find(fact => fact.field === 'imageUrl').value, galleryImage);
+    assert.equal(fetchCalls.filter(url => url === rejectedAffiliate).length, 1);
+    assert.equal(fetchCalls.filter(url => url === alternateAffiliate).length, 1);
+    assert.ok(fetchCalls.indexOf(rejectedAffiliate) < fetchCalls.indexOf(alternateAffiliate));
+    forbidNetwork();
+  });
+
+  await test('failed, timed-out, ambiguous, and throwing alternates never replace current commerce URLs', async () => {
+    await reset();
+    const now = new Date().toISOString();
+    const currentMerchant = 'https://fail-closed-primary.example/products/item';
+    const alternateMerchant = 'https://fail-closed-canonical.example/products/item';
+    const currentAffiliate = 'https://fail-closed-primary.example/products/item?ref=current';
+    const rejectedAffiliate = 'https://fail-closed-offers.example/rejected';
+    const timedOutAffiliate = 'https://fail-closed-offers.example/timeout';
+    const ambiguousAffiliate = 'https://fail-closed-offers.example/ambiguous';
+    const throwingAffiliate = 'https://fail-closed-offers.example/throwing';
+    const currentImage = 'https://fail-closed-images.example/item.jpg';
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60_000).toISOString();
+    const seeded = await seed('fallback-fail-closed', {
+      originalUrl: currentMerchant,
+      canonicalProductUrl: currentMerchant,
+      affiliateUrl: currentAffiliate,
+      imageUrl: currentImage,
+      gallery: [],
+      identity: {
+        sourceId: 'auralink-fallback-fail-closed', canonicalUrl: alternateMerchant, affiliateUrl: rejectedAffiliate,
+        normalizedTitle: 'auralink pro wireless noise cancelling headphones', merchant: 'fail-closed-primary.example',
+        identityHash: sourceHash('fallback-fail-closed-identity'), ruleVersion: 'product-identity-v2',
+      },
+      offers: [
+        {
+          id: 'offer-current', source: 'manual', merchant: 'fail-closed-primary.example', price: 1200000,
+          originalPrice: 1500000, affiliateUrl: currentAffiliate, health: 'HEALTHY', observedAt: now,
+          expiresAt, confidence: 1, primary: true,
+        },
+        ...[
+          ['offer-rejected', rejectedAffiliate, 0.99],
+          ['offer-timeout', timedOutAffiliate, 0.98],
+          ['offer-ambiguous', ambiguousAffiliate, 0.97],
+          ['offer-throwing', throwingAffiliate, 0.96],
+          ['offer-rejected-duplicate', rejectedAffiliate, 0.95],
+        ].map(([id, affiliateUrl, confidence]) => ({
+          id, source: 'manual', merchant: 'fail-closed-offers.example', price: 1210000,
+          originalPrice: 1500000, affiliateUrl, health: 'HEALTHY', observedAt: now,
+          expiresAt, confidence, primary: false,
+        })),
+      ],
+      bestOfferId: 'offer-current',
+    });
+    const fetchCalls = [];
+    global.fetch = async input => {
+      const url = String(input);
+      fetchCalls.push(url);
+      if (url === currentImage) {
+        return new Response(new Uint8Array(1024), {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg', 'content-length': '1024' },
+        });
+      }
+      if (url === timedOutAffiliate) {
+        const error = new Error('simulated request timeout');
+        error.name = 'TimeoutError';
+        throw error;
+      }
+      if (url === ambiguousAffiliate) {
+        return new Response(null, { status: 302, headers: { 'content-type': 'text/html' } });
+      }
+      if (url === throwingAffiliate) throw new Error('simulated probe transport failure');
+      if (url === alternateMerchant) {
+        return new Response(null, { status: 503, headers: { 'content-type': 'text/html' } });
+      }
+      return new Response(null, { status: 404, headers: { 'content-type': 'text/html' } });
+    };
+    const queued = await store.createAutomationJob({
+      type: 'POST_PUBLISH_MONITOR',
+      payload: { productId: seeded.id, publicPageStatus: 200, publicPageIdentity: 'expected', sequence: 0 },
+      idempotencyKey: 'post-monitor-fallback-fail-closed',
+      operationId: 'post-monitor-operation-fallback-fail-closed',
+      requestedBy: 'autopilot-worker',
+      priority: 99,
+    });
+    const completed = await processOne(queued, 'self-heal-worker-fallback-fail-closed');
+    const current = await products.getProductById(seeded.id);
+    assert.equal(current.originalUrl, currentMerchant);
+    assert.equal(current.canonicalProductUrl, currentMerchant);
+    assert.equal(current.affiliateUrl, currentAffiliate);
+    assert.equal(current.bestOfferId, 'offer-current');
+    assert.equal(current.offers.find(offer => offer.id === 'offer-current').primary, true);
+    assert.ok(current.offers.filter(offer => offer.id !== 'offer-current').every(offer => offer.primary === false));
+    assert.equal(completed.result.outcome, 'CONFIRMED_BROKEN');
+    assert.equal(completed.result.statuses.product, 'broken');
+    assert.equal(completed.result.statuses.affiliate, 'broken');
+    for (const url of [currentMerchant, alternateMerchant, currentAffiliate, rejectedAffiliate, timedOutAffiliate, ambiguousAffiliate, throwingAffiliate]) {
+      assert.equal(fetchCalls.filter(value => value === url).length, 1, `unexpected probe count for ${url}`);
+    }
+    forbidNetwork();
+  });
+
+  await test('commerce alternate probing is capped and exact duplicate URLs are probed once', async () => {
+    await reset();
+    const now = new Date().toISOString();
+    const currentMerchant = 'https://bounded-merchant.example/products/item';
+    const currentAffiliate = 'https://bounded-primary.example/products/item?ref=current';
+    const currentImage = 'https://bounded-images.example/item.jpg';
+    const alternateUrls = Array.from({ length: 12 }, (_, index) => `https://bounded-affiliate-${index}.example/products/item`);
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60_000).toISOString();
+    const alternateOffers = alternateUrls.map((affiliateUrl, index) => ({
+      id: `offer-bounded-${index}`, source: 'manual', merchant: `bounded-affiliate-${index}.example`, price: 1210000 + index,
+      originalPrice: 1500000, affiliateUrl, health: 'HEALTHY', observedAt: now,
+      expiresAt, confidence: 0.98 - index * 0.01, primary: false,
+    }));
+    const seeded = await seed('fallback-bounded', {
+      originalUrl: currentMerchant,
+      canonicalProductUrl: currentMerchant,
+      affiliateUrl: currentAffiliate,
+      imageUrl: currentImage,
+      gallery: [],
+      offers: [
+        {
+          id: 'offer-bounded-current', source: 'manual', merchant: 'bounded-primary.example', price: 1200000,
+          originalPrice: 1500000, affiliateUrl: currentAffiliate, health: 'HEALTHY', observedAt: now,
+          expiresAt, confidence: 1, primary: true,
+        },
+        {
+          ...alternateOffers[0],
+          id: 'offer-bounded-duplicate',
+          confidence: 0.99,
+        },
+        ...alternateOffers,
+      ],
+      bestOfferId: 'offer-bounded-current',
+    });
+    const fetchCalls = [];
+    global.fetch = async input => {
+      const url = String(input);
+      fetchCalls.push(url);
+      if (url === currentMerchant) {
+        return new Response('<html>ok</html>', { status: 200, headers: { 'content-type': 'text/html' } });
+      }
+      if (url === currentImage) {
+        return new Response(new Uint8Array(1024), {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg', 'content-length': '1024' },
+        });
+      }
+      if (url === alternateUrls[7]) {
+        return new Response('<html>healthy but outside the bounded candidate set</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        });
+      }
+      return new Response(null, { status: 404, headers: { 'content-type': 'text/html' } });
+    };
+    const queued = await store.createAutomationJob({
+      type: 'POST_PUBLISH_MONITOR',
+      payload: { productId: seeded.id, publicPageStatus: 200, publicPageIdentity: 'expected', sequence: 0 },
+      idempotencyKey: 'post-monitor-fallback-bounded',
+      operationId: 'post-monitor-operation-fallback-bounded',
+      requestedBy: 'autopilot-worker',
+      priority: 99,
+    });
+    await processOne(queued, 'self-heal-worker-fallback-bounded');
+    const current = await products.getProductById(seeded.id);
+    const affiliateCalls = fetchCalls.filter(url => url === currentAffiliate || url.startsWith('https://bounded-affiliate-'));
+    assert.equal(affiliateCalls.length, 8);
+    assert.equal(new Set(affiliateCalls).size, 8);
+    assert.equal(affiliateCalls.filter(url => url === alternateUrls[0]).length, 1);
+    assert.ok(affiliateCalls.includes(alternateUrls[6]));
+    assert.equal(affiliateCalls.includes(alternateUrls[7]), false);
+    assert.equal(current.affiliateUrl, currentAffiliate);
+    assert.equal(current.bestOfferId, 'offer-bounded-current');
     forbidNetwork();
   });
 

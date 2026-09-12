@@ -1,9 +1,4 @@
-import { promises as fs } from 'fs';
-import path from 'path';
-import { randomBytes } from 'crypto';
-import { ensureDataDir, getDataDir } from './adapter';
-
-function getSettingsFile() { return path.join(getDataDir(), 'automation-settings.json'); }
+import { getSettingsStore, validateSettingsValue, type SettingsStore } from './settingsStore';
 
 export interface AutomationSettings {
   schemaVersion: number;
@@ -184,24 +179,18 @@ function sanitizeSourceControlList(value: unknown, domain: boolean): string[] {
   return [...new Set(normalized)].slice(0, 100);
 }
 
-export async function getAutomationSettings(): Promise<AutomationSettings> {
-  try {
-    const raw = await fs.readFile(getSettingsFile(), 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') {
-      return DEFAULT_SETTINGS;
-    }
-    return sanitizeAutomationSettings(parsed);
-  } catch {
-    // If file doesn't exist or is corrupt, return defaults
-    return DEFAULT_SETTINGS;
-  }
+export async function getAutomationSettings(store: SettingsStore = getSettingsStore()): Promise<AutomationSettings> {
+  const parsed = await store.read('automation');
+  if (!parsed || typeof parsed !== 'object') return DEFAULT_SETTINGS;
+  validateSettingsValue('automation', parsed);
+  return sanitizeAutomationSettings(parsed);
 }
 
 export async function updateAutomationSettings(
-  updates: Partial<AutomationSettings>
+  updates: Partial<AutomationSettings>,
+  store: SettingsStore = getSettingsStore(),
 ): Promise<AutomationSettings> {
-  await ensureDataDir();
+  validateSettingsValue('automation', updates);
   
   // Prevent passing unsafe overrides in updates
   if (
@@ -213,17 +202,14 @@ export async function updateAutomationSettings(
     throw new Error('Policy violation: Cannot override safety immutables.');
   }
 
-  const current = await getAutomationSettings();
+  const current = await getAutomationSettings(store);
   const next = sanitizeAutomationSettings({
     ...current,
     ...updates,
     updatedAt: new Date().toISOString(),
   });
 
-  const settingsFile = getSettingsFile();
-  const tmpPath = settingsFile + '.tmp.' + randomBytes(4).toString('hex');
-  await fs.writeFile(tmpPath, JSON.stringify(next, null, 2), 'utf-8');
-  await fs.rename(tmpPath, settingsFile);
+  await store.write('automation', next);
 
   return next;
 }

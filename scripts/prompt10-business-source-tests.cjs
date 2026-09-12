@@ -168,12 +168,28 @@ async function main() {
 
   await test('runtime source scan uses the registered adapter, normalizes before queueing, and persists measured run quality', async () => {
     const pipeline = require('../src/lib/bots/productPipeline.ts');
+    const settings = require('../src/lib/storage/automationSettings.ts');
+    const previousSettings = await settings.getAutomationSettings();
     await storage.writeCollection('candidate-queue', []);
     await storage.writeCollection('products', []);
     await storage.writeCollection('pipeline-daily-usage', []);
     await storage.writeCollection('source-keyword-state', []);
     await storage.writeCollection('source-quality', []);
     let calls = 0;
+    let firstRequestLimit = 0;
+    let nextFixtureIndex = 0;
+    const fixtureItems = Array.from({ length: 50 }, (_, index) => {
+      const item = accessTradeItem(`runtime-${index}`);
+      const merchantDomain = `merchant-${index}.example`;
+      return {
+        ...item,
+        campaignName: `campaign-${index}`,
+        merchant: merchantDomain,
+        merchantDomain,
+        originalUrl: `https://${merchantDomain}/products/runtime-${index}`,
+        affiliateUrl: `https://${merchantDomain}/products/runtime-${index}?aff=fixture`,
+      };
+    });
     const registry = new platform.SourceAdapterRegistry();
     registry.register({
       id: 'accesstrade', version: 'fixture-runtime-v1',
@@ -181,9 +197,9 @@ async function main() {
       healthCheck: async () => ({ status: 'configured', configured: true, ready: false, reason: 'fixture_probe_not_run' }),
       discover: async input => {
         calls += 1;
-        const items = calls === 1
-          ? Array.from({ length: input.limit }, (_, index) => accessTradeItem(`runtime-${index}`))
-          : [];
+        if (calls === 1) firstRequestLimit = input.limit;
+        const items = fixtureItems.slice(nextFixtureIndex, nextFixtureIndex + input.limit);
+        nextFixtureIndex += items.length;
         return { items, requests: 1, outcomes: { [items.length ? 'success_with_results' : 'success_empty']: 1 } };
       },
       normalize: item => {
@@ -195,8 +211,23 @@ async function main() {
       classifyError: () => 'last_check_failed', retryAfter: () => undefined,
       disclosure: () => ({ fixture: true }),
     });
-    const result = await pipeline.scanSourcesToQueue('bootstrap', Date.now() + 30_000, { registry, runId: 'runtime-adapter-scan:1' });
+    // The established 240-item pool across ten keywords requests 24 per call.
+    // Supply a fixed 50-item workload across calls without reducing the scan.
+    let result;
+    try {
+      await settings.updateAutomationSettings({
+        sourceKeywords: Array.from({ length: 10 }, (_, index) => `runtime-fixture-${index}`),
+        bootstrapKeywordCount: 10,
+        bootstrapCandidateLimit: 80,
+        sourceDiscoveryPoolMultiplier: 3,
+      });
+      result = await pipeline.scanSourcesToQueue('bootstrap', Date.now() + 30_000, { registry, runId: 'runtime-adapter-scan:1' });
+    } finally {
+      await settings.updateAutomationSettings(previousSettings);
+    }
     assert.equal(result.sourceStatus, 'configured');
+    assert.equal(firstRequestLimit, 24);
+    assert.equal(calls, 10);
     assert.equal(result.found, 50); assert.equal(result.normalized, 50); assert.equal(result.queued, 50);
     assert.equal(result.rejected, 0); assert.equal(result.failed, 0); assert.equal(result.reason, 'source_scan_completed');
     assert.equal(result.sourceRequests, calls); assert.ok(result.durationMs >= 0);

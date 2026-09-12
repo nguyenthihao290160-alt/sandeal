@@ -145,6 +145,7 @@ export interface ProductSourceMapping {
 }
 
 export interface ProductOffer {
+  monetization?: import('./affiliate/money/types').NormalizedAffiliateOffer;
   id: string;
   source: string;
   merchant: string;
@@ -385,6 +386,8 @@ export interface ProductEligibilityDecisionRecord {
 }
 
 export interface Product {
+  /** Storage concurrency version; absent legacy rows start at revision one. */
+  storageRevision?: number;
   schemaVersion?: number;
   id: string;
   title: string;

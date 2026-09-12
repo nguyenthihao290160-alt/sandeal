@@ -227,6 +227,17 @@ async function writeRevision(
 }
 
 export class MongoStorageAdapter implements StorageAdapter {
+  get domain() {
+    // Preserve the existing revision-envelope Mongo format during remediation.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return (require('./legacyDomainStorage') as typeof import('./legacyDomainStorage')).createLegacyDomainStorage(this);
+  }
+
+  get settingsStore() {
+    // Mongo file-path compatibility methods deliberately fail closed.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return (require('./collectionSettingsStore') as typeof import('./collectionSettingsStore')).createCollectionSettingsStore(this);
+  }
   readonly driver = 'mongo' as const;
   readonly capabilities = {
     schemaVersion: 1 as const,

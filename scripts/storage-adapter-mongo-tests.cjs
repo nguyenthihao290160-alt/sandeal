@@ -1009,7 +1009,7 @@ async function main() {
     );
     assert.match(
         factorySource,
-        /if\s*\(config\.driver === 'file'\)\s*return fileStorageAdapter;/,
+        /if\s*\(config\.driver === 'file'\)\s*\{[^}]*return\s*\(require\(['"]\.\/fileStorageAdapter['"]\)[^;]*\.fileStorageAdapter;/,
     );
     assert.match(factorySource, /return loadMongoAdapter\(config\);/);
     const clientSource = fs.readFileSync(path.join(storageDir, 'mongoClient.ts'), 'utf8');
@@ -1023,6 +1023,29 @@ async function main() {
     assert.deepEqual(fs.readdirSync(tempDir), []);
   });
 
+  // Additive cross-driver domain contract; the pre-existing cases remain intact.
+  await require('./fixtures/v6-domain-contract.cjs').runDomainContract(
+      'mongo', createMongoStorageAdapter(config, new FakeConnection()), test,
+  );
+  await test('Mongo mutable settings use bounded database rows without filesystem', async () => {
+    const adapter = createMongoStorageAdapter(config, new FakeConnection());
+    await adapter.settingsStore.write('scheduler', { enabled: false, intervalMinutes: 30 });
+    assert.deepEqual(await adapter.settingsStore.read('scheduler'), { enabled: false, intervalMinutes: 30 });
+    assert.deepEqual(fs.readdirSync(tempDir), []);
+  });
+  await test('Mongo V6 migration planning reads domain records without mutating source', async () => {
+    const adapter = createMongoStorageAdapter(config, new FakeConnection());
+    await adapter.domain.createProduct(require('./fixtures/v6-domain-contract.cjs').fixture('migration-mongo'));
+    await adapter.settingsStore.write('scheduler', { enabled: false });
+    const before = await adapter.readCollection('products');
+    const { createMongoMigrationSource } = require('../src/lib/storage/v6MigrationSources.ts');
+    const { planV6Migration } = require('../src/lib/storage/v6MigrationEngine.ts');
+    const plan = await planV6Migration(createMongoMigrationSource(adapter, ['products','system-settings']));
+    assert.equal(plan.sourceDriver, 'mongo');
+    assert.deepEqual(plan.rows.map(row => row.classification), ['MIGRATABLE','MIGRATABLE']);
+    assert.deepEqual(await adapter.readCollection('products'), before);
+    assert.deepEqual(await adapter.settingsStore.read('scheduler'), { enabled: false });
+  });
   console.log(`\nMongo storage M2: ${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
 }

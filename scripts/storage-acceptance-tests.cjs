@@ -396,7 +396,7 @@ async function main() {
     const factory = fs.readFileSync(path.join(root, 'src', 'lib', 'storage', 'storageFactory.ts'), 'utf8');
     assert.equal(mongo.includes('fileStorageAdapter'), false);
     assert.equal(mongo.includes("from 'fs'"), false);
-    assert.match(factory, /if\s*\(config\.driver === 'file'\)\s*return fileStorageAdapter;/);
+    assert.match(factory, /if\s*\(config\.driver === 'file'\)\s*\{[^}]*return\s*\(require\(['"]\.\/fileStorageAdapter['"]\)[^;]*\.fileStorageAdapter;/);
     assert.match(factory, /return loadMongoAdapter\(config\);/);
   });
 

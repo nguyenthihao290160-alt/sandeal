@@ -291,8 +291,9 @@ function batchResult(workerId, overrides = {}) {
     assert.equal((await store.getAllAutomationJobs()).filter(item => item.type === 'RUNTIME_GUARDIAN').length, 1);
   });
 
-  await test('39. active pool remains within the configured four-slot safe ceiling', async () => {
-    assert.equal(rollout.isContinuousWorkerPoolEnabled({}), true);
+  await test('39. explicitly active pool remains within the configured four-slot safe ceiling', async () => {
+    assert.equal(rollout.isContinuousWorkerPoolEnabled({}), false);
+    assert.equal(rollout.isContinuousWorkerPoolEnabled({ WORKER_CONTINUOUS_POOL_V2: 'ACTIVE' }), true);
     let active = 0;
     let peak = 0;
     let count = 0;
@@ -311,7 +312,7 @@ function batchResult(workerId, overrides = {}) {
     const launcher = fs.readFileSync(path.join(process.cwd(), 'scripts/automation-worker.cjs'), 'utf8');
     assert.match(
       launcher,
-      /Math\.max\(\s*1,\s*Math\.min\(\s*4,\s*Number\(settings\.maxConcurrency\)/,
+      /Math\.max\(\s*1,\s*Math\.min\(\s*4,\s*Number\(\s*settings\.maxConcurrency\s*,?\s*\)/,
     );
   });
 

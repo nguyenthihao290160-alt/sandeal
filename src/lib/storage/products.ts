@@ -10,7 +10,7 @@ import type {
   ProductSourceMapping,
 } from '../types';
 import { createHash } from 'crypto';
-import { readCollection, writeCollection, deleteOne, generateId, runTransaction } from './adapter';
+import { readCollection, deleteOne, generateId } from './adapter';
 import { normalizeProductForPublic } from '../productNormalizer';
 import { isPublicSafeProduct } from '../publicProductFilter';
 import { evaluateCanonicalProduct, normalizeCanonicalProduct, stableProductHash } from '../canonicalProduct';
@@ -18,6 +18,10 @@ import { isReviewIndexable } from '../editorialReview';
 import { getOperationEnvironment, runGuardedOperation, sanitizeErrorMessage, type OperationEnvironment } from '../safety/operationGuard';
 import { isStorageError } from './storageErrors';
 import { getReleaseIdentity } from '../releaseIdentity';
+import { getDomainStorage } from './storageFactory';
+import { DomainStorageError, type ProductIdentityQuery, type ProductVersion } from './domainStorage';
+import { productCreateDuplicateKeys, normalizeProductIdentityUrl } from './productIdentity';
+export { normalizeProductIdentityUrl } from './productIdentity';
 
 const COLLECTION = 'products';
 let productWriteChain: Promise<unknown> = Promise.resolve();
@@ -47,41 +51,8 @@ export class DuplicateProductError extends Error {
   }
 }
 
-function normalizedDuplicateUrl(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  try {
-    const url = new URL(value.trim());
-    if (!['http:', 'https:'].includes(url.protocol)) return undefined;
-    url.protocol = 'https:';
-    url.hostname = url.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
-    url.hash = '';
-    for (const key of [...url.searchParams.keys()]) {
-      if (/^(?:utm_|aff|affiliate|ref|source|campaign|clickid|subid)/i.test(key)) url.searchParams.delete(key);
-    }
-    url.searchParams.sort();
-    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
-    return url.href;
-  } catch {
-    return undefined;
-  }
-}
-
 function duplicateKeys(product: Partial<Product>): Set<string> {
-  const keys = new Set<string>();
-  const sourceItemId = product.sourceItemId || product.sourceId || product.externalId;
-  if (product.source && sourceItemId) keys.add(`source:${product.source}:${String(sourceItemId).trim().toLowerCase()}`);
-  const canonicalUrl = normalizedDuplicateUrl(product.canonicalProductUrl || product.originalUrl);
-  if (canonicalUrl) keys.add(`canonical:${canonicalUrl}`);
-  const affiliateUrl = normalizedDuplicateUrl(product.affiliateUrl);
-  if (affiliateUrl) keys.add(`affiliate:${affiliateUrl}`);
-  const merchant = (product.merchantIdentity || product.merchantDomain || (() => {
-    try { return canonicalUrl ? new URL(canonicalUrl).hostname : ''; } catch { return ''; }
-  })()).toLowerCase();
-  const title = product.title?.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  // Title is only a fallback when neither side has a stable source/URL key;
-  // otherwise two variants sharing a merchant title must remain distinct.
-  if (!keys.size && merchant && title && title.length >= 16) keys.add(`merchant-title:${merchant}:${title}`);
-  return keys;
+  return new Set(productCreateDuplicateKeys(product));
 }
 
 export function productsAreCanonicalDuplicates(left: Partial<Product>, right: Partial<Product>): boolean {
@@ -237,12 +208,11 @@ export async function getAllProducts(): Promise<Product[]> {
 }
 
 export async function getProductById(id: string): Promise<Product | null> {
-  return (await readCanonicalProducts()).find((item) => item.id === id) ?? null;
+  return (await getDomainStorage().getProduct(id))?.value ?? null;
 }
 
 export async function getProductBySlug(slug: string): Promise<Product | null> {
-  const products = await readCanonicalProducts();
-  return products.find(p => p.slug === slug) ?? null;
+  return (await getDomainStorage().getProductBySlug(slug))?.value ?? null;
 }
 
 
@@ -338,7 +308,7 @@ export async function createProduct(data: CreateProductInput): Promise<Product> 
   return withProductWrite(async () => {
     let created: Product | null = null;
     let duplicate: { product: Product; updatedFields: string[]; unchangedFields: string[] } | null = null;
-    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+    await mutateProductEntity({ kind: 'CREATE', draft: data }, async stored => {
       const products = stored.map(item => normalizeCanonicalProduct(item));
       const existingIndex = products.findIndex(item => productsAreCanonicalDuplicates(item, data));
       if (existingIndex >= 0) {
@@ -351,7 +321,7 @@ export async function createProduct(data: CreateProductInput): Promise<Product> 
       created = normalizeCanonicalProduct({
         ...data,
         id,
-        slug: ensureUniqueSlug(generateSlug(data.title), products, id),
+        slug: await indexedUniqueSlug(generateSlug(data.title), id),
         createdAt: now,
         updatedAt: now,
       });
@@ -361,7 +331,7 @@ export async function createProduct(data: CreateProductInput): Promise<Product> 
     const duplicateResult = duplicate as { product: Product; updatedFields: string[]; unchangedFields: string[] } | null;
     if (duplicateResult) {
       try {
-        await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items.slice(-999), {
+        await getDomainStorage().appendProductAudit('duplicate', {
           id: generateId(),
           existingProductId: duplicateResult.product.id,
           source: data.source,
@@ -369,7 +339,7 @@ export async function createProduct(data: CreateProductInput): Promise<Product> 
           updatedFields: duplicateResult.updatedFields,
           unchangedFields: duplicateResult.unchangedFields,
           createdAt: new Date().toISOString(),
-        }]);
+        });
       } catch (error) {
         console.error(JSON.stringify({
           type: 'product_duplicate_merge_audit_failed',
@@ -418,28 +388,6 @@ export interface SourceCandidateUpsertResult {
   created: boolean;
   unchanged: boolean;
   mapping: SourceCandidateMappingResult;
-}
-
-const TRACKING_QUERY_KEYS = new Set(['fbclid', 'gclid', 'dclid', 'msclkid']);
-
-export function normalizeProductIdentityUrl(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  try {
-    const url = new URL(value.trim());
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
-    url.protocol = url.protocol.toLowerCase();
-    url.hostname = url.hostname.toLowerCase();
-    url.hash = '';
-    if ((url.protocol === 'https:' && url.port === '443') || (url.protocol === 'http:' && url.port === '80')) url.port = '';
-    for (const key of [...url.searchParams.keys()]) {
-      if (key.toLowerCase().startsWith('utm_') || TRACKING_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.delete(key);
-    }
-    url.searchParams.sort();
-    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '');
-    return url.toString();
-  } catch {
-    return null;
-  }
 }
 
 function mappingDomain(normalizedUrl: string | null): string | undefined {
@@ -602,7 +550,7 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
       result = null;
       audit = null;
       try {
-        await runTransaction<Partial<Product>>(COLLECTION, stored => {
+        await mutateProductEntity({ source, sourceId, normalizedOriginalUrl }, async stored => {
           const products = stored.map(item => normalizeCanonicalProduct(item));
           const matches: Array<{ index: number; evidence: ProductSourceDuplicateEvidence[] }> = [];
           for (let index = 0; index < products.length; index += 1) {
@@ -624,7 +572,7 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
               originalUrl,
               sourceMappings: [sourceMapping],
               id,
-              slug: ensureUniqueSlug(generateSlug(String(draft.title)), products, id),
+              slug: await indexedUniqueSlug(generateSlug(String(draft.title)), id),
               createdAt: now,
               updatedAt: now,
             });
@@ -724,7 +672,7 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
     } | null;
     if (!committedAudit) return committedResult;
     try {
-      await runTransaction<Record<string, unknown>>('product-duplicate-merge-audit', items => [...items, {
+      await getDomainStorage().appendProductAudit('duplicate', {
         id: generateId(),
         existingProductId: committedAudit.productId,
         source: draft.source,
@@ -733,7 +681,7 @@ export async function upsertSourceCandidateProduct(draft: Partial<Product>): Pro
         updatedFields: committedAudit.updatedFields,
         unchangedFields: committedAudit.unchangedFields,
         createdAt: committedAudit.createdAt,
-      }]);
+      });
     } catch (error) {
       console.error(JSON.stringify({
         type: 'product_duplicate_merge_audit_failed',
@@ -849,7 +797,7 @@ export async function repairSourceCandidateEvidence(
     let result: ProductEvidenceRepairResult | null = null;
     const auditId = generateId();
     const verifiedAt = options.verifiedAt || new Date().toISOString();
-    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+    await mutateProductEntity({ id: productId }, stored => {
       const products = stored.map(item => normalizeCanonicalProduct(item));
       const index = products.findIndex(product => product.id === productId);
       if (index < 0) throw new Error('SOURCE_CANDIDATE_REPAIR_PRODUCT_NOT_FOUND');
@@ -985,7 +933,7 @@ export async function repairSourceCandidateEvidence(
     const committed = result as ProductEvidenceRepairResult | null;
     if (!committed) throw new Error('SOURCE_CANDIDATE_REPAIR_NOT_COMMITTED');
     try {
-      await runTransaction<Record<string, unknown>>('product-evidence-repair-audit', items => [...items, {
+      await getDomainStorage().appendProductAudit('evidence', {
         id: auditId,
         productId,
         source: draft.source,
@@ -995,7 +943,7 @@ export async function repairSourceCandidateEvidence(
         preservedFields: committed.preservedFields,
         verifiedFields: Object.entries(options.verifiedFields).filter(([, verified]) => verified).map(([field]) => field),
         createdAt: verifiedAt,
-      }]);
+      });
     } catch (error) {
       console.error(JSON.stringify({
         type: 'product_evidence_repair_audit_failed',
@@ -1020,7 +968,7 @@ export async function saveCanonicalProduct(
   if (options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
     let saved: Product | null = null;
-    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+    await mutateProductEntity({ id }, stored => {
       const products = stored.map(item => normalizeCanonicalProduct(item));
       const index = products.findIndex((item) => item.id === id);
       if (index < 0) {
@@ -1056,7 +1004,7 @@ export async function upsertCanonicalProduct(
   if (requestsPublicProductState(draft) || options.evaluate === true) throw new Error('SAFE_PUBLISH_JOB_REQUIRED');
   return withProductWrite(async () => {
     let output: { product: Product; created: boolean; unchanged: boolean } | null = null;
-    await runTransaction<Partial<Product>>(COLLECTION, stored => {
+    await mutateProductEntity({ kind: 'CANONICAL', draft }, async stored => {
       const products = stored.map(item => normalizeCanonicalProduct(item));
       const sourceId = String(draft.sourceId || draft.externalId || '');
       const hash = draft.sourceHash || draft.contentHash || stableProductHash(draft);
@@ -1082,7 +1030,7 @@ export async function upsertCanonicalProduct(
         return products;
       }
       const requestedSlug = draft.slug || generateStableSlug(String(draft.title || 'san-pham'), hash);
-      const uniqueSlug = ensureUniqueSlug(requestedSlug, products, hash);
+      const uniqueSlug = await indexedUniqueSlug(requestedSlug, hash);
       const base = {
         ...draft,
         id: String(draft.id || generateId()),
@@ -1219,8 +1167,9 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
   return withProductWrite(async () => {
     const authorization = await requireDurablePublishAuthorization(id, audit);
     const job = authorization.job;
-    const products = await readCanonicalProducts(); const index = products.findIndex((item) => item.id === id); if (index < 0) return null;
-    const previous = products[index]; const now = new Date().toISOString();
+    const storage = getDomainStorage();
+    const record = await storage.getProduct(id); if (!record) return null;
+    const previous = record.value; const now = new Date().toISOString();
     const publicationEffectKey = audit.publicationEffectKey || job.idempotencyKey;
     if (previous.publicationEffectKey === publicationEffectKey && previous.status === 'published' && previous.publicHidden === false) return previous;
     if (authorization.autonomous && previous.lifecycleState !== 'PUBLISHING') {
@@ -1237,7 +1186,7 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
       publicationPreviousLifecycleState: previous.lifecycleState,
       lifecycleState: authorization.autonomous ? 'PUBLISHING' : 'PUBLISHED',
       lifecycleUpdatedAt: authorization.autonomous ? previous.lifecycleUpdatedAt : now,
-      slug: ensureUniqueSlug(requestedSlug, products.filter((item) => item.id !== id), previous.sourceHash || previous.id),
+      slug: await indexedUniqueSlug(requestedSlug, previous.sourceHash || previous.id, id),
       updatedAt: now,
     }, now);
     const candidate = authorization.autonomous && evaluatedCandidate.status === 'published'
@@ -1258,18 +1207,13 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
       dryRun: audit.dryRun,
       idempotencyKey: job.idempotencyKey,
     }, async () => {
-      let committed = false;
+      let committedVersion: ProductVersion | undefined;
       try {
-        await runTransaction<Partial<Product>>(COLLECTION, stored => {
-          const currentProducts = stored.map(item => normalizeCanonicalProduct(item));
-          const currentIndex = currentProducts.findIndex(item => item.id === id);
-          if (currentIndex < 0) throw new Error('canonical_product_disappeared');
-          if (currentProducts[currentIndex].updatedAt !== previous.updatedAt) throw new Error('PRODUCT_CHANGED_DURING_PUBLISH');
-          currentProducts[currentIndex] = candidate;
-          committed = true;
-          return currentProducts;
-        });
-        const confirmed = (await readCanonicalProducts()).find((item) => item.id === id);
+        const commit = await storage.replaceProduct(candidate, record.version);
+        if (commit.status === 'NOT_FOUND') throw new Error('canonical_product_disappeared');
+        if (commit.status !== 'APPLIED') throw new Error('PRODUCT_CHANGED_DURING_PUBLISH');
+        committedVersion = commit.record.version;
+        const confirmed = (await storage.getProduct(id))?.value;
         if (!confirmed) throw new Error('canonical_readback_failed');
         // Autonomous publication remains fail-closed while the durable lifecycle
         // transition is PUBLISHING. Validate the state that becomes visible only
@@ -1302,16 +1246,9 @@ export async function publishCanonicalProductTransaction(id: string, updates: Pa
         });
         return confirmed;
       } catch (error) {
-        if (committed) {
-          await runTransaction<Partial<Product>>(COLLECTION, stored => {
-            const currentProducts = stored.map(item => normalizeCanonicalProduct(item));
-            const currentIndex = currentProducts.findIndex(item => item.id === id);
-            if (currentIndex < 0) return undefined;
-            const current = currentProducts[currentIndex];
-            if (current.publicationEffectKey !== publicationEffectKey || current.updatedAt !== candidate.updatedAt) return undefined;
-            currentProducts[currentIndex] = previous;
-            return currentProducts;
-          });
+        if (committedVersion) {
+          // A newer writer must never be rolled back by this operation.
+          await storage.replaceProduct(previous, committedVersion);
         }
         await appendPublicationAudit({ operationId: job.operationId, runId: audit.runId || job.id, candidateId: audit.candidateId, productId: id, action: 'rolled_back', previousState: previous.status, nextState: previous.status, reasonCodes: [sanitizeErrorMessage(error instanceof Error ? error.message : 'publication_error')], sourceHash: previous.sourceHash, reviewVersion: previous.reviewContent?.reviewVersion, riskLevel: 'HIGH', dryRun: false, timestamp: now });
         throw error;
@@ -1353,7 +1290,7 @@ export interface PublicationAudit {
 }
 
 async function appendPublicationAudit(event: PublicationAudit): Promise<void> {
-  await runTransaction<PublicationAudit>('publication-audit', (existing) => [...existing.slice(-999), event]);
+  await getDomainStorage().appendProductAudit('publication', event);
 }
 
 export async function appendPublicationAuditOnce(
@@ -1363,25 +1300,13 @@ export async function appendPublicationAuditOnce(
   if (!normalizedEffectKey || normalizedEffectKey.length > 240) {
     throw new Error('PUBLICATION_AUDIT_EFFECT_KEY_INVALID');
   }
-  let output!: { event: PublicationAudit; created: boolean };
-  await runTransaction<PublicationAudit>('publication-audit', (existing) => {
-    const duplicate = existing.find((item) => item.effectKey === normalizedEffectKey);
-    if (duplicate) {
-      output = { event: duplicate, created: false };
-      return undefined;
-    }
-    const durableEvent: PublicationAudit = {
-      ...event,
-      schemaVersion: 2,
-      id: event.id || generateId(),
-      effectKey: normalizedEffectKey,
-      reasonCodes: [...new Set(event.reasonCodes.map(String).filter(Boolean))],
-      runtimeReasonCodes: [...new Set((event.runtimeReasonCodes || []).map(String).filter(Boolean))],
-      productReasonCodes: [...new Set((event.productReasonCodes || []).map(String).filter(Boolean))],
-    };
-    output = { event: durableEvent, created: true };
-    return [...existing.slice(-999), durableEvent];
-  });
+  const durableEvent: PublicationAudit = {
+    ...event, schemaVersion: 2, id: event.id || generateId(), effectKey: normalizedEffectKey,
+    reasonCodes: [...new Set(event.reasonCodes.map(String).filter(Boolean))],
+    runtimeReasonCodes: [...new Set((event.runtimeReasonCodes || []).map(String).filter(Boolean))],
+    productReasonCodes: [...new Set((event.productReasonCodes || []).map(String).filter(Boolean))],
+  };
+  const output = await getDomainStorage().appendProductAudit('publication', durableEvent, normalizedEffectKey);
   return structuredClone(output);
 }
 
@@ -1444,96 +1369,44 @@ export function generateSlug(title: string): string {
     .slice(0, 80) + '-' + Date.now().toString(36);
 }
 
-/** Seed some sample products for development */
+/** Historical samples live in scripts/fixtures/development-products.cjs. */
 export async function seedSampleProducts(): Promise<void> {
-  const existing = await readCollection<Product>(COLLECTION);
-  if (existing.length > 0) return;
+  throw new Error('SYNTHETIC_SEED_DISABLED_USE_ISOLATED_TEST_FIXTURES');
+}
 
-  const now = new Date().toISOString();
-  const samples: Product[] = [
-    {
-      id: generateId(),
-      title: 'Tai nghe Bluetooth TWS Pro Max',
-      slug: 'tai-nghe-bluetooth-tws-pro-max-' + Date.now().toString(36),
-      description: 'Tai nghe không dây chống ồn, pin 30 giờ, phù hợp nghe nhạc và họp online.',
-      kind: 'product',
-      platform: 'shopee',
-      source: 'manual',
-      originalUrl: 'https://shopee.vn/product/example1',
-      affiliateUrl: '',
-      imageUrl: '',
-      gallery: [],
-      price: 299000,
-      salePrice: 179000,
-      currency: 'VND',
-      priceNote: 'Giá có thể thay đổi theo thời gian',
-      category: 'Công nghệ',
-      tags: ['tai nghe', 'bluetooth', 'giảm giá'],
-      benefits: ['Chống ồn chủ động', 'Pin 30 giờ', 'Kết nối Bluetooth 5.3'],
-      painPoints: ['Muốn nghe nhạc không dây', 'Cần tai nghe cho họp online'],
-      targetAudience: ['Dân văn phòng', 'Sinh viên'],
-      warnings: [],
-      contentAngles: ['Review trung thực', 'So sánh giá'],
-      complianceNotes: [],
-      affiliateSource: 'shopee',
-      score: 72,
-      scoreLabel: 'Ưu tiên cao',
-      scoreReasons: ['Có hình ảnh', 'Có link affiliate', 'Giá hấp dẫn'],
-      scoreWarnings: [],
-      riskLevel: 'low',
-      status: 'approved',
-      createdAt: now,
-      updatedAt: now,
-    },
-    {
-      id: generateId(),
-      title: 'Bộ dưỡng da Vitamin C serum',
-      slug: 'bo-duong-da-vitamin-c-serum-' + Date.now().toString(36),
-      description: 'Serum dưỡng sáng da, giúp da đều màu theo thông tin nhà sản xuất.',
-      kind: 'product',
-      platform: 'tiktok_shop',
-      source: 'manual',
-      originalUrl: 'https://tiktok.com/shop/example2',
-      affiliateUrl: '',
-      imageUrl: '',
-      gallery: [],
-      price: 189000,
-      salePrice: 142000,
-      currency: 'VND',
-      category: 'Làm đẹp',
-      tags: ['skincare', 'vitamin c', 'serum'],
-      benefits: ['Dưỡng sáng da', 'Giúp da đều màu'],
-      warnings: [],
-      riskLevel: 'medium',
-      status: 'needs_review',
-      createdAt: now,
-      updatedAt: now,
-    },
-    {
-      id: generateId(),
-      title: 'Balo laptop chống nước 15.6 inch',
-      slug: 'balo-laptop-chong-nuoc-' + Date.now().toString(36),
-      description: 'Balo đựng laptop chống nước, nhiều ngăn tiện dụng cho dân văn phòng.',
-      kind: 'product',
-      platform: 'lazada',
-      source: 'manual',
-      originalUrl: 'https://lazada.vn/products/example3',
-      affiliateUrl: '',
-      imageUrl: '',
-      gallery: [],
-      price: 450000,
-      salePrice: 380000,
-      currency: 'VND',
-      category: 'Phụ kiện',
-      tags: ['balo', 'laptop', 'chống nước'],
-      benefits: ['Chống nước', 'Nhiều ngăn tiện dụng', 'Phù hợp laptop 15.6 inch'],
-      warnings: [],
-      riskLevel: 'low',
-      status: 'approved',
-      createdAt: now,
-      updatedAt: now,
-    },
-  ];
+/** Prepare at most two identity matches; only one entity can be committed. */
+async function mutateProductEntity(
+  lookup: { id: string } | ProductIdentityQuery,
+  prepare: (matched: Product[]) => Product[] | undefined | Promise<Product[] | undefined>,
+): Promise<void> {
+  const storage = getDomainStorage();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const records = 'id' in lookup
+      ? [await storage.getProduct(lookup.id)].filter(record => record !== null)
+      : await storage.findProductIdentity(lookup);
+    const next = await prepare(records.map(record => structuredClone(record.value)));
+    if (!next) return;
+    const changed = next.filter(product => {
+      const previous = records.find(record => record.value.id === product.id);
+      return !previous || JSON.stringify(previous.value) !== JSON.stringify(product);
+    });
+    if (!changed.length) return;
+    if (changed.length !== 1) throw new DomainStorageError('PRODUCT_ENTITY_MUTATION_INVALID');
+    const product = changed[0];
+    const previous = records.find(record => record.value.id === product.id);
+    const result = previous ? await storage.replaceProduct(product, previous.version)
+      : await storage.createProduct(product, 'id' in lookup ? undefined : lookup);
+    if (result.status === 'APPLIED') { Object.assign(product, result.record.value); return; }
+    if (attempt === 2) throw new DomainStorageError('PRODUCT_CONDITIONAL_CONFLICT');
+  }
+}
 
-  await writeCollection(COLLECTION, samples);
+async function indexedUniqueSlug(requested: string, seed: string, excludingId?: string): Promise<string> {
+  const storage = getDomainStorage();
+  const normalized = ensureUniqueSlug(requested, [], seed);
+  const first = await storage.getProductBySlug(normalized);
+  if (!first || first.value.id === excludingId) return normalized;
+  const candidate = ensureUniqueSlug(requested, [first.value], seed);
+  const second = candidate ? await storage.getProductBySlug(candidate) : null;
+  return second && second.value.id !== excludingId ? '' : candidate;
 }
