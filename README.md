@@ -61,3 +61,25 @@ regression suite with:
 ```bash
 npm run test:runtime-fence
 ```
+
+## V6 Decision OS — Local Shadow Foundation
+
+Phase 7 reuses the existing Affiliate Money Engine, Deal Intelligence Engine,
+and Cloudflare D1/Queue lifecycle. Deterministic policy is authoritative; AI
+advice cannot change deal scores, financial evidence, publication gates, or
+affiliate routing. Action plans are inert internal markers, not executors.
+
+```bash
+npm run test:v6:decisions
+node scripts/v6-phase7-validation.mjs tests
+node scripts/v6-phase7-validation.mjs quality
+```
+
+These checks use local fixtures and ephemeral D1. No live AI account is needed.
+The local Worker opt-in is `SANDEAL_DECISION_OS_ENABLED=true`, alongside the
+existing local-only AutoPilot and Deal Intelligence flags. Execution mode is
+always `SHADOW`; any other configured mode fails closed. The shipped Worker
+keeps AI disabled and has no external action executor or notification transport.
+
+See `docs/v6/phase-07-decision-os.md` for the policy, advisory-provider boundary,
+bounded storage, verification evidence, and remaining production limitations.

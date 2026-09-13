@@ -1,12 +1,546 @@
 {
-  "capturedAt": "2026-09-13T03:14:31.132Z",
+  "capturedAt": "2026-09-13T03:24:01.299Z",
+  "phase": "PHASE_7",
+  "generatedAt": "2026-09-13T03:15:47.484Z",
+  "passed": 132,
+  "failed": 0,
+  "skipped": 0,
+  "liveAiProbe": "NOT_RUN",
+  "cases": [
+    {
+      "name": "A exact high-quality deterministic ALLOW and shadow publish marker, AI disabled",
+      "status": "PASS"
+    },
+    {
+      "name": "B real two-sample Phase 6 evaluation requires review, not publication",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW versus ALLOW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW versus ALLOW_WITH_REVIEW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW versus HOLD",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW versus BLOCK",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW versus QUARANTINE",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW_WITH_REVIEW versus ALLOW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW_WITH_REVIEW versus ALLOW_WITH_REVIEW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW_WITH_REVIEW versus HOLD",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW_WITH_REVIEW versus BLOCK",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence ALLOW_WITH_REVIEW versus QUARANTINE",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence HOLD versus ALLOW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence HOLD versus ALLOW_WITH_REVIEW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence HOLD versus HOLD",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence HOLD versus BLOCK",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence HOLD versus QUARANTINE",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence BLOCK versus ALLOW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence BLOCK versus ALLOW_WITH_REVIEW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence BLOCK versus HOLD",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence BLOCK versus BLOCK",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence BLOCK versus QUARANTINE",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence QUARANTINE versus ALLOW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence QUARANTINE versus ALLOW_WITH_REVIEW",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence QUARANTINE versus HOLD",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence QUARANTINE versus BLOCK",
+      "status": "PASS"
+    },
+    {
+      "name": "precedence QUARANTINE versus QUARANTINE",
+      "status": "PASS"
+    },
+    {
+      "name": "unknown policy outcome fails closed",
+      "status": "PASS"
+    },
+    {
+      "name": "C unsafe affiliate destination cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "publication denied cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "missing merchant cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "missing required campaign cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "expired offer cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "direct Shopee route cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "disabled provider cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "invalid currency cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "zero price cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "negative price cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "critical history stale cannot be overridden by AI confidence 1",
+      "status": "PASS"
+    },
+    {
+      "name": "D soft-stale price requests price refresh then reevaluation",
+      "status": "PASS"
+    },
+    {
+      "name": "blocked routes retain diagnostic provider provenance without claiming a safe route",
+      "status": "PASS"
+    },
+    {
+      "name": "E soft-stale offer requests offer refresh then reevaluation",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary bad confidence scale",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary NaN confidence",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary negative confidence",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary infinite score",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary score above 100",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary corrupt fingerprint",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary unknown algorithm",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary wrong product",
+      "status": "PASS"
+    },
+    {
+      "name": "boundary expired evaluation",
+      "status": "PASS"
+    },
+    {
+      "name": "operational gate quarantine",
+      "status": "PASS"
+    },
+    {
+      "name": "operational gate security",
+      "status": "PASS"
+    },
+    {
+      "name": "operational gate runtime",
+      "status": "PASS"
+    },
+    {
+      "name": "operational gate mode",
+      "status": "PASS"
+    },
+    {
+      "name": "operational gate system unavailable",
+      "status": "PASS"
+    },
+    {
+      "name": "operational gate system degraded",
+      "status": "PASS"
+    },
+    {
+      "name": "invalid configuration returns deterministic BLOCK before any AI",
+      "status": "PASS"
+    },
+    {
+      "name": "malformed model-role configuration is rejected without calling a provider",
+      "status": "PASS"
+    },
+    {
+      "name": "fingerprint stable without meaningless timestamp changes; policy and prompt changes invalidate",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects malformed JSON",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects unsupported publish command",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects unknown action",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects overrange confidence",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects negative confidence",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects missing field",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects extra field",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects unknown rationale",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects unknown evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects unknown uncertainty",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects oversized response",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects array root",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects null root",
+      "status": "PASS"
+    },
+    {
+      "name": "strict AI schema rejects numeric confidence string",
+      "status": "PASS"
+    },
+    {
+      "name": "AI summary is not stored as factual, financial or secret-bearing evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "null evaluation and incomplete monetization payload fail closed rather than crashing",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary NO_ACTION never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary HOLD never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary REJECT never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary REQUEST_REFRESH_PRICE never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary REQUEST_REFRESH_OFFER never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary REQUEST_REEVALUATION never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary REQUEST_PROVIDER_RECHECK never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary MARK_PUBLISH_CANDIDATE never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary MARK_CONTENT_CANDIDATE never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary MARK_HIGH_PRIORITY never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary MARK_REVIEW_REQUIRED never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "planner vocabulary QUARANTINE never expands review permissions",
+      "status": "PASS"
+    },
+    {
+      "name": "AI disabled uses no provider or AI journal",
+      "status": "PASS"
+    },
+    {
+      "name": "cost governor avoids obvious strong deal and hard block",
+      "status": "PASS"
+    },
+    {
+      "name": "valid AI contract, independent confidence and exact usage with unknown monetary cost",
+      "status": "PASS"
+    },
+    {
+      "name": "model role FAST_CLASSIFIER can map to one registered provider",
+      "status": "PASS"
+    },
+    {
+      "name": "model role REASONER can map to one registered provider",
+      "status": "PASS"
+    },
+    {
+      "name": "model role OPTIONAL_REVIEWER can map to one registered provider",
+      "status": "PASS"
+    },
+    {
+      "name": "I prompt injection through product title exercises real evidence and provider boundary",
+      "status": "PASS"
+    },
+    {
+      "name": "I prompt injection through merchant text exercises real evidence and provider boundary",
+      "status": "PASS"
+    },
+    {
+      "name": "I prompt injection through campaign name exercises real evidence and provider boundary",
+      "status": "PASS"
+    },
+    {
+      "name": "I prompt injection through offer description exercises real evidence and provider boundary",
+      "status": "PASS"
+    },
+    {
+      "name": "G unavailable primary falls back once, separately from affiliate selection",
+      "status": "PASS"
+    },
+    {
+      "name": "all AI unavailable preserves deterministic policy without retry loop or secret error log",
+      "status": "PASS"
+    },
+    {
+      "name": "H invalid AI output rejected while policy remains intact",
+      "status": "PASS"
+    },
+    {
+      "name": "durable AI dedup survives a new reasoner instance",
+      "status": "PASS"
+    },
+    {
+      "name": "corrupt cached AI cannot bypass structured validation or trigger another request",
+      "status": "PASS"
+    },
+    {
+      "name": "concurrent duplicate AI requests reserve only one chargeable call",
+      "status": "PASS"
+    },
+    {
+      "name": "abandoned AI reservation is fail-closed without chargeable replay",
+      "status": "PASS"
+    },
+    {
+      "name": "evidence change never reuses old AI advice and product cooldown prevents fresh charges",
+      "status": "PASS"
+    },
+    {
+      "name": "batch quota caps all attempts including fallback atomically",
+      "status": "PASS"
+    },
+    {
+      "name": "bounded TIMEOUT aborts and cannot execute late after deadline",
+      "status": "PASS"
+    },
+    {
+      "name": "bounded HEALTH_TIMEOUT aborts and cannot execute late after deadline",
+      "status": "PASS"
+    },
+    {
+      "name": "production-default AI boundary rejects fixture bindings",
+      "status": "PASS"
+    },
+    {
+      "name": "unexpected configuration fields are rejected before fingerprinting or AI projection",
+      "status": "PASS"
+    },
+    {
+      "name": "explicit per-batch cost cap persists across budget-window boundaries",
+      "status": "PASS"
+    },
+    {
+      "name": "circuit breaker cooldown blocks another evidence key then recovers after bounded backoff",
+      "status": "PASS"
+    },
+    {
+      "name": "expired context cannot invoke a model",
+      "status": "PASS"
+    },
+    {
+      "name": "F verified AccessTrade Shopee path retains provenance with zero direct Shopee calls",
+      "status": "PASS"
+    },
+    {
+      "name": "J same captured Queue delivery gives one deal, decision and action plan",
+      "status": "PASS"
+    },
+    {
+      "name": "AI queue integration is fixture-only and duplicate delivery adds zero AI effects",
+      "status": "PASS"
+    },
+    {
+      "name": "audit failure rolls back deal, decision and job completion together",
+      "status": "PASS"
+    },
+    {
+      "name": "source change during reasoning rejects stale commit and exposes no stale decision",
+      "status": "PASS"
+    },
+    {
+      "name": "provider change and policy version invalidate latest without catalogue scan",
+      "status": "PASS"
+    },
+    {
+      "name": "commit rejects tampered score and AI-forged plan",
+      "status": "PASS"
+    },
+    {
+      "name": "normalized audit boundary rejects raw AI summary and extra payload fields",
+      "status": "PASS"
+    },
+    {
+      "name": "lost acknowledgement after commit redelivers without new action plan",
+      "status": "PASS"
+    },
+    {
+      "name": "all decision hot queries are bounded indexed searches, no temporary sort",
+      "status": "PASS"
+    },
+    {
+      "name": "bounded audit summary uses normalized labels and fixture records are hidden by default",
+      "status": "PASS"
+    },
+    {
+      "name": "decision expiry creates a new semantic epoch, not an immortal duplicate",
+      "status": "PASS"
+    },
+    {
+      "name": "evidence expiring during reasoning requests bounded retry rather than terminal quarantine",
+      "status": "PASS"
+    },
+    {
+      "name": "missing D1, Queue and active execution mode fail closed",
+      "status": "PASS"
+    },
+    {
+      "name": "native workerd Cron and Queue produce only a shadow block for fixture-only money evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "supported Cloudflare decision path makes zero FileStorage and filesystem settings calls",
+      "status": "PASS"
+    },
+    {
+      "name": "test integrity and no production executor, fixture response, financial writes or network vendor",
+      "status": "PASS"
+    },
+    {
+      "name": "direct Shopee executable-method spies observed zero calls across every decision case",
+      "status": "PASS"
+    }
+  ],
   "exit": 0,
-  "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
-  "bytes": 274449,
-  "fileStorageModules": 0,
-  "filesystemSettingsModules": 0,
+  "command": "node scripts/v6-decision-os-tests.mjs",
+  "log": ".test-tmp/phase7-focused-final.log",
   "manifest": {
-    "sha256": "77840bac6fc11b3a841c6ee445810bceee340b99626c97dc22866f4adc2e36de",
+    "sha256": "3341d4dea3d861718ba5f7c3154d291983654ff846a9bba757554655c4fd978a",
     "files": {
       ".env.example": "653fd3b6c3bbe99ae84104f519d02750da33fe7cacf5807b8afdd347f5dcc16a",
       ".github/workflows/release-quality.yml": "55b60c1e14a7ca6e7e03e75a7922946be6a6e8d2fa4861e001e0c9881b6ba1c4",
@@ -79,7 +613,7 @@
       "docs/v6/phase-04-cloudflare-runtime.md": "d74140c228c3321c5a879be61dbe0ec9bff4fd9954a38aa668217d794eb533dd",
       "docs/v6/phase-05-affiliate-money-engine.md": "23f9b0ec0d0f241b7330000527c4bb04f2e1aeca28c41a091b00f603327a6ae6",
       "docs/v6/phase-06-deal-intelligence.md": "c461b90511444a7c25e298726d09c6287051406258eea0c9d4742eda4163a154",
-      "docs/v6/phase-07-decision-os.md": "9397986e8c57277de2b45a3a5ac83c04e1f9bf6be2fad4d1e066028d3148c50d",
+      "docs/v6/phase-07-decision-os.md": "726390d3320b45485784bfcac5c0ca0471bda18a211d12ea2181d55111efd3c3",
       "docs/v6/resume-long-run-3.md": "1ee09c3f08441be79edbeccf4c10e12750a9b02175a556099728bd6d069f4d9e",
       "ecosystem.config.cjs": "e68788a139ad03de4c5cfa54e1caf89fb4f36f963f281f6a4d5ff9e0c52f61f5",
       "eslint.config.mjs": "ce15a5222d4e83ba3be2aeccaa36068a63223d99f9b2a10ee8ab82fe0ad267d3",

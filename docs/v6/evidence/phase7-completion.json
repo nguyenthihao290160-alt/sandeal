@@ -1,12 +1,251 @@
 {
-  "capturedAt": "2026-09-13T03:14:31.132Z",
-  "exit": 0,
-  "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
-  "bytes": 274449,
-  "fileStorageModules": 0,
-  "filesystemSettingsModules": 0,
+  "capturedAt": "2026-09-13T03:24:01.567Z",
+  "result": "PASS_LOCAL_FOUNDATION",
+  "focused": {
+    "passed": 132,
+    "failed": 0,
+    "skipped": 0,
+    "log": ".test-tmp/phase7-focused-final.log"
+  },
+  "criticalRegressions": [
+    {
+      "name": "deals",
+      "command": "node.exe scripts/v6-deal-intelligence-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 231377,
+      "log": ".test-tmp\\phase7\\tests\\deals.log",
+      "passed": 79,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "money",
+      "command": "node.exe scripts/v6-money-engine-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 549350,
+      "log": ".test-tmp\\phase7\\tests\\money.log",
+      "passed": 57,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "d1",
+      "command": "node.exe scripts/v6-d1-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 43819,
+      "log": ".test-tmp\\phase7\\tests\\d1.log",
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "queue",
+      "command": "node.exe scripts/v6-cloudflare-queue-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 125470,
+      "log": ".test-tmp\\phase7\\tests\\queue.log",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "cron",
+      "command": "node.exe scripts/v6-cloudflare-cron-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 78922,
+      "log": ".test-tmp\\phase7\\tests\\cron.log",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "autopilot",
+      "command": "node.exe scripts/v6-cloudflare-autopilot-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 16248,
+      "log": ".test-tmp\\phase7\\tests\\autopilot.log",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "runtime",
+      "command": "node.exe scripts/v6-cloudflare-runtime-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 11432,
+      "log": ".test-tmp\\phase7\\tests\\runtime.log",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "routing",
+      "command": "node.exe scripts/v6-cloudflare-routing-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 13190,
+      "log": ".test-tmp\\phase7\\tests\\routing.log",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "accesstrade",
+      "command": "node.exe scripts/accesstrade-link-safety-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 7971,
+      "log": ".test-tmp\\phase7\\tests\\accesstrade.log",
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "tiktok",
+      "command": "node.exe scripts/accesstrade-tiktok-integration-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 16536,
+      "log": ".test-tmp\\phase7\\tests\\tiktok.log",
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "publication",
+      "command": "node.exe scripts/prompt10-autopublish-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 140208,
+      "log": ".test-tmp\\phase7\\tests\\publication.log",
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "provider-foundation",
+      "command": "node.exe scripts/prompt10-foundation-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 20394,
+      "log": ".test-tmp\\phase7\\tests\\provider-foundation.log",
+      "passed": 28,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "gemini-provider",
+      "command": "node.exe scripts/gemini-provider-diagnostics-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 4565,
+      "log": ".test-tmp\\phase7\\tests\\gemini-provider.log",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "self-healing",
+      "command": "node.exe scripts/prompt10-self-healing-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 53018,
+      "log": ".test-tmp\\phase7\\tests\\self-healing.log",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "health",
+      "command": "node.exe scripts/production-health-readiness-regression-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 16067,
+      "log": ".test-tmp\\phase7\\tests\\health.log",
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "rollout",
+      "command": "node.exe scripts/v6-stabilization-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 5160,
+      "log": ".test-tmp\\phase7\\tests\\rollout.log",
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "zero-vps",
+      "command": "node.exe scripts/v6-zero-vps-storage-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 18771,
+      "log": ".test-tmp\\phase7\\tests\\zero-vps.log",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "revenue",
+      "command": "node.exe scripts/prompt10-revenue-integrity-tests.cjs",
+      "exit": 0,
+      "elapsedMs": 2373,
+      "log": ".test-tmp\\phase7\\tests\\revenue.log",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "totalPassed": 564,
+  "totalFailed": 0,
+  "totalSkipped": 0,
+  "quality": [
+    {
+      "name": "typescript",
+      "command": "node.exe node_modules/typescript/bin/tsc --noEmit --incremental false",
+      "exit": 0,
+      "elapsedMs": 59995,
+      "log": ".test-tmp\\phase7\\quality\\typescript.log"
+    },
+    {
+      "name": "secret-scan",
+      "command": "node.exe scripts/release-validation.cjs secret-scan",
+      "exit": 0,
+      "elapsedMs": 1427,
+      "log": ".test-tmp\\phase7\\quality\\secret-scan.log"
+    },
+    {
+      "name": "cloudflare-build",
+      "command": "node.exe scripts/v6-cloudflare-build.cjs all",
+      "exit": 0,
+      "elapsedMs": 27199,
+      "log": ".test-tmp\\phase7\\quality\\cloudflare-build.log"
+    },
+    {
+      "name": "eslint",
+      "command": "node node_modules/eslint/bin/eslint.js . --format json --output-file .test-tmp/phase7/eslint-final.json",
+      "exit": 0,
+      "errorCount": 0,
+      "warningCount": 34,
+      "log": ".test-tmp/phase7/eslint-final.json",
+      "disposition": "SUPERSEDES_UNSUCCESSFUL_EMPTY_LOG_WRAPPER_ATTEMPT"
+    }
+  ],
+  "supersededAttempts": [
+    {
+      "name": "decisions",
+      "passed": 127,
+      "disposition": "SUPERSEDED_BY_FINAL_FOCUSED_RUN"
+    },
+    {
+      "name": "eslint",
+      "command": "node.exe node_modules/eslint/bin/eslint.js .",
+      "exit": 1,
+      "elapsedMs": 5360367,
+      "log": ".test-tmp\\phase7\\quality\\eslint.log"
+    }
+  ],
+  "buildLegacy": "NOT_RUN_UNAFFECTED",
+  "liveAiProbe": "NOT_RUN",
+  "deployment": false,
+  "productionResourceCreated": false,
+  "committed": false,
+  "pushed": false,
   "manifest": {
-    "sha256": "77840bac6fc11b3a841c6ee445810bceee340b99626c97dc22866f4adc2e36de",
+    "sha256": "3341d4dea3d861718ba5f7c3154d291983654ff846a9bba757554655c4fd978a",
     "files": {
       ".env.example": "653fd3b6c3bbe99ae84104f519d02750da33fe7cacf5807b8afdd347f5dcc16a",
       ".github/workflows/release-quality.yml": "55b60c1e14a7ca6e7e03e75a7922946be6a6e8d2fa4861e001e0c9881b6ba1c4",
@@ -79,7 +318,7 @@
       "docs/v6/phase-04-cloudflare-runtime.md": "d74140c228c3321c5a879be61dbe0ec9bff4fd9954a38aa668217d794eb533dd",
       "docs/v6/phase-05-affiliate-money-engine.md": "23f9b0ec0d0f241b7330000527c4bb04f2e1aeca28c41a091b00f603327a6ae6",
       "docs/v6/phase-06-deal-intelligence.md": "c461b90511444a7c25e298726d09c6287051406258eea0c9d4742eda4163a154",
-      "docs/v6/phase-07-decision-os.md": "9397986e8c57277de2b45a3a5ac83c04e1f9bf6be2fad4d1e066028d3148c50d",
+      "docs/v6/phase-07-decision-os.md": "726390d3320b45485784bfcac5c0ca0471bda18a211d12ea2181d55111efd3c3",
       "docs/v6/resume-long-run-3.md": "1ee09c3f08441be79edbeccf4c10e12750a9b02175a556099728bd6d069f4d9e",
       "ecosystem.config.cjs": "e68788a139ad03de4c5cfa54e1caf89fb4f36f963f281f6a4d5ff9e0c52f61f5",
       "eslint.config.mjs": "ce15a5222d4e83ba3be2aeccaa36068a63223d99f9b2a10ee8ab82fe0ad267d3",

@@ -2,7 +2,7 @@ import type { Product } from '../../types';
 import type { PriceSnapshot } from '../../product-intelligence/types';
 import { evaluateDeal } from '../../deal-intelligence/evaluate';
 import { DEAL_CONFIG, validateDealConfig, type DealConfig } from '../../deal-intelligence/config';
-import type { DealEvaluation, DealPriority, PublishRecommendation } from '../../deal-intelligence/types';
+import type { DealEvaluation, DealInput, DealPriority, PublishRecommendation } from '../../deal-intelligence/types';
 import { EVENT_LIMITS, EventJobError, digest, jobId, validTime, validateInput, type EventJob } from '../../platform/cloudflareContracts';
 import { D1AffiliateStore } from './d1AffiliateStore';
 import { safePayload } from './d1StorageAdapter';
@@ -12,7 +12,7 @@ type Row = Record<string, string | number | null>;
 const providerVersionsSql = (owner: string) => `SELECT json_group_array(json_array(provider,revision)) FROM
   (SELECT refresh.provider,refresh.revision FROM deal_provider_products membership JOIN deal_provider_refresh refresh ON refresh.provider=membership.provider
     WHERE membership.product_id=${owner} ORDER BY refresh.provider LIMIT 2)`;
-export interface PreparedDeal { evaluation: DealEvaluation; revision: number; providerVersions: string; }
+export interface PreparedDeal { evaluation: DealEvaluation; revision: number; providerVersions: string; input: DealInput; }
 export type DealRanking = { kind: 'TOP' } | { kind: 'PROVIDER'; provider: 'accesstrade' | 'tiktok'; platform?: 'shopee' | 'tiktok_shop' | 'other' }
   | { kind: 'RECOMMENDATION'; recommendation: PublishRecommendation } | { kind: 'PRIORITY'; priority: DealPriority }
   | { kind: 'WEAK_CONFIDENCE' } | { kind: 'NO_SAFE_PATH' } | { kind: 'STALE' };
@@ -39,7 +39,7 @@ export class D1DealStore {
     const history = await this.query(`SELECT id,captured_at,price,sale_price,payload FROM price_history WHERE product_id=? AND captured_at>=?
       ORDER BY captured_at DESC,id DESC LIMIT ?`, [productId, new Date(Math.max(0, now - this.config.windows.referenceDays * Number(this.config.dayMs))).toISOString(), this.config.limits.samples + 1]);
     const money = new D1AffiliateStore(this.db, this.testOnly);
-    const evaluation = evaluateDeal({ product: JSON.parse(String(record.payload)) as Product,
+    const input: DealInput = { product: JSON.parse(String(record.payload)) as Product,
       history: history.map(row => {
         const value = JSON.parse(String(row.payload)) as PriceSnapshot;
         if (value.id !== row.id || value.capturedAt !== row.captured_at || (value.price ?? null) !== row.price || (value.salePrice ?? null) !== row.sale_price)
@@ -48,10 +48,11 @@ export class D1DealStore {
       }), providers: await money.providers(),
       revenue: await money.revenue({ scope: 'PRODUCT', scopeId: productId, currency: String(this.config.currency),
         from: new Date(Math.max(0, now - 30 * Number(this.config.dayMs))).toISOString().slice(0, 10), to: new Date(now).toISOString().slice(0, 10) }),
-      allowedHosts, now, testOnly: this.testOnly, evidenceRevision: Number(work.revision) }, this.config);
-    return { evaluation, revision: Number(work.revision), providerVersions };
+      allowedHosts, now, testOnly: this.testOnly, evidenceRevision: Number(work.revision) };
+    const evaluation = evaluateDeal(input, this.config);
+    return { evaluation, revision: Number(work.revision), providerVersions, input };
   }
-  async commit(prepared: PreparedDeal, now: number, job?: EventJob) {
+  async commit(prepared: PreparedDeal, now: number, job?: EventJob, additionalStatements: D1Statement[] = []) {
     validTime(now);
     const { evaluation, revision, providerVersions } = prepared;
     if (evaluation.origin !== this.origin() || Date.parse(evaluation.validUntil) <= now
@@ -73,6 +74,7 @@ export class D1DealStore {
       evaluation.priority, evaluation.publishRecommendation, evaluation.monetizationState, evaluation.dealScore, evaluation.confidence, Date.parse(evaluation.validUntil), providerVersions, safePayload(evaluation, 16384)]));
     statements.push(this.statement(`UPDATE deal_work SET evaluated_revision=?,due_at=? WHERE product_id=? AND revision=? AND (evaluated_revision<>? OR due_at<>?)`,
       [revision, Date.parse(evaluation.validUntil), evaluation.productId, revision, revision, Date.parse(evaluation.validUntil)]));
+    statements.push(...additionalStatements);
     if (job) statements.push(this.statement(`UPDATE automation_jobs SET status='SUCCEEDED',result=?,dispatch_pending=0,claim_token=NULL,lease_expires_at=0,last_error_code=NULL
       WHERE id=? AND status='RUNNING' AND claim_token=? AND lease_expires_at>? RETURNING id`,
     [JSON.stringify({ evidenceFingerprint: evaluation.evidenceFingerprint }), job.id, job.claimToken, now]));
@@ -129,12 +131,12 @@ export class D1DealStore {
         [String(products.at(-1)?.product_id || change.cursor), products.length === this.config.limits.work ? 1 : 0, String(change.provider), Number(change.revision), String(change.cursor)])]);
     }
   }
-  async materializeDue(now: number): Promise<number> {
+  async materializeDue(now: number, decisionVersion = ''): Promise<number> {
     validTime(now); await this.expandProviderChanges();
     const due = await this.query('SELECT product_id,revision,due_at FROM deal_work WHERE due_at<=? ORDER BY due_at,product_id LIMIT ?', [now, this.config.limits.work]);
     let created = 0;
     for (const work of due) {
-      const key = `deal:${digest(`${work.product_id}:${work.revision}:${work.due_at}:${this.config.algorithmVersion}`)}`;
+      const key = `deal:${digest(`${work.product_id}:${work.revision}:${work.due_at}:${this.config.algorithmVersion}${decisionVersion ? `:${decisionVersion}` : ''}`)}`;
       validateInput({ type: 'DEAL_EVALUATE', payload: { productId: String(work.product_id) }, idempotencyKey: key });
       const result = await this.batch([this.statement(`INSERT INTO automation_jobs(id,job_type,idempotency_key,payload_version,payload,status,created_at,available_at,expires_at,dispatch_at)
         SELECT ?,'DEAL_EVALUATE',?,1,?,'PENDING',?,?,?,? FROM deal_work WHERE product_id=? AND revision=? AND due_at=?

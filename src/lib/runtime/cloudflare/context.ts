@@ -20,6 +20,8 @@ export interface CloudflareEnvironment {
   JOB_QUEUE?: QueueBinding;
   SANDEAL_MONEY_ENGINE_ENABLED?: string;
   SANDEAL_DEAL_INTELLIGENCE_ENABLED?: string;
+  SANDEAL_DECISION_OS_ENABLED?: string;
+  SANDEAL_DECISION_EXECUTION_MODE?: string;
 }
 
 export class CloudflareRequestError extends Error {

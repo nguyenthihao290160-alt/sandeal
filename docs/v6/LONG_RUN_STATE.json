@@ -1,7 +1,7 @@
 {
-  "program": "SANDEAL_V6_PHASE_5_AFFILIATE_MONEY_ENGINE",
-  "currentPhase": "PHASE_6",
-  "currentStep": "Deal Intelligence Local Engine proof",
+  "program": "SANDEAL_V6_PHASE_7_DECISION_OS",
+  "currentPhase": "PHASE_7",
+  "currentStep": "Decision OS local shadow foundation verified; stop before Phase 7.5",
   "result": "PASS",
   "completedCheckpoints": [
     "PHASE_3: Focused reconstruction checks: 159 passed, zero failures/skips",
@@ -9,7 +9,8 @@
     "PHASE_4: Runtime, routing and required regressions complete: 207 PASS",
     "PHASE_4_5: Event-driven Queue/Cron foundation complete: 32 phase cases plus 76 critical/affected regressions, 108 PASS, zero failures/skips",
     "PHASE_5: AccessTrade-first Affiliate Money Engine complete locally: 57 phase cases plus 223 affected regressions, 280 PASS, zero failures/skips",
-    "PHASE_6: Deal Intelligence Local Engine proof"
+    "PHASE_6: Deal Intelligence Local Engine proof",
+    "PHASE_7: Decision OS local shadow foundation: 132 focused cases and 432 affected regressions; zero failures/skips"
   ],
   "verifiedTestEvidence": [
     {
@@ -474,27 +475,6 @@
       "log": ".test-tmp/v6-runtime-quality-QDd0LF/secret-scan.log"
     },
     {
-      "name": "phase5-local-money-proof",
-      "path": "docs/v6/evidence/phase5-local-money-proof.json",
-      "MONEY_ROUTER": "PASS",
-      "NORMALIZED_OFFERS": "PASS",
-      "AFFILIATE_REDIRECT": "PASS",
-      "CLICK_ATTRIBUTION": "PASS",
-      "CONVERSION_ATTRIBUTION": "PASS",
-      "COMMISSION_LEDGER": "PASS",
-      "REVENUE_SNAPSHOT": "PASS",
-      "DUPLICATE_CONVERSION_EFFECT": 0,
-      "DUPLICATE_COMMISSION_EFFECT": 0,
-      "DUPLICATE_REVENUE_EFFECT": 0,
-      "SHOPEE_LIVE_CALLS": 0,
-      "FILE_STORAGE_CALLS": 0,
-      "PM2_REQUIRED": "NO",
-      "VPS_REQUIRED": "NO",
-      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-      "ORIGIN": "TEST_FIXTURE",
-      "REAL_MONEY_TRANSACTION_CREATED": "NO"
-    },
-    {
       "name": "phase4-build-legacy",
       "path": "docs/v6/evidence/phase4-build-legacy.json",
       "command": "node scripts/validate-dirty-build.cjs",
@@ -502,51 +482,11 @@
       "log": ".test-tmp/v6-runtime-quality-QDd0LF/build-legacy.log"
     },
     {
-      "name": "build-cloudflare-worker",
-      "path": "docs/v6/evidence/build-cloudflare-worker.json",
-      "exit": 0,
-      "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
-      "bytes": 174968,
-      "fileStorageModules": 0,
-      "filesystemSettingsModules": 0
-    },
-    {
       "name": "phase4-build-worker",
       "path": "docs/v6/evidence/phase4-build-worker.json",
       "command": "node scripts/v6-cloudflare-build.cjs worker",
       "exit": 0,
       "log": ".test-tmp/v6-runtime-quality-QDd0LF/build-worker.log"
-    },
-    {
-      "name": "build-cloudflare-site",
-      "path": "docs/v6/evidence/build-cloudflare-site.json",
-      "exit": 0,
-      "log": ".test-tmp/v6-cloudflare-worker/site-build.log"
-    },
-    {
-      "name": "phase5-accesstrade-shopee-proof",
-      "path": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
-      "MONEY_ROUTER": "PASS",
-      "NORMALIZED_OFFERS": "PASS",
-      "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
-      "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
-      "AFFILIATE_REDIRECT": "PASS",
-      "CLICK_ATTRIBUTION": "PASS",
-      "CONVERSION_ATTRIBUTION": "PASS",
-      "COMMISSION_LEDGER": "PASS",
-      "REVENUE_SNAPSHOT": "PASS",
-      "PROVIDER": "accesstrade",
-      "PLATFORM": "shopee",
-      "DUPLICATE_CONVERSION_EFFECT": 0,
-      "DUPLICATE_COMMISSION_EFFECT": 0,
-      "DUPLICATE_REVENUE_EFFECT": 0,
-      "DIRECT_SHOPEE_API_CALLS": 0,
-      "FILE_STORAGE_CALLS": 0,
-      "PM2_REQUIRED": "NO",
-      "VPS_REQUIRED": "NO",
-      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-      "ORIGIN": "TEST_FIXTURE",
-      "REAL_MONEY_TRANSACTION_CREATED": "NO"
     },
     {
       "name": "v6-money-engine",
@@ -1094,6 +1034,52 @@
       "afterCheckpointAndCompletionEvidence": true
     },
     {
+      "name": "phase5-local-money-proof",
+      "path": "docs/v6/evidence/phase5-local-money-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "SHOPEE_LIVE_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
+      "name": "phase5-accesstrade-shopee-proof",
+      "path": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
+      "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "PROVIDER": "accesstrade",
+      "PLATFORM": "shopee",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "DIRECT_SHOPEE_API_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
       "name": "autopilot-local-smoke",
       "path": "docs/v6/evidence/autopilot-local-smoke.json",
       "CRON": "PASS",
@@ -1110,10 +1096,922 @@
       "PRODUCTION_QUEUE_CREATED": "NO",
       "PRODUCTION_CRON_CREATED": "NO",
       "DEPLOYED": "NO"
+    },
+    {
+      "name": "build-cloudflare-worker",
+      "path": "docs/v6/evidence/build-cloudflare-worker.json",
+      "exit": 0,
+      "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
+      "bytes": 274449,
+      "fileStorageModules": 0,
+      "filesystemSettingsModules": 0
+    },
+    {
+      "name": "build-cloudflare-site",
+      "path": "docs/v6/evidence/build-cloudflare-site.json",
+      "exit": 0,
+      "log": ".test-tmp/v6-cloudflare-worker/site-build.log"
+    },
+    {
+      "name": "phase7-focused",
+      "path": "docs/v6/evidence/phase7-focused.json",
+      "phase": "PHASE_7",
+      "generatedAt": "2026-09-13T03:15:47.484Z",
+      "passed": 132,
+      "failed": 0,
+      "skipped": 0,
+      "liveAiProbe": "NOT_RUN",
+      "cases": [
+        {
+          "name": "A exact high-quality deterministic ALLOW and shadow publish marker, AI disabled",
+          "status": "PASS"
+        },
+        {
+          "name": "B real two-sample Phase 6 evaluation requires review, not publication",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW versus ALLOW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW versus ALLOW_WITH_REVIEW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW versus HOLD",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW versus BLOCK",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW versus QUARANTINE",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW_WITH_REVIEW versus ALLOW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW_WITH_REVIEW versus ALLOW_WITH_REVIEW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW_WITH_REVIEW versus HOLD",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW_WITH_REVIEW versus BLOCK",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence ALLOW_WITH_REVIEW versus QUARANTINE",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence HOLD versus ALLOW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence HOLD versus ALLOW_WITH_REVIEW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence HOLD versus HOLD",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence HOLD versus BLOCK",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence HOLD versus QUARANTINE",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence BLOCK versus ALLOW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence BLOCK versus ALLOW_WITH_REVIEW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence BLOCK versus HOLD",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence BLOCK versus BLOCK",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence BLOCK versus QUARANTINE",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence QUARANTINE versus ALLOW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence QUARANTINE versus ALLOW_WITH_REVIEW",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence QUARANTINE versus HOLD",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence QUARANTINE versus BLOCK",
+          "status": "PASS"
+        },
+        {
+          "name": "precedence QUARANTINE versus QUARANTINE",
+          "status": "PASS"
+        },
+        {
+          "name": "unknown policy outcome fails closed",
+          "status": "PASS"
+        },
+        {
+          "name": "C unsafe affiliate destination cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "publication denied cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "missing merchant cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "missing required campaign cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "expired offer cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "direct Shopee route cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "disabled provider cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "invalid currency cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "zero price cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "negative price cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "critical history stale cannot be overridden by AI confidence 1",
+          "status": "PASS"
+        },
+        {
+          "name": "D soft-stale price requests price refresh then reevaluation",
+          "status": "PASS"
+        },
+        {
+          "name": "blocked routes retain diagnostic provider provenance without claiming a safe route",
+          "status": "PASS"
+        },
+        {
+          "name": "E soft-stale offer requests offer refresh then reevaluation",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary bad confidence scale",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary NaN confidence",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary negative confidence",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary infinite score",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary score above 100",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary corrupt fingerprint",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary unknown algorithm",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary wrong product",
+          "status": "PASS"
+        },
+        {
+          "name": "boundary expired evaluation",
+          "status": "PASS"
+        },
+        {
+          "name": "operational gate quarantine",
+          "status": "PASS"
+        },
+        {
+          "name": "operational gate security",
+          "status": "PASS"
+        },
+        {
+          "name": "operational gate runtime",
+          "status": "PASS"
+        },
+        {
+          "name": "operational gate mode",
+          "status": "PASS"
+        },
+        {
+          "name": "operational gate system unavailable",
+          "status": "PASS"
+        },
+        {
+          "name": "operational gate system degraded",
+          "status": "PASS"
+        },
+        {
+          "name": "invalid configuration returns deterministic BLOCK before any AI",
+          "status": "PASS"
+        },
+        {
+          "name": "malformed model-role configuration is rejected without calling a provider",
+          "status": "PASS"
+        },
+        {
+          "name": "fingerprint stable without meaningless timestamp changes; policy and prompt changes invalidate",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects malformed JSON",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects unsupported publish command",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects unknown action",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects overrange confidence",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects negative confidence",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects missing field",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects extra field",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects unknown rationale",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects unknown evidence",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects unknown uncertainty",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects oversized response",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects array root",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects null root",
+          "status": "PASS"
+        },
+        {
+          "name": "strict AI schema rejects numeric confidence string",
+          "status": "PASS"
+        },
+        {
+          "name": "AI summary is not stored as factual, financial or secret-bearing evidence",
+          "status": "PASS"
+        },
+        {
+          "name": "null evaluation and incomplete monetization payload fail closed rather than crashing",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary NO_ACTION never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary HOLD never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary REJECT never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary REQUEST_REFRESH_PRICE never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary REQUEST_REFRESH_OFFER never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary REQUEST_REEVALUATION never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary REQUEST_PROVIDER_RECHECK never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary MARK_PUBLISH_CANDIDATE never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary MARK_CONTENT_CANDIDATE never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary MARK_HIGH_PRIORITY never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary MARK_REVIEW_REQUIRED never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "planner vocabulary QUARANTINE never expands review permissions",
+          "status": "PASS"
+        },
+        {
+          "name": "AI disabled uses no provider or AI journal",
+          "status": "PASS"
+        },
+        {
+          "name": "cost governor avoids obvious strong deal and hard block",
+          "status": "PASS"
+        },
+        {
+          "name": "valid AI contract, independent confidence and exact usage with unknown monetary cost",
+          "status": "PASS"
+        },
+        {
+          "name": "model role FAST_CLASSIFIER can map to one registered provider",
+          "status": "PASS"
+        },
+        {
+          "name": "model role REASONER can map to one registered provider",
+          "status": "PASS"
+        },
+        {
+          "name": "model role OPTIONAL_REVIEWER can map to one registered provider",
+          "status": "PASS"
+        },
+        {
+          "name": "I prompt injection through product title exercises real evidence and provider boundary",
+          "status": "PASS"
+        },
+        {
+          "name": "I prompt injection through merchant text exercises real evidence and provider boundary",
+          "status": "PASS"
+        },
+        {
+          "name": "I prompt injection through campaign name exercises real evidence and provider boundary",
+          "status": "PASS"
+        },
+        {
+          "name": "I prompt injection through offer description exercises real evidence and provider boundary",
+          "status": "PASS"
+        },
+        {
+          "name": "G unavailable primary falls back once, separately from affiliate selection",
+          "status": "PASS"
+        },
+        {
+          "name": "all AI unavailable preserves deterministic policy without retry loop or secret error log",
+          "status": "PASS"
+        },
+        {
+          "name": "H invalid AI output rejected while policy remains intact",
+          "status": "PASS"
+        },
+        {
+          "name": "durable AI dedup survives a new reasoner instance",
+          "status": "PASS"
+        },
+        {
+          "name": "corrupt cached AI cannot bypass structured validation or trigger another request",
+          "status": "PASS"
+        },
+        {
+          "name": "concurrent duplicate AI requests reserve only one chargeable call",
+          "status": "PASS"
+        },
+        {
+          "name": "abandoned AI reservation is fail-closed without chargeable replay",
+          "status": "PASS"
+        },
+        {
+          "name": "evidence change never reuses old AI advice and product cooldown prevents fresh charges",
+          "status": "PASS"
+        },
+        {
+          "name": "batch quota caps all attempts including fallback atomically",
+          "status": "PASS"
+        },
+        {
+          "name": "bounded TIMEOUT aborts and cannot execute late after deadline",
+          "status": "PASS"
+        },
+        {
+          "name": "bounded HEALTH_TIMEOUT aborts and cannot execute late after deadline",
+          "status": "PASS"
+        },
+        {
+          "name": "production-default AI boundary rejects fixture bindings",
+          "status": "PASS"
+        },
+        {
+          "name": "unexpected configuration fields are rejected before fingerprinting or AI projection",
+          "status": "PASS"
+        },
+        {
+          "name": "explicit per-batch cost cap persists across budget-window boundaries",
+          "status": "PASS"
+        },
+        {
+          "name": "circuit breaker cooldown blocks another evidence key then recovers after bounded backoff",
+          "status": "PASS"
+        },
+        {
+          "name": "expired context cannot invoke a model",
+          "status": "PASS"
+        },
+        {
+          "name": "F verified AccessTrade Shopee path retains provenance with zero direct Shopee calls",
+          "status": "PASS"
+        },
+        {
+          "name": "J same captured Queue delivery gives one deal, decision and action plan",
+          "status": "PASS"
+        },
+        {
+          "name": "AI queue integration is fixture-only and duplicate delivery adds zero AI effects",
+          "status": "PASS"
+        },
+        {
+          "name": "audit failure rolls back deal, decision and job completion together",
+          "status": "PASS"
+        },
+        {
+          "name": "source change during reasoning rejects stale commit and exposes no stale decision",
+          "status": "PASS"
+        },
+        {
+          "name": "provider change and policy version invalidate latest without catalogue scan",
+          "status": "PASS"
+        },
+        {
+          "name": "commit rejects tampered score and AI-forged plan",
+          "status": "PASS"
+        },
+        {
+          "name": "normalized audit boundary rejects raw AI summary and extra payload fields",
+          "status": "PASS"
+        },
+        {
+          "name": "lost acknowledgement after commit redelivers without new action plan",
+          "status": "PASS"
+        },
+        {
+          "name": "all decision hot queries are bounded indexed searches, no temporary sort",
+          "status": "PASS"
+        },
+        {
+          "name": "bounded audit summary uses normalized labels and fixture records are hidden by default",
+          "status": "PASS"
+        },
+        {
+          "name": "decision expiry creates a new semantic epoch, not an immortal duplicate",
+          "status": "PASS"
+        },
+        {
+          "name": "evidence expiring during reasoning requests bounded retry rather than terminal quarantine",
+          "status": "PASS"
+        },
+        {
+          "name": "missing D1, Queue and active execution mode fail closed",
+          "status": "PASS"
+        },
+        {
+          "name": "native workerd Cron and Queue produce only a shadow block for fixture-only money evidence",
+          "status": "PASS"
+        },
+        {
+          "name": "supported Cloudflare decision path makes zero FileStorage and filesystem settings calls",
+          "status": "PASS"
+        },
+        {
+          "name": "test integrity and no production executor, fixture response, financial writes or network vendor",
+          "status": "PASS"
+        },
+        {
+          "name": "direct Shopee executable-method spies observed zero calls across every decision case",
+          "status": "PASS"
+        }
+      ],
+      "exit": 0,
+      "command": "node scripts/v6-decision-os-tests.mjs",
+      "log": ".test-tmp/phase7-focused-final.log"
+    },
+    {
+      "name": "phase7-completion",
+      "path": "docs/v6/evidence/phase7-completion.json",
+      "result": "PASS_LOCAL_FOUNDATION",
+      "focused": {
+        "passed": 132,
+        "failed": 0,
+        "skipped": 0,
+        "log": ".test-tmp/phase7-focused-final.log"
+      },
+      "criticalRegressions": [
+        {
+          "name": "deals",
+          "command": "node.exe scripts/v6-deal-intelligence-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 231377,
+          "log": ".test-tmp\\phase7\\tests\\deals.log",
+          "passed": 79,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "money",
+          "command": "node.exe scripts/v6-money-engine-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 549350,
+          "log": ".test-tmp\\phase7\\tests\\money.log",
+          "passed": 57,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "d1",
+          "command": "node.exe scripts/v6-d1-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 43819,
+          "log": ".test-tmp\\phase7\\tests\\d1.log",
+          "passed": 25,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "queue",
+          "command": "node.exe scripts/v6-cloudflare-queue-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 125470,
+          "log": ".test-tmp\\phase7\\tests\\queue.log",
+          "passed": 17,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "cron",
+          "command": "node.exe scripts/v6-cloudflare-cron-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 78922,
+          "log": ".test-tmp\\phase7\\tests\\cron.log",
+          "passed": 10,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "autopilot",
+          "command": "node.exe scripts/v6-cloudflare-autopilot-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 16248,
+          "log": ".test-tmp\\phase7\\tests\\autopilot.log",
+          "passed": 4,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "runtime",
+          "command": "node.exe scripts/v6-cloudflare-runtime-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 11432,
+          "log": ".test-tmp\\phase7\\tests\\runtime.log",
+          "passed": 14,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "routing",
+          "command": "node.exe scripts/v6-cloudflare-routing-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 13190,
+          "log": ".test-tmp\\phase7\\tests\\routing.log",
+          "passed": 11,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "accesstrade",
+          "command": "node.exe scripts/accesstrade-link-safety-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 7971,
+          "log": ".test-tmp\\phase7\\tests\\accesstrade.log",
+          "passed": 34,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "tiktok",
+          "command": "node.exe scripts/accesstrade-tiktok-integration-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 16536,
+          "log": ".test-tmp\\phase7\\tests\\tiktok.log",
+          "passed": 43,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "publication",
+          "command": "node.exe scripts/prompt10-autopublish-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 140208,
+          "log": ".test-tmp\\phase7\\tests\\publication.log",
+          "passed": 25,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "provider-foundation",
+          "command": "node.exe scripts/prompt10-foundation-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 20394,
+          "log": ".test-tmp\\phase7\\tests\\provider-foundation.log",
+          "passed": 28,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "gemini-provider",
+          "command": "node.exe scripts/gemini-provider-diagnostics-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 4565,
+          "log": ".test-tmp\\phase7\\tests\\gemini-provider.log",
+          "passed": 7,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "self-healing",
+          "command": "node.exe scripts/prompt10-self-healing-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 53018,
+          "log": ".test-tmp\\phase7\\tests\\self-healing.log",
+          "passed": 10,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "health",
+          "command": "node.exe scripts/production-health-readiness-regression-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 16067,
+          "log": ".test-tmp\\phase7\\tests\\health.log",
+          "passed": 34,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "rollout",
+          "command": "node.exe scripts/v6-stabilization-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 5160,
+          "log": ".test-tmp\\phase7\\tests\\rollout.log",
+          "passed": 20,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "zero-vps",
+          "command": "node.exe scripts/v6-zero-vps-storage-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 18771,
+          "log": ".test-tmp\\phase7\\tests\\zero-vps.log",
+          "passed": 9,
+          "failed": 0,
+          "skipped": 0
+        },
+        {
+          "name": "revenue",
+          "command": "node.exe scripts/prompt10-revenue-integrity-tests.cjs",
+          "exit": 0,
+          "elapsedMs": 2373,
+          "log": ".test-tmp\\phase7\\tests\\revenue.log",
+          "passed": 5,
+          "failed": 0,
+          "skipped": 0
+        }
+      ],
+      "totalPassed": 564,
+      "totalFailed": 0,
+      "totalSkipped": 0,
+      "quality": [
+        {
+          "name": "typescript",
+          "command": "node.exe node_modules/typescript/bin/tsc --noEmit --incremental false",
+          "exit": 0,
+          "elapsedMs": 59995,
+          "log": ".test-tmp\\phase7\\quality\\typescript.log"
+        },
+        {
+          "name": "secret-scan",
+          "command": "node.exe scripts/release-validation.cjs secret-scan",
+          "exit": 0,
+          "elapsedMs": 1427,
+          "log": ".test-tmp\\phase7\\quality\\secret-scan.log"
+        },
+        {
+          "name": "cloudflare-build",
+          "command": "node.exe scripts/v6-cloudflare-build.cjs all",
+          "exit": 0,
+          "elapsedMs": 27199,
+          "log": ".test-tmp\\phase7\\quality\\cloudflare-build.log"
+        },
+        {
+          "name": "eslint",
+          "command": "node node_modules/eslint/bin/eslint.js . --format json --output-file .test-tmp/phase7/eslint-final.json",
+          "exit": 0,
+          "errorCount": 0,
+          "warningCount": 34,
+          "log": ".test-tmp/phase7/eslint-final.json",
+          "disposition": "SUPERSEDES_UNSUCCESSFUL_EMPTY_LOG_WRAPPER_ATTEMPT"
+        }
+      ],
+      "supersededAttempts": [
+        {
+          "name": "decisions",
+          "passed": 127,
+          "disposition": "SUPERSEDED_BY_FINAL_FOCUSED_RUN"
+        },
+        {
+          "name": "eslint",
+          "command": "node.exe node_modules/eslint/bin/eslint.js .",
+          "exit": 1,
+          "elapsedMs": 5360367,
+          "log": ".test-tmp\\phase7\\quality\\eslint.log"
+        }
+      ],
+      "buildLegacy": "NOT_RUN_UNAFFECTED",
+      "liveAiProbe": "NOT_RUN",
+      "deployment": false,
+      "productionResourceCreated": false,
+      "committed": false,
+      "pushed": false
+    },
+    {
+      "name": "phase7-final-secret-scan",
+      "path": "docs/v6/evidence/phase7-final-secret-scan.json",
+      "exit": 0,
+      "command": "node scripts/release-validation.cjs secret-scan",
+      "log": ".test-tmp/phase7-final-secret-scan.log",
+      "diffCheck": "PASS"
     }
   ],
-  "nextStep": "Start Phase 7",
+  "nextStep": "STOP. Phase 7.5 requires separate authorization. Do not start Phase 8 or enable production actions.",
   "blockers": [],
+  "phase6Gate": {
+    "result": "PASS_LOCAL_FOUNDATION_REVERIFIED",
+    "checkpoint": "docs/v6/phase-06-deal-intelligence.md",
+    "currentRegressionLog": ".test-tmp/phase7/tests/deals.log",
+    "passed": 79,
+    "failed": 0,
+    "dealScoreScale": "0..100",
+    "dealConfidenceScale": "0..1",
+    "algorithmVersion": "deal-intelligence-v1",
+    "productionDeploymentProven": false
+  },
+  "phase7Gate": {
+    "result": "PASS",
+    "scope": "LOCAL_DECISION_OS_FOUNDATION_ONLY",
+    "checkpoint": "docs/v6/phase-07-decision-os.md",
+    "evidence": "docs/v6/evidence/phase7-completion.json",
+    "baselineBranch": "master",
+    "baselineHead": "620fa3f07f0dd11a94ee2f26d6536302caca2fa0",
+    "baselineWorkingTree": "CLEAN",
+    "decisionOs": "PASS",
+    "decisionContext": "PASS",
+    "decisionEvidencePack": "PASS",
+    "policyEngine": "PASS",
+    "policyVersion": "decision-policy-v1",
+    "policyPrecedence": "QUARANTINE>BLOCK>HOLD>ALLOW_WITH_REVIEW>ALLOW",
+    "policyPrecedenceTest": "PASS",
+    "aiReasonerContract": "PASS",
+    "aiProviderAbstraction": "EXISTING_AIPROVIDER_REGISTERED_GEMINI_AND_LOCAL_AI",
+    "structuredAiOutput": "PASS",
+    "aiIsAdvisory": true,
+    "promptInjectionDefense": "PASS_EXTERNAL_TEXT_OMITTED_ACTUAL_PROVIDER_BOUNDARY_TESTED",
+    "dataMinimization": "PASS_EXPLICIT_ALLOWLIST_NO_RAW_PROMPTS_RESPONSES",
+    "aiPromptVersion": "decision-reasoner-v1",
+    "aiCostGovernor": "PASS_DURABLE_RESERVATION_WINDOW_AND_BATCH_CAPS",
+    "aiProviderHealth": "PASS_BOUNDED_PROVIDER_CIRCUIT_BREAKER",
+    "aiFallback": "PASS_BOUNDED_FIXTURE_VERIFIED",
+    "aiRuntimeDefault": "DISABLED",
+    "actionPlanner": "PASS",
+    "policyReconciliation": "PASS",
+    "decisionExecutionMode": "SHADOW",
+    "decisionAuditJournal": "PASS_ATOMIC_WITH_DEAL_AND_JOB_EMBEDDED_ACTION_PLAN",
+    "evidenceFingerprint": "PASS_VERSIONED_SEMANTIC_EXPIRY",
+    "eventDrivenRecomputation": "REUSE_DEAL_EVALUATE_AND_INDEXED_DEAL_WORK",
+    "duplicateDecisionEffect": 0,
+    "duplicateActionPlanEffect": 0,
+    "duplicateAiReasoningEffect": 0,
+    "aiPolicyOverrideEffect": 0,
+    "aiDealScoreMutationEffect": 0,
+    "humanReviewSignal": "PASS",
+    "accessTradeShopeeDecisions": "PASS",
+    "directShopeeStatus": "DISABLED_NO_CREDENTIALS",
+    "directShopeeApiCalls": 0,
+    "decisionFullScan": false,
+    "aiAdviceFullScan": false,
+    "actionPlanFullScan": false,
+    "dueDecisionWorkFullScan": false,
+    "dealEvaluationFullScan": false,
+    "revenueHotPathFullScan": false,
+    "fileStorageCalls": 0,
+    "filesystemSettingsCalls": 0,
+    "pm2Required": false,
+    "vpsRequired": false,
+    "longRunningProcessRequired": false,
+    "continuousPolling": false,
+    "liveAiProbe": "NOT_RUN",
+    "newTestCasesPassed": 132,
+    "newTestCasesFailed": 0,
+    "criticalRegressionsPassed": 432,
+    "criticalRegressionsFailed": 0,
+    "testsPassed": 564,
+    "testsFailed": 0,
+    "testsSkipped": 0,
+    "assertionsWeakened": false,
+    "policyAssertionsWeakened": false,
+    "aiSafetyAssertionsWeakened": false,
+    "safetyGatesRelaxed": false,
+    "fakeProductionAiResponse": false,
+    "fakeFinancialProductionPath": false,
+    "typescript": "PASS",
+    "eslint": "PASS_0_ERRORS_34_EXISTING_WARNINGS_RETRY_VERIFIED",
+    "secretScan": "PASS",
+    "buildLegacy": "NOT_RUN_UNAFFECTED",
+    "buildCloudflare": "PASS_STATIC_AND_WORKER",
+    "productionResourceCreated": false,
+    "realProductionDataMigrated": false,
+    "realMoneyTransactionCreated": false,
+    "deployed": false,
+    "committed": false,
+    "pushed": false,
+    "cloudflareLoginUsed": false,
+    "dnsChanged": false,
+    "safeForPhase7_5": "YES_LOCAL_FOUNDATION_ONLY_REQUIRES_AUTHORIZATION",
+    "safeForPhase8": "NO_NOT_AUTHORIZED",
+    "phase7_5Started": false,
+    "phase8Started": false,
+    "nextPhaseRequiresSeparateAuthorization": true,
+    "blockers": []
+  },
   "phase5Gate": {
     "result": "PASS",
     "checkpoint": "docs/v6/phase-05-affiliate-money-engine.md",
@@ -1205,7 +2103,7 @@
     "preserveDirtyWorktree": true,
     "phase6Authorized": false
   },
-  "firstUnverifiedStep": "NONE_WITHIN_PHASE_5",
+  "firstUnverifiedStep": "NONE_WITHIN_PHASE_7_LOCAL_FOUNDATION",
   "phase4Gate": {
     "result": "PASS",
     "safeForPhase4_5": "YES",
@@ -1292,12 +2190,13 @@
     "nextPhaseRequiresSeparateAuthorization": true
   },
   "branch": "master",
-  "head": "31ad2c5a791d7339d0698b7216c9ddc51b3350b4",
-  "workingTreeFingerprint": "2f59967844fdc6ab0524bf6f60067951f6a3c485622fa51b52fbe726487de1d9",
+  "head": "620fa3f07f0dd11a94ee2f26d6536302caca2fa0",
+  "workingTreeFingerprint": "3341d4dea3d861718ba5f7c3154d291983654ff846a9bba757554655c4fd978a",
   "workingTreeFingerprintPolicy": "SHA256 of sorted Git tracked and nonignored untracked path/content hashes; excludes this generated state, evidence, and secret environment files",
   "filesChangedSinceEvidence": [
     ".gitignore",
     ".idea/deployment.xml",
+    "README.md",
     "docs/v6/phase-01-verification.md",
     "eslint.config.mjs",
     "package.json",
@@ -1329,6 +2228,7 @@
     "docs/v6/phase-04-cloudflare-runtime.md",
     "docs/v6/phase-05-affiliate-money-engine.md",
     "docs/v6/phase-06-deal-intelligence.md",
+    "docs/v6/phase-07-decision-os.md",
     "docs/v6/resume-long-run-3.md",
     "scripts/fixtures/v6-cloudflare-product.cjs",
     "scripts/fixtures/v6-deal-intelligence.cjs",
@@ -1344,7 +2244,9 @@
     "scripts/v6-cloudflare-runtime-tests.cjs",
     "scripts/v6-cloudflare-site-tests.cjs",
     "scripts/v6-deal-intelligence-tests.cjs",
+    "scripts/v6-decision-os-tests.mjs",
     "scripts/v6-money-engine-tests.cjs",
+    "scripts/v6-phase7-validation.mjs",
     "scripts/v6-route-audit.cjs",
     "scripts/v6-runtime-quality.cjs",
     "src/components/public/CloudflareStorefront.tsx",
@@ -1358,24 +2260,35 @@
     "src/lib/deal-intelligence/evaluate.ts",
     "src/lib/deal-intelligence/priceEvidence.ts",
     "src/lib/deal-intelligence/types.ts",
+    "src/lib/decision-os/config.ts",
+    "src/lib/decision-os/context.ts",
+    "src/lib/decision-os/planner.ts",
+    "src/lib/decision-os/policy.ts",
+    "src/lib/decision-os/prompts.ts",
+    "src/lib/decision-os/reasoner.ts",
+    "src/lib/decision-os/types.ts",
     "src/lib/platform/cloudflareAdapters.ts",
     "src/lib/platform/cloudflareContracts.ts",
     "src/lib/runtime/cloudflare/autopilot.ts",
     "src/lib/runtime/cloudflare/context.ts",
+    "src/lib/runtime/cloudflare/decision.ts",
     "src/lib/runtime/cloudflare/http.ts",
     "src/lib/runtime/cloudflare/publicCatalogue.ts",
     "src/lib/runtime/cloudflare/storageFactory.ts",
     "src/lib/storage/d1/d1AffiliateStore.ts",
     "src/lib/storage/d1/d1DealStore.ts",
+    "src/lib/storage/d1/d1DecisionAiStore.ts",
+    "src/lib/storage/d1/d1DecisionStore.ts",
     "src/lib/storage/d1/d1JobStore.ts",
     "src/lib/storage/d1/migrations/0002_event_jobs.sql",
     "src/lib/storage/d1/migrations/0003_affiliate_money.sql",
     "src/lib/storage/d1/migrations/0004_money_snapshot_jobs.sql",
     "src/lib/storage/d1/migrations/0005_money_platform.sql",
-    "src/lib/storage/d1/migrations/0006_deal_intelligence.sql"
+    "src/lib/storage/d1/migrations/0006_deal_intelligence.sql",
+    "src/lib/storage/d1/migrations/0007_decision_os.sql"
   ],
   "filesChangedSinceEvidenceBaseline": "docs/v6/evidence/resume-3-baseline.json",
-  "updatedAt": "2026-09-12T13:21:27.914Z",
+  "updatedAt": "2026-09-13T03:24:20.897Z",
   "phase5Plan": [
     "Extend existing provider/offer contracts without new discovery internals",
     "Attach normalized provider offers to the existing canonical product aggregate",

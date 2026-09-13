@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test:v6:decisions": "node scripts/v6-decision-os-tests.mjs",
     "test:v6:deals": "node scripts/v6-deal-intelligence-tests.cjs",
     "test:v6:money": "node scripts/v6-money-engine-tests.cjs",
     "build:cloudflare": "node scripts/v6-cloudflare-build.cjs",

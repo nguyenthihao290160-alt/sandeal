@@ -5,6 +5,7 @@ import { EVENT_LIMITS, EventJobError, classifyEventError, validateInput, validat
 import type { CloudflareEnvironment } from './context';
 import { MoneyError } from '../../affiliate/money/types';
 import { D1DealStore } from '../../storage/d1/d1DealStore';
+import { cloudflareDecisionStore, type DecisionRuntimeOptions } from './decision';
 
 export async function cloudflareScheduled(controller: { scheduledTime: number }, env: CloudflareEnvironment) {
   try { await createCloudflareSchedulerAdapter(env).tick(controller.scheduledTime); }
@@ -12,6 +13,7 @@ export async function cloudflareScheduled(controller: { scheduledTime: number },
 }
 export async function consumeDelivery(delivery: QueueDelivery, env: CloudflareEnvironment, options: {
   now?: () => number; beforeCommit?: () => Promise<void>; afterCommit?: () => Promise<void>; moneyTestOnly?: boolean;
+  decisionOptions?: DecisionRuntimeOptions;
 } = {}) {
   const clock = options.now || Date.now, now = validTime(clock()), context = eventContext(env), { jobs } = context;
   const body = delivery.body;
@@ -35,8 +37,11 @@ export async function consumeDelivery(delivery: QueueDelivery, env: CloudflareEn
       if (!env.JOB_QUEUE || typeof env.JOB_QUEUE.send !== 'function') throw new EventJobError('QUEUE_BINDING_UNAVAILABLE', 'RETRYABLE');
       const store = new D1DealStore(context.db, options.moneyTestOnly === true);
       const prepared = await store.prepare(job.payload.productId, (env.AFFILIATE_REDIRECT_HOSTS || '').split(',').map(host => host.trim()).filter(Boolean), now);
+      const decisions = env.SANDEAL_DECISION_OS_ENABLED === 'true' ? cloudflareDecisionStore(env, context.db, options.moneyTestOnly === true, options.decisionOptions) : null;
+      const decision = decisions ? await decisions.prepare(prepared) : null;
       await options.beforeCommit?.();
-      await store.commit(prepared, validTime(clock()), job);
+      if (decisions && decision) await decisions.commit(prepared, decision, validTime(clock()), job);
+      else await store.commit(prepared, validTime(clock()), job);
     } else if (job.type === 'AGGREGATE_GROWTH_METRICS') {
       await options.beforeCommit?.();
       await jobs.commitRevenueSnapshot(job, validTime(clock()), options.moneyTestOnly === true);

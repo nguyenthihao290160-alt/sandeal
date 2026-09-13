@@ -2,10 +2,12 @@ import type { JobQueueAdapter, SchedulerAdapter } from './types';
 import { D1JobStore } from '../storage/d1/d1JobStore';
 import { D1DealStore } from '../storage/d1/d1DealStore';
 import { cloudflareContext, type CloudflareEnvironment } from '../runtime/cloudflare/context';
+import { cloudflareDecisionStore, validateDecisionRuntimeFlags } from '../runtime/cloudflare/decision';
 import { EVENT_LIMITS, EventJobError, makeMessage, validTime, validateInput,
   type EventJob, type EventJobInput, type EventTickResult, type QueueBinding } from './cloudflareContracts';
 
 export function eventContext(env: CloudflareEnvironment) {
+  validateDecisionRuntimeFlags(env);
   if (env.SANDEAL_AUTOPILOT_ENABLED !== 'true') throw new EventJobError('AUTOPILOT_DISABLED', 'FINAL');
   const context = cloudflareContext(env);
   return { ...context, jobs: new D1JobStore(context.db) };
@@ -39,10 +41,12 @@ export function createCloudflareJobQueueAdapter(env: CloudflareEnvironment): Job
 }
 export function createCloudflareSchedulerAdapter(env: CloudflareEnvironment): SchedulerAdapter<EventTickResult> {
   const { jobs, db } = eventContext(env), queue = createCloudflareJobQueueAdapter(env);
+  const decisions = env.SANDEAL_DECISION_OS_ENABLED === 'true' ? cloudflareDecisionStore(env, db) : null;
   return { id: 'cloudflare-indexed-cron', runtime: 'cloudflare', async tick(now = Date.now()) {
     validTime(now); const tasks = await jobs.due(now); let created = 0;
     for (const task of tasks) if (await jobs.materialize(task, now)) created++;
-    const deals = env.SANDEAL_DEAL_INTELLIGENCE_ENABLED === 'true' ? await new D1DealStore(db).materializeDue(now) : 0;
+    const deals = env.SANDEAL_DEAL_INTELLIGENCE_ENABLED === 'true' ? await new D1DealStore(db).materializeDue(now, decisions?.configVersion) : 0;
+    if (decisions) await decisions.cleanup(now);
     created += deals;
     const enqueued = await queue.dispatch(now);
     return { due: tasks.length + deals, created, enqueued };
