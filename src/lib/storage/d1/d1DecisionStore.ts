@@ -10,7 +10,7 @@ import { EventJobError, validTime, type EventJob } from '../../platform/cloudfla
 import { D1DealStore, type PreparedDeal } from './d1DealStore';
 import { D1DecisionAiStore } from './d1DecisionAiStore';
 import { safePayload } from './d1StorageAdapter';
-import type { D1Database, SqlValue } from './database';
+import type { D1Database, D1Statement, SqlValue } from './database';
 
 type Row = Record<string, string | number | null>;
 export type DecisionFilter = { kind: 'LATEST'; productId: string } | { kind: 'HIGH_PRIORITY' } | { kind: 'REVIEW' }
@@ -18,6 +18,7 @@ export type DecisionFilter = { kind: 'LATEST'; productId: string } | { kind: 'HI
   | { kind: 'PROVIDER'; provider: 'accesstrade' | 'tiktok'; platform?: 'shopee' | 'tiktok_shop' | 'other' };
 export class D1DecisionStore {
   readonly configVersion: string;
+  readonly aiEnabled: boolean;
   private readonly origin: string;
   constructor(private readonly db: D1Database, private readonly constraints: DecisionConstraints,
     private readonly testOnly = false, private readonly config: DecisionConfig = DECISION_CONFIG, private readonly roles: DecisionModelRoles = {},
@@ -31,6 +32,7 @@ export class D1DecisionStore {
     if (!validateModelRoles(roles) || (!testOnly && AI_ROLES.some(role => roles[role]?.some(binding => binding.origin === 'TEST_FIXTURE'))))
       throw new EventJobError('INVALID_DECISION_MODEL_ROLES', 'QUARANTINE');
     this.origin = testOnly ? 'TEST_FIXTURE' : 'AUTHENTICATED_PROVIDER_API';
+    this.aiEnabled = config.ai.enabled;
     this.configVersion = dealFingerprint({ config, constraints, models: modelRoleFingerprint(roles) });
   }
   private statement(sql: string, values: SqlValue[] = []) { return this.db.prepare(sql).bind(...values); }
@@ -62,7 +64,7 @@ export class D1DecisionStore {
       plan: { ...plan, reasonCodes: [...new Set([...plan.reasonCodes, ...ai.reasonCodes])].sort() },
       createdAt: context.decisionTimestamp, validUntil: context.validUntil };
   }
-  async commit(prepared: PreparedDeal, record: DecisionAuditRecord, now: number, job?: EventJob) {
+  async commit(prepared: PreparedDeal, record: DecisionAuditRecord, now: number, job?: EventJob, additionalStatements: D1Statement[] = []) {
     validTime(now);
     if (record.validUntil <= now) throw new EventJobError('DECISION_EVIDENCE_EXPIRED', 'RETRYABLE');
     const context = this.context(prepared);
@@ -88,7 +90,7 @@ export class D1DecisionStore {
       record.dealEvaluationId, record.policyVersion, this.configVersion, record.plan.outcome, record.plan.reviewRequired ? 1 : 0,
       record.ai.status, ['UNAVAILABLE', 'INVALID'].includes(record.ai.status) ? 1 : 0, record.provider, record.platform, record.dealScore, Date.parse(record.createdAt), record.validUntil, safePayload(record, 16384)]),
     this.statement('UPDATE deal_work SET due_at=min(due_at,?) WHERE product_id=? AND revision=?', [record.validUntil, record.productId, prepared.revision])];
-    await new D1DealStore(this.db, this.testOnly).commit(prepared, now, job, statements);
+    await new D1DealStore(this.db, this.testOnly).commit(prepared, now, job, [...statements, ...additionalStatements]);
     const [stored] = await this.query('SELECT payload FROM decision_records WHERE id=? AND origin=? LIMIT 1', [record.decisionId, this.origin]);
     if (!stored) throw new EventJobError('DECISION_COMMIT_MISSING', 'RETRYABLE');
     return JSON.parse(String(stored.payload)) as DecisionAuditRecord;

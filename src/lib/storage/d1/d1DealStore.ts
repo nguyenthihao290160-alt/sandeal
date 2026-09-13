@@ -9,7 +9,7 @@ import { safePayload } from './d1StorageAdapter';
 import type { D1Database, D1Statement, SqlValue } from './database';
 
 type Row = Record<string, string | number | null>;
-const providerVersionsSql = (owner: string) => `SELECT json_group_array(json_array(provider,revision)) FROM
+export const providerVersionsSql = (owner: string) => `SELECT json_group_array(json_array(provider,revision)) FROM
   (SELECT refresh.provider,refresh.revision FROM deal_provider_products membership JOIN deal_provider_refresh refresh ON refresh.provider=membership.provider
     WHERE membership.product_id=${owner} ORDER BY refresh.provider LIMIT 2)`;
 export interface PreparedDeal { evaluation: DealEvaluation; revision: number; providerVersions: string; input: DealInput; }

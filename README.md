@@ -83,3 +83,27 @@ keeps AI disabled and has no external action executor or notification transport.
 
 See `docs/v6/phase-07-decision-os.md` for the policy, advisory-provider boundary,
 bounded storage, verification evidence, and remaining production limitations.
+
+## V6 Opportunity And Experiments — Local Shadow Only
+
+Phase 7.5 ranks verified opportunities independently of DealScore using the
+existing Money Engine, Decision OS and indexed D1 deal jobs. It never updates
+public ranking, content, affiliate destinations, prices or traffic routing.
+
+```bash
+npm run test:v6:opportunities
+node scripts/v6-phase7-validation.mjs tests phase7-5
+node scripts/v6-phase7-validation.mjs quality phase7-5
+```
+
+The optional local Worker flag is `SANDEAL_OPPORTUNITY_ENABLED=true`, with the
+existing local-only AutoPilot, Deal Intelligence and Decision OS prerequisites.
+It is not enabled in shipped configuration. AI remains disabled; missing D1 or
+Queue bindings fail closed. Experiment assignment and metric ingestion require
+explicit test dependency injection and have no HTTP or storefront entry point.
+`ACTIVE` is rejected by both the experiment state machine and D1 schema.
+
+See `docs/v6/phase-07-5-opportunity-experiments.md` for score weights, evidence
+limitations, bounded queries, local proof and the separate Phase 8 authorization
+boundary. Legacy `Product.opportunityScore` remains a legacy display value, not
+the V6 Opportunity Engine's authoritative score.

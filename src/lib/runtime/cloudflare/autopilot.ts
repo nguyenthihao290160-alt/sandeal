@@ -6,6 +6,7 @@ import type { CloudflareEnvironment } from './context';
 import { MoneyError } from '../../affiliate/money/types';
 import { D1DealStore } from '../../storage/d1/d1DealStore';
 import { cloudflareDecisionStore, type DecisionRuntimeOptions } from './decision';
+import { cloudflareOpportunityStore } from './opportunity';
 
 export async function cloudflareScheduled(controller: { scheduledTime: number }, env: CloudflareEnvironment) {
   try { await createCloudflareSchedulerAdapter(env).tick(controller.scheduledTime); }
@@ -38,9 +39,12 @@ export async function consumeDelivery(delivery: QueueDelivery, env: CloudflareEn
       const store = new D1DealStore(context.db, options.moneyTestOnly === true);
       const prepared = await store.prepare(job.payload.productId, (env.AFFILIATE_REDIRECT_HOSTS || '').split(',').map(host => host.trim()).filter(Boolean), now);
       const decisions = env.SANDEAL_DECISION_OS_ENABLED === 'true' ? cloudflareDecisionStore(env, context.db, options.moneyTestOnly === true, options.decisionOptions) : null;
+      const opportunities = env.SANDEAL_OPPORTUNITY_ENABLED === 'true' && decisions ? cloudflareOpportunityStore(env, context.db, decisions, options.moneyTestOnly === true) : null;
       const decision = decisions ? await decisions.prepare(prepared) : null;
+      const opportunity = opportunities && decision ? opportunities.prepare(prepared, decision) : null;
       await options.beforeCommit?.();
-      if (decisions && decision) await decisions.commit(prepared, decision, validTime(clock()), job);
+      if (opportunities && opportunity && decision) await opportunities.commit(prepared, decision, opportunity, validTime(clock()), job);
+      else if (decisions && decision) await decisions.commit(prepared, decision, validTime(clock()), job);
       else await store.commit(prepared, validTime(clock()), job);
     } else if (job.type === 'AGGREGATE_GROWTH_METRICS') {
       await options.beforeCommit?.();

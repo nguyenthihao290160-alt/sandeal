@@ -1,28 +1,899 @@
 {
-  "capturedAt": "2026-09-13T06:26:57.105Z",
-  "MONEY_ROUTER": "PASS",
-  "NORMALIZED_OFFERS": "PASS",
-  "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
-  "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
-  "AFFILIATE_REDIRECT": "PASS",
-  "CLICK_ATTRIBUTION": "PASS",
-  "CONVERSION_ATTRIBUTION": "PASS",
-  "COMMISSION_LEDGER": "PASS",
-  "REVENUE_SNAPSHOT": "PASS",
-  "PROVIDER": "accesstrade",
-  "PLATFORM": "shopee",
-  "DUPLICATE_CONVERSION_EFFECT": 0,
-  "DUPLICATE_COMMISSION_EFFECT": 0,
-  "DUPLICATE_REVENUE_EFFECT": 0,
-  "DIRECT_SHOPEE_API_CALLS": 0,
-  "FILE_STORAGE_CALLS": 0,
-  "PM2_REQUIRED": "NO",
-  "VPS_REQUIRED": "NO",
-  "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-  "ORIGIN": "TEST_FIXTURE",
-  "REAL_MONEY_TRANSACTION_CREATED": "NO",
+  "capturedAt": "2026-09-13T06:40:07.139Z",
+  "phase": "PHASE_7_5",
+  "result": "PASS_LOCAL_SHADOW_FOUNDATION",
+  "baseline": {
+    "branch": "master",
+    "head": "0ee3ea152bc6ea40fcafad8f203a446018d51ffc",
+    "workingTree": "CLEAN"
+  },
+  "focused": {
+    "phase": "PHASE_7_5",
+    "generatedAt": "2026-09-13T06:35:30.702Z",
+    "passed": 127,
+    "failed": 0,
+    "skipped": 0,
+    "liveAiProbe": "NOT_RUN",
+    "directShopeeCalls": 0,
+    "proofs": {
+      "opportunityCases": {
+        "A": {
+          "dealScore": 95,
+          "score": 93.2,
+          "confidence": 1,
+          "priority": "P0"
+        },
+        "B": {
+          "dealScore": 95,
+          "score": 63.35,
+          "confidence": 0.7625,
+          "priority": "P2"
+        },
+        "C": {
+          "dealScore": 84,
+          "score": 89.02,
+          "confidence": 1,
+          "priority": "P0"
+        },
+        "D": {
+          "dealScore": 90,
+          "score": 81.7,
+          "confidence": 0.85,
+          "priority": "P1"
+        },
+        "E": {
+          "dealScore": 35,
+          "score": 70.4,
+          "confidence": 1,
+          "priority": "P3"
+        }
+      },
+      "assignmentFixture": {
+        "subjects": 1000,
+        "A": 494,
+        "B": 506
+      }
+    },
+    "cases": [
+      {
+        "name": "A great deal plus verified monetization has high opportunity and priority",
+        "status": "PASS"
+      },
+      {
+        "name": "B great deal with weak monetization ranks below A without DealScore mutation",
+        "status": "PASS"
+      },
+      {
+        "name": "C moderate deal with verified business evidence outranks B",
+        "status": "PASS"
+      },
+      {
+        "name": "D cold-start gets bounded exploration, lower confidence, meaningful priority",
+        "status": "PASS"
+      },
+      {
+        "name": "E historical revenue cannot make a weak current deal top-ranked",
+        "status": "PASS"
+      },
+      {
+        "name": "F policy BLOCK dominates every score and experiment recommendation",
+        "status": "PASS"
+      },
+      {
+        "name": "policy QUARANTINE dominates every score and experiment recommendation",
+        "status": "PASS"
+      },
+      {
+        "name": "H same inputs have byte-identical evaluation and recommendation identity",
+        "status": "PASS"
+      },
+      {
+        "name": "unknown revenue is distinct from observed zero and never fake demand",
+        "status": "PASS"
+      },
+      {
+        "name": "absent optional commission fields are not invented commission terms",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 0",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 10",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 35",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 50",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 70",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 84",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 95",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded deterministic score invariant for DealScore 100",
+        "status": "PASS"
+      },
+      {
+        "name": "raising verified deal quality helps but is not the sole ranking factor",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore NaN fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore Infinity fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore -Infinity fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore -1 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore 101 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore 95 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid DealScore null fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid confidence NaN fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid confidence Infinity fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid confidence -0.1 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid confidence 1.1 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid confidence 95 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing deal fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing decision fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing context fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "negative revenue is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "infinite revenue is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "NaN revenue is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "negative conversions is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "future revenue day is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "wrong revenue product is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "wrong revenue currency is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "missing commission states is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "repeated revenue day is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "zero evidence sequence is rejected rather than scored",
+        "status": "PASS"
+      },
+      {
+        "name": "historic revenue outlier has identical bounded influence to a modest verified amount",
+        "status": "PASS"
+      },
+      {
+        "name": "extreme revenue dominance and quota configuration attacks are rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration NaN weight fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration infinite confidence weight fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration weights do not sum fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration confidence sum invalid fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration excessive exploration fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration invalid priority thresholds fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration unbounded reads fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "configuration unsupported algorithm fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "canonical bounded score refuses NaN",
+        "status": "PASS"
+      },
+      {
+        "name": "canonical bounded score refuses Infinity",
+        "status": "PASS"
+      },
+      {
+        "name": "canonical bounded score refuses -Infinity",
+        "status": "PASS"
+      },
+      {
+        "name": "algorithm version change creates different opportunity fingerprint",
+        "status": "PASS"
+      },
+      {
+        "name": "high score can have lower independent confidence",
+        "status": "PASS"
+      },
+      {
+        "name": "canonical content takes precedence over contradictory missing-content marker",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate content status POSSIBLE prevents experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate content status UNRESOLVED prevents experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate content status MERGED prevents experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "merchant reputation, money cost, search demand remain explicitly unknown",
+        "status": "PASS"
+      },
+      {
+        "name": "stale price cannot become an experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "expired offer cannot become an experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "provider unavailable cannot become an experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "provider degraded cannot become an experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "no money route cannot become an experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "publication denied cannot become an experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "staler evidence never improves freshness contribution",
+        "status": "PASS"
+      },
+      {
+        "name": "future deal timestamp is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "expired decision produces blocked opportunity without resource use",
+        "status": "PASS"
+      },
+      {
+        "name": "forged ALLOW policy cannot override authoritative context",
+        "status": "PASS"
+      },
+      {
+        "name": "AI advice, legacy product opportunity and legacy deal score do not control V6 scores",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment A deterministic 50/50 assignment is stable across retries and order",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment B weights do not sum is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment zero variants is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment one variant is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment duplicate variants is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment negative weights is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment fractional weights is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment NaN weights is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment unknown type is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment unsupported metric is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment insufficient minimum sample is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment zero minimum runtime is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment expired definition is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment infinite timestamp is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment unapproved fields is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "all six permitted experiment types are modeled without prices or destinations",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from DRAFT",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from ELIGIBLE",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from SHADOW",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from READY_FOR_REVIEW",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from ACTIVE",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from PAUSED",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from COMPLETED",
+        "status": "PASS"
+      },
+      {
+        "name": "ACTIVE cannot be entered from REJECTED",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment E raw count leader with insufficient evidence is INCONCLUSIVE, never winner",
+        "status": "PASS"
+      },
+      {
+        "name": "minimum runtime and explicit completion prevent continuous auto-winner",
+        "status": "PASS"
+      },
+      {
+        "name": "impossible sample totals and contradictory variant summaries fail closed",
+        "status": "PASS"
+      },
+      {
+        "name": "D1 latest opportunity is atomic, idempotent and leaves deal/product untouched",
+        "status": "PASS"
+      },
+      {
+        "name": "ranking and observability use bounded indexed candidate pages",
+        "status": "PASS"
+      },
+      {
+        "name": "content/source change invalidates current opportunity and recomputes one product",
+        "status": "PASS"
+      },
+      {
+        "name": "provider health change invalidates opportunity before provider fanout",
+        "status": "PASS"
+      },
+      {
+        "name": "missing D1, Queue, phase prerequisites and production flags fail closed",
+        "status": "PASS"
+      },
+      {
+        "name": "AI cost governor is reused disabled, never bypassed with live AI",
+        "status": "PASS"
+      },
+      {
+        "name": "missing product/deal and algorithm version change never reuse obsolete scores",
+        "status": "PASS"
+      },
+      {
+        "name": "atomic opportunity insertion failure rolls back decision and job completion",
+        "status": "PASS"
+      },
+      {
+        "name": "Queue redelivery and lost acknowledgment have zero duplicate resource effect",
+        "status": "PASS"
+      },
+      {
+        "name": "Cron materializes one bounded opportunity recomputation via existing deal job",
+        "status": "PASS"
+      },
+      {
+        "name": "provider/product CAS race rejects stale opportunity commit",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment lifecycle and duplicate assignment D have one durable enrollment",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment C blocked subject, stale evidence and expiry reject new assignments",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment version immutability and conflicting shadow experiments are enforced",
+        "status": "PASS"
+      },
+      {
+        "name": "parallel assignment redelivery enrolls a subject exactly once",
+        "status": "PASS"
+      },
+      {
+        "name": "paused and review-state experiments cannot enroll or prematurely complete",
+        "status": "PASS"
+      },
+      {
+        "name": "assignment failure rolls back both enrollment and exposure counters",
+        "status": "PASS"
+      },
+      {
+        "name": "assignment and metric mutations are unavailable without explicit fixture injection",
+        "status": "PASS"
+      },
+      {
+        "name": "verified fixture click/conversion IDs deduplicate metrics transactionally",
+        "status": "PASS"
+      },
+      {
+        "name": "experiment assignment, metrics and retention EXPLAIN plans are indexed",
+        "status": "PASS"
+      },
+      {
+        "name": "bounded ranking excludes blocked score leaders before selecting the top page",
+        "status": "PASS"
+      },
+      {
+        "name": "G AccessTrade Shopee keeps provider/platform provenance with direct Shopee disabled",
+        "status": "PASS"
+      },
+      {
+        "name": "supported opportunity paths make zero FileStorage/settings calls",
+        "status": "PASS"
+      },
+      {
+        "name": "native local Worker Cron/Queue creates only blocked shadow opportunity from fixture money",
+        "status": "PASS"
+      },
+      {
+        "name": "test integrity: no skipped/focused tests, random assignment, network, production executor or artificial SEO data",
+        "status": "PASS"
+      }
+    ],
+    "log": ".test-tmp/phase7-5-focused-complete.log",
+    "command": "node scripts/v6-opportunity-experiments-tests.mjs",
+    "exit": 0
+  },
+  "regressions": {
+    "passed": 564,
+    "failed": 0,
+    "skipped": 0,
+    "suites": [
+      {
+        "name": "decisions",
+        "command": "node.exe scripts/v6-decision-os-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 134844,
+        "log": ".test-tmp\\phase7-5\\tests\\decisions.log",
+        "passed": 132,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "deals",
+        "command": "node.exe scripts/v6-deal-intelligence-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 126106,
+        "log": ".test-tmp\\phase7-5\\tests\\deals.log",
+        "passed": 79,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "money",
+        "command": "node.exe scripts/v6-money-engine-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 314284,
+        "log": ".test-tmp\\phase7-5\\tests\\money.log",
+        "passed": 57,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "d1",
+        "command": "node.exe scripts/v6-d1-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 25064,
+        "log": ".test-tmp\\phase7-5\\tests\\d1.log",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "queue",
+        "command": "node.exe scripts/v6-cloudflare-queue-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 65512,
+        "log": ".test-tmp\\phase7-5\\tests\\queue.log",
+        "passed": 17,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "cron",
+        "command": "node.exe scripts/v6-cloudflare-cron-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 36293,
+        "log": ".test-tmp\\phase7-5\\tests\\cron.log",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "autopilot",
+        "command": "node.exe scripts/v6-cloudflare-autopilot-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 6418,
+        "log": ".test-tmp\\phase7-5\\tests\\autopilot.log",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "runtime",
+        "command": "node.exe scripts/v6-cloudflare-runtime-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 5118,
+        "log": ".test-tmp\\phase7-5\\tests\\runtime.log",
+        "passed": 14,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "routing",
+        "command": "node.exe scripts/v6-cloudflare-routing-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 4714,
+        "log": ".test-tmp\\phase7-5\\tests\\routing.log",
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "accesstrade",
+        "command": "node.exe scripts/accesstrade-link-safety-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 2135,
+        "log": ".test-tmp\\phase7-5\\tests\\accesstrade.log",
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "tiktok",
+        "command": "node.exe scripts/accesstrade-tiktok-integration-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 5954,
+        "log": ".test-tmp\\phase7-5\\tests\\tiktok.log",
+        "passed": 43,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "publication",
+        "command": "node.exe scripts/prompt10-autopublish-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 83757,
+        "log": ".test-tmp\\phase7-5\\tests\\publication.log",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "provider-foundation",
+        "command": "node.exe scripts/prompt10-foundation-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 7621,
+        "log": ".test-tmp\\phase7-5\\tests\\provider-foundation.log",
+        "passed": 28,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "gemini-provider",
+        "command": "node.exe scripts/gemini-provider-diagnostics-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 1163,
+        "log": ".test-tmp\\phase7-5\\tests\\gemini-provider.log",
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "self-healing",
+        "command": "node.exe scripts/prompt10-self-healing-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 26160,
+        "log": ".test-tmp\\phase7-5\\tests\\self-healing.log",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "health",
+        "command": "node.exe scripts/production-health-readiness-regression-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 3875,
+        "log": ".test-tmp\\phase7-5\\tests\\health.log",
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "rollout",
+        "command": "node.exe scripts/v6-stabilization-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 1087,
+        "log": ".test-tmp\\phase7-5\\tests\\rollout.log",
+        "passed": 20,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "zero-vps",
+        "command": "node.exe scripts/v6-zero-vps-storage-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 7418,
+        "log": ".test-tmp\\phase7-5\\tests\\zero-vps.log",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "revenue",
+        "command": "node.exe scripts/prompt10-revenue-integrity-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 529,
+        "log": ".test-tmp\\phase7-5\\tests\\revenue.log",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0
+      }
+    ]
+  },
+  "quality": [
+    {
+      "name": "typescript",
+      "command": "node.exe node_modules/typescript/bin/tsc --noEmit --incremental false",
+      "exit": 0,
+      "elapsedMs": 30269,
+      "log": ".test-tmp\\phase7-5\\quality\\typescript.log"
+    },
+    {
+      "name": "eslint",
+      "command": "node.exe node_modules/eslint/bin/eslint.js .",
+      "exit": 0,
+      "elapsedMs": 82049,
+      "log": ".test-tmp\\phase7-5\\quality\\eslint.log"
+    },
+    {
+      "name": "secret-scan",
+      "command": "node.exe scripts/release-validation.cjs secret-scan",
+      "exit": 0,
+      "elapsedMs": 217,
+      "log": ".test-tmp\\phase7-5\\quality\\secret-scan.log"
+    },
+    {
+      "name": "cloudflare-build",
+      "command": "node.exe scripts/v6-cloudflare-build.cjs all",
+      "exit": 0,
+      "elapsedMs": 27259,
+      "log": ".test-tmp\\phase7-5\\quality\\cloudflare-build.log"
+    }
+  ],
+  "supersededFocusedMatrixRun": {
+    "name": "opportunities",
+    "command": "node.exe scripts/v6-opportunity-experiments-tests.mjs",
+    "exit": 1,
+    "elapsedMs": 203656,
+    "log": ".test-tmp\\phase7-5\\tests\\opportunities.log",
+    "passed": 125,
+    "failed": 1,
+    "skipped": 0
+  },
+  "supersededDisposition": "Retained failed fixture attempt; superseded by final focused run, not counted twice and not relabeled successful",
+  "gate": {
+    "PHASE7_5": "PASS",
+    "OPPORTUNITY_ENGINE": "PASS",
+    "OPPORTUNITY_SCORE_SCALE": "0..100",
+    "OPPORTUNITY_CONFIDENCE_SCALE": "0..1",
+    "OPPORTUNITY_ALGORITHM_VERSION": "opportunity-engine-v1",
+    "DEAL_SCORE_SEPARATION": "PASS",
+    "MONETIZATION_POTENTIAL": "PASS",
+    "PROVIDER_TRUST": "PASS",
+    "MERCHANT_TRUST": "UNKNOWN",
+    "CONTENT_OPPORTUNITY": "PASS",
+    "SEO_EXTERNAL_EVIDENCE": "NOT_AVAILABLE",
+    "RESOURCE_EFFICIENCY": "PASS",
+    "EXPLORATION_MODEL": "PASS",
+    "COLD_START": "PASS",
+    "RICH_GET_RICHER_PROTECTION": "PASS",
+    "OPPORTUNITY_RISK": "PASS",
+    "OPPORTUNITY_PRIORITY": "PASS",
+    "RESOURCE_RECOMMENDATION": "PASS",
+    "OPPORTUNITY_EXPLAINABILITY": "PASS",
+    "OPPORTUNITY_EVIDENCE_FINGERPRINT": "PASS",
+    "OPPORTUNITY_IDEMPOTENCY": "PASS",
+    "DUPLICATE_OPPORTUNITY_EFFECT": "0",
+    "DUPLICATE_RESOURCE_RECOMMENDATION_EFFECT": "0",
+    "OPPORTUNITY_POLICY_OVERRIDE_EFFECT": "0",
+    "OPPORTUNITY_DEAL_SCORE_MUTATION_EFFECT": "0",
+    "EXPERIMENT_FOUNDATION": "PASS",
+    "EXPERIMENT_EXECUTION_MODE": "SHADOW",
+    "EXPERIMENT_TYPES": "TITLE_VARIANT,CTA_VARIANT,DEAL_BADGE_VARIANT,CARD_LAYOUT_VARIANT,SORT_PRIORITY_VARIANT,CONTENT_ANGLE_VARIANT",
+    "EXPERIMENT_ASSIGNMENT": "PASS",
+    "EXPERIMENT_METRICS": "PASS",
+    "EXPERIMENT_GUARDRAILS": "PASS",
+    "EXPERIMENT_OUTCOME_MODEL": "INCONCLUSIVE_OR_SUFFICIENT_EVIDENCE_NO_SIGNIFICANCE_NO_WINNER",
+    "DUPLICATE_EXPERIMENT_ASSIGNMENT_EFFECT": "0",
+    "DUPLICATE_EXPERIMENT_METRIC_EFFECT": "0",
+    "PRODUCTION_EXPERIMENT_TRAFFIC": "0",
+    "ACTIVE_PRODUCTION_EXPERIMENTS": "0",
+    "ACCESS_TRADE_SHOPEE_OPPORTUNITY": "PASS",
+    "DIRECT_SHOPEE_STATUS": "DISABLED_NO_CREDENTIALS",
+    "DIRECT_SHOPEE_API_CALLS": "0",
+    "LIVE_AI_PROBE": "NOT_RUN",
+    "OPPORTUNITY_FULL_SCAN": "NO",
+    "OPPORTUNITY_RANKING_FULL_SCAN": "NO",
+    "EXPERIMENT_ASSIGNMENT_FULL_SCAN": "NO",
+    "EXPERIMENT_METRIC_FULL_SCAN": "NO",
+    "DUE_OPPORTUNITY_WORK_FULL_SCAN": "NO",
+    "DEAL_EVALUATION_FULL_SCAN": "NO",
+    "REVENUE_HOT_PATH_FULL_SCAN": "NO",
+    "FILE_STORAGE_CALLS": "0",
+    "FILESYSTEM_SETTINGS_CALLS": "0",
+    "PM2_REQUIRED": "NO",
+    "VPS_REQUIRED": "NO",
+    "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+    "CONTINUOUS_POLLING": "NO",
+    "NEW_TEST_CASES_PASSED": "127",
+    "NEW_TEST_CASES_FAILED": "0",
+    "CRITICAL_REGRESSIONS_PASSED": "564",
+    "CRITICAL_REGRESSIONS_FAILED": "0",
+    "TESTS_PASSED": "691",
+    "TESTS_FAILED": "0",
+    "TEST_CASES_SKIPPED": "0",
+    "ASSERTIONS_WEAKENED": "NO",
+    "OPPORTUNITY_ASSERTIONS_WEAKENED": "NO",
+    "EXPERIMENT_ASSERTIONS_WEAKENED": "NO",
+    "SAFETY_GATES_RELAXED": "NO",
+    "FAKE_SEARCH_VOLUME_PRODUCTION_PATH": "NO",
+    "FAKE_REVENUE_PRODUCTION_PATH": "NO",
+    "FAKE_DIRECT_SHOPEE_PRODUCTION_PATH": "NO",
+    "TYPESCRIPT": "PASS",
+    "ESLINT": "PASS_0_ERRORS_34_EXISTING_WARNINGS",
+    "SECRET_SCAN": "PASS",
+    "BUILD_LEGACY": "NOT_RUN_UNAFFECTED",
+    "BUILD_CLOUDFLARE": "PASS_STATIC_AND_WORKER",
+    "PRODUCTION_RESOURCE_CREATED": "NO",
+    "REAL_PRODUCTION_DATA_MIGRATED": "NO",
+    "REAL_MONEY_TRANSACTION_CREATED": "NO",
+    "DEPLOYED": "NO",
+    "COMMITTED": "NO",
+    "PUSHED": "NO",
+    "CLOUDFLARE_LOGIN_USED": "NO",
+    "DNS_CHANGED": "NO",
+    "RESULT": "PASS_LOCAL_SHADOW_FOUNDATION",
+    "SAFE_FOR_PHASE_8": "YES_LOCAL_FOUNDATION_ONLY_REQUIRES_SEPARATE_AUTHORIZATION",
+    "BLOCKERS": "NONE_FOR_LOCAL_PHASE_7_5",
+    "NEXT_RECOMMENDED_PHASE": "PHASE_8_ONLY_AFTER_SEPARATE_AUTHORIZATION"
+  },
   "manifest": {
-    "sha256": "8b5b867205bb01dddee765b1db3ce7cd241d9759cf2941387b58730061882891",
+    "sha256": "d0c9b9c4ae5a5a8445242a423a1bbac2e158ac02f23e0560d680bda73f42dff5",
     "files": {
       ".env.example": "653fd3b6c3bbe99ae84104f519d02750da33fe7cacf5807b8afdd347f5dcc16a",
       ".github/workflows/release-quality.yml": "55b60c1e14a7ca6e7e03e75a7922946be6a6e8d2fa4861e001e0c9881b6ba1c4",
@@ -95,7 +966,7 @@
       "docs/v6/phase-04-cloudflare-runtime.md": "d74140c228c3321c5a879be61dbe0ec9bff4fd9954a38aa668217d794eb533dd",
       "docs/v6/phase-05-affiliate-money-engine.md": "23f9b0ec0d0f241b7330000527c4bb04f2e1aeca28c41a091b00f603327a6ae6",
       "docs/v6/phase-06-deal-intelligence.md": "c461b90511444a7c25e298726d09c6287051406258eea0c9d4742eda4163a154",
-      "docs/v6/phase-07-5-opportunity-experiments.md": "7968e0d9089c1010909348e98bff6f5cc12ee7d9ce188fc77687388718d0405a",
+      "docs/v6/phase-07-5-opportunity-experiments.md": "b9c412f028ca06299afa9d7edcdc5ef17ce74802be0d74e473d0c2cd8af7dc73",
       "docs/v6/phase-07-decision-os.md": "726390d3320b45485784bfcac5c0ca0471bda18a211d12ea2181d55111efd3c3",
       "docs/v6/resume-long-run-3.md": "1ee09c3f08441be79edbeccf4c10e12750a9b02175a556099728bd6d069f4d9e",
       "ecosystem.config.cjs": "e68788a139ad03de4c5cfa54e1caf89fb4f36f963f281f6a4d5ff9e0c52f61f5",
@@ -259,7 +1130,7 @@
       "scripts/v6-migrate-storage.cjs": "25749fa3429bf9dd8ffb0358628c78f6fb966461c9b1a5b28f308ef7013c2c4e",
       "scripts/v6-migration-tests.cjs": "3429cca7983bb0405e967551c8c3b4d72b61aef3e61717d85865e72587ecb451",
       "scripts/v6-money-engine-tests.cjs": "5e7cd329f63512c2df395de17666751c5063d865ae43d2304378eeae903cce64",
-      "scripts/v6-opportunity-experiments-tests.mjs": "ff279d445e5e93db2c4b712382d97858d35609a3fb0f157a4d01364ceaa8f4e3",
+      "scripts/v6-opportunity-experiments-tests.mjs": "321cf6a9d7c33855df61b814f6cd312e729321e366aaffcde5e38057be023d21",
       "scripts/v6-phase1-foundation-tests.cjs": "c012c6ef8a962317e85c390f84702fd47f3d5bbf7961a3ee252ffd3c1630c2ba",
       "scripts/v6-phase7-validation.mjs": "42ac66b5a9a0e2763753fe0414b97542723bdf0713215a21134d3dba85590968",
       "scripts/v6-resume-validation.cjs": "068f460f5c6571cd803217182f8ba808d2481ebd0575fd33c2358715d045a7a7",
@@ -601,7 +1472,7 @@
       "src/lib/integrations/accesstradeTikTokShop.ts": "1ab1cda3a14843fbe1eb81de00790fe045cb026984b7eb1f846e9376abaec891",
       "src/lib/operations/onboarding.ts": "04514e9a013b86cfb57d45e52fe9b39e747010ab6fe1dcf4fbd269b30a611592",
       "src/lib/opportunity/config.ts": "ad03835426eaa31be27944a489a75ebbf3d576089d6eaf98a5fca406f0376f71",
-      "src/lib/opportunity/evaluate.ts": "e3916425a643452248a4e8065712184a7fc9cd490636b6f6a3d20f67f91e35d6",
+      "src/lib/opportunity/evaluate.ts": "b77547c01679ac1468e9b5744385f3e88f7843fb75c772c23a3eeb01eba42ecc",
       "src/lib/opportunity/types.ts": "f466cab3da19a05b82cc06d2a4581ddc689048e39a36994d7999f54d25ba54f4",
       "src/lib/platform/cloudflareAdapters.ts": "7e327744aa60d39361539896742d0c5cfc8cb4eafada47d232cdd49c20729bec",
       "src/lib/platform/cloudflareContracts.ts": "82e85ebbda27c1f0b8004e3a501ac8f707fc0e5125103c68f69999d82c469b6e",

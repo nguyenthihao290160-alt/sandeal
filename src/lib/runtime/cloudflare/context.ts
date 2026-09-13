@@ -22,6 +22,7 @@ export interface CloudflareEnvironment {
   SANDEAL_DEAL_INTELLIGENCE_ENABLED?: string;
   SANDEAL_DECISION_OS_ENABLED?: string;
   SANDEAL_DECISION_EXECUTION_MODE?: string;
+  SANDEAL_OPPORTUNITY_ENABLED?: string;
 }
 
 export class CloudflareRequestError extends Error {

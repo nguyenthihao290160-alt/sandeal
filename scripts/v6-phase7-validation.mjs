@@ -30,9 +30,12 @@ const quality = [
   ['cloudflare-build', ['scripts/v6-cloudflare-build.cjs', 'all']],
 ];
 const mode = process.argv[2] || 'all';
+const phase = process.argv[3] || 'phase7';
+if (!['phase7', 'phase7-5'].includes(phase)) throw new Error('VALIDATION_PHASE_INVALID');
+if (phase === 'phase7-5') suites.unshift(['opportunities', ['scripts/v6-opportunity-experiments-tests.mjs']]);
 if (!['all', 'tests', 'quality'].includes(mode)) throw new Error('PHASE7_VALIDATION_MODE_INVALID');
 const selected = mode === 'tests' ? suites : mode === 'quality' ? quality : [...suites, ...quality];
-const directory = path.join('.test-tmp', 'phase7', mode);
+const directory = path.join('.test-tmp', phase, mode);
 fs.mkdirSync(directory, { recursive: true });
 const results = [];
 for (const [name, args] of selected) {
