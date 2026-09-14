@@ -23,6 +23,7 @@ export interface CloudflareEnvironment {
   SANDEAL_DECISION_OS_ENABLED?: string;
   SANDEAL_DECISION_EXECUTION_MODE?: string;
   SANDEAL_OPPORTUNITY_ENABLED?: string;
+  SANDEAL_CONTENT_LIFECYCLE_ENABLED?: string;
 }
 
 export class CloudflareRequestError extends Error {

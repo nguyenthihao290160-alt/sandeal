@@ -1,28 +1,1304 @@
 {
-  "capturedAt": "2026-09-14T00:18:23.136Z",
-  "MONEY_ROUTER": "PASS",
-  "NORMALIZED_OFFERS": "PASS",
-  "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
-  "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
-  "AFFILIATE_REDIRECT": "PASS",
-  "CLICK_ATTRIBUTION": "PASS",
-  "CONVERSION_ATTRIBUTION": "PASS",
-  "COMMISSION_LEDGER": "PASS",
-  "REVENUE_SNAPSHOT": "PASS",
-  "PROVIDER": "accesstrade",
-  "PLATFORM": "shopee",
-  "DUPLICATE_CONVERSION_EFFECT": 0,
-  "DUPLICATE_COMMISSION_EFFECT": 0,
-  "DUPLICATE_REVENUE_EFFECT": 0,
-  "DIRECT_SHOPEE_API_CALLS": 0,
-  "FILE_STORAGE_CALLS": 0,
-  "PM2_REQUIRED": "NO",
-  "VPS_REQUIRED": "NO",
-  "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-  "ORIGIN": "TEST_FIXTURE",
-  "REAL_MONEY_TRANSACTION_CREATED": "NO",
+  "capturedAt": "2026-09-14T10:23:52.778Z",
+  "phase": "PHASE_8_5",
+  "result": "PASS_LOCAL_SHADOW_FOUNDATION",
+  "gates": {
+    "PHASE8_5": "PASS",
+    "CONTENT_LIFECYCLE_ENGINE": "PASS",
+    "MATERIAL_CHANGE_ENGINE": "PASS",
+    "TIME_ONLY_REFRESH_EFFECT": "0",
+    "REFRESH_ELIGIBILITY": "PASS",
+    "REFRESH_PRIORITY": "PASS",
+    "REFRESH_ORCHESTRATOR": "PASS",
+    "REFRESH_JOB_STORM_GUARD": "PASS",
+    "REFRESH_COOLDOWN": "PASS",
+    "STALE_REFRESH_JOB_EFFECT": "0",
+    "LIFECYCLE_EVIDENCE_FINGERPRINT": "PASS",
+    "CONTENT_VALUE_ATTRIBUTION": "PASS",
+    "CONTENT_VALUE_SNAPSHOT": "PASS",
+    "CONTENT_VALUE_CONFIDENCE": "PASS",
+    "UNKNOWN_VALUE_ZERO_COERCION_EFFECT": "0",
+    "NO_REVENUE_AUTO_ARCHIVE_EFFECT": "0",
+    "CONTENT_DECAY": "PASS",
+    "CONTENT_ATTRIBUTION_CHAIN": "PASS",
+    "RESOURCE_BUDGET": "PASS",
+    "AI_IS_ADVISORY": "YES",
+    "LIVE_AI_PROBE": "NOT_RUN",
+    "INVALIDATED_FACT_REUSE_EFFECT": "0",
+    "AI_PROSE_AS_AUTHORITY": "NO",
+    "MERGE_FOUNDATION": "PASS",
+    "ARCHIVE_SAFETY": "PASS",
+    "ACCESS_TRADE_SHOPEE_LIFECYCLE": "PASS",
+    "DIRECT_SHOPEE_STATUS": "DISABLED_NO_CREDENTIALS",
+    "DIRECT_SHOPEE_API_CALLS": "0",
+    "DUPLICATE_REFRESH_EVALUATION_EFFECT": "0",
+    "DUPLICATE_REFRESH_JOB_EFFECT": "0",
+    "DUPLICATE_LIFECYCLE_PLAN_EFFECT": "0",
+    "DUPLICATE_CONTENT_CLICK_EFFECT": "0",
+    "DUPLICATE_CONTENT_CONVERSION_EFFECT": "0",
+    "DUPLICATE_CONTENT_REVENUE_EFFECT": "0",
+    "CONTENT_LIFECYCLE_POLICY_OVERRIDE_EFFECT": "0",
+    "CONTENT_LIFECYCLE_FULL_SCAN": "NO",
+    "REFRESH_QUEUE_FULL_SCAN": "NO",
+    "CONTENT_VALUE_FULL_SCAN": "NO",
+    "CONTENT_ATTRIBUTION_FULL_SCAN": "NO",
+    "DUE_REFRESH_WORK_FULL_SCAN": "NO",
+    "CONTENT_PORTFOLIO_FULL_SCAN": "NO",
+    "PRODUCTION_CONTENT_MUTATIONS": "0",
+    "PRODUCTION_CONTENT_PUBLISHED": "0",
+    "PRODUCTION_CONTENT_DELETED": "0",
+    "PRODUCTION_REDIRECTS_CREATED": "0",
+    "PRODUCTION_METADATA_MUTATIONS": "0",
+    "PRODUCTION_EXPERIMENT_TRAFFIC": "0",
+    "ACTIVE_PRODUCTION_EXPERIMENTS": "0",
+    "FILE_STORAGE_CALLS": "0",
+    "FILESYSTEM_SETTINGS_CALLS": "0",
+    "PM2_REQUIRED": "NO",
+    "VPS_REQUIRED": "NO",
+    "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+    "CONTINUOUS_POLLING": "NO",
+    "ASSERTIONS_WEAKENED": "NO",
+    "SAFETY_GATES_RELAXED": "NO",
+    "TYPESCRIPT": "PASS",
+    "ESLINT": "PASS_0_ERRORS_35_EXISTING_WARNINGS",
+    "SECRET_SCAN": "PASS",
+    "BUILD_CLOUDFLARE": "PASS_STATIC_AND_WORKER",
+    "BUILD_LEGACY": "NOT_RUN_UNAFFECTED",
+    "COMMITTED": "NO",
+    "PUSHED": "NO",
+    "DEPLOYED": "NO",
+    "CLOUDFLARE_LOGIN_USED": "NO",
+    "DNS_CHANGED": "NO",
+    "PHASE9_STARTED": "NO",
+    "RESULT": "PASS_LOCAL_SHADOW_FOUNDATION",
+    "BLOCKERS": "NONE_WITHIN_LOCAL_PHASE_8_5",
+    "NEXT_STEP": "STOP_BEFORE_PHASE_9"
+  },
+  "focused": {
+    "command": "node scripts/v6-content-lifecycle-tests.mjs",
+    "exit": 0,
+    "passed": 122,
+    "failed": 0,
+    "skipped": 0,
+    "directShopeeCalls": 0,
+    "cases": [
+      {
+        "name": "A unchanged evidence gives exact NO_ACTION and stable fingerprint",
+        "status": "PASS"
+      },
+      {
+        "name": "H old page alone cannot cause refresh or archive",
+        "status": "PASS"
+      },
+      {
+        "name": "B material price change is MEDIUM eligible P2 refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "C tiny price change below configured threshold has no effect",
+        "status": "PASS"
+      },
+      {
+        "name": "minor metadata-only change is LOW and never requires refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "price threshold exact boundary is material",
+        "status": "PASS"
+      },
+      {
+        "name": "D K safe offer/provider change preserves canonical entity and URL",
+        "status": "PASS"
+      },
+      {
+        "name": "E BLOCK defeats high value and refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "E QUARANTINE defeats high value and refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "HOLD requires review and cannot refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "ALLOW_WITH_REVIEW requires review and cannot refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "F verified-value stale content outranks otherwise equivalent new content",
+        "status": "PASS"
+      },
+      {
+        "name": "G no value history remains UNKNOWN, never default LOW_VALUE",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid price NaN fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid price -1 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid price Infinity fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid dealScore NaN fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid dealConfidence 2 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid contentConfidence -1 fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid priceState invented fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid policy PASS fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing selected offer requests offer evidence, not refresh execution",
+        "status": "PASS"
+      },
+      {
+        "name": "fabricated direct Shopee provider cannot enter lifecycle evidence",
+        "status": "PASS"
+      },
+      {
+        "name": "contradictory safe-route claim is rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "expired offer requests revalidation and invalidates offer facts",
+        "status": "PASS"
+      },
+      {
+        "name": "unsafe destination produces critical BLOCK regardless of experiment",
+        "status": "PASS"
+      },
+      {
+        "name": "provider DEGRADED cannot execute refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "provider UNAVAILABLE cannot execute refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "provider COOLDOWN cannot execute refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "price STALE requests authoritative refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "price UNKNOWN requests authoritative refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "explicit invalid price claim causes critical block",
+        "status": "PASS"
+      },
+      {
+        "name": "canonical conflict overrides Phase 8 refresh recommendation",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate coverage without verified merge target is review-only",
+        "status": "PASS"
+      },
+      {
+        "name": "MERGED_INTO recommends but never deletes or redirects",
+        "status": "PASS"
+      },
+      {
+        "name": "SUPERSEDES_CONTENT recommends but never deletes or redirects",
+        "status": "PASS"
+      },
+      {
+        "name": "obsolete authoritative entity yields archive review only",
+        "status": "PASS"
+      },
+      {
+        "name": "score collapse without obsolete evidence cannot auto-archive",
+        "status": "PASS"
+      },
+      {
+        "name": "missing baseline is review required",
+        "status": "PASS"
+      },
+      {
+        "name": "missing contentPlan is review required",
+        "status": "PASS"
+      },
+      {
+        "name": "missing opportunity is review required",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid content identity rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "canonical product mismatch rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "fingerprint mismatch input rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "algorithm version changes identity without time-driven refresh",
+        "status": "PASS"
+      },
+      {
+        "name": "AI disabled configuration cannot be escalated",
+        "status": "PASS"
+      },
+      {
+        "name": "resource budget cannot be inflated beyond hard caps",
+        "status": "PASS"
+      },
+      {
+        "name": "string-valued numeric thresholds cannot bypass material-change validation",
+        "status": "PASS"
+      },
+      {
+        "name": "blocked to queued without reevaluation is forbidden",
+        "status": "PASS"
+      },
+      {
+        "name": "archive to current without new evidence is forbidden",
+        "status": "PASS"
+      },
+      {
+        "name": "unknown lifecycle states cannot silently transition",
+        "status": "PASS"
+      },
+      {
+        "name": "supersede to automatic delete is forbidden",
+        "status": "PASS"
+      },
+      {
+        "name": "explicit reevaluation can recover blocked state",
+        "status": "PASS"
+      },
+      {
+        "name": "invalidated fact cannot be in preserved authoritative facts",
+        "status": "PASS"
+      },
+      {
+        "name": "AI prose and unrelated metadata cannot become factual authority",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid bounded value window 100/50/100",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid bounded value window 0/100/50",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid bounded value window 0/2764800000/2764800000",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid bounded value window -1/100/100",
+        "status": "PASS"
+      },
+      {
+        "name": "invalid bounded value window NaN/100/100",
+        "status": "PASS"
+      },
+      {
+        "name": "same evidence has exact material-change classification",
+        "status": "PASS"
+      },
+      {
+        "name": "new content click-only signal is insufficient evidence with no revenue data",
+        "status": "PASS"
+      },
+      {
+        "name": "NaN value confidence cannot promote refresh priority",
+        "status": "PASS"
+      },
+      {
+        "name": "observed zero payment does not assert complete zero content value",
+        "status": "PASS"
+      },
+      {
+        "name": "configured opportunity priority can promote but cannot override safety",
+        "status": "PASS"
+      },
+      {
+        "name": "registration replay is idempotent and no public content mutation occurs",
+        "status": "PASS"
+      },
+      {
+        "name": "missing lifecycle record fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "actual current upstream evidence produces unchanged NO_ACTION",
+        "status": "PASS"
+      },
+      {
+        "name": "coalescing suppresses immediate noncritical jobs",
+        "status": "PASS"
+      },
+      {
+        "name": "I duplicate materialization creates exactly one durable refresh job",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate queue delivery produces exactly one lifecycle plan and audit",
+        "status": "PASS"
+      },
+      {
+        "name": "J stale queued fingerprint cannot create a plan",
+        "status": "PASS"
+      },
+      {
+        "name": "rapid changes coalesce into one current evaluation per content",
+        "status": "PASS"
+      },
+      {
+        "name": "atomic audit failure rolls back lifecycle and job completion",
+        "status": "PASS"
+      },
+      {
+        "name": "portfolio and value queries use bounded indexed searches",
+        "status": "PASS"
+      },
+      {
+        "name": "unbounded portfolio/value query rejected",
+        "status": "PASS"
+      },
+      {
+        "name": "local lifecycle paths have no FileStorage or filesystem calls",
+        "status": "PASS"
+      },
+      {
+        "name": "explicit relationship requires an existing matching canonical target",
+        "status": "PASS"
+      },
+      {
+        "name": "content coverage events update only shadow plans through explicit CAS",
+        "status": "PASS"
+      },
+      {
+        "name": "lifecycle audit cannot be silently rewritten or deleted",
+        "status": "PASS"
+      },
+      {
+        "name": "critical change bypasses cooldown and coalescing",
+        "status": "PASS"
+      },
+      {
+        "name": "budget caps a burst and keyset config invalidation is bounded",
+        "status": "PASS"
+      },
+      {
+        "name": "Queue unavailable leaves durable outbox rather than falsely completing",
+        "status": "PASS"
+      },
+      {
+        "name": "existing shadow experiment can reference the same stable click identity",
+        "status": "PASS"
+      },
+      {
+        "name": "attribution A content-linked click counted once under duplicate replay",
+        "status": "PASS"
+      },
+      {
+        "name": "content and experiment metrics reference one deduplicated business event with zero extra money",
+        "status": "PASS"
+      },
+      {
+        "name": "attribution B click-conversion chain counted once",
+        "status": "PASS"
+      },
+      {
+        "name": "attribution C approved commission replay has no extra economic effect",
+        "status": "PASS"
+      },
+      {
+        "name": "paid revision reclassifies value, duplicate revenue adds nothing",
+        "status": "PASS"
+      },
+      {
+        "name": "commission rejection retracts approved evidence and preserves final paid evidence",
+        "status": "PASS"
+      },
+      {
+        "name": "paid money remains final when an invalid rejection revision is attempted",
+        "status": "PASS"
+      },
+      {
+        "name": "D missing conversion/click chain remains unattributed",
+        "status": "PASS"
+      },
+      {
+        "name": "loose content strings cannot retroactively assign existing click",
+        "status": "PASS"
+      },
+      {
+        "name": "future event timestamp is quarantined without attributed value",
+        "status": "PASS"
+      },
+      {
+        "name": "ambiguous multiple content identity cannot produce attribution",
+        "status": "PASS"
+      },
+      {
+        "name": "fixture events cannot enter authenticated content value projections",
+        "status": "PASS"
+      },
+      {
+        "name": "same business IDs are referenced without new money or experiment events",
+        "status": "PASS"
+      },
+      {
+        "name": "concurrent content event reconciliation converges without lost or duplicate aggregates",
+        "status": "PASS"
+      },
+      {
+        "name": "attribution write and aggregate update roll back together on D1 failure",
+        "status": "PASS"
+      },
+      {
+        "name": "attribution and due queries are indexed with explicit fixed bounds",
+        "status": "PASS"
+      },
+      {
+        "name": "critically unsafe content wins over existing shadow experiment state",
+        "status": "PASS"
+      },
+      {
+        "name": "concurrent identical registration retains one immutable content identity",
+        "status": "PASS"
+      },
+      {
+        "name": "concurrent refresh producers create one outbox job per evidence fingerprint",
+        "status": "PASS"
+      },
+      {
+        "name": "concurrent Queue consumers and later redelivery commit one lifecycle plan",
+        "status": "PASS"
+      },
+      {
+        "name": "lost acknowledgement after commit cannot duplicate a lifecycle audit",
+        "status": "PASS"
+      },
+      {
+        "name": "duplicate evidence notification does not invalidate an otherwise current queued job",
+        "status": "PASS"
+      },
+      {
+        "name": "evidence change between preparation and atomic commit rolls back the stale plan",
+        "status": "PASS"
+      },
+      {
+        "name": "expired worker claim cannot write after a replacement consumer takes over",
+        "status": "PASS"
+      },
+      {
+        "name": "cooldown suppresses equivalent nonmaterial evidence churn without losing pending work",
+        "status": "PASS"
+      },
+      {
+        "name": "new lifecycle algorithm rejects old queued work without audit or publication effects",
+        "status": "PASS"
+      },
+      {
+        "name": "D1 unavailable fails closed without legacy fallback",
+        "status": "PASS"
+      },
+      {
+        "name": "missing Cloudflare binding/prerequisite DB fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing Cloudflare binding/prerequisite JOB_QUEUE fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing Cloudflare binding/prerequisite SANDEAL_LOCAL_ONLY fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing Cloudflare binding/prerequisite SANDEAL_OPPORTUNITY_ENABLED fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing Cloudflare binding/prerequisite SANDEAL_DECISION_OS_ENABLED fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "missing Cloudflare binding/prerequisite SANDEAL_DEAL_INTELLIGENCE_ENABLED fails closed",
+        "status": "PASS"
+      },
+      {
+        "name": "production mode cannot enable lifecycle automation",
+        "status": "PASS"
+      },
+      {
+        "name": "absent opt-in remains disabled",
+        "status": "PASS"
+      },
+      {
+        "name": "test/source integrity has no skip, focused test, network or production executor",
+        "status": "PASS"
+      },
+      {
+        "name": "native workerd Cron and Queue retain only blocked shadow records with zero publication effect",
+        "status": "PASS"
+      },
+      {
+        "name": "real AccessTrade normalization with Shopee offer replacement preserves registered content identity",
+        "status": "PASS"
+      }
+    ],
+    "proofs": {
+      "pureUnchanged": {
+        "id": "lifecycle-233ef2c10c832246df2e224395b93c5dbbf4779ff86a2c44727a931b3f5da6f5",
+        "contentEntityId": "content-primary",
+        "canonicalProductId": "local-audio",
+        "origin": "TEST_FIXTURE",
+        "algorithmVersion": "content-lifecycle-v1",
+        "evidenceFingerprint": "233ef2c10c832246df2e224395b93c5dbbf4779ff86a2c44727a931b3f5da6f5",
+        "materialFingerprint": "62b420f09accd62310d2b70643881bcf708458a02abc0ffae2cf950b83a050b2",
+        "severity": "NONE",
+        "materialChange": false,
+        "state": "CURRENT",
+        "priority": "NONE",
+        "eligibility": "NOT_REQUIRED",
+        "reasonCodes": [
+          "NO_MATERIAL_CHANGE"
+        ],
+        "riskCodes": [],
+        "decay": [],
+        "value": null,
+        "plan": {
+          "id": "lifecycle-plan-233ef2c10c832246df2e224395b93c5dbbf4779ff86a2c44727a931b3f5da6f5",
+          "contentEntityId": "content-primary",
+          "action": "NO_ACTION",
+          "executionMode": "SHADOW",
+          "productionAllowed": false,
+          "priority": "NONE",
+          "eligibility": "NOT_REQUIRED",
+          "brief": {
+            "contentEntityId": "content-primary",
+            "currentLifecycleState": "PUBLISHED_EXISTING",
+            "recommendedAction": "NO_ACTION",
+            "materialChangeReasons": [
+              "NO_MATERIAL_CHANGE"
+            ],
+            "factsChanged": [],
+            "factsInvalidated": [],
+            "factsStillValid": [
+              "product-facts",
+              "price",
+              "selected-offer",
+              "affiliate-route"
+            ],
+            "mustRefreshSections": [],
+            "mustPreserveFacts": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "d3964de8c7d1ef8cc4647c14771db4ffc6669f6a932c1ed0688d941734a745ce",
+              "8ce6ce1a14a46649971bdb4d09c8de898f2fbf1208b9a39fdb907d6a3e25d6c9",
+              "f3505067cb2d1893af6505030614b219a18e12839b730c5926e7d7dfc0187303"
+            ],
+            "mustAvoidClaims": [
+              "UNVERIFIED_DISCOUNT",
+              "BEST_PRICE_WITHOUT_COMPARATIVE_EVIDENCE",
+              "UNVERIFIED_AVAILABILITY",
+              "UNVERIFIED_STRUCTURED_OFFER",
+              "AI_PROSE_AS_FACT",
+              "SEO_PERFORMANCE_WITHOUT_EVIDENCE"
+            ],
+            "newEvidenceRefs": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "d3964de8c7d1ef8cc4647c14771db4ffc6669f6a932c1ed0688d941734a745ce",
+              "8ce6ce1a14a46649971bdb4d09c8de898f2fbf1208b9a39fdb907d6a3e25d6c9",
+              "f3505067cb2d1893af6505030614b219a18e12839b730c5926e7d7dfc0187303"
+            ],
+            "oldEvidenceRefs": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "d3964de8c7d1ef8cc4647c14771db4ffc6669f6a932c1ed0688d941734a745ce",
+              "8ce6ce1a14a46649971bdb4d09c8de898f2fbf1208b9a39fdb907d6a3e25d6c9",
+              "f3505067cb2d1893af6505030614b219a18e12839b730c5926e7d7dfc0187303"
+            ],
+            "canonicalTarget": {
+              "url": "/deals/local-audio",
+              "entityId": "local-audio",
+              "entityType": "PRODUCT"
+            },
+            "affiliateDisclosureRequired": true,
+            "priority": "NONE",
+            "reasonCodes": [
+              "NO_MATERIAL_CHANGE"
+            ],
+            "riskCodes": []
+          },
+          "relationship": null,
+          "experimentProposal": null
+        },
+        "ai": {
+          "status": "DISABLED",
+          "reasonCodes": [
+            "AI_DISABLED"
+          ],
+          "advice": null,
+          "provider": null,
+          "model": null,
+          "role": "OPTIONAL_REVIEWER",
+          "promptVersion": null,
+          "attempts": [],
+          "cacheHit": false
+        },
+        "evaluatedAt": 1789380493204
+      },
+      "realUpstreamUnchanged": {
+        "id": "lifecycle-ac901268a113311f1f2c691cdac8afad40b00bf096a4eac7cd2d2a38ba257961",
+        "contentEntityId": "content-primary",
+        "canonicalProductId": "local-audio",
+        "origin": "TEST_FIXTURE",
+        "algorithmVersion": "content-lifecycle-v1",
+        "evidenceFingerprint": "ac901268a113311f1f2c691cdac8afad40b00bf096a4eac7cd2d2a38ba257961",
+        "materialFingerprint": "195719bd91573268d169b93949807697f8b2345102c403c8d42ba06e1506e07f",
+        "severity": "NONE",
+        "materialChange": false,
+        "state": "CURRENT",
+        "priority": "NONE",
+        "eligibility": "NOT_REQUIRED",
+        "reasonCodes": [
+          "NO_MATERIAL_CHANGE"
+        ],
+        "riskCodes": [],
+        "decay": [],
+        "value": {
+          "contentEntityId": "content-primary",
+          "origin": "TEST_FIXTURE",
+          "windowStart": 1786752000000,
+          "windowEnd": 1789380503214,
+          "attributedClicks": 0,
+          "attributedConversions": 0,
+          "approvedCommissionEvidence": null,
+          "revenueEvidence": null,
+          "revenueState": "NO_REVENUE_DATA",
+          "monetizationEvents": 0,
+          "dataCompleteness": "NO_DATA",
+          "valueConfidence": 0,
+          "businessValue": "UNKNOWN",
+          "sourceEventCount": 0,
+          "evidenceFingerprint": "a71b960334eeca93dcb076a21850f9d54f4dac0b47cabc834f1ff17589123561",
+          "algorithmVersion": "content-attribution-v1",
+          "generatedAt": 1789380503214,
+          "attribution": "UNKNOWN",
+          "causalImpact": "NOT_ESTABLISHED",
+          "seoExternalEvidence": "NOT_AVAILABLE"
+        },
+        "plan": {
+          "id": "lifecycle-plan-ac901268a113311f1f2c691cdac8afad40b00bf096a4eac7cd2d2a38ba257961",
+          "contentEntityId": "content-primary",
+          "action": "NO_ACTION",
+          "executionMode": "SHADOW",
+          "productionAllowed": false,
+          "priority": "NONE",
+          "eligibility": "NOT_REQUIRED",
+          "brief": {
+            "contentEntityId": "content-primary",
+            "currentLifecycleState": "PUBLISHED_EXISTING",
+            "recommendedAction": "NO_ACTION",
+            "materialChangeReasons": [
+              "NO_MATERIAL_CHANGE"
+            ],
+            "factsChanged": [],
+            "factsInvalidated": [],
+            "factsStillValid": [
+              "product-facts",
+              "price",
+              "selected-offer",
+              "affiliate-route"
+            ],
+            "mustRefreshSections": [],
+            "mustPreserveFacts": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "89b3f383ef651a7208256285f4db72dc06c0dadb2bd8f1f1b2ed3e5024a24a1b",
+              "12c470b25d948ec042da84ea8f731aea3ab8c1c2d4476ae97d8e0b0411478eb8",
+              "f3505067cb2d1893af6505030614b219a18e12839b730c5926e7d7dfc0187303"
+            ],
+            "mustAvoidClaims": [
+              "UNVERIFIED_DISCOUNT",
+              "BEST_PRICE_WITHOUT_COMPARATIVE_EVIDENCE",
+              "UNVERIFIED_AVAILABILITY",
+              "UNVERIFIED_STRUCTURED_OFFER",
+              "AI_PROSE_AS_FACT",
+              "SEO_PERFORMANCE_WITHOUT_EVIDENCE"
+            ],
+            "newEvidenceRefs": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "89b3f383ef651a7208256285f4db72dc06c0dadb2bd8f1f1b2ed3e5024a24a1b",
+              "12c470b25d948ec042da84ea8f731aea3ab8c1c2d4476ae97d8e0b0411478eb8",
+              "f3505067cb2d1893af6505030614b219a18e12839b730c5926e7d7dfc0187303"
+            ],
+            "oldEvidenceRefs": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "89b3f383ef651a7208256285f4db72dc06c0dadb2bd8f1f1b2ed3e5024a24a1b",
+              "12c470b25d948ec042da84ea8f731aea3ab8c1c2d4476ae97d8e0b0411478eb8",
+              "f3505067cb2d1893af6505030614b219a18e12839b730c5926e7d7dfc0187303"
+            ],
+            "canonicalTarget": {
+              "url": "/deals/local-audio",
+              "entityId": "local-audio",
+              "entityType": "PRODUCT"
+            },
+            "affiliateDisclosureRequired": true,
+            "priority": "NONE",
+            "reasonCodes": [
+              "NO_MATERIAL_CHANGE"
+            ],
+            "riskCodes": []
+          },
+          "relationship": null,
+          "experimentProposal": null
+        },
+        "ai": {
+          "status": "DISABLED",
+          "reasonCodes": [
+            "AI_DISABLED"
+          ],
+          "advice": null,
+          "provider": null,
+          "model": null,
+          "role": "OPTIONAL_REVIEWER",
+          "promptVersion": null,
+          "attempts": [],
+          "cacheHit": false
+        },
+        "evaluatedAt": 1789380503214
+      },
+      "indexPlans": [
+        {
+          "kind": "P0",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_priority (origin=? AND priority=?)"
+        },
+        {
+          "kind": "P1",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_priority (origin=? AND priority=?)"
+        },
+        {
+          "kind": "HIGH_VALUE_STALE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_high_value (origin=? AND high_value_stale=?)"
+        },
+        {
+          "kind": "LOW_CONFIDENCE_STALE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_low_confidence (origin=? AND low_confidence_stale=?)"
+        },
+        {
+          "kind": "MERGE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_state (origin=? AND state=?)"
+        },
+        {
+          "kind": "SUPERSEDE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_state (origin=? AND state=?)"
+        },
+        {
+          "kind": "ARCHIVE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_state (origin=? AND state=?)"
+        },
+        {
+          "kind": "RECENT",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_recent (origin=? AND material=?)"
+        },
+        {
+          "kind": "ACCESSTRADE_SHOPEE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_provider (origin=? AND provider=? AND platform=?)"
+        },
+        {
+          "kind": "SAMPLE",
+          "detail": "SEARCH content_lifecycle USING COVERING INDEX content_lifecycle_sample (origin=?)"
+        }
+      ],
+      "attribution": {
+        "contentEntityId": "content-primary",
+        "origin": "TEST_FIXTURE",
+        "windowStart": 1786752000000,
+        "windowEnd": 1789380606748,
+        "attributedClicks": 1,
+        "attributedConversions": 1,
+        "approvedCommissionEvidence": null,
+        "revenueEvidence": [
+          {
+            "currency": "VND",
+            "evidenceCount": 1,
+            "amountMinor": 25000
+          }
+        ],
+        "revenueState": "VERIFIED_REVENUE",
+        "monetizationEvents": 1,
+        "dataCompleteness": "PARTIAL",
+        "valueConfidence": 0.28,
+        "businessValue": "INSUFFICIENT_EVIDENCE",
+        "sourceEventCount": 3,
+        "evidenceFingerprint": "64c605c9d1f36de99c99ce369e47622941c551bb81b329cba076ea12cddb0d98",
+        "algorithmVersion": "content-attribution-v1",
+        "generatedAt": 1789380606748,
+        "attribution": "DIRECTLY_ATTRIBUTED",
+        "causalImpact": "NOT_ESTABLISHED",
+        "seoExternalEvidence": "NOT_AVAILABLE"
+      },
+      "nativeWorker": {
+        "id": "lifecycle-79909e079b7f74048c6934f5e0a5115f35d143269ef975b0d42c08ca738eeba9",
+        "contentEntityId": "content-primary",
+        "canonicalProductId": "local-audio",
+        "origin": "AUTHENTICATED_PROVIDER_API",
+        "algorithmVersion": "content-lifecycle-v1",
+        "evidenceFingerprint": "79909e079b7f74048c6934f5e0a5115f35d143269ef975b0d42c08ca738eeba9",
+        "materialFingerprint": "8fea7da508ca3c73b025dc56aa78ac5786edc816ad4c69bd856a4a15ff022a2b",
+        "severity": "CRITICAL",
+        "materialChange": true,
+        "state": "BLOCKED",
+        "priority": "BLOCKED",
+        "eligibility": "BLOCKED",
+        "reasonCodes": [
+          "CONTENT_STALE",
+          "OFFER_CHANGED",
+          "POLICY_BLOCKED",
+          "PROVIDER_UNAVAILABLE"
+        ],
+        "riskCodes": [
+          "CONTENT_STALE",
+          "OFFER_CHANGED",
+          "POLICY_BLOCKED",
+          "PROVIDER_UNAVAILABLE"
+        ],
+        "decay": [
+          "CONTENT_STALE",
+          "POLICY_BLOCKED"
+        ],
+        "value": {
+          "contentEntityId": "content-primary",
+          "origin": "AUTHENTICATED_PROVIDER_API",
+          "windowStart": 1786752000000,
+          "windowEnd": 1789380713015,
+          "attributedClicks": 0,
+          "attributedConversions": 0,
+          "approvedCommissionEvidence": null,
+          "revenueEvidence": null,
+          "revenueState": "NO_REVENUE_DATA",
+          "monetizationEvents": 0,
+          "dataCompleteness": "NO_DATA",
+          "valueConfidence": 0,
+          "businessValue": "UNKNOWN",
+          "sourceEventCount": 0,
+          "evidenceFingerprint": "f87827a0f7c48b72b29d890afc3623f117f0655eebd4252bcf31c9edf800d333",
+          "algorithmVersion": "content-attribution-v1",
+          "generatedAt": 1789380713015,
+          "attribution": "UNKNOWN",
+          "causalImpact": "NOT_ESTABLISHED",
+          "seoExternalEvidence": "NOT_AVAILABLE"
+        },
+        "plan": {
+          "id": "lifecycle-plan-79909e079b7f74048c6934f5e0a5115f35d143269ef975b0d42c08ca738eeba9",
+          "contentEntityId": "content-primary",
+          "action": "BLOCK",
+          "executionMode": "SHADOW",
+          "productionAllowed": false,
+          "priority": "BLOCKED",
+          "eligibility": "BLOCKED",
+          "brief": {
+            "contentEntityId": "content-primary",
+            "currentLifecycleState": "PUBLISHED_EXISTING",
+            "recommendedAction": "BLOCK",
+            "materialChangeReasons": [
+              "CONTENT_STALE",
+              "OFFER_CHANGED",
+              "POLICY_BLOCKED",
+              "PROVIDER_UNAVAILABLE"
+            ],
+            "factsChanged": [],
+            "factsInvalidated": [
+              "price",
+              "selected-offer",
+              "affiliate-route"
+            ],
+            "factsStillValid": [
+              "product-facts"
+            ],
+            "mustRefreshSections": [
+              "PRICE",
+              "OFFER",
+              "AFFILIATE_ROUTE"
+            ],
+            "mustPreserveFacts": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36"
+            ],
+            "mustAvoidClaims": [
+              "UNVERIFIED_DISCOUNT",
+              "BEST_PRICE_WITHOUT_COMPARATIVE_EVIDENCE",
+              "UNVERIFIED_AVAILABILITY",
+              "UNVERIFIED_STRUCTURED_OFFER",
+              "AI_PROSE_AS_FACT",
+              "SEO_PERFORMANCE_WITHOUT_EVIDENCE"
+            ],
+            "newEvidenceRefs": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36"
+            ],
+            "oldEvidenceRefs": [
+              "3b5a9be11f132ca7e0e8b13387008c2477500e3da535f07d0eefe337fb88da36",
+              "1c06ffcf9690a1b1dc89052f9f686bafa9b522b5598ced6d704c267c75949272",
+              "a534059ccfec31fd816516a5f41650eabf29cdeed7c5416e9816266868cf65d7",
+              "1696b14decd130abf838273d69620db43b3902db3e22bb03a3ad9499c02c6182"
+            ],
+            "canonicalTarget": {
+              "url": "/deals/local-audio",
+              "entityId": "local-audio",
+              "entityType": "PRODUCT"
+            },
+            "affiliateDisclosureRequired": true,
+            "priority": "BLOCKED",
+            "reasonCodes": [
+              "CONTENT_STALE",
+              "OFFER_CHANGED",
+              "POLICY_BLOCKED",
+              "PROVIDER_UNAVAILABLE"
+            ],
+            "riskCodes": [
+              "CONTENT_STALE",
+              "OFFER_CHANGED",
+              "POLICY_BLOCKED",
+              "PROVIDER_UNAVAILABLE"
+            ]
+          },
+          "relationship": null,
+          "experimentProposal": null
+        },
+        "ai": {
+          "status": "DISABLED",
+          "reasonCodes": [
+            "AI_DISABLED"
+          ],
+          "advice": null,
+          "provider": null,
+          "model": null,
+          "role": "OPTIONAL_REVIEWER",
+          "promptVersion": null,
+          "attempts": [],
+          "cacheHit": false
+        },
+        "evaluatedAt": 1789380713015
+      }
+    }
+  },
+  "regressions": {
+    "passed": 601,
+    "failed": 0,
+    "skipped": 0,
+    "rerunPassed": 104,
+    "reusedPassed": 497,
+    "results": [
+      {
+        "name": "content-phase8",
+        "command": "node scripts/v6-content-seo-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 270,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\content-phase8.log",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "d7f80520347ef8470b4e17d64e1c74816b18ff4f8c4705089ba1331c5ba63969"
+      },
+      {
+        "name": "opportunities",
+        "command": "node scripts/v6-opportunity-experiments-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 224673,
+        "log": ".test-tmp\\phase8-5\\tests\\opportunities.log",
+        "passed": 127,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "0887b0c5572c8c7bb1757027c3a78a65fbc5e29a362bf59263a291ac85a77924"
+      },
+      {
+        "name": "decisions",
+        "command": "node scripts/v6-decision-os-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 143880,
+        "log": ".test-tmp\\phase8-5\\tests\\decisions.log",
+        "passed": 132,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "2bf9c547b5d8934aeea50c86f2009a5cd24dd8913fd28674bfe19fca334665e8"
+      },
+      {
+        "name": "deals",
+        "command": "node scripts/v6-deal-intelligence-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 139447,
+        "log": ".test-tmp\\phase8-5\\tests\\deals.log",
+        "passed": 79,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "09ae17d98a9d239b19564ce9cb46f6974056805cb004ba5fd758c626fb4c591a"
+      },
+      {
+        "name": "money",
+        "command": "node scripts/v6-money-engine-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 348402,
+        "log": ".test-tmp\\phase8-5\\tests\\money.log",
+        "passed": 57,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "f3d5aa8b50a29b44c83772f91d270609bae72fff5fa9dfffa785648283811467"
+      },
+      {
+        "name": "d1",
+        "command": "node scripts/v6-d1-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 23150,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\d1.log",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "78a3039e3a0fca572c823ee279f8abb926b681026a56d920eb59ff15f776eb21"
+      },
+      {
+        "name": "queue",
+        "command": "node scripts/v6-cloudflare-queue-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 77407,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\queue.log",
+        "passed": 17,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "7b7c98a352a1a4d7a0eed7fb0ce03778fec74dbf79241eb160e0e018f1528233"
+      },
+      {
+        "name": "cron",
+        "command": "node scripts/v6-cloudflare-cron-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 47857,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\cron.log",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "7f07271f33cab58863bf560e966f62baca2e0e8d4528582a75159f47c9b581cd"
+      },
+      {
+        "name": "autopilot",
+        "command": "node scripts/v6-cloudflare-autopilot-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 7185,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\autopilot.log",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "044952af281a3ee8ce89e6cc01c4a8b477c83b0d11101eab62ae655139b635c6"
+      },
+      {
+        "name": "runtime",
+        "command": "node scripts/v6-cloudflare-runtime-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 5552,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\runtime.log",
+        "passed": 14,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "b0367268d4cf90cf6202963072438eb2a5e2765cb3024f8feef1432bc9ee4b42"
+      },
+      {
+        "name": "routing",
+        "command": "node scripts/v6-cloudflare-routing-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 6242,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\routing.log",
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "53b12532100995a257ab4cfada4a171871833bb505f497aa433ba838d3031477"
+      },
+      {
+        "name": "accesstrade",
+        "command": "node scripts/accesstrade-link-safety-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 1640,
+        "log": ".test-tmp\\phase8-5\\tests\\accesstrade.log",
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "c67f3479435de01d44bc99e6e06ae4462542357542812a9952d4593e53ba7df0"
+      },
+      {
+        "name": "tiktok",
+        "command": "node scripts/accesstrade-tiktok-integration-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 3751,
+        "log": ".test-tmp\\phase8-5\\tests\\tiktok.log",
+        "passed": 43,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "9a5dc90fde5ffd98e77d6dbca9bccc233fae9ff63bbe9f411c6f9bb3ede6f847"
+      },
+      {
+        "name": "publication",
+        "command": "node scripts/prompt10-autopublish-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 34516,
+        "log": ".test-tmp\\phase8-5\\tests\\publication.log",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "REUSED_VERIFIED_UNCHANGED",
+        "reuseReason": "Prior Phase 8.5 log has zero failures; authoritative source and test unchanged. Later changes are confined to opt-in lifecycle implementation and tests.",
+        "logSha256": "a85d9b7e0f440d235072601710cc635e9f52830a4bd493bfa4bbb1aaa03c0716"
+      },
+      {
+        "name": "zero-vps",
+        "command": "node scripts/v6-zero-vps-storage-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 7860,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\zero-vps.log",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "998006dd428ec7fbb81942a2699eff5b5588bbab369f684987536832c2fd0c01"
+      },
+      {
+        "name": "revenue",
+        "command": "node scripts/prompt10-revenue-integrity-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 332,
+        "log": ".test-tmp\\phase8-5\\tests-resume-0KTQfr\\revenue.log",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "disposition": "RERUN_AFTER_RESUME",
+        "logSha256": "ef77dce462dc23437ab4dd5a5a4703324c56d3cd5e79852119355f73b0bc8be3"
+      }
+    ]
+  },
+  "quality": {
+    "results": [
+      {
+        "name": "typescript",
+        "command": "node node_modules/typescript/bin/tsc --noEmit --incremental false",
+        "exit": 0,
+        "elapsedMs": 13517,
+        "log": ".test-tmp\\phase8-5\\quality-resume-JPF5Av\\typescript.log",
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "eslint",
+        "command": "node node_modules/eslint/bin/eslint.js .",
+        "exit": 0,
+        "elapsedMs": 44519,
+        "log": ".test-tmp\\phase8-5\\quality-resume-JPF5Av\\eslint.log",
+        "logSha256": "fa7ec028173d680499f57b39f0c67293b49d85bc2e1089c88c8482a2e216ce84"
+      },
+      {
+        "name": "secret-scan",
+        "command": "node scripts/release-validation.cjs secret-scan",
+        "exit": 0,
+        "elapsedMs": 172,
+        "log": ".test-tmp\\phase8-5\\quality-resume-JPF5Av\\secret-scan.log",
+        "logSha256": "ecd95a3a6df2b3bf369c789be83efcfac5f5857af17c2afeac1042eec8927c48"
+      },
+      {
+        "name": "cloudflare-build",
+        "command": "node scripts/v6-cloudflare-build.cjs all",
+        "exit": 0,
+        "elapsedMs": 14909,
+        "log": ".test-tmp\\phase8-5\\quality-resume-JPF5Av\\cloudflare-build.log",
+        "logSha256": "e7c052419575a5ce06655cc70cf9ee7e77d6ee1dd8e090bae6065525eac1e506"
+      }
+    ],
+    "eslintErrors": 0,
+    "eslintExistingWarnings": 35,
+    "eslintWarningsUnchanged": true
+  },
+  "validationRunnerGuards": [
+    {
+      "args": [
+        "tests",
+        "not-a-suite"
+      ],
+      "exit": 1,
+      "expectedFailure": true
+    },
+    {
+      "args": [
+        "tests",
+        "queue",
+        "queue"
+      ],
+      "exit": 1,
+      "expectedFailure": true
+    }
+  ],
+  "counts": {
+    "focusedPassed": 122,
+    "criticalRegressionsPassed": 601,
+    "totalUniquePassed": 723,
+    "failed": 0,
+    "skipped": 0
+  },
+  "preservation": {
+    "originalSrcFilesUnchanged": true,
+    "priorPhaseHistoryUnchanged": true,
+    "initialUntrackedFilesRetained": true,
+    "ledgerTransitionRulesUnchanged": true,
+    "productionPathsUnchanged": true
+  },
+  "scope": {
+    "localOnly": true,
+    "shadowOnly": true,
+    "liveAiProbe": "NOT_RUN",
+    "externalSeoEvidence": "NOT_AVAILABLE",
+    "phase9Started": false
+  },
+  "validationSourceFingerprint": "91e93ede1fde936048a6218ed92d7560c2a30b3f163dec46ec447a9f8993b880",
+  "postValidationSourceChanges": [
+    "docs/v6/phase-08-5-content-lifecycle.md"
+  ],
+  "documentation": "docs/v6/phase-08-5-content-lifecycle.md",
+  "audit": "docs/v6/evidence/phase8-5-resume-audit.json",
   "manifest": {
-    "sha256": "d2d88560a608737b9002a660b95f53dd7dd32e1ccc12d5d19ee4cf73c1caedb4",
+    "sha256": "9a55d5085f77760115af4edf6fc1e7b33539aa8449414767da1d5906f32d41bf",
     "files": {
       ".env.example": "653fd3b6c3bbe99ae84104f519d02750da33fe7cacf5807b8afdd347f5dcc16a",
       ".github/workflows/release-quality.yml": "55b60c1e14a7ca6e7e03e75a7922946be6a6e8d2fa4861e001e0c9881b6ba1c4",
@@ -35,7 +1311,7 @@
       ".idea/vcs.xml": "62be7e0a7f84ab3c35b4d4bafb890a4951d061eadafde1a10aa3f5d0406db5df",
       "AGENTS.md": "e3447d84251880fb34cfae09131cb4c57471529bbfe60976a3245793cf621627",
       "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49",
-      "README.md": "3683398757813d682f74e4826a232e2cebe4aade5b769894bf807f4752c972c0",
+      "README.md": "3abe1ee7d9f5f8d1f36247f99799321ade2b73491bffb6eeb6f12196757bbca7",
       "VPS_SCHEDULER.md": "10d0c522e61b78150acec64640a21908948e60167486020a9b660cee1f0ed2a5",
       "cloudflare/site/app/deals/page.tsx": "ba21d2f0ec5341cf5be120e9a0c1fe2ead23e0df12a46f5460d8dc9f49838426",
       "cloudflare/site/app/layout.tsx": "2c95c3a42eaad47a6d8f6eb49c077e9337ef43a5ea9bfab64fe4d37a87dea91d",
@@ -97,6 +1373,7 @@
       "docs/v6/phase-06-deal-intelligence.md": "c461b90511444a7c25e298726d09c6287051406258eea0c9d4742eda4163a154",
       "docs/v6/phase-07-5-opportunity-experiments.md": "b9c412f028ca06299afa9d7edcdc5ef17ce74802be0d74e473d0c2cd8af7dc73",
       "docs/v6/phase-07-decision-os.md": "726390d3320b45485784bfcac5c0ca0471bda18a211d12ea2181d55111efd3c3",
+      "docs/v6/phase-08-5-content-lifecycle.md": "dec24941ab94ccf43a271c9bb57b976c540e5f810924484da345057f0abb8fd2",
       "docs/v6/phase-08-content-seo-intelligence.md": "491de027e313e4e76f62eccbedb9809e5ce7ddf20765c79a823caeaa4b9a992d",
       "docs/v6/resume-long-run-3.md": "1ee09c3f08441be79edbeccf4c10e12750a9b02175a556099728bd6d069f4d9e",
       "ecosystem.config.cjs": "e68788a139ad03de4c5cfa54e1caf89fb4f36f963f281f6a4d5ff9e0c52f61f5",
@@ -254,7 +1531,7 @@
       "scripts/v6-cloudflare-routing-tests.cjs": "820d367f09adc5e7aa54c802c7a366fc45730beab41a725a13514592e4566e2e",
       "scripts/v6-cloudflare-runtime-tests.cjs": "558cc48e061f2e7021ec97e4513f9eb1c0769d2b15d2f708e1cbdfb181e0a0b4",
       "scripts/v6-cloudflare-site-tests.cjs": "401ff43d2a324ebb6377c99e9aea1e45dd6fe3aac6d3a0ef10c19d635c767e64",
-      "scripts/v6-content-lifecycle-tests.mjs": "69c7a92328c874cf56b7bf4478ad10e098c4ba90e1520f6eb7f576e1588c4867",
+      "scripts/v6-content-lifecycle-tests.mjs": "1a0c64391ef04aa62eacc4fd363175be068429b482ee0ed32270353137d86a6d",
       "scripts/v6-content-seo-tests.mjs": "dea791f8e2af2f62754536993f6c88ecdf7f4675383d89e560d0e842bf1490fa",
       "scripts/v6-d1-tests.cjs": "b3cdf6c0316d81ba19b22f5c58d8ff145dc95f745fa7e292a0262edf9371012a",
       "scripts/v6-deal-intelligence-tests.cjs": "1783976c0ddb09f253b98d9fcdea0d0e53b0d2d4a600e6ddd80ba95eb922a4d0",
@@ -265,7 +1542,7 @@
       "scripts/v6-opportunity-experiments-tests.mjs": "321cf6a9d7c33855df61b814f6cd312e729321e366aaffcde5e38057be023d21",
       "scripts/v6-phase1-foundation-tests.cjs": "c012c6ef8a962317e85c390f84702fd47f3d5bbf7961a3ee252ffd3c1630c2ba",
       "scripts/v6-phase7-validation.mjs": "42ac66b5a9a0e2763753fe0414b97542723bdf0713215a21134d3dba85590968",
-      "scripts/v6-phase8-5-validation.mjs": "71f08afbb51cba4fd2725c25dddfe60c6443c047ea8dc4156a9116c31b6141b8",
+      "scripts/v6-phase8-5-validation.mjs": "a39a7dd58371523c0d302dc95b988079aa54d823f0da529eaf70ea302d487d4c",
       "scripts/v6-resume-validation.cjs": "068f460f5c6571cd803217182f8ba808d2481ebd0575fd33c2358715d045a7a7",
       "scripts/v6-route-audit.cjs": "791f529ab762cb4c2e5c27c80fc170a3cfab2f00c3c0aea17dfea87f2bfee0df",
       "scripts/v6-run-state.cjs": "da36cf05e8ab90b038fcf67c3f3ddf7892b2469229752d3fd4c33cf6d4ab9033",
@@ -576,8 +1853,8 @@
       "src/lib/content/cannibalization.ts": "a2189a7b815b5cf0f3cc05ef08fe6a0b7407cb59a3feac5d592511f85838a183",
       "src/lib/content/config.ts": "b0f45b7d88f8012a6a9e50463fdfffecb54646c5a4c596e5d72e679a9628658a",
       "src/lib/content/index.ts": "621fe9f97432e127695ae61dd6e53b4ae7da7d012efdaaa31d2d1408ed56adf9",
-      "src/lib/content/lifecycle/config.ts": "b26e9da13471d8b23f19b16d3b602da7f6dcb80414b7c1eada0eafdc3c6cd96b",
-      "src/lib/content/lifecycle/evaluate.ts": "53a8c54b9320c85fca5b225a676a50f2bcfea3212814e87c72aff4441abc9aeb",
+      "src/lib/content/lifecycle/config.ts": "d2292de07483edecc9a869c815be1b81303c99f3c3babff8b5d9cf4ce061167f",
+      "src/lib/content/lifecycle/evaluate.ts": "fea4191ab94ce75ead443b46cab4ce8ecb14931c0b50873e1c0b3765f55b9aaa",
       "src/lib/content/lifecycle/evidence.ts": "1dff31d70031d35f34a4c6d6dc34a882dc1638eb738490dccf7e4661e2e46924",
       "src/lib/content/lifecycle/types.ts": "66f0820fd426716a3c384207fff79aa1557ed879a1fb26c193e011ae9675d658",
       "src/lib/content/lifecycle/value.ts": "0407c463439a9cfb9a8c1a52abbe790a98d87efd936759edf5def7f47cce0bd4",
@@ -681,7 +1958,7 @@
       "src/lib/storage/content.ts": "140725265a76c7f0fb08c0b284b8f1176a330aaeaa93faac47ad6bacbd44a21d",
       "src/lib/storage/contentPackages.ts": "2f4d55161f8a0a527c1397bd550ed4bf57129d57e1e3e3709b01c9989395d789",
       "src/lib/storage/d1/d1AffiliateStore.ts": "540647fe3e0a5fd35ad74683cbdeb141e20314bb7b177b913aac828d5bc39bdf",
-      "src/lib/storage/d1/d1ContentLifecycleStore.ts": "14f72f1ad0bed2b398a77683111e041b0fd70f20f5c4131f3a9f2480305e926a",
+      "src/lib/storage/d1/d1ContentLifecycleStore.ts": "22a5ad5f73ddaf7132d0495c3b0ad659114e99829a445c42ff4a53501e965882",
       "src/lib/storage/d1/d1ContentValueStore.ts": "ea4c4e1b4856eca1983e19ee27c7b5ee8f7069ddf8096b062985c6929f9a5fc0",
       "src/lib/storage/d1/d1DealStore.ts": "39acf0be45b5875cb39ca372e4801d407d6b66a37d180f4ba5ec97d779824c8f",
       "src/lib/storage/d1/d1DecisionAiStore.ts": "f7ad2754f45cce062cd0b4fd38c0ffc6418df2f00955b70578c5dcde13bbfd76",

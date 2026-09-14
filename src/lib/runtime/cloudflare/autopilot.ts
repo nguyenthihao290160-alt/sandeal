@@ -7,6 +7,7 @@ import { MoneyError } from '../../affiliate/money/types';
 import { D1DealStore } from '../../storage/d1/d1DealStore';
 import { cloudflareDecisionStore, type DecisionRuntimeOptions } from './decision';
 import { cloudflareOpportunityStore } from './opportunity';
+import { cloudflareContentLifecycleStore } from './contentLifecycle';
 
 export async function cloudflareScheduled(controller: { scheduledTime: number }, env: CloudflareEnvironment) {
   try { await createCloudflareSchedulerAdapter(env).tick(controller.scheduledTime); }
@@ -33,7 +34,10 @@ export async function consumeDelivery(delivery: QueueDelivery, env: CloudflareEn
   if (!job) { delivery.retry({ delaySeconds: Math.max(1, Math.min(60, Math.ceil((Math.max(stored.availableAt, stored.leaseExpiresAt) - now) / 1000))) }); return 'DEFERRED'; }
   try {
     validateInput({ type: job.type, payload: job.payload, idempotencyKey: job.idempotencyKey });
-    if (job.type === 'DEAL_EVALUATE') {
+    if (job.type === 'CONTENT_LIFECYCLE_EVALUATE') {
+      await options.beforeCommit?.();
+      await cloudflareContentLifecycleStore(env, options.moneyTestOnly === true).execute(job, validTime(clock()));
+    } else if (job.type === 'DEAL_EVALUATE') {
       if (env.SANDEAL_DEAL_INTELLIGENCE_ENABLED !== 'true') throw new EventJobError('DEAL_INTELLIGENCE_DISABLED', 'FINAL');
       if (!env.JOB_QUEUE || typeof env.JOB_QUEUE.send !== 'function') throw new EventJobError('QUEUE_BINDING_UNAVAILABLE', 'RETRYABLE');
       const store = new D1DealStore(context.db, options.moneyTestOnly === true);

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test:v6:lifecycle": "node scripts/v6-content-lifecycle-tests.mjs",
     "test:v6:opportunities": "node scripts/v6-opportunity-experiments-tests.mjs",
     "test:v6:decisions": "node scripts/v6-decision-os-tests.mjs",
     "test:v6:deals": "node scripts/v6-deal-intelligence-tests.cjs",

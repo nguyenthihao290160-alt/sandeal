@@ -25,8 +25,8 @@ async function main() {
       assert.equal(await db.prepare("SELECT name FROM sqlite_schema WHERE name='d1_migrations'").first(), null);
       assert.equal((await applyLocalMigrations(handle))[0].action, 'APPLIED');
       assert.equal((await applyLocalMigrations(handle))[0].action, 'ALREADY_APPLIED');
-      assert.deepEqual((await db.prepare('SELECT name FROM d1_migrations ORDER BY name').all()).results.map(row => row.name), ['0001_product_storage.sql', '0002_event_jobs.sql', '0003_affiliate_money.sql', '0004_money_snapshot_jobs.sql', '0005_money_platform.sql', '0006_deal_intelligence.sql', '0007_decision_os.sql', '0008_opportunity_experiments.sql']);
-      assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM d1_migrations').first()).count, 8);
+      assert.deepEqual((await db.prepare('SELECT name FROM d1_migrations ORDER BY name').all()).results.map(row => row.name), ['0001_product_storage.sql', '0002_event_jobs.sql', '0003_affiliate_money.sql', '0004_money_snapshot_jobs.sql', '0005_money_platform.sql', '0006_deal_intelligence.sql', '0007_decision_os.sql', '0008_opportunity_experiments.sql', '0009_content_lifecycle.sql']);
+      assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM d1_migrations').first()).count, 9);
     });
     const observations = [];
     const adapter = createD1StorageAdapter(db, value => observations.push(value));

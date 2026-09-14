@@ -55,6 +55,8 @@ export interface ProviderObservation {
 export interface Attribution { reference: string; transport: 'PROVIDER_SUB1' | 'UNAVAILABLE' }
 export interface AffiliateClick {
   id: string;
+  contentEntityId?: string;
+  opportunityId?: string;
   productId: string;
   offerId: string;
   provider: AffiliateProviderId;

@@ -1,28 +1,495 @@
 {
-  "capturedAt": "2026-09-14T00:18:23.136Z",
-  "MONEY_ROUTER": "PASS",
-  "NORMALIZED_OFFERS": "PASS",
-  "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
-  "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
-  "AFFILIATE_REDIRECT": "PASS",
-  "CLICK_ATTRIBUTION": "PASS",
-  "CONVERSION_ATTRIBUTION": "PASS",
-  "COMMISSION_LEDGER": "PASS",
-  "REVENUE_SNAPSHOT": "PASS",
-  "PROVIDER": "accesstrade",
-  "PLATFORM": "shopee",
-  "DUPLICATE_CONVERSION_EFFECT": 0,
-  "DUPLICATE_COMMISSION_EFFECT": 0,
-  "DUPLICATE_REVENUE_EFFECT": 0,
-  "DIRECT_SHOPEE_API_CALLS": 0,
-  "FILE_STORAGE_CALLS": 0,
-  "PM2_REQUIRED": "NO",
-  "VPS_REQUIRED": "NO",
-  "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-  "ORIGIN": "TEST_FIXTURE",
-  "REAL_MONEY_TRANSACTION_CREATED": "NO",
+  "capturedAt": "2026-09-14T10:02:16.934Z",
+  "branch": "master",
+  "head": "39357f28f890d01b9c9ad983f1ee4ccf18b25d11",
+  "initialWorkingTreeFingerprint": "b4f5f329fae76e5fd9636113b55215eca8b0359126f7480adcc32d95ebf043c2",
+  "inventory": [
+    "README.md",
+    "docs/v6/LONG_RUN_STATE.json",
+    "docs/v6/evidence/autopilot-local-smoke.json",
+    "docs/v6/evidence/build-cloudflare-site.json",
+    "docs/v6/evidence/build-cloudflare-worker.json",
+    "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
+    "docs/v6/evidence/phase5-local-money-proof.json",
+    "package.json",
+    "scripts/v6-d1-tests.cjs",
+    "src/lib/affiliate/money/types.ts",
+    "src/lib/platform/cloudflareAdapters.ts",
+    "src/lib/platform/cloudflareContracts.ts",
+    "src/lib/runtime/cloudflare/autopilot.ts",
+    "src/lib/runtime/cloudflare/context.ts",
+    "src/lib/storage/d1/d1AffiliateStore.ts",
+    "docs/v6/phase-08-content-seo-intelligence.md",
+    "scripts/v6-content-lifecycle-tests.mjs",
+    "scripts/v6-content-seo-tests.mjs",
+    "scripts/v6-phase8-5-validation.mjs",
+    "src/lib/content/cannibalization.ts",
+    "src/lib/content/config.ts",
+    "src/lib/content/index.ts",
+    "src/lib/content/lifecycle/config.ts",
+    "src/lib/content/lifecycle/evaluate.ts",
+    "src/lib/content/lifecycle/evidence.ts",
+    "src/lib/content/lifecycle/types.ts",
+    "src/lib/content/lifecycle/value.ts",
+    "src/lib/content/planner.ts",
+    "src/lib/content/types.ts",
+    "src/lib/runtime/cloudflare/contentLifecycle.ts",
+    "src/lib/storage/d1/d1ContentLifecycleStore.ts",
+    "src/lib/storage/d1/d1ContentValueStore.ts",
+    "src/lib/storage/d1/migrations/0009_content_lifecycle.sql"
+  ],
+  "state": {
+    "PHASE8_5_IMPLEMENTATION_PRESENT": "YES",
+    "PHASE8_5_TESTS_PRESENT": "YES",
+    "PHASE8_5_STORAGE_PRESENT": "YES",
+    "PHASE8_5_RUNTIME_INTEGRATION_PRESENT": "YES",
+    "PHASE8_5_CHECKPOINT_PRESENT": "NO",
+    "LAST_CONFIRMED_TEST_STATE": "108 focused and 601 affected regressions passed; source edits after focused/quality evidence",
+    "FIRST_UNVERIFIED_STEP": "Focused lifecycle validation of final config/evaluator/store/value-store/test changes",
+    "REMAINING_WORK": "Concurrency and stale-job proofs, affected regression revalidation, TypeScript, ESLint, secret scan, local Cloudflare builds, checkpoint"
+  },
+  "previousFocused": {
+    "passed": 108,
+    "failed": 0,
+    "skipped": 0,
+    "path": ".test-tmp/phase8-5/focused-results.json",
+    "completedAt": "2026-09-14T00:16:23.206Z"
+  },
+  "previousRegressions": {
+    "generatedAt": "2026-09-14T00:22:09.501Z",
+    "results": [
+      {
+        "name": "content-phase8",
+        "command": "node scripts/v6-content-seo-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 290,
+        "log": ".test-tmp\\phase8-5\\tests\\content-phase8.log",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "opportunities",
+        "command": "node scripts/v6-opportunity-experiments-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 224673,
+        "log": ".test-tmp\\phase8-5\\tests\\opportunities.log",
+        "passed": 127,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "decisions",
+        "command": "node scripts/v6-decision-os-tests.mjs",
+        "exit": 0,
+        "elapsedMs": 143880,
+        "log": ".test-tmp\\phase8-5\\tests\\decisions.log",
+        "passed": 132,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "deals",
+        "command": "node scripts/v6-deal-intelligence-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 139447,
+        "log": ".test-tmp\\phase8-5\\tests\\deals.log",
+        "passed": 79,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "money",
+        "command": "node scripts/v6-money-engine-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 348402,
+        "log": ".test-tmp\\phase8-5\\tests\\money.log",
+        "passed": 57,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "d1",
+        "command": "node scripts/v6-d1-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 22756,
+        "log": ".test-tmp\\phase8-5\\tests\\d1.log",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "queue",
+        "command": "node scripts/v6-cloudflare-queue-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 76232,
+        "log": ".test-tmp\\phase8-5\\tests\\queue.log",
+        "passed": 17,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "cron",
+        "command": "node scripts/v6-cloudflare-cron-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 47556,
+        "log": ".test-tmp\\phase8-5\\tests\\cron.log",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "autopilot",
+        "command": "node scripts/v6-cloudflare-autopilot-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 6965,
+        "log": ".test-tmp\\phase8-5\\tests\\autopilot.log",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "runtime",
+        "command": "node scripts/v6-cloudflare-runtime-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 5483,
+        "log": ".test-tmp\\phase8-5\\tests\\runtime.log",
+        "passed": 14,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "routing",
+        "command": "node scripts/v6-cloudflare-routing-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 6461,
+        "log": ".test-tmp\\phase8-5\\tests\\routing.log",
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "accesstrade",
+        "command": "node scripts/accesstrade-link-safety-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 1640,
+        "log": ".test-tmp\\phase8-5\\tests\\accesstrade.log",
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "tiktok",
+        "command": "node scripts/accesstrade-tiktok-integration-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 3751,
+        "log": ".test-tmp\\phase8-5\\tests\\tiktok.log",
+        "passed": 43,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "publication",
+        "command": "node scripts/prompt10-autopublish-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 34516,
+        "log": ".test-tmp\\phase8-5\\tests\\publication.log",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "zero-vps",
+        "command": "node scripts/v6-zero-vps-storage-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 8506,
+        "log": ".test-tmp\\phase8-5\\tests\\zero-vps.log",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "name": "revenue",
+        "command": "node scripts/prompt10-revenue-integrity-tests.cjs",
+        "exit": 0,
+        "elapsedMs": 359,
+        "log": ".test-tmp\\phase8-5\\tests\\revenue.log",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0
+      }
+    ]
+  },
+  "previousQuality": {
+    "generatedAt": "2026-09-14T00:16:05.855Z",
+    "results": [
+      {
+        "name": "typescript",
+        "command": "node node_modules/typescript/bin/tsc --noEmit --incremental false",
+        "exit": 0,
+        "elapsedMs": 12743,
+        "log": ".test-tmp\\phase8-5\\quality\\typescript.log"
+      },
+      {
+        "name": "eslint",
+        "command": "node node_modules/eslint/bin/eslint.js .",
+        "exit": 0,
+        "elapsedMs": 50784,
+        "log": ".test-tmp\\phase8-5\\quality\\eslint.log"
+      },
+      {
+        "name": "secret-scan",
+        "command": "node scripts/release-validation.cjs secret-scan",
+        "exit": 0,
+        "elapsedMs": 260,
+        "log": ".test-tmp\\phase8-5\\quality\\secret-scan.log"
+      },
+      {
+        "name": "cloudflare-build",
+        "command": "node scripts/v6-cloudflare-build.cjs all",
+        "exit": 0,
+        "elapsedMs": 16101,
+        "log": ".test-tmp\\phase8-5\\quality\\cloudflare-build.log"
+      }
+    ]
+  },
+  "evidenceAudit": [
+    {
+      "file": "docs/v6/evidence/autopilot-local-smoke.json",
+      "capturedAt": "2026-09-14T00:21:08.511Z",
+      "hashes": 716,
+      "changedSince": [
+        "scripts/v6-content-lifecycle-tests.mjs",
+        "src/lib/content/lifecycle/config.ts",
+        "src/lib/content/lifecycle/evaluate.ts",
+        "src/lib/storage/d1/d1ContentLifecycleStore.ts"
+      ]
+    },
+    {
+      "file": "docs/v6/evidence/build-cloudflare-site.json",
+      "capturedAt": "2026-09-14T00:16:05.644Z",
+      "hashes": 716,
+      "changedSince": [
+        "README.md",
+        "scripts/v6-content-lifecycle-tests.mjs",
+        "src/lib/content/lifecycle/config.ts",
+        "src/lib/content/lifecycle/evaluate.ts",
+        "src/lib/storage/d1/d1ContentLifecycleStore.ts",
+        "src/lib/storage/d1/d1ContentValueStore.ts"
+      ]
+    },
+    {
+      "file": "docs/v6/evidence/build-cloudflare-worker.json",
+      "capturedAt": "2026-09-14T00:15:50.174Z",
+      "hashes": 716,
+      "changedSince": [
+        "README.md",
+        "scripts/v6-content-lifecycle-tests.mjs",
+        "src/lib/content/lifecycle/config.ts",
+        "src/lib/content/lifecycle/evaluate.ts",
+        "src/lib/storage/d1/d1ContentLifecycleStore.ts",
+        "src/lib/storage/d1/d1ContentValueStore.ts"
+      ]
+    },
+    {
+      "file": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
+      "capturedAt": "2026-09-14T00:18:23.136Z",
+      "hashes": 716,
+      "changedSince": [
+        "README.md",
+        "scripts/v6-content-lifecycle-tests.mjs",
+        "src/lib/content/lifecycle/config.ts",
+        "src/lib/content/lifecycle/evaluate.ts",
+        "src/lib/storage/d1/d1ContentLifecycleStore.ts"
+      ]
+    },
+    {
+      "file": "docs/v6/evidence/phase5-local-money-proof.json",
+      "capturedAt": "2026-09-14T00:16:42.230Z",
+      "hashes": 716,
+      "changedSince": [
+        "README.md",
+        "scripts/v6-content-lifecycle-tests.mjs",
+        "src/lib/content/lifecycle/config.ts",
+        "src/lib/content/lifecycle/evaluate.ts",
+        "src/lib/storage/d1/d1ContentLifecycleStore.ts",
+        "src/lib/storage/d1/d1ContentValueStore.ts"
+      ]
+    }
+  ],
+  "ledgerFixture": "Already corrected before resume: separate APPROVED to REJECTED commission; original PAID commission remains final",
+  "initialState": {
+    "currentPhase": "PHASE_8",
+    "currentStep": "Cloudflare local build: all",
+    "result": "RUNNING",
+    "nextStep": "STOP. Phase 8 requires separate explicit authorization. No autonomous SEO, publishing, production experiments, real-user variant routing, deployment, login, DNS, commit or push."
+  },
+  "firstResumedRun": {
+    "passed": 112,
+    "failed": 0,
+    "skipped": 0
+  },
+  "restrictions": {
+    "commit": false,
+    "push": false,
+    "deploy": false,
+    "cloudflareLogin": false,
+    "dnsChange": false,
+    "productionMutation": false,
+    "phase9Started": false
+  },
+  "initialChangedSourceHashes": {
+    "README.md": "3abe1ee7d9f5f8d1f36247f99799321ade2b73491bffb6eeb6f12196757bbca7",
+    "package.json": "9e4d82c3a2abefa00ff68b33494a3aaf7dbfdfcb9da301fae72bf9c6e313dc99",
+    "scripts/v6-d1-tests.cjs": "b3cdf6c0316d81ba19b22f5c58d8ff145dc95f745fa7e292a0262edf9371012a",
+    "src/lib/affiliate/money/types.ts": "a5c2eb74eff0f135199e21f117c0daa5d4919d3dea35dc08c1eca1289fe6bc94",
+    "src/lib/platform/cloudflareAdapters.ts": "3e5d6ee8791960fb43a06189160dca201037b20bde2c549459ae4f433298aa5d",
+    "src/lib/platform/cloudflareContracts.ts": "9dd38b09c3242221d1691301a98c5fc0e01efbd8ec14b89d0c863d834b50ecbb",
+    "src/lib/runtime/cloudflare/autopilot.ts": "5b0be1ea243e4e4832712602c31aed4f314162dfb6727a09297450119ebc626a",
+    "src/lib/runtime/cloudflare/context.ts": "7816988f4bac3ac222a2ccf75783f35d2a519dbfa416ba7747a7a9158393b6a7",
+    "src/lib/storage/d1/d1AffiliateStore.ts": "540647fe3e0a5fd35ad74683cbdeb141e20314bb7b177b913aac828d5bc39bdf",
+    "docs/v6/phase-08-content-seo-intelligence.md": "491de027e313e4e76f62eccbedb9809e5ce7ddf20765c79a823caeaa4b9a992d",
+    "scripts/v6-content-lifecycle-tests.mjs": "ae79eb6d7099c7ba7811d89fc38a5d94b7dd734673696091f6b79b6e57a47d68",
+    "scripts/v6-content-seo-tests.mjs": "dea791f8e2af2f62754536993f6c88ecdf7f4675383d89e560d0e842bf1490fa",
+    "scripts/v6-phase8-5-validation.mjs": "71f08afbb51cba4fd2725c25dddfe60c6443c047ea8dc4156a9116c31b6141b8",
+    "src/lib/content/cannibalization.ts": "a2189a7b815b5cf0f3cc05ef08fe6a0b7407cb59a3feac5d592511f85838a183",
+    "src/lib/content/config.ts": "b0f45b7d88f8012a6a9e50463fdfffecb54646c5a4c596e5d72e679a9628658a",
+    "src/lib/content/index.ts": "621fe9f97432e127695ae61dd6e53b4ae7da7d012efdaaa31d2d1408ed56adf9",
+    "src/lib/content/lifecycle/config.ts": "d2292de07483edecc9a869c815be1b81303c99f3c3babff8b5d9cf4ce061167f",
+    "src/lib/content/lifecycle/evaluate.ts": "fea4191ab94ce75ead443b46cab4ce8ecb14931c0b50873e1c0b3765f55b9aaa",
+    "src/lib/content/lifecycle/evidence.ts": "1dff31d70031d35f34a4c6d6dc34a882dc1638eb738490dccf7e4661e2e46924",
+    "src/lib/content/lifecycle/types.ts": "66f0820fd426716a3c384207fff79aa1557ed879a1fb26c193e011ae9675d658",
+    "src/lib/content/lifecycle/value.ts": "0407c463439a9cfb9a8c1a52abbe790a98d87efd936759edf5def7f47cce0bd4",
+    "src/lib/content/planner.ts": "18e9be78a3b37cc885d871a4f0a91a16938db48bae1fd15767d11df0bcbbe9ea",
+    "src/lib/content/types.ts": "898e6f6c1dbe330d8c33840a2db58c05f1afc3ac86c4e1a3c148af30fad98c60",
+    "src/lib/runtime/cloudflare/contentLifecycle.ts": "7a4f7fed85288d713dbe079cf157fcc831550cdae1125389f9997fd4f938bf1c",
+    "src/lib/storage/d1/d1ContentLifecycleStore.ts": "22a5ad5f73ddaf7132d0495c3b0ad659114e99829a445c42ff4a53501e965882",
+    "src/lib/storage/d1/d1ContentValueStore.ts": "ea4c4e1b4856eca1983e19ee27c7b5ee8f7069ddf8096b062985c6929f9a5fc0",
+    "src/lib/storage/d1/migrations/0009_content_lifecycle.sql": "792a823478cdee7e69fda814297fa87c05bd620fdb856bfecee774529b63d9b2"
+  },
+  "previousPhaseHistory": {
+    "completedCheckpoints": [
+      "PHASE_3: Focused reconstruction checks: 159 passed, zero failures/skips",
+      "PHASE_3_5: Local shadow parity, immutable source and failure proof: 14 PASS",
+      "PHASE_4: Runtime, routing and required regressions complete: 207 PASS",
+      "PHASE_4_5: Event-driven Queue/Cron foundation complete: 32 phase cases plus 76 critical/affected regressions, 108 PASS, zero failures/skips",
+      "PHASE_5: AccessTrade-first Affiliate Money Engine complete locally: 57 phase cases plus 223 affected regressions, 280 PASS, zero failures/skips",
+      "PHASE_6: Deal Intelligence Local Engine proof",
+      "PHASE_7: Decision OS local shadow foundation: 132 focused cases and 432 affected regressions; zero failures/skips",
+      "PHASE_7_5: 127 focused cases and 564 affected regressions; zero failures/skips; local shadow foundation only",
+      "PHASE_8: Local shadow foundation only"
+    ],
+    "phaseHashes": {
+      "phase7_5Reconstruction": "fc41391491615fb6a3ed1d421acdebb39b43f5a3f1644d788062e60daec37146",
+      "phase6Gate": "271e1fa3508aac5857fd3407a629b9383614a0057d01353d1db65c1633c62998",
+      "phase7Gate": "a90468764f0cf3473ad97a7e90bfaf54c9f9a03155d2032cce687281b5b17dc0",
+      "phase5Gate": "5da41d34b8fc599b212adf0bf2c8d431b7c62ff37d8a491db126c1fe1cb9c7c2",
+      "phase5Resume": "0920788125d7da67af48fc1a634b23135a3f6437f936f5ed19ffb9b10d7f2094",
+      "phase4Gate": "e583670058525bce3b61955d425963a20ece44703c9016630a9018c3737d9ca0",
+      "phase4_5Gate": "8a76db6fed3084811d258913969d9325f6d003ce0fb1c1febd482dc514b8dcf4",
+      "phase5Plan": "1416adc78351e6beaed89b140a48cdabb1876f607ec61ed227405158b6d2f780",
+      "phase7_5": "4ebacbf46d0195f3a2473f045aa26a033a51f05d531943fd6954267741b9b76c",
+      "phase8": "df1d015ceccdbf5ed337e70598e022ab430ebcbe3b7d0e7525bc5b5a508a7ef3"
+    },
+    "originalLongRunStateSha256": "0639a4bed3c2291dbc5737aa427f98bf1af7002e1aa415e040aa820fad078d9a",
+    "preserved": true
+  },
+  "priorGeneratedEvidence": [
+    {
+      "name": "build-cloudflare-worker",
+      "path": "docs/v6/evidence/build-cloudflare-worker.json",
+      "exit": 0,
+      "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
+      "bytes": 377349,
+      "fileStorageModules": 0,
+      "filesystemSettingsModules": 0
+    },
+    {
+      "name": "build-cloudflare-site",
+      "path": "docs/v6/evidence/build-cloudflare-site.json",
+      "exit": 0,
+      "log": ".test-tmp/v6-cloudflare-worker/site-build.log"
+    },
+    {
+      "name": "phase5-local-money-proof",
+      "path": "docs/v6/evidence/phase5-local-money-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "SHOPEE_LIVE_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
+      "name": "phase5-accesstrade-shopee-proof",
+      "path": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
+      "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "PROVIDER": "accesstrade",
+      "PLATFORM": "shopee",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "DIRECT_SHOPEE_API_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
+      "name": "autopilot-local-smoke",
+      "path": "docs/v6/evidence/autopilot-local-smoke.json",
+      "CRON": "PASS",
+      "QUEUE": "PASS",
+      "D1": "PASS",
+      "JOB_STATE": "SUCCEEDED",
+      "DUPLICATE_DELIVERY": "SAFE",
+      "DUPLICATE_DOMAIN_EFFECT": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "FILESYSTEM_SETTINGS_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "PRODUCTION_QUEUE_CREATED": "NO",
+      "PRODUCTION_CRON_CREATED": "NO",
+      "DEPLOYED": "NO"
+    }
+  ],
+  "previousFocusedSummary": {
+    "passed": 108,
+    "failed": 0,
+    "skipped": 0,
+    "proofNames": [
+      "pureUnchanged",
+      "realUpstreamUnchanged",
+      "indexPlans",
+      "attribution",
+      "nativeWorker"
+    ]
+  },
+  "sourceEditsDuringResume": 0,
   "manifest": {
-    "sha256": "d2d88560a608737b9002a660b95f53dd7dd32e1ccc12d5d19ee4cf73c1caedb4",
+    "sha256": "9a55d5085f77760115af4edf6fc1e7b33539aa8449414767da1d5906f32d41bf",
     "files": {
       ".env.example": "653fd3b6c3bbe99ae84104f519d02750da33fe7cacf5807b8afdd347f5dcc16a",
       ".github/workflows/release-quality.yml": "55b60c1e14a7ca6e7e03e75a7922946be6a6e8d2fa4861e001e0c9881b6ba1c4",
@@ -35,7 +502,7 @@
       ".idea/vcs.xml": "62be7e0a7f84ab3c35b4d4bafb890a4951d061eadafde1a10aa3f5d0406db5df",
       "AGENTS.md": "e3447d84251880fb34cfae09131cb4c57471529bbfe60976a3245793cf621627",
       "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49",
-      "README.md": "3683398757813d682f74e4826a232e2cebe4aade5b769894bf807f4752c972c0",
+      "README.md": "3abe1ee7d9f5f8d1f36247f99799321ade2b73491bffb6eeb6f12196757bbca7",
       "VPS_SCHEDULER.md": "10d0c522e61b78150acec64640a21908948e60167486020a9b660cee1f0ed2a5",
       "cloudflare/site/app/deals/page.tsx": "ba21d2f0ec5341cf5be120e9a0c1fe2ead23e0df12a46f5460d8dc9f49838426",
       "cloudflare/site/app/layout.tsx": "2c95c3a42eaad47a6d8f6eb49c077e9337ef43a5ea9bfab64fe4d37a87dea91d",
@@ -97,6 +564,7 @@
       "docs/v6/phase-06-deal-intelligence.md": "c461b90511444a7c25e298726d09c6287051406258eea0c9d4742eda4163a154",
       "docs/v6/phase-07-5-opportunity-experiments.md": "b9c412f028ca06299afa9d7edcdc5ef17ce74802be0d74e473d0c2cd8af7dc73",
       "docs/v6/phase-07-decision-os.md": "726390d3320b45485784bfcac5c0ca0471bda18a211d12ea2181d55111efd3c3",
+      "docs/v6/phase-08-5-content-lifecycle.md": "dec24941ab94ccf43a271c9bb57b976c540e5f810924484da345057f0abb8fd2",
       "docs/v6/phase-08-content-seo-intelligence.md": "491de027e313e4e76f62eccbedb9809e5ce7ddf20765c79a823caeaa4b9a992d",
       "docs/v6/resume-long-run-3.md": "1ee09c3f08441be79edbeccf4c10e12750a9b02175a556099728bd6d069f4d9e",
       "ecosystem.config.cjs": "e68788a139ad03de4c5cfa54e1caf89fb4f36f963f281f6a4d5ff9e0c52f61f5",
@@ -254,7 +722,7 @@
       "scripts/v6-cloudflare-routing-tests.cjs": "820d367f09adc5e7aa54c802c7a366fc45730beab41a725a13514592e4566e2e",
       "scripts/v6-cloudflare-runtime-tests.cjs": "558cc48e061f2e7021ec97e4513f9eb1c0769d2b15d2f708e1cbdfb181e0a0b4",
       "scripts/v6-cloudflare-site-tests.cjs": "401ff43d2a324ebb6377c99e9aea1e45dd6fe3aac6d3a0ef10c19d635c767e64",
-      "scripts/v6-content-lifecycle-tests.mjs": "69c7a92328c874cf56b7bf4478ad10e098c4ba90e1520f6eb7f576e1588c4867",
+      "scripts/v6-content-lifecycle-tests.mjs": "1a0c64391ef04aa62eacc4fd363175be068429b482ee0ed32270353137d86a6d",
       "scripts/v6-content-seo-tests.mjs": "dea791f8e2af2f62754536993f6c88ecdf7f4675383d89e560d0e842bf1490fa",
       "scripts/v6-d1-tests.cjs": "b3cdf6c0316d81ba19b22f5c58d8ff145dc95f745fa7e292a0262edf9371012a",
       "scripts/v6-deal-intelligence-tests.cjs": "1783976c0ddb09f253b98d9fcdea0d0e53b0d2d4a600e6ddd80ba95eb922a4d0",
@@ -265,7 +733,7 @@
       "scripts/v6-opportunity-experiments-tests.mjs": "321cf6a9d7c33855df61b814f6cd312e729321e366aaffcde5e38057be023d21",
       "scripts/v6-phase1-foundation-tests.cjs": "c012c6ef8a962317e85c390f84702fd47f3d5bbf7961a3ee252ffd3c1630c2ba",
       "scripts/v6-phase7-validation.mjs": "42ac66b5a9a0e2763753fe0414b97542723bdf0713215a21134d3dba85590968",
-      "scripts/v6-phase8-5-validation.mjs": "71f08afbb51cba4fd2725c25dddfe60c6443c047ea8dc4156a9116c31b6141b8",
+      "scripts/v6-phase8-5-validation.mjs": "a39a7dd58371523c0d302dc95b988079aa54d823f0da529eaf70ea302d487d4c",
       "scripts/v6-resume-validation.cjs": "068f460f5c6571cd803217182f8ba808d2481ebd0575fd33c2358715d045a7a7",
       "scripts/v6-route-audit.cjs": "791f529ab762cb4c2e5c27c80fc170a3cfab2f00c3c0aea17dfea87f2bfee0df",
       "scripts/v6-run-state.cjs": "da36cf05e8ab90b038fcf67c3f3ddf7892b2469229752d3fd4c33cf6d4ab9033",
@@ -576,8 +1044,8 @@
       "src/lib/content/cannibalization.ts": "a2189a7b815b5cf0f3cc05ef08fe6a0b7407cb59a3feac5d592511f85838a183",
       "src/lib/content/config.ts": "b0f45b7d88f8012a6a9e50463fdfffecb54646c5a4c596e5d72e679a9628658a",
       "src/lib/content/index.ts": "621fe9f97432e127695ae61dd6e53b4ae7da7d012efdaaa31d2d1408ed56adf9",
-      "src/lib/content/lifecycle/config.ts": "b26e9da13471d8b23f19b16d3b602da7f6dcb80414b7c1eada0eafdc3c6cd96b",
-      "src/lib/content/lifecycle/evaluate.ts": "53a8c54b9320c85fca5b225a676a50f2bcfea3212814e87c72aff4441abc9aeb",
+      "src/lib/content/lifecycle/config.ts": "d2292de07483edecc9a869c815be1b81303c99f3c3babff8b5d9cf4ce061167f",
+      "src/lib/content/lifecycle/evaluate.ts": "fea4191ab94ce75ead443b46cab4ce8ecb14931c0b50873e1c0b3765f55b9aaa",
       "src/lib/content/lifecycle/evidence.ts": "1dff31d70031d35f34a4c6d6dc34a882dc1638eb738490dccf7e4661e2e46924",
       "src/lib/content/lifecycle/types.ts": "66f0820fd426716a3c384207fff79aa1557ed879a1fb26c193e011ae9675d658",
       "src/lib/content/lifecycle/value.ts": "0407c463439a9cfb9a8c1a52abbe790a98d87efd936759edf5def7f47cce0bd4",
@@ -681,7 +1149,7 @@
       "src/lib/storage/content.ts": "140725265a76c7f0fb08c0b284b8f1176a330aaeaa93faac47ad6bacbd44a21d",
       "src/lib/storage/contentPackages.ts": "2f4d55161f8a0a527c1397bd550ed4bf57129d57e1e3e3709b01c9989395d789",
       "src/lib/storage/d1/d1AffiliateStore.ts": "540647fe3e0a5fd35ad74683cbdeb141e20314bb7b177b913aac828d5bc39bdf",
-      "src/lib/storage/d1/d1ContentLifecycleStore.ts": "14f72f1ad0bed2b398a77683111e041b0fd70f20f5c4131f3a9f2480305e926a",
+      "src/lib/storage/d1/d1ContentLifecycleStore.ts": "22a5ad5f73ddaf7132d0495c3b0ad659114e99829a445c42ff4a53501e965882",
       "src/lib/storage/d1/d1ContentValueStore.ts": "ea4c4e1b4856eca1983e19ee27c7b5ee8f7069ddf8096b062985c6929f9a5fc0",
       "src/lib/storage/d1/d1DealStore.ts": "39acf0be45b5875cb39ca372e4801d407d6b66a37d180f4ba5ec97d779824c8f",
       "src/lib/storage/d1/d1DecisionAiStore.ts": "f7ad2754f45cce062cd0b4fd38c0ffc6418df2f00955b70578c5dcde13bbfd76",

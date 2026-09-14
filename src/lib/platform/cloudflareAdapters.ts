@@ -4,12 +4,14 @@ import { D1DealStore } from '../storage/d1/d1DealStore';
 import { cloudflareContext, type CloudflareEnvironment } from '../runtime/cloudflare/context';
 import { cloudflareDecisionStore, validateDecisionRuntimeFlags } from '../runtime/cloudflare/decision';
 import { cloudflareOpportunityStore, validateOpportunityRuntime } from '../runtime/cloudflare/opportunity';
+import { cloudflareContentLifecycleStore, validateContentLifecycleRuntime } from '../runtime/cloudflare/contentLifecycle';
 import { EVENT_LIMITS, EventJobError, makeMessage, validTime, validateInput,
   type EventJob, type EventJobInput, type EventTickResult, type QueueBinding } from './cloudflareContracts';
 
 export function eventContext(env: CloudflareEnvironment) {
   validateDecisionRuntimeFlags(env);
   validateOpportunityRuntime(env);
+  validateContentLifecycleRuntime(env);
   if (env.SANDEAL_AUTOPILOT_ENABLED !== 'true') throw new EventJobError('AUTOPILOT_DISABLED', 'FINAL');
   const context = cloudflareContext(env);
   return { ...context, jobs: new D1JobStore(context.db) };
@@ -51,6 +53,7 @@ export function createCloudflareSchedulerAdapter(env: CloudflareEnvironment): Sc
     const deals = env.SANDEAL_DEAL_INTELLIGENCE_ENABLED === 'true' ? await new D1DealStore(db).materializeDue(now, opportunities?.configVersion || decisions?.configVersion) : 0;
     if (decisions) await decisions.cleanup(now);
     created += deals;
+    if (env.SANDEAL_CONTENT_LIFECYCLE_ENABLED === 'true') created += (await cloudflareContentLifecycleStore(env).materializeDue(now)).created;
     const enqueued = await queue.dispatch(now);
     return { due: tasks.length + deals, created, enqueued };
   } };

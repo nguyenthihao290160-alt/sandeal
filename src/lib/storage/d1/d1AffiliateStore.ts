@@ -35,6 +35,8 @@ export class D1AffiliateStore {
     return rows.map(row => JSON.parse(String(row.payload)) as ProviderObservation).filter(row => this.testOnly || row.origin !== 'TEST_FIXTURE');
   }
   async recordClick(click: AffiliateClick, expectedProductToken: string) {
+    if (click.contentEntityId !== undefined) moneyId(click.contentEntityId);
+    if (click.opportunityId !== undefined) moneyId(click.opportunityId);
     supportedMoneyProvider(click.provider); moneyOrigin(click.origin, this.testOnly);
     moneyPlatform(click.platform);
     if ((click.platform === 'shopee' && click.provider !== 'accesstrade') || (click.provider === 'tiktok' && click.platform !== 'tiktok_shop')) throw new MoneyError('CLICK_PROVENANCE_MISMATCH', 'QUARANTINE');

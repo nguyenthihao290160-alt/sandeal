@@ -107,3 +107,32 @@ See `docs/v6/phase-07-5-opportunity-experiments.md` for score weights, evidence
 limitations, bounded queries, local proof and the separate Phase 8 authorization
 boundary. Legacy `Product.opportunityScore` remains a legacy display value, not
 the V6 Opportunity Engine's authoritative score.
+
+## V6 Content Lifecycle — Local Shadow Only
+
+Phase 8.5 adds evidence-driven lifecycle decisions and conservative internal
+affiliate-value attribution. Page age alone never authorizes a refresh. Plans,
+merge/supersede recommendations and archive reviews are inert D1 records; no
+public page, canonical URL, metadata, sitemap, robots rule or experiment traffic
+is changed.
+
+```bash
+npm run test:v6:lifecycle
+node scripts/v6-phase8-5-validation.mjs tests
+node scripts/v6-phase8-5-validation.mjs quality
+```
+
+The optional local Worker flag is `SANDEAL_CONTENT_LIFECYCLE_ENABLED=true`, with
+the existing local-only AutoPilot, Deal Intelligence, Decision OS and Opportunity
+prerequisites. It is not enabled in shipped configuration. Missing D1 or Queue
+fails closed. Existing Queue claims/outbox/retries carry the single added
+`CONTENT_LIFECYCLE_EVALUATE` job type; no additional service or polling loop exists.
+
+Content identity must be explicitly registered in the shadow registry. New
+internal click evidence may include a validated `contentEntityId`; the public
+redirect endpoint is unchanged and accepts no content-source override. Historical
+unlinked clicks are never reverse-attributed. Content and experiment projections
+reference the existing deduplicated money ledger, without creating money events.
+
+See `docs/v6/phase-08-5-content-lifecycle.md` for evidence limits, bounded storage,
+retention caps, tests, and the unresolved limitations of the Phase 8 scaffold.
