@@ -1,0 +1,262 @@
+{
+  "phase": "PHASE_9",
+  "result": "PASS_LOCAL_SHADOW_DRY_RUN_ONLY",
+  "validationKind": "RESUME_INTERRUPTED_REMEDIATION_NOT_REAUDIT",
+  "branch": "master",
+  "head": "29b113ad386a51a085123361417d85ca4328e96e",
+  "qualityCompletedAt": "2026-09-15T13:33:34.637Z",
+  "reconstruction": {
+    "readOnlyBeforeCompletion": true,
+    "remediationPresent": true,
+    "sourceChangedSince831Tests": false,
+    "lastConfirmedTests": "831_PASS_0_FAILED_0_SKIPPED",
+    "firstUnverifiedStep": "FINAL_CHECKPOINT_CONSISTENCY",
+    "priorFinalGatesAlsoCompletedAt": "2026-09-15T00:21:08.466Z",
+    "resumedWork": "REFRESH_REQUESTED_FINAL_GATES_AND_RECONCILE_CHECKPOINT",
+    "runtimeSourceEditsDuringResume": 0,
+    "sourceFilesVerified": 681,
+    "sourceSha256": "f2b5e9887fb89eb8ed3dfccbfb27eb368ae2ae9a1e7de99c7695397c174dd665",
+    "fingerprintPolicy": "SHA256 of sorted non-docs path/content hashes from scripts/v6-run-state.cjs fingerprint(); tracked and nonignored untracked files; excludes generated state/evidence and secret environment files",
+    "initialAndFinalSourceHashesEqual": true,
+    "interruptedRunSourceHashesEqualCurrent": true,
+    "rawSuiteLogsCheckedAgainstRecordedCounts": true
+  },
+  "tests": {
+    "focusedPassed": 104,
+    "regressionsPassed": 727,
+    "totalPassed": 831,
+    "failed": 0,
+    "skipped": 0,
+    "reused": 831,
+    "rerun": 0,
+    "suites": [
+      { "name": "phase9", "passed": 104, "exit": 0 },
+      { "name": "d1", "passed": 25, "exit": 0 },
+      { "name": "queue", "passed": 17, "exit": 0 },
+      { "name": "cron", "passed": 10, "exit": 0 },
+      { "name": "phase8-5-lifecycle", "passed": 122, "exit": 0 },
+      { "name": "phase8-content", "passed": 9, "exit": 0 },
+      { "name": "phase7-5-opportunity", "passed": 127, "exit": 0 },
+      { "name": "phase7-decision", "passed": 132, "exit": 0 },
+      { "name": "phase6-deal", "passed": 79, "exit": 0 },
+      { "name": "phase5-money", "passed": 57, "exit": 0 },
+      { "name": "autopilot", "passed": 4, "exit": 0 },
+      { "name": "runtime", "passed": 14, "exit": 0 },
+      { "name": "routing", "passed": 11, "exit": 0 },
+      { "name": "site", "passed": 4, "exit": 0 },
+      { "name": "accesstrade", "passed": 34, "exit": 0 },
+      { "name": "tiktok", "passed": 43, "exit": 0 },
+      { "name": "publication", "passed": 25, "exit": 0 },
+      { "name": "zero-vps", "passed": 9, "exit": 0 },
+      { "name": "revenue", "passed": 5, "exit": 0 }
+    ],
+    "matrix": {
+      "required": 41,
+      "covered": 41,
+      "complete": true,
+      "coveredCases": [
+        "safe dry run",
+        "unregistered action",
+        "policy block",
+        "kill switch ACTIVE",
+        "kill switch UNKNOWN",
+        "revoked approval",
+        "stale approval",
+        "expired approval",
+        "cross-proposal approval reuse",
+        "cross-environment authorization",
+        "stale proposal",
+        "proposal expiration",
+        "duplicate proposal",
+        "duplicate dry run",
+        "duplicate receipt",
+        "queue redelivery",
+        "lost acknowledgement",
+        "concurrent execution",
+        "superseded proposal",
+        "production publish blocked",
+        "deployment blocked",
+        "DNS change blocked",
+        "destructive migration blocked",
+        "unknown migration blocked",
+        "money ledger immutable",
+        "prompt injection",
+        "malicious deploy now",
+        "malicious disable safety",
+        "malicious change DNS",
+        "malicious publish 500 pages",
+        "malicious ignore policy",
+        "malicious turn kill switch off",
+        "AccessTrade/Shopee boundary",
+        "Direct Shopee disabled",
+        "unsafe URL",
+        "missing binding",
+        "D1 unavailable",
+        "Queue unavailable",
+        "rollback missing",
+        "rollback invalid",
+        "unknown environment"
+      ]
+    }
+  },
+  "quality": {
+    "command": "node scripts/v6-phase9-validation.mjs final",
+    "allExitZero": true,
+    "typescript": "PASS",
+    "eslint": "PASS_0_NEW_ERRORS",
+    "eslintErrors": 0,
+    "eslintWarnings": 68,
+    "eslintLogIdenticalToPriorRun": true,
+    "secretScan": "PASS",
+    "gitDiffCheck": "PASS",
+    "cloudflare": "PASS_STATIC_AND_WORKER",
+    "workerBytes": 379507,
+    "workerFileStorageModules": 0,
+    "workerFilesystemSettingsModules": 0,
+    "staticPagesGenerated": 10,
+    "gates": [
+      {
+        "name": "typescript",
+        "exit": 0,
+        "log": ".test-tmp/phase9/final-sQtAnf/typescript.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "eslint",
+        "exit": 0,
+        "log": ".test-tmp/phase9/final-sQtAnf/eslint.log",
+        "sha256": "1f1f27baa74ee4b595a75fc51d0ea6995b3c13c6ac6100821eb3e68beab1e28b"
+      },
+      {
+        "name": "secret-scan",
+        "exit": 0,
+        "log": ".test-tmp/phase9/final-sQtAnf/secret-scan.log",
+        "sha256": "cbeba2c1d2d46ec7ad3209e4aa2491dcb769deee4281f5e21bd2091bfe2242ea"
+      },
+      {
+        "name": "cloudflare-worker",
+        "exit": 0,
+        "log": ".test-tmp/phase9/final-sQtAnf/cloudflare-worker.log",
+        "sha256": "a56a63090db9b1e9a7f2bb759c6f654f3184254b03742a3e0d2187343f937c82"
+      },
+      {
+        "name": "cloudflare-site",
+        "exit": 0,
+        "log": ".test-tmp/phase9/final-sQtAnf/cloudflare-site.log",
+        "sha256": "731065cf6cb2676b7970fda0a52c70c169e834fa587fc0aab6beee1d8dafc9c1"
+      },
+      {
+        "name": "diff-check",
+        "exit": 0,
+        "log": ".test-tmp/phase9/final-sQtAnf/diff-check.log",
+        "sha256": "5b9a16baa61d16f8eac4366a7e05c0abf96b008838c04013f85d88a6f998367d"
+      }
+    ]
+  },
+  "provenance": [
+    {
+      "path": ".test-tmp/phase9/all-dQL90j/results.json",
+      "sha256": "a26d68112a895a56fad2d2ce0668664ac06658affd303d8547d17fe6810d8e67"
+    },
+    {
+      "path": ".test-tmp/phase9/focused-results.json",
+      "sha256": "11418bd39824d12fc7f8a3a880717fa156924c677e39766ca0d812a02395ef93"
+    },
+    {
+      "path": ".test-tmp/phase9/final-sQtAnf/results.json",
+      "sha256": "2465ecdcafef01b065708c355b25c82ab3f5f760a6d082b04a5cb6623da81f59"
+    },
+    {
+      "path": ".test-tmp/v6-cloudflare-worker/metafile.json",
+      "sha256": "86f9bdad5c0d3bccc68c46394cb8c5104e5a5e1674af692223a9addbda4af955"
+    },
+    {
+      "path": ".test-tmp/v6-cloudflare-worker/worker.mjs",
+      "sha256": "4638d0d8d2ae716801919a87729f33a375c9f2229c61822136214b48001d6e1f"
+    }
+  ],
+  "sharedAdapter": {
+    "path": "src/lib/storage/d1/d1StorageAdapter.ts",
+    "byteIdenticalToHead": true,
+    "byteIdenticalToTestedSource": true,
+    "gitBlob": "86524c9b6ce16dc77e7b3ddd50c91ef4c64fd843",
+    "sha256": "44dada7d2bf6382c0639fb276385812ecfd450cd048f290b2cc534b9b6c3e029",
+    "workerReachability": [
+      "cloudflare/worker.ts",
+      "src/lib/runtime/cloudflare/http.ts",
+      "src/lib/runtime/cloudflare/context.ts",
+      "src/lib/storage/d1/d1StorageAdapter.ts"
+    ],
+    "phase9ExecutorEnabledInShippedWorker": false
+  },
+  "history": {
+    "statePath": "docs/v6/LONG_RUN_STATE.json",
+    "parseUsingExistingStateReader": "PASS",
+    "encoding": "UTF8_WITHOUT_BOM",
+    "priorPhaseFieldsPreserved": [
+      "phase7_5Reconstruction",
+      "phase6Gate",
+      "phase7Gate",
+      "phase5Gate",
+      "phase5Resume",
+      "phase4Gate",
+      "phase4_5Gate",
+      "phase5Plan",
+      "phase7_5",
+      "phase8",
+      "phase8_5"
+    ],
+    "priorEvidenceEntriesPreserved": 49,
+    "priorCheckpointsPreserved": true,
+    "duplicateCheckpoints": 0,
+    "phase9CheckpointReconciledInPlace": true
+  },
+  "safety": {
+    "defaultExecutionMode": "SHADOW",
+    "liveExecutionEnabled": false,
+    "productionExecutionEnabled": false,
+    "productionSideEffects": 0,
+    "productionContentMutations": 0,
+    "productionD1Migrations": 0,
+    "cloudflareDeployments": 0,
+    "cloudflareLoginUsed": false,
+    "dnsChanges": 0,
+    "realMoneyTransactionCreated": false,
+    "dryRunExternalWriteCalls": 0,
+    "directShopeeApiCalls": 0,
+    "directShopeeStatus": "DISABLED_NO_CREDENTIALS",
+    "liveAiProbe": "NOT_RUN",
+    "aiExecutionAuthority": false,
+    "committed": false,
+    "pushed": false,
+    "phase9_5Started": false,
+    "phase10Started": false
+  },
+  "postCheckpointChecks": {
+    "secretScanCommand": "node scripts/release-validation.cjs secret-scan",
+    "secretScanExit": 0,
+    "secretScanFiles": 777,
+    "gitDiffCheckCommand": "git diff --check",
+    "gitDiffCheckExit": 0,
+    "existingStateReaderParse": "PASS",
+    "stateMatchesRepositoryJsonFormatting": true,
+    "duplicateJsonKeys": 0,
+    "duplicateHistoricalCheckpoints": 0,
+    "documentOutcomeFieldsMatchingState": 63,
+    "workingTreeFingerprintMatchesState": true,
+    "sourceFingerprintStillMatches831Tests": true,
+    "existingFilesDeleted": 0,
+    "existingFilesChangedDuringResume": [
+      "docs/v6/LONG_RUN_STATE.json",
+      "docs/v6/phase-09-execution-control-plane.md"
+    ],
+    "addedFilesDuringResume": [
+      "docs/v6/evidence/phase9-remediation-completion.json"
+    ]
+  },
+  "checkpoint": "docs/v6/phase-09-execution-control-plane.md",
+  "safeForPhase9Reaudit": true,
+  "reauditPerformed": false,
+  "blockers": [],
+  "nextStep": "STOP_FOR_PHASE9_REAUDIT"
+}
