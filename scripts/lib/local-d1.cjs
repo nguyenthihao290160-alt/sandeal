@@ -19,14 +19,15 @@ async function openLocalD1({ testOnly = true, shadowId } = {}) {
   handles.add(handle); return handle;
 }
 
-async function applyLocalMigrations(handle, { dryRun = false } = {}) {
+async function applyLocalMigrations(handle, { dryRun = false, through } = {}) {
   if (!handles.has(handle)) throw new Error('LOCAL_MIGRATION_HANDLE_REQUIRED');
   const db = handle.db;
   const ledger = await db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name='d1_migrations' LIMIT 1").first();
   const applied = new Set(ledger ? (await db.prepare('SELECT name FROM d1_migrations ORDER BY id LIMIT 1000').all()).results.map(row => row.name) : []);
   const files = fs.readdirSync(migrationDirectory).filter(name => /^\d{4}_[a-z0-9_]+\.sql$/.test(name)).sort();
   if (files.length > 50) throw new Error('LOCAL_MIGRATION_PLAN_LIMIT');
-  const plan = files.map(name => {
+  if (through !== undefined && (!handle.testOnly || !files.includes(through) || [...applied].some(name => name > through))) throw new Error('LOCAL_MIGRATION_BASELINE_INVALID');
+  const plan = files.filter(name => through === undefined || name <= through).map(name => {
     const sql = fs.readFileSync(path.join(migrationDirectory, name), 'utf8');
     return { name, sql, checksum: createHash('sha256').update(sql).digest('hex'), applied: applied.has(name) };
   });

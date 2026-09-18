@@ -1,0 +1,1104 @@
+{
+  "schema": "sandeal-phase9-5-local-readiness-checkpoint-v1",
+  "capturedAt": "2026-09-18T00:12:26.245Z",
+  "scope": "LOCAL_FIXTURE_REHEARSAL_NOT_PRODUCTION_APPROVAL",
+  "productionAuthorization": false,
+  "source": {
+    "head": "1fda09b7d0e9fdaac6a315b4aa50d3da326adeab",
+    "fingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+    "fileCount": 696,
+    "policy": "Existing sourceManifest(): Git tracked and nonignored untracked non-document files; excludes secret env files; canonical executionFingerprint of raw file SHA-256 hashes"
+  },
+  "reconstruction": {
+    "implementationPresent": true,
+    "originalFocusedPassed": 59,
+    "originalFocusedFailed": 0,
+    "originalFocusedSkipped": 0,
+    "originalFocusedGeneratedAt": "2026-09-17T14:37:14.223Z",
+    "originalSourceFingerprint": "3665eda0cdc7a77583e0a135804134b92f1a3c20f3cc0d5c1e92542977341df4",
+    "sourceChangedAfter59AtResume": false,
+    "firstUnverifiedStep": "REGRESSIONS",
+    "initialStateSha256": "21558e982b46ed42b7c14164b0b4b878b1c550f0b36690682d3cd1456c74c3e8"
+  },
+  "remediation": {
+    "reason": "Actual Next.js static export contains $d$slug metadata and [slug] chunk paths, which the original safe filename character allowlist incorrectly rejected.",
+    "scope": "One artifact-path character allowlist update plus two additive focused test cases. Existing test assertions are byte-identical.",
+    "changes": [
+      {
+        "path": "scripts/phase-09-5-preproduction-tests.mjs",
+        "before": "f8d6a13cab690e1726486923c5125df853512f4e2c21fecf9a8f6fa9fed0db05",
+        "after": "c0de0a58b07a3b7d32094c0780b755dd98c62f9f8d1228920592422b8f440a20"
+      },
+      {
+        "path": "src/lib/release-rehearsal/manifest.ts",
+        "before": "e23f1237d623d4888d5b870ae29c776ca58e054a70eae52bcc1be08cff8fad8f",
+        "after": "bcf9e5c5e4d341459a6aeded5f63391e48a99cf07295e736e69ab1bfc0d03e58"
+      }
+    ],
+    "regressionReuse": {
+      "kind": "UNAFFECTED_REGRESSION_REUSE_AFTER_ISOLATED_ARTIFACT_PATH_FIX",
+      "capturedAt": "2026-09-18T00:10:20.015Z",
+      "originalReport": ".test-tmp/phase9-5/pre-artifact-path-fix/regressions.json",
+      "originalReportSha256": "e70f0902072615a04b86dc66228fe16b5279453a60b1c5fbed864045447418b1",
+      "executedAt": "2026-09-18T00:00:25.705Z",
+      "executedSourceFingerprint": "3665eda0cdc7a77583e0a135804134b92f1a3c20f3cc0d5c1e92542977341df4",
+      "verifiedFinalSourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "sourceHeadUnchanged": true,
+      "changedFiles": [
+        {
+          "path": "scripts/phase-09-5-preproduction-tests.mjs",
+          "before": "f8d6a13cab690e1726486923c5125df853512f4e2c21fecf9a8f6fa9fed0db05",
+          "after": "c0de0a58b07a3b7d32094c0780b755dd98c62f9f8d1228920592422b8f440a20"
+        },
+        {
+          "path": "src/lib/release-rehearsal/manifest.ts",
+          "before": "e23f1237d623d4888d5b870ae29c776ca58e054a70eae52bcc1be08cff8fad8f",
+          "after": "bcf9e5c5e4d341459a6aeded5f63391e48a99cf07295e736e69ab1bfc0d03e58"
+        }
+      ],
+      "unchangedFiles": 694,
+      "existingAssertionsUnchanged": true,
+      "changeScope": "Artifact filename allowlist adds Next.js dollar/bracket characters; two additive Phase 9.5 path checks only",
+      "dependencyScope": "Only the isolated Phase 9.5 harness imports this module; no prior phase or shipped Worker depends on it",
+      "all20OriginalLogHashesVerified": true,
+      "passed": 873,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "reports": {
+    "originalFocused": {
+      "path": ".test-tmp/phase9-5/pre-artifact-path-fix/focused-results.json",
+      "sha256": "9e8065fec5ec3a8a7451e7460aa0309ed850436615a97c2234817b5752d2eee9"
+    },
+    "originalRegressions": {
+      "path": ".test-tmp/phase9-5/pre-artifact-path-fix/regressions.json",
+      "sha256": "e70f0902072615a04b86dc66228fe16b5279453a60b1c5fbed864045447418b1"
+    },
+    "focused": {
+      "path": ".test-tmp/phase9-5/focused-results.json",
+      "sha256": "af8ea6d42bd51dbb1e1042b79b4fc2e0211184a3025c394a5d50d863437d9ece"
+    },
+    "focusedRunner": {
+      "path": ".test-tmp/phase9-5/focused.json",
+      "sha256": "a8b9e4545d9f57af506a786280bd2ba5d59bad5d8d1af058b3589dff2e34bd70"
+    },
+    "regressions": {
+      "path": ".test-tmp/phase9-5/regressions.json",
+      "sha256": "ca97d8b36126c4faf87803bbcd86625fdecd35d8b23c1db31c890230210606da"
+    },
+    "quality": {
+      "path": ".test-tmp/phase9-5/quality.json",
+      "sha256": "f38efd549d0387117b1b7e833e78194a5c40539a9f9b8a2e3fa2c1812d021873"
+    },
+    "build": {
+      "path": ".test-tmp/phase9-5/build.json",
+      "sha256": "df6fc4221a5b02ed4a23162d93057d6ffc89a876593cf820d197d4905b3d34be"
+    },
+    "certification": {
+      "path": ".test-tmp/phase9-5/certification.json",
+      "sha256": "c040c5dd10082a0021a3217d06f3d77c86df3ac0320945eab1b937ffd6b01483"
+    }
+  },
+  "tests": {
+    "focusedPassed": 61,
+    "regressionsPassed": 873,
+    "totalUniquePassed": 934,
+    "failed": 0,
+    "skipped": 0,
+    "focusedExecutedAfterFix": 61,
+    "regressionsExecutedDuringResume": 873,
+    "regressionsReusedAcrossIsolatedFix": 873,
+    "original59SupersededNotDoubleCounted": true,
+    "focusedCases": {
+      "passed": 61,
+      "failed": 0,
+      "fullCaseReport": ".test-tmp/phase9-5/focused-results.json",
+      "requiredMatrix": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+      "requiredMatrixCovered": 26,
+      "addedCases": [
+        {
+          "name": "Next static-export dynamic segment artifact paths certify locally",
+          "status": "PASS"
+        },
+        {
+          "name": "artifact paths still reject traversal absolute paths and URL encodings",
+          "status": "PASS"
+        }
+      ]
+    },
+    "regressions": [
+      {
+        "name": "phase9",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/phase-09-execution-control-plane-tests.cjs",
+        "passed": 124,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "28166d6d7151c94f0fcd0aee9a6f46062a69988be80bfd3b9b7409e92bc4e723"
+      },
+      {
+        "name": "d1",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-d1-tests.cjs",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "78a3039e3a0fca572c823ee279f8abb926b681026a56d920eb59ff15f776eb21"
+      },
+      {
+        "name": "migrations",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-migration-tests.cjs",
+        "passed": 22,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "ef82a8b2fb706a5a233140d1295af35744131cd361b251af6d555321434dca71"
+      },
+      {
+        "name": "queue",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-cloudflare-queue-tests.cjs",
+        "passed": 17,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "7b7c98a352a1a4d7a0eed7fb0ce03778fec74dbf79241eb160e0e018f1528233"
+      },
+      {
+        "name": "cron",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-cloudflare-cron-tests.cjs",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "7f07271f33cab58863bf560e966f62baca2e0e8d4528582a75159f47c9b581cd"
+      },
+      {
+        "name": "phase8-5",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-content-lifecycle-tests.mjs",
+        "passed": 122,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "a631186ed76dfe5dc109e3362e71613ff9c2c96e1416a5f65b25d3263b77134d"
+      },
+      {
+        "name": "phase8",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-content-seo-tests.mjs",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "d7f80520347ef8470b4e17d64e1c74816b18ff4f8c4705089ba1331c5ba63969"
+      },
+      {
+        "name": "phase7-5",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-opportunity-experiments-tests.mjs",
+        "passed": 127,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "0887b0c5572c8c7bb1757027c3a78a65fbc5e29a362bf59263a291ac85a77924"
+      },
+      {
+        "name": "phase7",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-decision-os-tests.mjs",
+        "passed": 132,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "2bf9c547b5d8934aeea50c86f2009a5cd24dd8913fd28674bfe19fca334665e8"
+      },
+      {
+        "name": "phase6",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-deal-intelligence-tests.cjs",
+        "passed": 79,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "09ae17d98a9d239b19564ce9cb46f6974056805cb004ba5fd758c626fb4c591a"
+      },
+      {
+        "name": "phase5",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-money-engine-tests.cjs",
+        "passed": 57,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "f3d5aa8b50a29b44c83772f91d270609bae72fff5fa9dfffa785648283811467"
+      },
+      {
+        "name": "autopilot",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-cloudflare-autopilot-tests.cjs",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "044952af281a3ee8ce89e6cc01c4a8b477c83b0d11101eab62ae655139b635c6"
+      },
+      {
+        "name": "runtime",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-cloudflare-runtime-tests.cjs",
+        "passed": 14,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "b0367268d4cf90cf6202963072438eb2a5e2765cb3024f8feef1432bc9ee4b42"
+      },
+      {
+        "name": "routing",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-cloudflare-routing-tests.cjs",
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "53b12532100995a257ab4cfada4a171871833bb505f497aa433ba838d3031477"
+      },
+      {
+        "name": "site",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-cloudflare-site-tests.cjs",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "de10c3ff96984e64744f94a0cdb7c97b9cf0054a62034d89422d5f81229d17b5"
+      },
+      {
+        "name": "accesstrade",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/accesstrade-link-safety-tests.cjs",
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "0e64d88ca952ea7b48ec110429cf955d5dba9084acb1f2da2f75651979ced872"
+      },
+      {
+        "name": "tiktok",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/accesstrade-tiktok-integration-tests.cjs",
+        "passed": 43,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "2438ba54dda9dddd7910810f2f1d4714edf7faabd7d8613338d9516fb7d9fbeb"
+      },
+      {
+        "name": "publication",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/prompt10-autopublish-tests.cjs",
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "86cd5e4c2c97cc2a015c0343878637758cd2ead9d547f60102b30252ec746c0f"
+      },
+      {
+        "name": "zero-vps",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/v6-zero-vps-storage-tests.cjs",
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "998006dd428ec7fbb81942a2699eff5b5588bbab369f684987536832c2fd0c01"
+      },
+      {
+        "name": "revenue",
+        "command": "node --import ./scripts/lib/rehearsal-evidence-isolation.mjs scripts/prompt10-revenue-integrity-tests.cjs",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "exit": 0,
+        "outputFingerprint": "30831043d5f8a26dece99c4d7980d79d6f135c6667441c1d5fb4bba83db0a729"
+      }
+    ]
+  },
+  "quality": [
+    {
+      "name": "typescript",
+      "command": "node node_modules/typescript/bin/tsc --noEmit --incremental false",
+      "exit": 0,
+      "elapsedMs": 11141,
+      "outputFingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": null,
+      "failed": null,
+      "skipped": null
+    },
+    {
+      "name": "eslint",
+      "command": "node node_modules/eslint/bin/eslint.js .",
+      "exit": 0,
+      "elapsedMs": 24704,
+      "outputFingerprint": "1f1f27baa74ee4b595a75fc51d0ea6995b3c13c6ac6100821eb3e68beab1e28b",
+      "passed": null,
+      "failed": null,
+      "skipped": null
+    },
+    {
+      "name": "secret-scan",
+      "command": "node scripts/release-validation.cjs secret-scan",
+      "exit": 0,
+      "elapsedMs": 155,
+      "outputFingerprint": "5979384c618b5e751ed7ac346a4e24a4719a5119c4cc28439168843c2ddf3afa",
+      "passed": null,
+      "failed": null,
+      "skipped": null
+    },
+    {
+      "name": "diff-check",
+      "command": "git diff --check",
+      "exit": 0,
+      "elapsedMs": 64,
+      "outputFingerprint": "0b47c9a3c9a1cd264aa5af61f42f68c0abe2e21426cebdad0a0ed2f752cb7f56",
+      "passed": null,
+      "failed": null,
+      "skipped": null
+    }
+  ],
+  "eslint": {
+    "errors": 0,
+    "warnings": 68,
+    "warningOutputUnchanged": true
+  },
+  "candidate": {
+    "id": "rc-8ae580e1c0fb177c728efdccb683d2af56922aa7c81724430ebf3c94b9a56aef",
+    "fingerprint": "8ae580e1c0fb177c728efdccb683d2af56922aa7c81724430ebf3c94b9a56aef",
+    "fullManifest": "Exact candidate.manifest in the hash-bound certification report; this document contains a summary, not an alternative manifest.",
+    "algorithmVersion": "release-rehearsal-v1",
+    "environment": "LOCAL",
+    "productionAuthorized": false,
+    "registryVersion": "registry-sha256-d33b2a377e3dab4d059fca28af704f755aa2c61a0198c5264c80a2fc1f9bba7a",
+    "registryFingerprint": "d33b2a377e3dab4d059fca28af704f755aa2c61a0198c5264c80a2fc1f9bba7a",
+    "policyVersion": "decision-policy-v1",
+    "algorithmVersions": {
+      "execution": "execution-v1",
+      "deal": "deal-intelligence-v1",
+      "decision": "decision-policy-v1",
+      "opportunity": "opportunity-engine-v1",
+      "content": "content-intelligence-v1",
+      "lifecycle": "content-lifecycle-v1",
+      "release": "release-rehearsal-v1"
+    },
+    "bundleFingerprint": "0b85ba6bcef288bf84c7de4779e811fd2652b76b049913e9ff9fb9ed3bbcded6",
+    "rollbackCoverage": "FULL",
+    "bindings": {
+      "d1": [
+        "DB"
+      ],
+      "queues": [
+        "JOB_QUEUE"
+      ],
+      "assets": [
+        "ASSETS"
+      ],
+      "databaseReferences": [
+        "sandeal-runtime-local"
+      ],
+      "queueReferences": [
+        "sandeal-local-jobs"
+      ],
+      "crons": [
+        "*/5 * * * *"
+      ],
+      "secretReferences": []
+    },
+    "runtime": {
+      "version": "cloudflare-local-contract-v1",
+      "configFingerprint": "9fef5f19cb2d3b42f4d0836be658a4aebc03e091926337411398faf19f9a4c1f",
+      "runtime": "cloudflare",
+      "localOnly": true,
+      "production": false,
+      "executionMode": "SHADOW",
+      "directShopeeEnabled": false,
+      "aiExecutionEnabled": false,
+      "autopilotEnabled": false,
+      "moneyEngineEnabled": false,
+      "budget": {
+        "queueBatch": 10,
+        "d1Batch": 100,
+        "proposals": 20,
+        "approvalBacklog": 20,
+        "routeScope": 20,
+        "attempts": 3,
+        "dispatches": 5,
+        "retryDelayMs": 60000,
+        "workerRequestsPerMinute": 60,
+        "queueMessagesPerMinute": 10,
+        "d1ReadsPerWork": 50,
+        "d1WritesPerWork": 10
+      }
+    },
+    "provider": {
+      "provider": "accesstrade",
+      "platform": "shopee"
+    },
+    "dependencies": [
+      {
+        "id": "migration",
+        "dependsOn": []
+      },
+      {
+        "id": "artifact",
+        "dependsOn": [
+          "migration"
+        ]
+      },
+      {
+        "id": "binding",
+        "dependsOn": [
+          "artifact"
+        ]
+      },
+      {
+        "id": "preflight",
+        "dependsOn": [
+          "binding"
+        ]
+      },
+      {
+        "id": "approval",
+        "dependsOn": [
+          "preflight"
+        ]
+      },
+      {
+        "id": "canary",
+        "dependsOn": [
+          "approval"
+        ]
+      },
+      {
+        "id": "rollback",
+        "dependsOn": [
+          "canary"
+        ]
+      },
+      {
+        "id": "certification",
+        "dependsOn": [
+          "rollback"
+        ]
+      }
+    ],
+    "futureActions": []
+  },
+  "artifacts": [
+    {
+      "kind": "WORKER",
+      "fingerprint": "aa756a30780c26c52c1506a0535dddbfece866cf325cf47e4835560fc21acddc",
+      "sourceHead": "1fda09b7d0e9fdaac6a315b4aa50d3da326adeab",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "fileCount": 1,
+      "bytes": 379507,
+      "file": {
+        "path": "worker.mjs",
+        "sha256": "4638d0d8d2ae716801919a87729f33a375c9f2229c61822136214b48001d6e1f",
+        "bytes": 379507
+      }
+    },
+    {
+      "kind": "STATIC",
+      "fingerprint": "dc8eaa9b3dd6b2f4f607cb49295a6d661f9033d330310c6d7a81b56b21a412b3",
+      "sourceHead": "1fda09b7d0e9fdaac6a315b4aa50d3da326adeab",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "fileCount": 109,
+      "bytes": 1437090,
+      "fileInventory": ".test-tmp/phase9-5/build.json artifacts[kind=STATIC].files"
+    }
+  ],
+  "builds": {
+    "reproducibility": "SOURCE_BOUND_BUILDS_BYTE_VARIANCE_RECORDED",
+    "comparison": [
+      {
+        "kind": "WORKER",
+        "firstFingerprint": "aa756a30780c26c52c1506a0535dddbfece866cf325cf47e4835560fc21acddc",
+        "secondFingerprint": "aa756a30780c26c52c1506a0535dddbfece866cf325cf47e4835560fc21acddc",
+        "exactBytes": true,
+        "changedFileCount": 0
+      },
+      {
+        "kind": "STATIC",
+        "firstFingerprint": "fba9d7b629a93c830c750c54f4c6ae3e25f0fe51ca245144060aa7336c9b686d",
+        "secondFingerprint": "dc8eaa9b3dd6b2f4f607cb49295a6d661f9033d330310c6d7a81b56b21a412b3",
+        "exactBytes": false,
+        "changedFileCount": 81
+      }
+    ],
+    "detail": ".test-tmp/phase9-5/build.json comparison"
+  },
+  "migrations": {
+    "inventory": [
+      {
+        "name": "0001_product_storage.sql",
+        "sha256": "1fad5e55594346eebca93362755a94d235a37f9814099422618622a70d858c84",
+        "classification": "DESTRUCTIVE",
+        "statements": 14
+      },
+      {
+        "name": "0002_event_jobs.sql",
+        "sha256": "4ceaa99be08658c4d4486bfdfe95eb1802e57dbf1979d6dfebed5194b9c0c279",
+        "classification": "ADDITIVE_SAFE",
+        "statements": 5
+      },
+      {
+        "name": "0003_affiliate_money.sql",
+        "sha256": "53cbe21758ba82cb0bf78e56db16eecc421f1ec15bf4f6c4cf2b21dc4cef3424",
+        "classification": "REVIEW_REQUIRED",
+        "statements": 24
+      },
+      {
+        "name": "0004_money_snapshot_jobs.sql",
+        "sha256": "2ea269d75b554d75f92918fa5123b7a9dd59ce6e116c9c71661110fd60d74baa",
+        "classification": "DESTRUCTIVE",
+        "statements": 10
+      },
+      {
+        "name": "0005_money_platform.sql",
+        "sha256": "ac8ff8986c7d4111713f15799dfe588ef2a6d0be338c05483a583771be084165",
+        "classification": "DESTRUCTIVE",
+        "statements": 14
+      },
+      {
+        "name": "0006_deal_intelligence.sql",
+        "sha256": "8f6c72694d3997f503edc4f80cd396874be0f833890dda82c5b09ce9dd7fc75e",
+        "classification": "DESTRUCTIVE",
+        "statements": 37
+      },
+      {
+        "name": "0007_decision_os.sql",
+        "sha256": "be8b2236e9428601c47df301f6ad9271e26c5c4ee2b012dedeb1f58c90142847",
+        "classification": "ADDITIVE_SAFE",
+        "statements": 15
+      },
+      {
+        "name": "0008_opportunity_experiments.sql",
+        "sha256": "ad0fcd6c46b49706b5c4840a49f540fbf23111e3715a62cd28b7a3307c5fe251",
+        "classification": "DESTRUCTIVE",
+        "statements": 30
+      },
+      {
+        "name": "0009_content_lifecycle.sql",
+        "sha256": "792a823478cdee7e69fda814297fa87c05bd620fdb856bfecee774529b63d9b2",
+        "classification": "DESTRUCTIVE",
+        "statements": 51
+      },
+      {
+        "name": "0010_execution_control_plane.sql",
+        "sha256": "7402fcea62eb779d24f2ee99aec011f54924006d3963d265cc6ca5b45a8380a2",
+        "classification": "ADDITIVE_SAFE",
+        "statements": 43
+      }
+    ],
+    "baseline": "0009_content_lifecycle.sql",
+    "required": [
+      "0001_product_storage.sql",
+      "0002_event_jobs.sql",
+      "0003_affiliate_money.sql",
+      "0004_money_snapshot_jobs.sql",
+      "0005_money_platform.sql",
+      "0006_deal_intelligence.sql",
+      "0007_decision_os.sql",
+      "0008_opportunity_experiments.sql",
+      "0009_content_lifecycle.sql",
+      "0010_execution_control_plane.sql"
+    ],
+    "inventoryFingerprint": "dd7c12394d04352ea642fba387cf6aa4bffdb16b187e1a470846cce6289621b8",
+    "target": "EPHEMERAL_LOCAL_D1_ONLY",
+    "pending": [
+      "0010_execution_control_plane.sql"
+    ],
+    "idempotency": "MIGRATION_LEDGER_SKIPS_APPLIED_ONE_SHOT_SQL",
+    "fixtureHashes": {
+      "before": "e234c7ef3eeafbba67aa956e8b88c8ed6b3dec0e220d81da34a0d8a404161246",
+      "after": "e234c7ef3eeafbba67aa956e8b88c8ed6b3dec0e220d81da34a0d8a404161246"
+    }
+  },
+  "plans": {
+    "canary": {
+      "environment": "LOCAL",
+      "worker": "sandeal-runtime-local-only",
+      "contentDomain": "shadow-content",
+      "routes": [
+        "/",
+        "/api",
+        "/deals",
+        "/go",
+        "/product"
+      ],
+      "blastRadius": "BOUNDED",
+      "productionTrafficPercent": 0,
+      "migrationFingerprint": "dd7c12394d04352ea642fba387cf6aa4bffdb16b187e1a470846cce6289621b8",
+      "observabilityFingerprint": "7add398407ec69cbf6077f39a45c6a7ff23fb710fa36c0df18808d69a533150d",
+      "stages": [
+        {
+          "name": "ZERO",
+          "futurePercent": 0,
+          "executable": false
+        },
+        {
+          "name": "PREVIEW_ONLY",
+          "futurePercent": 0,
+          "executable": false
+        },
+        {
+          "name": "FUTURE_SMALL",
+          "futurePercent": 1,
+          "executable": false
+        },
+        {
+          "name": "FUTURE_EXPANDED",
+          "futurePercent": 5,
+          "executable": false
+        },
+        {
+          "name": "FUTURE_FULL",
+          "futurePercent": 100,
+          "executable": false
+        }
+      ],
+      "abortConditions": [
+        "MIGRATION_FAILURE",
+        "BINDING_FAILURE",
+        "PRODUCTION_MUTATION_ATTEMPT",
+        "KILL_SWITCH_ACTIVE_OR_UNKNOWN",
+        "FAILURE_THRESHOLD_EXCEEDED",
+        "MONEY_INVARIANT_FAILURE",
+        "SECURITY_FAILURE",
+        "ARTIFACT_MISMATCH",
+        "POLICY_MISMATCH",
+        "STALE_APPROVAL",
+        "ROLLBACK_UNAVAILABLE"
+      ]
+    },
+    "observability": {
+      "source": "CONFIGURED_LOCAL_REHEARSAL_NOT_PRODUCTION_TELEMETRY",
+      "productionSloApproved": false,
+      "signals": [
+        {
+          "name": "REQUEST_FAILURE",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "QUEUE_FAILURE",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "D1_ERROR",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "DECISION_BLOCK",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "KILL_SWITCH_BLOCK",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "CONTENT_MUTATION_ATTEMPT",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "AFFILIATE_ERROR",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "MONEY_INVARIANT_FAILURE",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "RATE_LIMIT",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "EXTERNAL_WRITE_ATTEMPT",
+          "abortAbove": 0,
+          "unit": "unexpected-events-per-drill"
+        },
+        {
+          "name": "LATENCY",
+          "abortAbove": 5000,
+          "unit": "configured-local-drill-ms-not-business-slo"
+        }
+      ]
+    }
+  },
+  "certification": {
+    "readiness": "CERTIFIED_LOCAL",
+    "blockers": [],
+    "certificate": {
+      "id": "cert-82224dc788461b028a3b86a900836ed4acc70431d93bb0b39b3f6a646ca72234",
+      "candidateId": "rc-8ae580e1c0fb177c728efdccb683d2af56922aa7c81724430ebf3c94b9a56aef",
+      "candidateFingerprint": "8ae580e1c0fb177c728efdccb683d2af56922aa7c81724430ebf3c94b9a56aef",
+      "environment": "LOCAL",
+      "state": "CERTIFIED_LOCAL_PREPROD",
+      "evidenceFingerprint": "b6c5f30be7e8d9e3253ce36161f62d239d7ecb53fa6fff919d578ca88b43014c",
+      "issuedAt": 1789690344619,
+      "expiresAt": 1789690530157,
+      "productionAuthorized": false,
+      "approvalScope": "LOCAL_REHEARSAL_ONLY"
+    },
+    "summary": {
+      "candidateId": "rc-8ae580e1c0fb177c728efdccb683d2af56922aa7c81724430ebf3c94b9a56aef",
+      "readiness": "CERTIFIED_LOCAL",
+      "changes": [
+        "Worker and static artifacts; local migration and safety rehearsal only"
+      ],
+      "why": "Validate this exact source and local artifact pair before a separately authorized production review",
+      "capabilities": [
+        "PROPOSE_CONTENT_REFRESH"
+      ],
+      "entities": [
+        "rehearsal-content"
+      ],
+      "migrations": [
+        "0010_execution_control_plane.sql"
+      ],
+      "bindings": [
+        "DB",
+        "JOB_QUEUE",
+        "ASSETS"
+      ],
+      "risk": "LOW",
+      "rollbackCoverage": "FULL",
+      "rollbackLimitations": [
+        "CAPABILITY_SCOPED_INLINE_PLANS_ONLY",
+        "NO_RESTORE_EXECUTOR",
+        "NO_PRODUCTION_ARTIFACT_OR_EXTERNAL_RECOVERY"
+      ],
+      "abortConditions": [
+        "MIGRATION_FAILURE",
+        "BINDING_FAILURE",
+        "PRODUCTION_MUTATION_ATTEMPT",
+        "KILL_SWITCH_ACTIVE_OR_UNKNOWN",
+        "FAILURE_THRESHOLD_EXCEEDED",
+        "MONEY_INVARIANT_FAILURE",
+        "SECURITY_FAILURE",
+        "ARTIFACT_MISMATCH",
+        "POLICY_MISMATCH",
+        "STALE_APPROVAL",
+        "ROLLBACK_UNAVAILABLE"
+      ],
+      "monitoring": [
+        "REQUEST_FAILURE",
+        "QUEUE_FAILURE",
+        "D1_ERROR",
+        "DECISION_BLOCK",
+        "KILL_SWITCH_BLOCK",
+        "CONTENT_MUTATION_ATTEMPT",
+        "AFFILIATE_ERROR",
+        "MONEY_INVARIANT_FAILURE",
+        "RATE_LIMIT",
+        "EXTERNAL_WRITE_ATTEMPT",
+        "LATENCY"
+      ],
+      "approval": "CANDIDATE_BOUND_PHASE9_APPROVAL_LOCAL_REHEARSAL_ONLY",
+      "reasons": [],
+      "futureProductionAuthorizationRequired": true
+    }
+  },
+  "gateEvidence": [
+    {
+      "gate": "CLEAN_MIGRATION",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "dd7c12394d04352ea642fba387cf6aa4bffdb16b187e1a470846cce6289621b8",
+      "passed": true,
+      "reportFingerprint": "0f8524e51df009f3a82d85a5e6198b78c1e5275d67901764b2faecdc08ebbeb6",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "UPGRADE_MIGRATION",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "dd7c12394d04352ea642fba387cf6aa4bffdb16b187e1a470846cce6289621b8",
+      "passed": true,
+      "reportFingerprint": "0f8524e51df009f3a82d85a5e6198b78c1e5275d67901764b2faecdc08ebbeb6",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "DATA_PRESERVATION",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "dd7c12394d04352ea642fba387cf6aa4bffdb16b187e1a470846cce6289621b8",
+      "passed": true,
+      "reportFingerprint": "0f8524e51df009f3a82d85a5e6198b78c1e5275d67901764b2faecdc08ebbeb6",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "ROLLBACK_DRILL",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "0b85ba6bcef288bf84c7de4779e811fd2652b76b049913e9ff9fb9ed3bbcded6",
+      "passed": true,
+      "reportFingerprint": "0e9cd5658319b4253bd0e325c2685b86aded23f5e3cfeed8e306ac979b4157a9",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "KILL_SWITCH_DRILL",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "0b85ba6bcef288bf84c7de4779e811fd2652b76b049913e9ff9fb9ed3bbcded6",
+      "passed": true,
+      "reportFingerprint": "27f339bacc9525608691c949a2f632d9d1af458550b4c972c7febabcff8cb587",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "KILL_SWITCH_UNKNOWN_DRILL",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "0b85ba6bcef288bf84c7de4779e811fd2652b76b049913e9ff9fb9ed3bbcded6",
+      "passed": true,
+      "reportFingerprint": "27f339bacc9525608691c949a2f632d9d1af458550b4c972c7febabcff8cb587",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "EMERGENCY_STOP_DRILL",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "0b85ba6bcef288bf84c7de4779e811fd2652b76b049913e9ff9fb9ed3bbcded6",
+      "passed": true,
+      "reportFingerprint": "27f339bacc9525608691c949a2f632d9d1af458550b4c972c7febabcff8cb587",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "SECURITY_TESTS",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "passed": true,
+      "reportFingerprint": "4d50c7af5a33d44d9186b31c7ca7f42574a58b64dd2986e35343de0341ad2357",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "REGRESSIONS",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "passed": true,
+      "reportFingerprint": "37f20d3b9925da3d6d3541d7d027aa6def5dbc9371cb316aa65d665606664da3",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "TYPESCRIPT",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "passed": true,
+      "reportFingerprint": "1cc8e3b05f5634419ca142cacfeda17d3cd502a7b000e2f3209687a49002ebcd",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "ESLINT",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "passed": true,
+      "reportFingerprint": "11c2da53308c65a2046188c00a5be0c54fca84d29c58c9e29db2b4f8169a5bcd",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "SECRET_SCAN",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "passed": true,
+      "reportFingerprint": "d44a4d55528bbf8cf1d1ada17195f715a61189dfe495e97983f3893612c5ef6b",
+      "origin": "LOCAL_RUNNER"
+    },
+    {
+      "gate": "DIFF_CHECK",
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "subjectFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "passed": true,
+      "reportFingerprint": "433b08c2b859cc741dcd9a49eca1c1eebcb7d4f57ce034a5cfc3fb2536f47a81",
+      "origin": "LOCAL_RUNNER"
+    }
+  ],
+  "drills": {
+    "scope": "ACTUAL_CANDIDATE_LOCAL_FIXTURE_BUNDLE_NO_RESTORE_OR_PRODUCTION_AUTHORITY",
+    "rollback": {
+      "passed": true,
+      "proposalId": "proposal-rehearsal-content",
+      "planFingerprint": "c6820355ddf10aaae107d3d4e44d0e6c635f37e6d06fdcb755b1f421e05e4da5",
+      "restored": false,
+      "scope": "CAPABILITY_SCOPED_PLAN_VALIDATION_ONLY"
+    },
+    "killSwitch": "BLOCKED",
+    "unknownKillSwitch": "BLOCKED",
+    "emergencyStop": "BLOCKED"
+  },
+  "journalEvents": {
+    "count": 6,
+    "events": [
+      {
+        "id": "rehearsal-bae02ee6a29865001c477fb413cf76d5af40232308a1956436e03e6d1b5298d8",
+        "event": "REHEARSAL_CANDIDATE_CREATED"
+      },
+      {
+        "id": "rehearsal-4ab40b19b8916fedaac92c20da5b879e93346f9a8e836d515fd3abe3e039ffc3",
+        "event": "REHEARSAL_ARTIFACT_VERIFIED"
+      },
+      {
+        "id": "rehearsal-07b05c06473f3ff28817c4239b16a21c7f23664e9fb32932bf1babf0c55221e4",
+        "event": "REHEARSAL_MIGRATION_PASS"
+      },
+      {
+        "id": "rehearsal-753cc2351e7885e9405f4435a652938a15def02a199830faa11dd96787d88b5b",
+        "event": "REHEARSAL_KILL_SWITCH_DRILL"
+      },
+      {
+        "id": "rehearsal-28d299c785eadb3e2a78d31302beda682fde5e35f2f61f7f6c72d19431d83817",
+        "event": "REHEARSAL_ROLLBACK_DRILL"
+      },
+      {
+        "id": "rehearsal-f04afb5261e343f3532f38c71ccd4d759570c0d54d76788b77de94ee206ac6ac",
+        "event": "REHEARSAL_CERTIFICATE_ISSUED"
+      }
+    ],
+    "fullRows": ".test-tmp/phase9-5/certification.json journalEvents"
+  },
+  "approvalProvenance": "SYNTHETIC_LOCAL_OPERATOR_ALLOWLIST_ONLY_NOT_PRODUCTION_HUMAN_APPROVAL",
+  "providerProvenance": "LOCAL_FIXTURE_AVAILABILITY_NOT_LIVE_PROBE",
+  "dependencyAudit": {
+    "packageAndLockUnchanged": true,
+    "productionDependenciesAdded": 0
+  },
+  "production": {
+    "deployment": 0,
+    "resources": 0,
+    "migrations": 0,
+    "mutations": 0,
+    "trafficShift": 0,
+    "realMoney": 0,
+    "directShopeeCalls": 0,
+    "aiExecutionAuthority": false,
+    "liveAiProbe": "NOT_RUN",
+    "enabled": false,
+    "scope": "Zero effects performed by this rehearsal; production was neither connected nor inspected."
+  },
+  "priorHistory": {
+    "initialStateSha256": "21558e982b46ed42b7c14164b0b4b878b1c550f0b36690682d3cd1456c74c3e8",
+    "checkpointsPreserved": 11,
+    "evidenceEntriesPreserved": 51,
+    "duplicateCheckpoints": 0,
+    "duplicateEvidenceNames": 0,
+    "phase5Through9Unchanged": true
+  },
+  "limitations": [
+    "Historical migrations include destructive table-copy steps; only 0010 is pending against the 0009 fixture baseline.",
+    "FULL rollback covers critical reversible local bundle members only. No artifact/schema/production restore executor exists.",
+    "Local approval and provider availability are explicit fixtures; no authenticated production approval or observation.",
+    "Certificates expire within five minutes or sooner with any source, artifact, approval, policy, control, or environment change.",
+    "No release worker is scheduled. Candidate/certificate sessions are bounded and ephemeral; only indexed local D1 audit events persist during the drill.",
+    "Next.js static bytes vary across builds; both builds are source-bound, but byte-for-byte static reproducibility is not claimed.",
+    "The compact checkpoint references ignored full local reports by SHA-256. The recorded certificate is historical and expires; it is not ongoing or production authorization."
+  ],
+  "outcomes": {
+    "PHASE9_5": "PASS",
+    "PREPRODUCTION_REHEARSAL": "PASS",
+    "RELEASE_CANDIDATE_CERTIFICATION": "PASS",
+    "RELEASE_CANDIDATE_FINGERPRINT": "PASS",
+    "RELEASE_MANIFEST": "PASS",
+    "WORKER_ARTIFACT_INTEGRITY": "PASS",
+    "STATIC_ARTIFACT_INTEGRITY": "PASS",
+    "BINDING_CONTRACT": "PASS",
+    "CONFIGURATION_CONTRACT": "PASS",
+    "MIGRATION_INVENTORY": "PASS",
+    "MIGRATION_CLASSIFICATION": "PASS",
+    "CLEAN_INSTALL_MIGRATION_REHEARSAL": "PASS",
+    "UPGRADE_MIGRATION_REHEARSAL": "PASS",
+    "MIGRATION_DATA_PRESERVATION": "PASS",
+    "RELEASE_BUNDLE_CERTIFICATION": "PASS",
+    "OPERATOR_REVIEW_SUMMARY": "PASS",
+    "CANARY_PLAN": "PASS",
+    "OBSERVABILITY_PLAN": "PASS",
+    "ABORT_CONDITIONS": "PASS",
+    "KILL_SWITCH_DRILL": "PASS",
+    "KILL_SWITCH_UNKNOWN_DRILL": "PASS",
+    "EMERGENCY_STOP_DRILL": "PASS",
+    "ROLLBACK_DRILL": "PASS",
+    "RELEASE_RETRY_BUDGET": "PASS",
+    "RESOURCE_LIMIT_AUDIT": "PASS",
+    "DEPENDENCY_AUDIT": "PASS",
+    "READINESS_CERTIFICATE": "PASS",
+    "TYPESCRIPT": "PASS",
+    "SECRET_SCAN": "PASS",
+    "GIT_DIFF_CHECK": "PASS",
+    "RELEASE_CANDIDATE_ALGORITHM_VERSION": "release-rehearsal-v1",
+    "BUILD_SOURCE_FINGERPRINT_MATCH": "YES",
+    "ROLLBACK_COVERAGE": "FULL",
+    "BUILD_REPRODUCIBILITY": "SOURCE_BOUND_BUILDS_BYTE_VARIANCE_RECORDED",
+    "READINESS_CERTIFICATE_STATE": "CERTIFIED_LOCAL_PREPROD",
+    "DIRECT_SHOPEE_STATUS": "DISABLED_NO_CREDENTIALS",
+    "AI_EXECUTION_AUTHORITY": "NO",
+    "LIVE_AI_PROBE": "NOT_RUN",
+    "NEW_TEST_CASES_PASSED": 61,
+    "NEW_TEST_CASES_FAILED": 0,
+    "TEST_CASES_SKIPPED": 0,
+    "ESLINT": "PASS_0_NEW_ERRORS",
+    "BUILD_CLOUDFLARE": "PASS_STATIC_AND_WORKER",
+    "PRODUCTION_EXECUTION_ENABLED": "NO",
+    "REAL_MONEY_TRANSACTION_CREATED": "NO",
+    "DEPLOYED": "NO",
+    "RESULT": "PASS",
+    "SAFE_FOR_PHASE10": "NOT_AUTHORIZED",
+    "BLOCKERS": [],
+    "NEXT_RECOMMENDED_PHASE": "PHASE9_5_READ_ONLY_PRECOMMIT_REVIEW_NO_PRODUCTION_AUTHORIZATION",
+    "MISSING_BINDING_RELEASE_EFFECT": 0,
+    "RAW_SECRET_IN_RELEASE_MANIFEST": 0,
+    "RELEASE_APPROVAL_STALE_EFFECT": 0,
+    "PRODUCTION_TRAFFIC_SHIFT": 0,
+    "UNKNOWN_BLAST_RADIUS_AUTOPASS_EFFECT": 0,
+    "REHEARSAL_MONEY_LEDGER_MUTATION_EFFECT": 0,
+    "STALE_READINESS_CERTIFICATE_EFFECT": 0,
+    "DUPLICATE_CERTIFICATION_EFFECT": 0,
+    "SUPERSEDED_RELEASE_CERTIFICATE_EFFECT": 0,
+    "CROSS_ENVIRONMENT_RELEASE_CERT_EFFECT": 0,
+    "STALE_ARTIFACT_RELEASE_EFFECT": 0,
+    "DIRECT_SHOPEE_API_CALLS": 0,
+    "FILE_STORAGE_CALLS": 0,
+    "FILESYSTEM_SETTINGS_CALLS": 0,
+    "PRODUCTION_SIDE_EFFECTS": 0,
+    "PRODUCTION_CONTENT_MUTATIONS": 0,
+    "PRODUCTION_CONTENT_PUBLISHED": 0,
+    "PRODUCTION_CONTENT_DELETED": 0,
+    "PRODUCTION_REDIRECTS_CREATED": 0,
+    "PRODUCTION_METADATA_MUTATIONS": 0,
+    "PRODUCTION_EXPERIMENT_TRAFFIC": 0,
+    "ACTIVE_PRODUCTION_EXPERIMENTS": 0,
+    "PRODUCTION_D1_MIGRATIONS": 0,
+    "CLOUDFLARE_DEPLOYMENTS": 0,
+    "DNS_CHANGES": 0,
+    "PRODUCTION_RESOURCE_CREATED": 0,
+    "REAL_PRODUCTION_DATA_MIGRATED": 0,
+    "RELEASE_CANDIDATE_FULL_SCAN": "NO",
+    "READINESS_CERT_FULL_SCAN": "NO",
+    "REHEARSAL_AUDIT_FULL_SCAN": "NO",
+    "MIGRATION_REHEARSAL_FULL_SCAN": "NO",
+    "DUE_RELEASE_WORK_FULL_SCAN": "NO",
+    "PM2_REQUIRED": "NO",
+    "VPS_REQUIRED": "NO",
+    "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+    "CONTINUOUS_POLLING": "NO",
+    "ASSERTIONS_WEAKENED": "NO",
+    "RELEASE_ASSERTIONS_WEAKENED": "NO",
+    "MIGRATION_ASSERTIONS_WEAKENED": "NO",
+    "ROLLBACK_ASSERTIONS_WEAKENED": "NO",
+    "KILL_SWITCH_ASSERTIONS_WEAKENED": "NO",
+    "SAFETY_GATES_RELAXED": "NO",
+    "STALE_RELEASE_CERTIFICATION_EFFECT": 0,
+    "CRITICAL_FAILURE_CERTIFICATION_EFFECT": 0,
+    "LAST_CONFIRMED_FOCUSED_TESTS": 61,
+    "FOCUSED_TESTS_AT_INTERRUPTION": 59,
+    "NEW_ARTIFACT_PATH_TESTS": 2,
+    "REGRESSION_TESTS": 873,
+    "TOTAL_VERIFIED_TESTS": 934,
+    "FOCUSED_TESTS_RERUN_AFTER_FIX": 61,
+    "REGRESSIONS_RUN_DURING_RESUME": 873,
+    "REGRESSIONS_REUSED_AFTER_ISOLATED_FIX": 873,
+    "LONG_RUN_STATE_PARSE": "PASS",
+    "LONG_RUN_STATE_PRIOR_HISTORY_PRESERVED": "YES",
+    "PHASE9_5_CHECKPOINT_CONSISTENT": "YES",
+    "SAFE_FOR_PHASE9_5_PRECOMMIT_AUDIT": "YES",
+    "NEXT_STEP": "STOP_FOR_PHASE9_5_PRECOMMIT_AUDIT",
+    "COMMITTED": "NO",
+    "PUSHED": "NO",
+    "CLOUDFLARE_LOGIN_USED": "NO",
+    "PHASE10_STARTED": "NO"
+  }
+}
