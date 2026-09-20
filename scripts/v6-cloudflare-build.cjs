@@ -21,9 +21,23 @@ async function buildWorker() {
   return { file: path.join(outputDirectory, 'worker.mjs'), bytes: fs.statSync(path.join(outputDirectory, 'worker.mjs')).size,
     fileStorageModules: 0, filesystemSettingsModules: 0 };
 }
-function buildSite() {
+function siteBuildEnvironment(options = {}) {
+  const environment = options.environment ?? 'LOCAL';
+  if (!['LOCAL', 'PRODUCTION_REHEARSAL', 'PRODUCTION'].includes(environment)) throw new Error('STATIC_ENVIRONMENT_INVALID');
+  const origin = options.origin ?? (environment === 'LOCAL' ? 'http://localhost:8787' : null);
+  if (typeof origin !== 'string') throw new Error('STATIC_ORIGIN_REQUIRED');
+  const address = new URL(origin);
+  if (address.origin !== origin || address.username || address.password || address.port && environment !== 'LOCAL'
+    || (environment === 'LOCAL' ? !['localhost', '127.0.0.1'].includes(address.hostname)
+      : address.protocol !== 'https:' || !address.hostname.includes('.') || ['localhost', '127.0.0.1'].includes(address.hostname))
+    || environment === 'PRODUCTION_REHEARSAL' && !address.hostname.endsWith('.invalid')
+    || environment === 'PRODUCTION' && /\.(?:invalid|test|example)$/.test(address.hostname)) throw new Error('STATIC_ORIGIN_INVALID');
+  return { NEXT_TELEMETRY_DISABLED: '1', NODE_ENV: 'production', SANDEAL_RUNTIME: 'cloudflare',
+    SANDEAL_SITE_ENVIRONMENT: environment, NEXT_PUBLIC_SANDEAL_ENVIRONMENT: environment, NEXT_PUBLIC_SITE_URL: origin };
+}
+function buildSite(options = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(?:PATH|PATHEXT|SystemRoot|WINDIR|TEMP|TMP|LOCALAPPDATA|APPDATA|USERPROFILE|COMSPEC|NUMBER_OF_PROCESSORS)$/i.test(name)));
-  Object.assign(env, { NEXT_TELEMETRY_DISABLED: '1', NODE_ENV: 'production', SANDEAL_RUNTIME: 'cloudflare', NEXT_PUBLIC_SITE_URL: 'http://localhost:8787' });
+  Object.assign(env, siteBuildEnvironment(options));
   const result = spawnSync(process.execPath, [require.resolve('next/dist/bin/next'), 'build', 'cloudflare/site', '--webpack'],
     { cwd: root, env, encoding: 'utf8', timeout: 360000, maxBuffer: 16 * 1024 * 1024 });
   fs.mkdirSync(outputDirectory, { recursive: true });
@@ -32,7 +46,7 @@ function buildSite() {
   if (result.status !== 0) throw new Error('CLOUDFLARE_STATIC_BUILD_FAILED');
   const headers = '/*\n  X-Content-Type-Options: nosniff\n  X-Frame-Options: DENY\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  Content-Security-Policy: default-src \'self\'; base-uri \'self\'; object-src \'none\'; frame-ancestors \'none\'; form-action \'self\'; script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: https:; connect-src \'self\'; font-src \'self\' data:\n  X-Robots-Tag: noindex, nofollow\n\n/_next/static/*\n  Cache-Control: public, max-age=31536000, immutable\n';
   fs.writeFileSync(path.join(root, 'cloudflare/site/out/_headers'), headers);
-  return { exit: 0, log: '.test-tmp/v6-cloudflare-worker/site-build.log' };
+  return { exit: 0, log: '.test-tmp/v6-cloudflare-worker/site-build.log', environment: env.SANDEAL_SITE_ENVIRONMENT, origin: env.NEXT_PUBLIC_SITE_URL };
 }
 async function main() {
   const mode = process.argv[2] || 'all';
@@ -42,4 +56,4 @@ async function main() {
   if (mode !== 'worker') recordEvidence('build-cloudflare-site', buildSite());
 }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
-module.exports = { buildWorker, buildSite, outputDirectory };
+module.exports = { buildWorker, buildSite, siteBuildEnvironment, outputDirectory };

@@ -7,6 +7,7 @@ import { D1AffiliateStore } from '../../storage/d1/d1AffiliateStore';
 import { prepareMoneyRedirect } from '../../affiliate/money/redirect';
 import { MoneyError } from '../../affiliate/money/types';
 import { D1DealStore, type DealRanking } from '../../storage/d1/d1DealStore';
+import { productionFetch } from './production';
 
 const securityHeaders = {
   'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -51,6 +52,7 @@ async function asset(request: Request, env: CloudflareEnvironment, pathname?: st
   return secured;
 }
 export async function cloudflareFetch(request: Request, env: CloudflareEnvironment, options: { moneyTestOnly?: boolean } = {}): Promise<Response> {
+  if (env.SANDEAL_RUNTIME !== 'cloudflare' || env.SANDEAL_LOCAL_ONLY !== 'true' || env.SANDEAL_PRODUCTION !== 'false') return productionFetch(request, env);
   try {
     const url = new URL(request.url), pathname = url.pathname.replace(/\/$/, '') || '/';
     if (request.url.length > 8192 || /%2f|%5c|%00/i.test(url.pathname)) throw new CloudflareRequestError('INVALID_URL', 400);

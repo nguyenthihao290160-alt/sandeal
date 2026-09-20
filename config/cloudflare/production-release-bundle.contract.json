@@ -1,0 +1,31 @@
+{
+  "schema": "sandeal-production-release-bundle-draft-v1",
+  "scope": "LOCAL_CONTRACT_READY_NOT_PRODUCTION_VERIFIED",
+  "executable": false,
+  "environment": "PRODUCTION",
+  "identity": {
+    "head": null,
+    "candidateFingerprint": null,
+    "workerFingerprint": null,
+    "staticFingerprint": null,
+    "configFingerprint": null,
+    "targets": { "accountId": null, "workerName": null, "staticTarget": null, "databaseId": null, "queueName": null, "route": null, "domain": null },
+    "migrations": { "checkedInInventoryReference": "src/lib/storage/d1/migrations", "authenticatedBaseline": null, "pendingSet": null },
+    "capabilities": ["READ_PRODUCTION_HEALTH"],
+    "secretReferences": ["BASIC_AUTH_PASSWORD", "BASIC_AUTH_USER"]
+  },
+  "requirements": {
+    "authentication": null, "resources": null, "bindings": null, "secretReferences": null,
+    "migrationBaseline": null, "recovery": null, "observability": null, "canaryRouting": null,
+    "changeWindow": null, "rollbackTargets": null, "staticArtifact": null
+  },
+  "bundleFingerprint": null,
+  "approval": null,
+  "emergencyStopVerification": null,
+  "killSwitchVerification": null,
+  "rollbackWorkerVersion": null,
+  "rollbackAssetVersion": null,
+  "contractReferences": ["config/cloudflare/production.contract.json", "docs/v6/phase-10-preauth-contracts.md"],
+  "activationPrerequisites": ["SEPARATE_AUTHENTICATED_READ_ONLY_DISCOVERY", "REVIEW_REQUIRED_POLICY_DECISIONS", "CLEAN_COMMITTED_CANDIDATE_AND_FINAL_ARTIFACTS", "TARGET_BOUND_FRESH_SIGNED_HUMAN_APPROVAL"],
+  "productionMutationMode": "BLOCKED"
+}

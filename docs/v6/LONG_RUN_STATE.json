@@ -1,8 +1,8 @@
 {
-  "program": "SANDEAL_V6_PHASE_9_TARGETED_ROLLBACK_REMEDIATION",
-  "currentPhase": "PHASE9_5",
-  "currentStep": "Local preproduction readiness certified; stop for read-only precommit audit",
-  "result": "PASS_LOCAL_PREPRODUCTION_REHEARSAL",
+  "program": "SANDEAL_V6_PHASE10_RESUMED_SAFE_PREFLIGHT",
+  "currentPhase": "PHASE10",
+  "currentStep": "Interrupted preflight resumed; local checks complete; production BLOCKED_PREAUTH; STOP",
+  "result": "BLOCKED_PREAUTH",
   "completedCheckpoints": [
     "PHASE_3: Focused reconstruction checks: 159 passed, zero failures/skips",
     "PHASE_3_5: Local shadow parity, immutable source and failure proof: 14 PASS",
@@ -15,7 +15,8 @@
     "PHASE_8: Local shadow foundation only",
     "PHASE_8_5: Resumed existing work; 122 focused cases and 601 critical regressions (104 rerun, 497 reused), zero failures/skips; local shadow foundation only",
     "PHASE_9: Targeted rollback remediation validated: 41/41 required cases; 124 focused plus 727 regressions reused, 1 new D1 cross-proposal replay proof (852 unique checks); final quality and Cloudflare static/Worker builds PASS; STOP for final re-audit",
-    "PHASE9_5: Resumed local preproduction rehearsal: 61 final focused plus 873 unaffected regressions, 934 unique PASS; source-bound certificate is historical/local only; STOP for precommit audit"
+    "PHASE9_5: Resumed local preproduction rehearsal: 61 final focused plus 873 unaffected regressions, 934 unique PASS; source-bound certificate is historical/local only; STOP for precommit audit",
+    "PHASE10_PREFLIGHT: Existing interrupted work resumed; 943 unique local PASS (303 reused, 640 remaining regressions), zero failures/skips; production BLOCKED_PREAUTH, no authorization or production mutation; STOP"
   ],
   "verifiedTestEvidence": [
     {
@@ -2897,10 +2898,36 @@
       "focusedRerunAfterArtifactFix": 61,
       "regressionsRunDuringResume": 873,
       "regressionsReusedAcrossIsolatedFix": 873
+    },
+    {
+      "name": "phase10-production-preflight",
+      "path": "docs/v6/evidence/phase10-production-launch.json",
+      "scope": "LOCAL_PREFLIGHT_ONLY_NOT_PRODUCTION_AUTHORIZATION",
+      "result": "BLOCKED_PREAUTH",
+      "passed": 943,
+      "failed": 0,
+      "skipped": 0,
+      "reusedSafety": 237,
+      "reusedMoney": 57,
+      "reusedNegativeProbes": 9,
+      "resumedRegressions": 640,
+      "migrationChecksRerunNotDoubleCounted": 8,
+      "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+      "regressionReport": ".test-tmp/phase10/resume-20260919/regressions.json",
+      "finalVerification": ".test-tmp/phase10/resume-20260919/final-check.json"
     }
   ],
-  "nextStep": "STOP_FOR_PHASE9_5_PRECOMMIT_AUDIT",
-  "blockers": [],
+  "nextStep": "STOP_BLOCKED_PREAUTH_SEPARATE_REVIEW_REQUIRED",
+  "blockers": [
+    "PHASE9_5_PRECOMMIT_AUDIT_PASS_NOT_RECORDED",
+    "PRODUCTION_RUNTIME_REJECTED_AND_STATIC_BUILD_NOT_PRODUCTION_EQUIVALENT",
+    "CLOUDFLARE_AUTHENTICATION_AND_PRODUCTION_ACCOUNT_TARGETS_UNAVAILABLE",
+    "PRODUCTION_BINDINGS_AND_SECRET_REFERENCE_CONTRACT_UNVERIFIED",
+    "PRODUCTION_D1_BASELINE_PENDING_SET_AND_RECOVERY_UNKNOWN",
+    "PRODUCTION_CAPABILITIES_APPROVAL_VALIDATOR_KILL_SWITCH_AND_EMERGENCY_PATH_UNAVAILABLE",
+    "PRODUCTION_CHANGE_WINDOW_OBSERVABILITY_CANARY_AND_ROLLBACK_UNVERIFIED",
+    "FINAL_DOCUMENTATION_CHANGES_REQUIRE_HUMAN_REVIEW_AND_CLEAN_COMMIT_BEFORE_RECERTIFICATION"
+  ],
   "phase7_5Reconstruction": {
     "branch": "master",
     "head": "0ee3ea152bc6ea40fcafad8f203a446018d51ffc",
@@ -3107,7 +3134,7 @@
     "preserveDirtyWorktree": true,
     "phase6Authorized": false
   },
-  "firstUnverifiedStep": "PHASE9_5_PRECOMMIT_AUDIT",
+  "firstUnverifiedStep": "PRODUCTION_PREAUTH_BLOCKERS_REQUIRE_SEPARATE_REVIEW_NOT_AUTHORIZED",
   "phase4Gate": {
     "result": "PASS",
     "safeForPhase4_5": "YES",
@@ -3194,8 +3221,8 @@
     "nextPhaseRequiresSeparateAuthorization": true
   },
   "branch": "master",
-  "head": "1fda09b7d0e9fdaac6a315b4aa50d3da326adeab",
-  "workingTreeFingerprint": "bef571bc4030ec6a0bb01074a853604566a620ecee31112a4a1955c721e82510",
+  "head": "4890b7bd4ec737d1e503ea2b6e38435a817aaee6",
+  "workingTreeFingerprint": "38f75c7ee8a06e7f3bcacca9fc3fac749029345afa835483631ee40e1c0d912e",
   "workingTreeFingerprintPolicy": "SHA256 of sorted Git tracked and nonignored untracked path/content hashes; excludes this generated state, evidence, and secret environment files",
   "filesChangedSinceEvidence": [
     ".gitignore",
@@ -3353,10 +3380,11 @@
     "src/lib/storage/d1/migrations/0007_decision_os.sql",
     "src/lib/storage/d1/migrations/0008_opportunity_experiments.sql",
     "src/lib/storage/d1/migrations/0009_content_lifecycle.sql",
-    "src/lib/storage/d1/migrations/0010_execution_control_plane.sql"
+    "src/lib/storage/d1/migrations/0010_execution_control_plane.sql",
+    "docs/v6/phase-10-production-launch.md"
   ],
   "filesChangedSinceEvidenceBaseline": "docs/v6/evidence/resume-3-baseline.json",
-  "updatedAt": "2026-09-18T00:12:26.245Z",
+  "updatedAt": "2026-09-18T23:38:57.029Z",
   "phase5Plan": [
     "Extend existing provider/offer contracts without new discovery internals",
     "Attach normalized provider offers to the existing canonical product aggregate",
@@ -3933,5 +3961,84 @@
       "CLOUDFLARE_LOGIN_USED": "NO",
       "PHASE10_STARTED": "NO"
     }
+  },
+  "phase10": {
+    "checkpoint": "docs/v6/phase-10-production-launch.md",
+    "evidence": "docs/v6/evidence/phase10-production-launch.json",
+    "scope": "RESUMED_LOCAL_PREFLIGHT_NOT_PRODUCTION_AUTHORIZATION",
+    "result": "BLOCKED_PREAUTH",
+    "sourceHead": "4890b7bd4ec737d1e503ea2b6e38435a817aaee6",
+    "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+    "currentProductionCandidateFingerprint": null,
+    "sourceArtifactInventoryFingerprint": "676fd84a4a695743bb674de5ae82fa50e4073d60dfddc8c9f5caeb2c4bede1c2",
+    "productionAuthorized": false,
+    "readyForProductionAuthorization": false,
+    "productionMutationMode": "BLOCKED",
+    "productionEmergencyStopReady": false,
+    "totalPassed": 943,
+    "reusedPassed": 303,
+    "resumedRegressionsPassed": 640,
+    "migrationChecksRerunNotDoubleCounted": 8,
+    "failed": 0,
+    "skipped": 0,
+    "resumedWorktreeClean": false,
+    "originalPhase10WorktreeClean": true,
+    "sourceChangedAfter237SafetyTests": false,
+    "moneySuiteCompletedBeforeResume": true,
+    "moneyCompletedAt": "2026-09-18T14:09:05.973Z",
+    "previousStateSha256": "6ce81e1b9323f3bb7e2cb6329c4d7fb708f1ad78ca909f65912d501d2fd5e480",
+    "previousStateSnapshot": ".test-tmp/phase10/resume-20260919/prior-long-run-state.json",
+    "previousStateMetadata": {
+      "program": "SANDEAL_V6_PHASE_9_TARGETED_ROLLBACK_REMEDIATION",
+      "currentPhase": "PHASE9_5",
+      "currentStep": "Local preproduction readiness certified; stop for read-only precommit audit",
+      "result": "PASS_LOCAL_PREPRODUCTION_REHEARSAL",
+      "nextStep": "STOP_FOR_PHASE9_5_PRECOMMIT_AUDIT",
+      "blockers": [],
+      "firstUnverifiedStep": "PHASE9_5_PRECOMMIT_AUDIT",
+      "head": "1fda09b7d0e9fdaac6a315b4aa50d3da326adeab",
+      "workingTreeFingerprint": "bef571bc4030ec6a0bb01074a853604566a620ecee31112a4a1955c721e82510",
+      "updatedAt": "2026-09-18T00:12:26.245Z"
+    },
+    "outcomes": {
+      "PHASE10": "BLOCKED_PREAUTH",
+      "PHASE10_PREFLIGHT": "PASS_LOCAL_CHECKS_PRODUCTION_BLOCKED",
+      "LAST_CONFIRMED_SAFETY_TESTS": 237,
+      "MONEY_REGRESSION_TESTS": 57,
+      "TOTAL_VERIFIED_TESTS": 943,
+      "FAILED_TESTS": 0,
+      "SKIPPED_TESTS": 0,
+      "BUILD_CLOUDFLARE_WORKER": "PASS",
+      "BUILD_CLOUDFLARE_STATIC": "PASS",
+      "CLOUDFLARE_AUTHORIZATION": "ABSENT",
+      "PRODUCTION_BINDING_PREFLIGHT": "BLOCKED_MISSING_BINDINGS",
+      "PRODUCTION_APPROVAL_MODEL": "BLOCKED_NO_PRODUCTION_VALIDATOR",
+      "PRODUCTION_KILL_SWITCH_PREFLIGHT": "BLOCKED_NOT_CONNECTED",
+      "PRODUCTION_EMERGENCY_STOP_READY": "NO",
+      "PRODUCTION_RELEASE_BUNDLE": "BLOCKED_INCOMPLETE",
+      "TYPESCRIPT": "PASS",
+      "ESLINT": "PASS_0_NEW_ERRORS",
+      "SECRET_SCAN": "PASS",
+      "GIT_DIFF_CHECK": "PASS",
+      "LONG_RUN_STATE_PARSE": "PASS",
+      "LONG_RUN_STATE_PRIOR_HISTORY_PRESERVED": "YES",
+      "PRODUCTION_MUTATION_MODE": "BLOCKED",
+      "PRODUCTION_EXECUTION_ENABLED": "NO",
+      "PRODUCTION_SIDE_EFFECTS": 0,
+      "PRODUCTION_D1_MIGRATIONS": 0,
+      "CLOUDFLARE_DEPLOYMENTS": 0,
+      "DNS_CHANGES": 0,
+      "PRODUCTION_TRAFFIC_SHIFT": 0,
+      "REAL_MONEY_TRANSACTION_CREATED": "NO",
+      "DIRECT_SHOPEE_API_CALLS": 0,
+      "AI_EXECUTION_AUTHORITY": "NO",
+      "READY_FOR_PRODUCTION_AUTHORIZATION": "NO",
+      "PHASE10_CHECKPOINT_CONSISTENT": "YES",
+      "NEXT_STEP": "STOP_BLOCKED_PREAUTH_SEPARATE_REVIEW_REQUIRED"
+    },
+    "allOutcomesReference": "docs/v6/evidence/phase10-production-launch.json#outcomes",
+    "finalVerification": ".test-tmp/phase10/resume-20260919/final-check.json",
+    "productionNegativeAssertionScope": "SESSION_EFFECTS_AND_LOCAL_GUARDS_EXTERNAL_PRODUCTION_STATE_UNINSPECTED",
+    "stop": true
   }
 }

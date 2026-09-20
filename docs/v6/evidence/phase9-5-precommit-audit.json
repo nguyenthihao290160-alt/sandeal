@@ -1,0 +1,45 @@
+{
+  "schema": "sandeal-phase95-reconstructed-audit-v1",
+  "reviewedAt": "2026-09-19T10:04:58.376Z",
+  "scope": "HONESTLY_DATED_POSTCOMMIT_REVERIFICATION_OF_COMMITTED_PHASE95_NOT_BACKDATED",
+  "head": "4890b7bd4ec737d1e503ea2b6e38435a817aaee6",
+  "originalPrecommitAuditTimestamp": null,
+  "originalPrecommitAuditClaimVerified": false,
+  "PHASE9_5_PRECOMMIT_AUDIT": "PASS",
+  "PHASE9_5_PRECOMMIT_EVIDENCE": "PASS",
+  "SAFE_TO_COMMIT_ALL": "YES",
+  "SAFE_TO_COMMIT_ALL_SCOPE": "RECONSTRUCTED_19_FILE_PHASE95_CHANGESET_ONLY_NOT_CURRENT_PHASE10_WORKTREE",
+  "SUSPICIOUS_COUNT": 0,
+  "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
+  "sourceFilesVerified": 696,
+  "checks": {
+    "committedPathsReviewed": 19,
+    "unexpectedPaths": 0,
+    "committedSourceAndRetainedManifestMatch": true,
+    "secretScan": "PASS",
+    "commitAndWorktreeDiffCheck": "PASS",
+    "focusedPassed": 61,
+    "regressionsPassed": 873,
+    "failed": 0,
+    "skipped": 0,
+    "retainedRawReportHashesVerified": 8,
+    "phase10RawRegressionLogHashesAlsoVerified": true,
+    "historicalCertificateReusable": false
+  },
+  "rawReport": {
+    "path": ".test-tmp/phase10-preauth/phase95-audit.json",
+    "sha256": "4b7c18853d41841025e4bd6c72433d903d43adb7ee864e21f4b286e058669874"
+  },
+  "reportReferences": {
+    "focused": "af8ea6d42bd51dbb1e1042b79b4fc2e0211184a3025c394a5d50d863437d9ece",
+    "regressions": "ca97d8b36126c4faf87803bbcd86625fdecd35d8b23c1db31c890230210606da",
+    "quality": "f38efd549d0387117b1b7e833e78194a5c40539a9f9b8a2e3fa2c1812d021873",
+    "build": "df6fc4221a5b02ed4a23162d93057d6ffc89a876593cf820d197d4905b3d34be",
+    "certification": "c040c5dd10082a0021a3217d06f3d77c86df3ac0320945eab1b937ffd6b01483"
+  },
+  "sourceEvidence": "docs/v6/evidence/phase9-5-preproduction-readiness.json",
+  "verifier": "scripts/phase-09-5-precommit-audit.mjs",
+  "productionAuthority": false,
+  "commitPerformed": false,
+  "pushPerformed": false
+}

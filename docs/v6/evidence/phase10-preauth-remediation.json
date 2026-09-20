@@ -1,0 +1,30 @@
+{
+  "checkedAt": "2026-09-20T08:27:51.126Z",
+  "sourceFingerprint": "c2547677284d573b4d5fbc0260808b2d80649700774192e0a79d547f284acbe8",
+  "sourceHead": "4890b7bd4ec737d1e503ea2b6e38435a817aaee6",
+  "uniqueTests": 1039,
+  "failed": 0,
+  "skipped": 0,
+  "reused": 0,
+  "resumedRegressionTests": 21,
+  "migrationChecksRerunNotDoubleCounted": 0,
+  "finalQuality": "PASS",
+  "stateParse": "PASS",
+  "priorHistoryPreserved": true,
+  "checkpointConsistent": true,
+  "currentReleaseCandidateFingerprint": "NONE_PRODUCTION_CANDIDATE_UNAVAILABLE",
+  "artifactInventoryFingerprint": "4d54751c7197540ea97766070c81315dcd7f7c12f9da5a0a8e58975e7872bcef",
+  "localArtifactInventoryFingerprint": "fda6ed4a4072b38fc5cb9a3a9fdbe5664675b18a8c34ea29a7bd84f17c2c2d92",
+  "documentHashes": {
+    "docs/v6/LONG_RUN_STATE.json": "e5ec3be18c422b603a01ee49ad535e6a4e285eb209124ec34f9be76ceec96518",
+    "docs/v6/phase-10-production-launch.md": "c3c984580399e72b622361441f22d6c0e89d3d9b5e05ccc7bd68d2651e6182ce",
+    "docs/v6/phase-10-preauth-contracts.md": "18c79e2ea24753944a42eaf7d5abe485c15714e697cce24501874be701bc4af9",
+    "docs/v6/evidence/phase10-production-launch.json": "8b152506d25f4a322201b6b743ae848a91d765c623b2f57824b3831888198761",
+    "docs/v6/evidence/phase10-preauth-remediation.json": "d381222dd118d2d0c2af76c3f1a79259d707a57b35c60f0ebe72b6b3dda5e533",
+    "docs/v6/evidence/phase9-5-precommit-audit.json": "ada2f6b9a1630b4efc25a431d9bbd73870d6b0cf8481ce73a407a41c23939fd0"
+  },
+  "gitStatus": "M cloudflare/site/app/layout.tsx\n M cloudflare/site/next.config.mjs\n M docs/v6/LONG_RUN_STATE.json\n M scripts/v6-cloudflare-build.cjs\n M src/lib/runtime/cloudflare/autopilot.ts\n M src/lib/runtime/cloudflare/context.ts\n M src/lib/runtime/cloudflare/http.ts\n?? config/cloudflare/production-release-bundle.contract.json\n?? config/cloudflare/production.contract.json\n?? docs/v6/evidence/phase10-preauth-remediation.json\n?? docs/v6/evidence/phase10-production-launch.json\n?? docs/v6/evidence/phase9-5-precommit-audit.json\n?? docs/v6/phase-10-preauth-contracts.md\n?? docs/v6/phase-10-production-launch.md\n?? scripts/lib/phase10-evidence-isolation.mjs\n?? scripts/phase-09-5-precommit-audit.mjs\n?? scripts/phase-10-preauth-tests.mjs\n?? scripts/v6-phase10-preauth-validation.mjs\n?? src/lib/execution-control-plane/production.ts\n?? src/lib/release-rehearsal/productionDiscovery.ts\n?? src/lib/runtime/cloudflare/production.ts",
+  "sourceChanged": false,
+  "productionMutations": 0,
+  "productionAuthorization": false
+}

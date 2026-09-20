@@ -76,6 +76,7 @@ export async function consumeDelivery(delivery: QueueDelivery, env: CloudflareEn
   delivery.ack(); return 'SUCCEEDED';
 }
 export async function cloudflareQueue(batch: QueueBatch, env: CloudflareEnvironment) {
+  if (env.SANDEAL_RUNTIME !== 'cloudflare' || env.SANDEAL_LOCAL_ONLY !== 'true' || env.SANDEAL_PRODUCTION !== 'false') throw new EventJobError('PRODUCTION_QUEUE_DISABLED', 'FINAL');
   if (batch.queue !== 'sandeal-local-jobs' || batch.messages.length > EVENT_LIMITS.queueBatch) throw new EventJobError('QUEUE_BATCH_REJECTED', 'QUARANTINE');
   // D1 has the business attempt cap. The local Queue config separately caps transport retries.
   for (const message of batch.messages) {

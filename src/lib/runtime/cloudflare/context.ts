@@ -3,8 +3,9 @@ import { createD1StorageAdapter } from '../../storage/d1/d1StorageAdapter';
 import type { D1Database } from '../../storage/d1/database';
 import { ShopeeAffiliateProvider } from '../../affiliate/shopeeAffiliateProvider';
 import type { QueueBinding } from '../../platform/cloudflareContracts';
+import type { ProductionEnvironment } from './production';
 
-export interface CloudflareEnvironment {
+export interface CloudflareEnvironment extends ProductionEnvironment {
   SANDEAL_RUNTIME: string;
   SANDEAL_LOCAL_ONLY: string;
   SANDEAL_PRODUCTION: string;
