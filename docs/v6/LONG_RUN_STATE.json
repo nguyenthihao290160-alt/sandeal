@@ -1,8 +1,8 @@
 {
-  "program": "SANDEAL_V6_PHASE10_RESUMED_SAFE_PREFLIGHT",
+  "program": "SANDEAL_V6_PHASE10_PRODUCTION_DISCOVERY",
   "currentPhase": "PHASE10",
-  "currentStep": "Interrupted preflight resumed; local checks complete; production BLOCKED_PREAUTH; STOP",
-  "result": "BLOCKED_PREAUTH",
+  "currentStep": "Read-only discovery stopped at authentication; no production inventory or mutation; STOP",
+  "result": "DISCOVERY_BLOCKED",
   "completedCheckpoints": [
     "PHASE_3: Focused reconstruction checks: 159 passed, zero failures/skips",
     "PHASE_3_5: Local shadow parity, immutable source and failure proof: 14 PASS",
@@ -2917,16 +2917,13 @@
       "finalVerification": ".test-tmp/phase10/resume-20260919/final-check.json"
     }
   ],
-  "nextStep": "STOP_BLOCKED_PREAUTH_SEPARATE_REVIEW_REQUIRED",
+  "nextStep": "STOP_OPERATOR_AUTHENTICATES_OUTSIDE_CHAT_CONFIRMS_TARGETS_REVIEWS_AND_COMMITS_CHECKPOINT_THEN_REQUESTS_READ_ONLY_DISCOVERY_AGAIN",
   "blockers": [
-    "PHASE9_5_PRECOMMIT_AUDIT_PASS_NOT_RECORDED",
-    "PRODUCTION_RUNTIME_REJECTED_AND_STATIC_BUILD_NOT_PRODUCTION_EQUIVALENT",
-    "CLOUDFLARE_AUTHENTICATION_AND_PRODUCTION_ACCOUNT_TARGETS_UNAVAILABLE",
-    "PRODUCTION_BINDINGS_AND_SECRET_REFERENCE_CONTRACT_UNVERIFIED",
-    "PRODUCTION_D1_BASELINE_PENDING_SET_AND_RECOVERY_UNKNOWN",
-    "PRODUCTION_CAPABILITIES_APPROVAL_VALIDATOR_KILL_SWITCH_AND_EMERGENCY_PATH_UNAVAILABLE",
-    "PRODUCTION_CHANGE_WINDOW_OBSERVABILITY_CANARY_AND_ROLLBACK_UNVERIFIED",
-    "FINAL_DOCUMENTATION_CHANGES_REQUIRE_HUMAN_REVIEW_AND_CLEAN_COMMIT_BEFORE_RECERTIFICATION"
+    "CLOUDFLARE_AUTHENTICATION_REQUIRED",
+    "INTENDED_PRODUCTION_ACCOUNT_AND_TARGETS_UNSPECIFIED",
+    "PRODUCTION_INVENTORY_BASELINE_AND_OPERATIONAL_PREREQUISITES_UNVERIFIED",
+    "CHANGE_WINDOW_NOT_CONFIGURED",
+    "PREAUTH_FINAL_AUDIT_NOT_IN_DURABLE_CHECKPOINTS"
   ],
   "phase7_5Reconstruction": {
     "branch": "master",
@@ -3134,7 +3131,7 @@
     "preserveDirtyWorktree": true,
     "phase6Authorized": false
   },
-  "firstUnverifiedStep": "PRODUCTION_PREAUTH_BLOCKERS_REQUIRE_SEPARATE_REVIEW_NOT_AUTHORIZED",
+  "firstUnverifiedStep": "STEP_2_EXISTING_CLOUDFLARE_AUTHENTICATION_REQUIRED",
   "phase4Gate": {
     "result": "PASS",
     "safeForPhase4_5": "YES",
@@ -3221,8 +3218,8 @@
     "nextPhaseRequiresSeparateAuthorization": true
   },
   "branch": "master",
-  "head": "4890b7bd4ec737d1e503ea2b6e38435a817aaee6",
-  "workingTreeFingerprint": "38f75c7ee8a06e7f3bcacca9fc3fac749029345afa835483631ee40e1c0d912e",
+  "head": "b9e42ceff31dfc214148b2c6d767369fd2aa303d",
+  "workingTreeFingerprint": "8f3db8e4d5d027aeba3c0a378d2f95de7e23131c3e3313cc707f6a40c213fe90",
   "workingTreeFingerprintPolicy": "SHA256 of sorted Git tracked and nonignored untracked path/content hashes; excludes this generated state, evidence, and secret environment files",
   "filesChangedSinceEvidence": [
     ".gitignore",
@@ -3384,7 +3381,7 @@
     "docs/v6/phase-10-production-launch.md"
   ],
   "filesChangedSinceEvidenceBaseline": "docs/v6/evidence/resume-3-baseline.json",
-  "updatedAt": "2026-09-18T23:38:57.029Z",
+  "updatedAt": "2026-09-20T09:34:36.998Z",
   "phase5Plan": [
     "Extend existing provider/offer contracts without new discovery internals",
     "Attach normalized provider offers to the existing canonical product aggregate",
@@ -4039,6 +4036,54 @@
     "allOutcomesReference": "docs/v6/evidence/phase10-production-launch.json#outcomes",
     "finalVerification": ".test-tmp/phase10/resume-20260919/final-check.json",
     "productionNegativeAssertionScope": "SESSION_EFFECTS_AND_LOCAL_GUARDS_EXTERNAL_PRODUCTION_STATE_UNINSPECTED",
+    "stop": true
+  },
+  "phase10ProductionDiscovery": {
+    "checkpoint": "docs/v6/phase-10-production-launch.md",
+    "evidence": "docs/v6/evidence/phase10-production-discovery.json",
+    "scope": "READ_ONLY_DISCOVERY_ATTEMPT_STOPPED_AT_AUTHENTICATION_LOCAL_CHECKPOINT_ONLY",
+    "result": "DISCOVERY_BLOCKED",
+    "authenticationCheckedAt": "2026-09-20T09:34:36.998Z",
+    "sourceHead": "b9e42ceff31dfc214148b2c6d767369fd2aa303d",
+    "workingTreeFingerprint": "8f3db8e4d5d027aeba3c0a378d2f95de7e23131c3e3313cc707f6a40c213fe90",
+    "filesChangedDuringDiscovery": ["docs/v6/LONG_RUN_STATE.json", "docs/v6/evidence/phase10-production-discovery.json", "docs/v6/phase-10-production-launch.md"],
+    "legacyRootFileChangeMetadataScope": "filesChangedSinceEvidence and its baseline are preserved historical metadata, not this discovery changeset",
+    "worktreeCleanAtDiscoveryStart": true,
+    "indexCleanAtDiscoveryStart": true,
+    "cloudflareAuthenticated": false,
+    "productionAccountTargetMatch": "UNKNOWN",
+    "authenticatedResourceRequests": 0,
+    "productionAuthorized": false,
+    "productionMutationMode": "BLOCKED",
+    "productionExecutionEnabled": false,
+    "readyForProductionLaunchReview": false,
+    "previousStateSha256": "e5ec3be18c422b603a01ee49ad535e6a4e285eb209124ec34f9be76ceec96518",
+    "previousStateReference": "git:b9e42ceff31dfc214148b2c6d767369fd2aa303d:docs/v6/LONG_RUN_STATE.json",
+    "previousTopLevel": {
+      "program": "SANDEAL_V6_PHASE10_RESUMED_SAFE_PREFLIGHT",
+      "currentPhase": "PHASE10",
+      "currentStep": "Interrupted preflight resumed; local checks complete; production BLOCKED_PREAUTH; STOP",
+      "result": "BLOCKED_PREAUTH",
+      "nextStep": "STOP_BLOCKED_PREAUTH_SEPARATE_REVIEW_REQUIRED",
+      "blockers": [
+        "PHASE9_5_PRECOMMIT_AUDIT_PASS_NOT_RECORDED",
+        "PRODUCTION_RUNTIME_REJECTED_AND_STATIC_BUILD_NOT_PRODUCTION_EQUIVALENT",
+        "CLOUDFLARE_AUTHENTICATION_AND_PRODUCTION_ACCOUNT_TARGETS_UNAVAILABLE",
+        "PRODUCTION_BINDINGS_AND_SECRET_REFERENCE_CONTRACT_UNVERIFIED",
+        "PRODUCTION_D1_BASELINE_PENDING_SET_AND_RECOVERY_UNKNOWN",
+        "PRODUCTION_CAPABILITIES_APPROVAL_VALIDATOR_KILL_SWITCH_AND_EMERGENCY_PATH_UNAVAILABLE",
+        "PRODUCTION_CHANGE_WINDOW_OBSERVABILITY_CANARY_AND_ROLLBACK_UNVERIFIED",
+        "FINAL_DOCUMENTATION_CHANGES_REQUIRE_HUMAN_REVIEW_AND_CLEAN_COMMIT_BEFORE_RECERTIFICATION"
+      ],
+      "firstUnverifiedStep": "PRODUCTION_PREAUTH_BLOCKERS_REQUIRE_SEPARATE_REVIEW_NOT_AUTHORIZED",
+      "head": "4890b7bd4ec737d1e503ea2b6e38435a817aaee6",
+      "workingTreeFingerprint": "38f75c7ee8a06e7f3bcacca9fc3fac749029345afa835483631ee40e1c0d912e",
+      "updatedAt": "2026-09-18T23:38:57.029Z"
+    },
+    "historicalPhaseObjectsPreserved": true,
+    "historicalCheckpointCountPreserved": 13,
+    "historicalTestEvidenceCountPreserved": 53,
+    "outcomesReference": "docs/v6/evidence/phase10-production-discovery.json#outcomes",
     "stop": true
   }
 }

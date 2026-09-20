@@ -1,3 +1,81 @@
+# Phase 10 — Authenticated discovery attempt (blocked)
+
+## Current disposition — September 20, 2026
+
+**`PHASE10=DISCOVERY_BLOCKED`. `PHASE10_DISCOVERY=BLOCKED_AUTHENTICATION_REQUIRED`.**
+This is a stopped read-only discovery attempt, not a completed authenticated
+inventory, production launch, approval, or readiness certificate. Production
+mutation remains **BLOCKED** and production execution remains **NO**.
+
+- The six required Git commands ran before Cloudflare tooling. Branch `master`,
+  HEAD `b9e42ceff31dfc214148b2c6d767369fd2aa303d`; worktree and index were clean,
+  and `git diff --check` passed. The preauth production contracts and validators
+  are committed in that HEAD, dated September 20, 2026, 16:21:28 Asia/Saigon.
+- At **2026-09-20T09:34:36.998Z / 16:34:36.998 Asia/Saigon**, installed Wrangler
+  **4.129.1** `whoami --json` exited **1** with `loggedIn: false`. Its source was
+  inspected first; the invocation disabled network connections, telemetry and
+  log-payload writes and emitted only allowlisted status fields. No connection
+  was attempted or blocked. No login, token refresh or credential output occurred.
+- Discovery stopped at Step 2. No account/resource/schema/route/DNS/provider
+  request followed. Unknown resources are **not** declared absent; unknown drift,
+  secret presence, recovery, observability or kill-switch state never passes.
+
+Durable sanitized evidence: `docs/v6/evidence/phase10-production-discovery.json`.
+The separate `phase10ProductionDiscovery` state records this attempt; all existing
+Phase 5–10 objects, all 13 historical checkpoints and all 53 test-evidence entries
+remain unchanged. The complete prior launch document is retained verbatim below.
+
+## Expected contract, not discovered production state
+
+The committed contract requires **one Worker with ASSETS, D1 `DB`, and Queue
+`JOB_QUEUE`**, not a separate Pages project. Account, Worker/static target, D1 ID,
+Queue name, domain, route and zone are unresolved. Local-only resource names and
+the all-zero local D1 identifier are not production targets. Queue production
+producer/consumer and Cron remain disabled; no production schedule is specified.
+The local five-minute schedule must not be copied into production.
+
+Required secret references are `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`;
+`ACCESS_TRADE_API_KEY` is conditional on a separately reviewed provider capability.
+Only names are recorded; actual production presence is **UNKNOWN**. AccessTrade
+remains the provider contract; its production endpoint/campaign/merchant/platform
+references are unresolved. Direct Shopee remains disabled in the committed
+contract, with no credentials added and zero API calls in this session.
+
+The repository contains ten migrations through `0010_execution_control_plane.sql`.
+Their hashes and unchanged conservative local classifications are in the evidence.
+**Production baseline and pending set remain UNKNOWN**, not zero pending. No SQL
+was executed. Pending destructive or unknown migrations would block launch.
+
+The local approval validator and D1 `execution_controls`/`release_bundles` contracts
+exist, but no actual target, live control state, operator stop procedure, previous
+Worker/asset version, canary mechanism or D1 recovery is verified. All 12 required
+observability signals are UNKNOWN. Rollback coverage is **UNVERIFIED, not FULL**.
+The committed change-window policy is not configured; external operator policy
+and production configuration were not inspected. No approval or candidate issued.
+
+## Provenance and handoff
+
+The committed preauth evidence records a local final-quality report with **1,039
+prior passing tests**; these tests were not rerun by discovery. The supplied
+historical state and launch document still say `BLOCKED_PREAUTH`, and the expected
+Phase 10 preauth final-audit/ready-after-commit markers are not recorded there.
+The user's reported audit completion is not relabeled failed, but is not fabricated
+as an independently verified durable audit either. The recorded Phase 9.5 audit
+PASS is a separate, honestly dated reconstructed review.
+
+**`READY_FOR_PRODUCTION_LAUNCH_REVIEW=NO`.** The operator must establish the intended
+Cloudflare session outside chat, confirm the non-secret production account/target
+mapping, resolve the final-audit provenance, and review/commit this local checkpoint
+before requesting read-only discovery again. No interactive login is started.
+Every production creation/modification/deletion, migration/data write, deployment,
+DNS change, traffic shift, Queue message, content mutation, experiment, real-money
+transaction and direct Shopee call remains zero for this session. Raw secret output
+is zero. These counters do not describe the uninspected external production state.
+
+**STOP. A later launch still requires separate explicit human authorization.**
+
+---
+
 # Phase 10 — Controlled production launch preflight
 
 ## Disposition
