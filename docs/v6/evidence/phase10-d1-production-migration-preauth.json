@@ -1,14 +1,137 @@
 {
-  "timestamp": "2026-09-21T02:49:45.730Z",
-  "auditStatus": "PASS",
-  "gitClean": true,
-  "evidenceVerified": true,
-  "productionIdentityMatch": true,
-  "productionEmptyBaseline": true,
-  "migrationSourceHashesMatch": true,
-  "proposedApplyStrategy": "STEPWISE_0001_TO_0010_WITH_VERIFICATION",
-  "recoveryPlanStatusRevised": "READY",
-  "abortConditionsDefined": true,
-  "changeWindowDefined": true,
-  "authorizationDecision": "YES"
+  "schema": "phase10-d1-local-preauth-reaudit-v2",
+  "observedAt": "2026-09-21T06:48:45.794Z",
+  "auditStatus": "LOCAL_EVIDENCE_REAUDIT_READY",
+  "sourceHead": "95ecff5c4f0e235be1d7b7918dbeec4368584d6e",
+  "branch": "master",
+  "scope": "LOCAL_ONLY_PREAUTH_EVIDENCE_REVALIDATION_NOT_MIGRATION_AUTHORIZATION",
+  "priorConclusion": {
+    "sha256": "c6755cba08ba55fab8affd54b9b2ba050ed8f2596650a11fcaf5ebfb74897d9c",
+    "status": "SUPERSEDED_UNSUPPORTED_BLANKET_PASS",
+    "reason": "Historical booleans did not contain verifiable source-to-rehearsal and fingerprint-method evidence."
+  },
+  "initialWorktreeClean": true,
+  "initialIndexClean": true,
+  "currentWorktreeClean": false,
+  "currentIndexClean": true,
+  "expectedDirtyFiles": [
+    "docs/v6/evidence/phase10-d1-clean-install-rehearsal.json",
+    "docs/v6/evidence/phase10-d1-production-migration-preauth.json",
+    "docs/v6/phase-10-d1-schema-fingerprint.md",
+    "scripts/lib/d1-schema-canonical.mjs",
+    "scripts/phase-10-d1-evidence-repair.mjs",
+    "scripts/phase-10-d1-evidence-tests.mjs"
+  ],
+  "unrelatedDirtyFiles": [],
+  "rehearsalReference": {
+    "file": "docs/v6/evidence/phase10-d1-clean-install-rehearsal.json",
+    "sha256": "bdaae67d2d50c6788579985f840f77930738c9d8358668a9ed81463fffa3f701",
+    "bytes": 714979,
+    "evidenceBindingSha256": "32cf14313038c8219855d18505b4f283d42019e0d79508a74a6cd22eaad98921",
+    "sourceManifestSha256": "f93f9068742da2e26a68fbe948ebcfa483aed7c09db8af20c5a51643d1c74224"
+  },
+  "migrationSources": [
+    {
+      "file": "src/lib/storage/d1/migrations/0001_product_storage.sql",
+      "sha256": "1fad5e55594346eebca93362755a94d235a37f9814099422618622a70d858c84",
+      "bytes": 5627
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0002_event_jobs.sql",
+      "sha256": "4ceaa99be08658c4d4486bfdfe95eb1802e57dbf1979d6dfebed5194b9c0c279",
+      "bytes": 2199
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0003_affiliate_money.sql",
+      "sha256": "53cbe21758ba82cb0bf78e56db16eecc421f1ec15bf4f6c4cf2b21dc4cef3424",
+      "bytes": 10493
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0004_money_snapshot_jobs.sql",
+      "sha256": "2ea269d75b554d75f92918fa5123b7a9dd59ce6e116c9c71661110fd60d74baa",
+      "bytes": 2359
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0005_money_platform.sql",
+      "sha256": "ac8ff8986c7d4111713f15799dfe588ef2a6d0be338c05483a583771be084165",
+      "bytes": 5307
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0006_deal_intelligence.sql",
+      "sha256": "8f6c72694d3997f503edc4f80cd396874be0f833890dda82c5b09ce9dd7fc75e",
+      "bytes": 8503
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0007_decision_os.sql",
+      "sha256": "be8b2236e9428601c47df301f6ad9271e26c5c4ee2b012dedeb1f58c90142847",
+      "bytes": 3472
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0008_opportunity_experiments.sql",
+      "sha256": "ad0fcd6c46b49706b5c4840a49f540fbf23111e3715a62cd28b7a3307c5fe251",
+      "bytes": 8164
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0009_content_lifecycle.sql",
+      "sha256": "792a823478cdee7e69fda814297fa87c05bd620fdb856bfecee774529b63d9b2",
+      "bytes": 16937
+    },
+    {
+      "file": "src/lib/storage/d1/migrations/0010_execution_control_plane.sql",
+      "sha256": "7402fcea62eb779d24f2ee99aec011f54924006d3963d265cc6ca5b45a8380a2",
+      "bytes": 9479
+    }
+  ],
+  "migrationSourceHashesMatchRehearsal": true,
+  "methodVersion": "d1-schema-canonical-v1",
+  "schemaFingerprintA": "e5c45918f92463f24a675bf7c62407714b3110ce1929b2108703a8fa22e190c1",
+  "schemaFingerprintB": "e5c45918f92463f24a675bf7c62407714b3110ce1929b2108703a8fa22e190c1",
+  "localRequirements": {
+    "durableMigrationHashes": "PASS",
+    "hashesTiedToFreshRehearsal": "PASS",
+    "fingerprintMethodDocumented": "PASS",
+    "fingerprintRepeatable": "PASS",
+    "currentMigrationHashesEqualRehearsal": "PASS",
+    "zeroBusinessSeed": "PASS",
+    "partialResumesVerified": "PASS",
+    "failureBehaviorVerified": "PASS",
+    "recoveryLimitationsDocumented": "PASS",
+    "phase5EvidenceUnchanged": "PASS",
+    "noUnrelatedDirtyChanges": "PASS",
+    "qualityChecks": "PASS"
+  },
+  "currentProductionIdentityVerified": false,
+  "currentProductionEmptyBaselineVerified": false,
+  "productionInspectedThisTask": false,
+  "recoveryPlanStatus": "LOCAL_LIMITATIONS_DOCUMENTED_PRODUCTION_RECOVERY_UNVERIFIED",
+  "productionGateBlockers": [
+    "FINAL_CHECKPOINT_REQUIRES_HUMAN_REVIEW",
+    "CURRENT_PRODUCTION_IDENTITY_AND_EMPTY_BASELINE_NOT_REVALIDATED",
+    "PRODUCTION_BACKUP_AND_RECOVERY_NOT_VERIFIED",
+    "REMOTE_APPLY_SEMANTICS_AND_CHANGE_WINDOW_REQUIRE_REVIEW",
+    "NO_HUMAN_MIGRATION_AUTHORIZATION"
+  ],
+  "abortConditions": [
+    "Any source, method, harness, HEAD or evidence-reference drift",
+    "Any unknown migration or nonempty/unverified target",
+    "Any failed local quality, repeatability, integrity, resume or atomicity check",
+    "Any unresolved unrelated changes or missing recovery/approval"
+  ],
+  "readyForD1ProductionMigrationPreauthReaudit": "YES",
+  "authorizationDecision": "NO",
+  "productionMigrationAuthorized": false,
+  "productionEffects": {
+    "PRODUCTION_D1_MIGRATIONS": 0,
+    "PRODUCTION_D1_SCHEMA_MUTATIONS": 0,
+    "PRODUCTION_D1_BUSINESS_DATA_MUTATIONS": 0,
+    "PRODUCTION_RESOURCE_CREATED": 0,
+    "PRODUCTION_RESOURCE_MODIFIED": 0,
+    "PRODUCTION_RESOURCE_DELETED": 0,
+    "CLOUDFLARE_DEPLOYMENTS": 0,
+    "QUEUE_MESSAGES_SENT": 0,
+    "DNS_CHANGES": 0,
+    "PRODUCTION_TRAFFIC_SHIFT": 0,
+    "PRODUCTION_SECRET_WRITES": 0
+  },
+  "nextStep": "STOP_FOR_HUMAN_REVIEW_NO_AUTHENTICATION_NO_PRODUCTION_WRITE_NO_DEPLOY_NO_COMMIT"
 }
