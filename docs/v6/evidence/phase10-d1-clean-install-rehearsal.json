@@ -1,0 +1,11 @@
+{
+  "outcome": "PASS",
+  "migrationsApplied": 10,
+  "tablesCreated": 54,
+  "businessDataMutated": 0,
+  "schemaFingerprint": "765242eb594e24acd01c1e35ee5a9c13c9a31754b18d6a828f1a7729da2d3859",
+  "schemaValid": true,
+  "foreignKeysValid": true,
+  "qualityTestsPassed": true,
+  "timestamp": "2026-09-21T02:26:41.436Z"
+}

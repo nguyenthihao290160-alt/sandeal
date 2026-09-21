@@ -2770,52 +2770,6 @@
       "cloudflareBuild": "PASS_STATIC_AND_WORKER"
     },
     {
-      "name": "phase5-local-money-proof",
-      "path": "docs/v6/evidence/phase5-local-money-proof.json",
-      "MONEY_ROUTER": "PASS",
-      "NORMALIZED_OFFERS": "PASS",
-      "AFFILIATE_REDIRECT": "PASS",
-      "CLICK_ATTRIBUTION": "PASS",
-      "CONVERSION_ATTRIBUTION": "PASS",
-      "COMMISSION_LEDGER": "PASS",
-      "REVENUE_SNAPSHOT": "PASS",
-      "DUPLICATE_CONVERSION_EFFECT": 0,
-      "DUPLICATE_COMMISSION_EFFECT": 0,
-      "DUPLICATE_REVENUE_EFFECT": 0,
-      "SHOPEE_LIVE_CALLS": 0,
-      "FILE_STORAGE_CALLS": 0,
-      "PM2_REQUIRED": "NO",
-      "VPS_REQUIRED": "NO",
-      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-      "ORIGIN": "TEST_FIXTURE",
-      "REAL_MONEY_TRANSACTION_CREATED": "NO"
-    },
-    {
-      "name": "phase5-accesstrade-shopee-proof",
-      "path": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
-      "MONEY_ROUTER": "PASS",
-      "NORMALIZED_OFFERS": "PASS",
-      "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
-      "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
-      "AFFILIATE_REDIRECT": "PASS",
-      "CLICK_ATTRIBUTION": "PASS",
-      "CONVERSION_ATTRIBUTION": "PASS",
-      "COMMISSION_LEDGER": "PASS",
-      "REVENUE_SNAPSHOT": "PASS",
-      "PROVIDER": "accesstrade",
-      "PLATFORM": "shopee",
-      "DUPLICATE_CONVERSION_EFFECT": 0,
-      "DUPLICATE_COMMISSION_EFFECT": 0,
-      "DUPLICATE_REVENUE_EFFECT": 0,
-      "DIRECT_SHOPEE_API_CALLS": 0,
-      "FILE_STORAGE_CALLS": 0,
-      "PM2_REQUIRED": "NO",
-      "VPS_REQUIRED": "NO",
-      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
-      "ORIGIN": "TEST_FIXTURE",
-      "REAL_MONEY_TRANSACTION_CREATED": "NO"
-    },
-    {
       "name": "autopilot-local-smoke",
       "path": "docs/v6/evidence/autopilot-local-smoke.json",
       "CRON": "PASS",
@@ -2917,6 +2871,52 @@
       "log": ".test-tmp/v6-cloudflare-worker/site-build.log",
       "environment": "LOCAL",
       "origin": "http://localhost:8787"
+    },
+    {
+      "name": "phase5-local-money-proof",
+      "path": "docs/v6/evidence/phase5-local-money-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "SHOPEE_LIVE_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
+    },
+    {
+      "name": "phase5-accesstrade-shopee-proof",
+      "path": "docs/v6/evidence/phase5-accesstrade-shopee-proof.json",
+      "MONEY_ROUTER": "PASS",
+      "NORMALIZED_OFFERS": "PASS",
+      "ACCESS_TRADE_SHOPEE_NORMALIZATION": "PASS",
+      "ACCESS_TRADE_SHOPEE_MONETIZATION": "PASS",
+      "AFFILIATE_REDIRECT": "PASS",
+      "CLICK_ATTRIBUTION": "PASS",
+      "CONVERSION_ATTRIBUTION": "PASS",
+      "COMMISSION_LEDGER": "PASS",
+      "REVENUE_SNAPSHOT": "PASS",
+      "PROVIDER": "accesstrade",
+      "PLATFORM": "shopee",
+      "DUPLICATE_CONVERSION_EFFECT": 0,
+      "DUPLICATE_COMMISSION_EFFECT": 0,
+      "DUPLICATE_REVENUE_EFFECT": 0,
+      "DIRECT_SHOPEE_API_CALLS": 0,
+      "FILE_STORAGE_CALLS": 0,
+      "PM2_REQUIRED": "NO",
+      "VPS_REQUIRED": "NO",
+      "LONG_RUNNING_PROCESS_REQUIRED": "NO",
+      "ORIGIN": "TEST_FIXTURE",
+      "REAL_MONEY_TRANSACTION_CREATED": "NO"
     }
   ],
   "nextStep": "STOP_OPERATOR_AUTHENTICATES_OUTSIDE_CHAT_CONFIRMS_TARGETS_REVIEWS_AND_COMMITS_CHECKPOINT_THEN_REQUESTS_READ_ONLY_DISCOVERY_AGAIN",
@@ -3220,8 +3220,8 @@
     "nextPhaseRequiresSeparateAuthorization": true
   },
   "branch": "master",
-  "head": "183eaef16f130ceeb5f7f147ae17a026df8964cb",
-  "workingTreeFingerprint": "fb08cc59b34b6a0bbb1ca00ad11b366238ff01f8f90e546380911a683a0af968",
+  "head": "3cc4a65a2de67c8337402259a3c522ee14d5e83c",
+  "workingTreeFingerprint": "6bd7b0b885e733c50e917d15dd9ef3bf5b652190f8b6d12bbbc20d71a0c8c812",
   "workingTreeFingerprintPolicy": "SHA256 of sorted Git tracked and nonignored untracked path/content hashes; excludes this generated state, evidence, and secret environment files",
   "filesChangedSinceEvidence": [
     ".gitignore",
@@ -3394,7 +3394,7 @@
     "wrangler.bootstrap.toml"
   ],
   "filesChangedSinceEvidenceBaseline": "docs/v6/evidence/resume-3-baseline.json",
-  "updatedAt": "2026-09-21T01:18:27.852Z",
+  "updatedAt": "2026-09-21T02:25:57.417Z",
   "phase5Plan": [
     "Extend existing provider/offer contracts without new discovery internals",
     "Attach normalized provider offers to the existing canonical product aggregate",
@@ -4104,6 +4104,9 @@
     "stop": true
   },
   "outcomes": {
-    "PHASE10_BOOTSTRAP_PROVISIONING": "COMPLETE_RESOURCE_BASELINE_ONLY"
-  }
+    "PHASE10_BOOTSTRAP_PROVISIONING": "COMPLETE_RESOURCE_BASELINE_ONLY",
+    "PHASE10_D1_CLEAN_INSTALL_REHEARSAL": "COMPLETE"
+  },
+  "phase10_d1_preauth_audit": "COMPLETE",
+  "d1_production_migration_authorized": false
 }
