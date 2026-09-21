@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { canonicalJson, captureSchema, checkConstraints, normalizeSql, sha256 } from './lib/d1-schema-canonical.mjs';
 import { validateRehearsal } from './phase-10-d1-evidence-repair.mjs';
+import { legacyExpression, parserCompatibilityGuard, partialBaselineModel, repairedExpression, triggerRepairs, validatePartialProductionObservation } from './lib/d1-0009-repair-guards.mjs';
 
 const cases = [];
 async function test(name, work) {
@@ -86,8 +87,27 @@ try {
 } finally { database.close(); }
 
 const root = path.resolve(import.meta.dirname, '..');
+const repairedSql = fs.readFileSync(path.join(root, 'src/lib/storage/d1/migrations/0009_content_lifecycle.sql'), 'utf8');
+await test('0009 remote-parser compatibility guard accepts both repaired cap triggers', () => {
+  assert.equal(parserCompatibilityGuard(repairedSql).status, 'PASS');
+});
+for (const repair of triggerRepairs) {
+  await test(`parser guard rejects reintroduced CASE shape in ${repair.name}`, () => {
+    assert.throws(() => parserCompatibilityGuard(repairedSql.replace(repairedExpression(repair), legacyExpression(repair))), /REMOTE_PARSER_CASE_REGRESSION/);
+  });
+  await test(`parser guard rejects commented multiline CASE shape in ${repair.name}`, () => {
+    const expression = legacyExpression(repair).replace('CASE WHEN', 'case /* regression */\nwhen');
+    assert.throws(() => parserCompatibilityGuard(repairedSql.replace(repairedExpression(repair), expression)), /REMOTE_PARSER_CASE_REGRESSION/);
+  });
+  await test(`parser guard rejects removed cap policy in ${repair.name}`, () => {
+    assert.throws(() => parserCompatibilityGuard(repairedSql.replace(repairedExpression(repair), 'SELECT 1;')), /CAP_POLICY_DRIFT/);
+  });
+  await test(`parser guard rejects weakened threshold in ${repair.name}`, () => {
+    assert.throws(() => parserCompatibilityGuard(repairedSql.replace(repairedExpression(repair), repairedExpression(repair).replace('>=', '>'))), /CAP_POLICY_DRIFT/);
+  });
+}
 const evidence = JSON.parse(fs.readFileSync(path.join(root, 'docs/v6/evidence/phase10-d1-clean-install-rehearsal.json'), 'utf8'));
-assert.equal(evidence.schema, 'phase10-d1-rehearsal-evidence-v2', 'FRESH_REHEARSAL_REQUIRED_FOR_VERIFIER_TESTS');
+assert.equal(evidence.schema, 'phase10-d1-rehearsal-evidence-v3', 'FRESH_REHEARSAL_REQUIRED_FOR_VERIFIER_TESTS');
 const fixture = structuredClone(evidence);
 fixture.quality = { status: 'PASS', harnessManifestSha256: sha256(canonicalJson(fixture.harnessSources)),
   results: ['focused-tests', 'typescript', 'eslint', 'secret-scan', 'git-diff-check'].map(name => ({ name, exitCode: 0 })) };
@@ -117,6 +137,15 @@ const mutations = [
   ['missing migration', report => { report.installs[0].steps.pop(); }],
   ['unbound migration step', report => { report.installs[0].steps[0].sha256 = '0'.repeat(64); }],
   ['missing partial resume', report => { report.partialResumes.pop(); }],
+  ['missing eight-migration partial baseline', report => { report.partialResumes = report.partialResumes.filter(resume => !resume.through.startsWith('0008')); }],
+  ['pre-0009 fingerprint drift', report => { report.pre0009SchemaFingerprint = '0'.repeat(64); }],
+  ['partial 0009 object concealed', report => { report.partialResumes[2].before.partial0009Objects.push({ type: 'table', name: 'content_lifecycle_sources' }); }],
+  ['0009 metadata present in baseline', report => { report.partialResumes[2].before.migration0009MetadataPresent = true; }],
+  ['partial baseline business seed', report => { report.partialResumes[2].before.data.businessRows = 1; }],
+  ['historical fingerprint claimed current', report => { report.oldFingerprintComparison.authority = 'CURRENT'; }],
+  ['empty-production model regression', report => { report.partialProductionBaselineModel.productionIsEmpty = true; }],
+  ['cap policy check not executed', report => { report.constraints.repairedCapPolicies.audit255To256Allowed = false; }],
+  ['incident evidence changed', report => { report.incidentEvidence.sha256 = '0'.repeat(64); }],
   ['resume reapplies committed migration', report => { report.partialResumes[0].resumeSteps[0].action = 'APPLIED'; }],
   ['failure ledger mutation', report => { report.failureAtomicity.after.ledger.pop(); }],
   ['failed rollback', report => { report.failureAtomicity.schemaRolledBack = false; }],
@@ -134,6 +163,35 @@ await test('verifier rejects an invalid whole-evidence digest', () => {
   const changed = structuredClone(fixture); changed.evidenceBindingSha256 = '0'.repeat(64);
   assert.throws(() => validateRehearsal(changed, evidence.migrationSources, evidence.harnessSources, evidence.sourceHead));
 });
+const expectedBaseline = partialBaselineModel(evidence);
+const observation = { ...structuredClone(expectedBaseline), readOnly: true };
+await test('partial production model accepts an exact synthetic read-only observation, not authorization', () => {
+  assert.equal(expectedBaseline.productionIsEmpty, false);
+  assert.equal(validatePartialProductionObservation(observation, expectedBaseline), 'PASS');
+});
+for (const [name, mutate] of [
+  ['wrong account', value => { value.accountId = 'wrong-account'; }],
+  ['wrong D1', value => { value.d1Id = 'wrong-database'; }],
+  ['empty production', value => { value.appliedMigrations = []; }],
+  ['reordered history', value => { value.appliedMigrations.reverse(); }],
+  ['unknown migration', value => { value.appliedMigrations.push('0011_unknown.sql'); }],
+  ['0009 already applied', value => { value.migration0009MetadataPresent = true; }],
+  ['0010 already applied', value => { value.migration0010MetadataPresent = true; }],
+  ['partial table', value => { value.partial0009Tables.push('content_lifecycle_sources'); }],
+  ['partial index', value => { value.partial0009Indexes.push('content_sources_product'); }],
+  ['partial trigger', value => { value.partial0009Triggers.push('content_source_cap'); }],
+  ['partial schema effect', value => { value.partial0009SchemaEffect = 'UNKNOWN'; }],
+  ['wrong fingerprint', value => { value.schemaFingerprint = evidence.schemaFingerprint; }],
+  ['wrong method', value => { value.canonicalizationMethod = 'unknown'; }],
+  ['nonzero business rows', value => { value.businessRows = 1; }],
+  ['missing control row', value => { value.controlRows = []; }],
+  ['not read only', value => { value.readOnly = false; }],
+]) {
+  await test(`partial production model rejects ${name}`, () => {
+    const changed = structuredClone(observation); mutate(changed);
+    assert.throws(() => validatePartialProductionObservation(changed, expectedBaseline));
+  });
+}
 const passed = cases.filter(testCase => testCase.status === 'PASS').length;
 const failed = cases.length - passed;
 console.log(`${passed} passed, ${failed} failed, 0 skipped`);

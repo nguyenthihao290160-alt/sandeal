@@ -1,0 +1,28 @@
+{
+  "gitHead": "833ba419280edbe6d0e2e10abe07a50160762771",
+  "cloudflareAccountReference": "Huydjsoma@gmail.com Account - 88d3839bee4ac092d39fbb293e3eb426",
+  "d1Id": "bdf42c22-190d-4cdf-a166-a9e07ade57f2",
+  "d1Name": "sandeal-production",
+  "migrationHashesMatch": true,
+  "appliedMigrations": [
+    "0001_product_storage.sql",
+    "0002_event_jobs.sql",
+    "0003_affiliate_money.sql",
+    "0004_money_snapshot_jobs.sql",
+    "0005_money_platform.sql",
+    "0006_deal_intelligence.sql",
+    "0007_decision_os.sql",
+    "0008_opportunity_experiments.sql"
+  ],
+  "failedMigrations": [
+    "0009_content_lifecycle.sql"
+  ],
+  "applicationTableCount": 32,
+  "indexCount": 47,
+  "triggerCount": 32,
+  "canonicalizationMethod": "d1-schema-canonical-v1",
+  "productionSchemaFingerprint": "INCOMPLETE",
+  "zeroBusinessDataProof": true,
+  "zeroUnrelatedSideEffectProof": true,
+  "status": "FAIL"
+}

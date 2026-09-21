@@ -1,4 +1,4 @@
-# Phase 10 D1 local rehearsal evidence contract
+# Phase 10 D1 repaired-0009 and partial-production evidence contract
 
 ## Scope
 
@@ -9,6 +9,14 @@ loopback listener, one ephemeral D1 binding, persistence disabled, no Wrangler
 configuration, no account identifiers, no Queue binding, and no dotenv loading.
 It never imports the application or runs a production command. The production
 zero-effect counters describe this invocation only, not historical provisioning.
+
+Production is **not empty**: the verified incident baseline has exactly 0001..0008
+applied; 0009 failed and 0010 remains pending. This task does not reinspect or write
+production. The immutable incident is
+`docs/v6/evidence/phase10-d1-production-migration.json`, still `FAIL`, with the first
+attempt stopped at 0009. Its original byte hash is checked before and after every
+regeneration. The staged incident entry is preserved; this runner never stages,
+commits, pushes, invokes Wrangler, or retries a production migration.
 
 ## Exact source binding
 
@@ -28,9 +36,20 @@ submitted-statement digest, ledger, resulting schema digest, inventory counts,
 foreign-key check and row counts. Current source bytes are rechecked after every
 run and at final verification. The ordered source mapping is itself hashed using
 the canonical JSON encoding below. The source Git HEAD and branch are recorded,
-along with the initial clean Git gate and hashes of the harness, this document,
+along with the classified dirty repair gate and hashes of the harness, this document,
 package manifest, lockfile, and existing local migration helper. New harness files
 are working-tree artifacts, not falsely claimed to be present at the source HEAD.
+
+The repair audit compares raw SQL bytes to incident Git HEAD
+`833ba419280edbe6d0e2e10abe07a50160762771`. Migrations 0001..0008 and 0010 must be
+byte-identical. Migration 0009 must be exactly the original bytes after replacing
+only the two enumerated `SELECT CASE WHEN ... THEN RAISE(...) END;` expressions in
+`content_source_cap` and `content_audit_cap` with `SELECT RAISE(...) WHERE ...;`.
+Predicates, limits (16 sources and 256 audits), ABORT messages, trigger WHEN clauses,
+table definitions, columns and constraints remain unchanged. A token-level guard
+rejects CASE reintroduction, missing bodies and cap-policy changes. This is a local
+regression guard against the known failed shape, not proof that a remote retry
+will succeed. No remote parser request is made.
 
 ## d1-schema-canonical-v1
 
@@ -109,10 +128,20 @@ have zero rows after a clean install and after each empty-prefix resume.
 
 Install A and B use separate, freshly constructed and disposed Miniflare instances.
 Before ledger creation their application schema and ledger are absent. All ten
-steps are recorded independently. Prefix resumes after 0003/0006/0009 inspect the
+steps are recorded independently. Prefix resumes after 0003/0006/0008/0009 inspect the
 ledger and schema before resuming; existing migration entries must be skipped,
 and final canonical schema and control/business counts must equal clean install A.
 These are empty-business-prefix proofs, not populated-production upgrade proofs.
+
+The 0008 prefix is an independent fresh database and is the required rehearsal of
+the current production history. Its complete canonical schema, ordered eight-row
+migration ledger, per-table row counts, control row, FK/quick checks and inventory
+counts are durable in `partialResumes` under `0008_opportunity_experiments.sql`.
+The pre-0009 fingerprint must also equal step 0008 of clean installs A and B.
+0009 and 0010 ledger entries and partial 0009 objects must be absent. Then the
+runner applies only 0009, captures its success, and separately applies 0010. The
+eight existing ledger entries are skipped, not reapplied. Final canonical schema
+must match both repaired clean installations.
 
 Failure injection uses a third disposable database at 0003 and the exact captured
 0004 statement batch, with a deliberate final CHECK failure before the migration
@@ -132,6 +161,13 @@ fixture database. Synthetic business rows in that probe database are disclosed;
 they never seed clean installations or production. These are bounded regression
 probes, not an exhaustive theorem about all application behavior.
 
+The isolated policy fixture permits source 16, rejects source 17 with
+`CONTENT_PRODUCT_CAP`, and preserves the duplicate-source conflict path at the cap.
+It permits audit 256, rejects audit 257 with `CONTENT_AUDIT_CAP`, and checks that the
+counter and row total stay 256. Synthetic fixture rows are explicitly reported;
+the two clean installations and every migration-prefix rehearsal have zero
+business rows. The existing single revenue cursor control seed is not business data.
+
 The installed D1 authorizer denies `integrity_check` and access to internal
 `_cf_METADATA` columns. `table_xinfo` and `index_xinfo` work for application
 objects. The method excludes that exact internal table and uses the supported
@@ -142,7 +178,8 @@ it does not misreport a full SQLite `integrity_check` as having run.
 
 Requires the repository's installed lockfile dependencies and Node 22+ (within
 the package's supported range). No dependency install, authentication or network
-credential is needed. From a clean checkpoint, capture the gate before repair:
+credential is needed. After classifying the incident/repair files, capture a new
+gate at the current HEAD (do not reuse the pre-repair gate):
 
 ```text
 node scripts/phase-10-d1-evidence-repair.mjs capture-gate
@@ -151,10 +188,11 @@ node scripts/phase-10-d1-evidence-repair.mjs verify
 node scripts/phase-10-d1-evidence-repair.mjs replay
 ```
 
-The initial implementation's clean gate was captured before creating these
-harness files. `repair` accepts only the explicitly classified repair files as
-new dirty changes; it requires an unchanged HEAD, empty index, unchanged SQL and
-unchanged Phase 5 bytes. It generates structured evidence and runs TypeScript,
+`capture-gate` accepts only the repair allowlist and, if present, the already
+staged incident file. It records the actual dirty/index state rather than claiming
+clean Git. `repair` requires unchanged HEAD, exact index-diff hash, captured repaired
+SQL, immutable incident, preserved forensic artifacts and unchanged Phase 5 bytes.
+It generates structured evidence and runs TypeScript,
 ESLint, secret scan, diff checks and focused tests. `verify` checks the durable
 mapping, current hashes, implementation hashes, embedded canonical schema and
 cross-report bindings without creating a database. `replay` independently reruns
@@ -162,29 +200,57 @@ the local installations/resumes/failure/safety checks and compares fingerprints
 without rewriting durable evidence. Reports/logs in `.test-tmp` are disposable
 and are not the sole source of any required conclusion.
 
+The two confusing SQL files are `TEMP_FORENSIC_ARTIFACT`, not repository fixtures:
+`.test-tmp/isolated/0001_test.sql` is byte-identical to pre-repair 0009, renamed for
+isolated parser reproduction; `.test-tmp/bisect/0001_base.sql` is byte-identical to
+0001 and served as a bisection baseline. Neither is in the migration source set.
+Eight untracked one-off scripts/configurations from the investigation are retained
+byte-for-byte as `.txt` files under `.test-tmp/phase10-0009-forensics/`, not executed
+or committed. The evidence gate records every original path, preserved path,
+classification, reason and hash. Existing `.gitignore` already excludes `.test-tmp`.
+
 ## Previous hash and authorization limits
 
-The previous fingerprint was
+The older undocumented fingerprint was
 `765242eb594e24acd01c1e35ee5a9c13c9a31754b18d6a828f1a7729da2d3859`.
 Its historical report contains neither a source mapping nor a fingerprint method.
 Do not infer an old algorithm or claim a schema change solely from a hash mismatch.
-The new method becomes authoritative for this local evidence only after A/B and
-replay validation. Preserve the actual comparison and explain any change as a
-newly specified representation, with the old method explicitly unknown.
+The pre-repair `d1-schema-canonical-v1` fingerprint was
+`e5c45918f92463f24a675bf7c62407714b3110ce1929b2108703a8fa22e190c1`.
+It is **historical only and invalid for current authorization**. The authoritative
+repaired post-0010 fingerprint is `schemaFingerprint` in the newly generated
+rehearsal, bound to all ten current migration hashes and matching A/B results.
+The canonicalization algorithm has not changed. Replacing only the two repaired
+trigger bodies in the new canonical schema with their historical forms must
+reproduce the old fingerprint exactly; this proves no other canonical schema
+definition changed.
 
 Re-audit readiness is NOT migration authorization. The replacement preauth report
-withdraws the unsupported old blanket PASS/YES and records local evidence checks
-and an exact rehearsal-file SHA-256 reference. No current production identity,
-empty baseline, backup/export, Time Travel, permissions, change window or approval
-is certified by local execution. None is silently inherited from old booleans.
+withdraws all previous empty-production authorization assumptions and records local
+evidence checks and an exact rehearsal-file SHA-256 reference. Its expected target
+is account `88d3839bee4ac092d39fbb293e3eb426`, D1
+`bdf42c22-190d-4cdf-a166-a9e07ade57f2` (`sandeal-production`). A future separately
+authorized read-only audit must verify that identity, the exact ordered 0001..0008
+history, absent 0009/0010 metadata, absence of every partial 0009 object/effect,
+the expected pre-0009 canonical fingerprint, zero business rows and the exact
+control seed. Missing or mismatched observations fail closed. Local mutation
+tests cover each of these rejection conditions.
+
+`readyForD1PartialBaselinePreauthAudit=YES` means only that the local prerequisites
+for that audit are ready. `authorizationDecision=NO` and
+`productionMigrationAuthorized=false` remain mandatory. No current production
+identity, baseline, backup/export, Time Travel, permissions, change window or
+approval is certified by local execution. None is inherited from historical flags.
 
 Recovery limitations: committed migrations are not automatically reversible;
 0004/0005/0006/0009 include table-copy/drop transformations. Code rollback does not
 undo schema/data. No production backup or restore has been tested here. Before a
 separately authorized production attempt, a human must approve the final clean
 checkpoint and byte inventory, revalidate the exact production identity/ledger/
-empty baseline, review current remote transaction semantics, authorize and verify
+eight-migration baseline, review remote transaction semantics, authorize and verify
 the actual backup/recovery procedure, establish a change window and abort owner,
 quiesce writers and Queue consumers, and issue explicit migration permission.
-Unknown, nonempty, drifted or partially applied targets must stop for review; no
+Only 0009 then 0010 can be considered in a future authorization; never rerun
+0001..0008. Unknown histories, populated business data, drift or partial 0009
+effects must stop for review; no
 automatic reset, reverse SQL, force-apply or production retry is provided.

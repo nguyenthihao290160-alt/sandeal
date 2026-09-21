@@ -1,34 +1,36 @@
 {
-  "schema": "phase10-d1-local-preauth-reaudit-v2",
-  "observedAt": "2026-09-21T06:48:45.794Z",
-  "auditStatus": "LOCAL_EVIDENCE_REAUDIT_READY",
-  "sourceHead": "95ecff5c4f0e235be1d7b7918dbeec4368584d6e",
+  "schema": "phase10-d1-partial-production-preauth-v3",
+  "observedAt": "2026-09-21T11:46:41.513Z",
+  "auditStatus": "LOCAL_PARTIAL_BASELINE_EVIDENCE_READY",
+  "sourceHead": "833ba419280edbe6d0e2e10abe07a50160762771",
   "branch": "master",
   "scope": "LOCAL_ONLY_PREAUTH_EVIDENCE_REVALIDATION_NOT_MIGRATION_AUTHORIZATION",
   "priorConclusion": {
-    "sha256": "c6755cba08ba55fab8affd54b9b2ba050ed8f2596650a11fcaf5ebfb74897d9c",
-    "status": "SUPERSEDED_UNSUPPORTED_BLANKET_PASS",
-    "reason": "Historical booleans did not contain verifiable source-to-rehearsal and fingerprint-method evidence."
+    "sha256": "a2c5a1f07a2acbea05d0c95880274af5fb1203e136b05f744e8a027465dc2888",
+    "status": "INVALIDATED_BY_0009_REPAIR_AND_NONEMPTY_PRODUCTION",
+    "reason": "Production has exactly 0001..0008 applied, not an empty schema. Previous migration hashes and canonical fingerprint do not authorize repaired 0009."
   },
-  "initialWorktreeClean": true,
-  "initialIndexClean": true,
+  "initialWorktreeClean": false,
+  "initialIndexClean": false,
   "currentWorktreeClean": false,
-  "currentIndexClean": true,
+  "currentIndexClean": false,
   "expectedDirtyFiles": [
     "docs/v6/evidence/phase10-d1-clean-install-rehearsal.json",
     "docs/v6/evidence/phase10-d1-production-migration-preauth.json",
+    "docs/v6/evidence/phase10-d1-production-migration.json",
     "docs/v6/phase-10-d1-schema-fingerprint.md",
-    "scripts/lib/d1-schema-canonical.mjs",
+    "scripts/lib/d1-0009-repair-guards.mjs",
     "scripts/phase-10-d1-evidence-repair.mjs",
-    "scripts/phase-10-d1-evidence-tests.mjs"
+    "scripts/phase-10-d1-evidence-tests.mjs",
+    "src/lib/storage/d1/migrations/0009_content_lifecycle.sql"
   ],
   "unrelatedDirtyFiles": [],
   "rehearsalReference": {
     "file": "docs/v6/evidence/phase10-d1-clean-install-rehearsal.json",
-    "sha256": "bdaae67d2d50c6788579985f840f77930738c9d8358668a9ed81463fffa3f701",
-    "bytes": 714979,
-    "evidenceBindingSha256": "32cf14313038c8219855d18505b4f283d42019e0d79508a74a6cd22eaad98921",
-    "sourceManifestSha256": "f93f9068742da2e26a68fbe948ebcfa483aed7c09db8af20c5a51643d1c74224"
+    "sha256": "4998b40049c60abeccf5a46e8a646ab942d678a8ccf4c14d3d6b47aafdf69aa3",
+    "bytes": 1051937,
+    "evidenceBindingSha256": "39a39e15b4cdc24c434a924d0915dabc74950a28c1e8eb8d97937bcd14146fc2",
+    "sourceManifestSha256": "4647e534d382f1778d79694104335380b85fe9fb7dbe3c412eb293168fcbdb37"
   },
   "migrationSources": [
     {
@@ -73,8 +75,8 @@
     },
     {
       "file": "src/lib/storage/d1/migrations/0009_content_lifecycle.sql",
-      "sha256": "792a823478cdee7e69fda814297fa87c05bd620fdb856bfecee774529b63d9b2",
-      "bytes": 16937
+      "sha256": "6ec406bf5ef0815ee02dd2f3d69e9083a834b11eecf66ac3f6d70416f97cd7af",
+      "bytes": 16911
     },
     {
       "file": "src/lib/storage/d1/migrations/0010_execution_control_plane.sql",
@@ -84,8 +86,8 @@
   ],
   "migrationSourceHashesMatchRehearsal": true,
   "methodVersion": "d1-schema-canonical-v1",
-  "schemaFingerprintA": "e5c45918f92463f24a675bf7c62407714b3110ce1929b2108703a8fa22e190c1",
-  "schemaFingerprintB": "e5c45918f92463f24a675bf7c62407714b3110ce1929b2108703a8fa22e190c1",
+  "schemaFingerprintA": "2d857eed231f8eef4f846dbd9f1134787f3b8becb557521cb54f0512a444cfd4",
+  "schemaFingerprintB": "2d857eed231f8eef4f846dbd9f1134787f3b8becb557521cb54f0512a444cfd4",
   "localRequirements": {
     "durableMigrationHashes": "PASS",
     "hashesTiedToFreshRehearsal": "PASS",
@@ -101,29 +103,116 @@
     "qualityChecks": "PASS"
   },
   "currentProductionIdentityVerified": false,
-  "currentProductionEmptyBaselineVerified": false,
+  "productionIsEmpty": false,
   "productionInspectedThisTask": false,
+  "partialProductionBaselineModel": {
+    "status": "PASS",
+    "productionIsEmpty": false,
+    "accountId": "88d3839bee4ac092d39fbb293e3eb426",
+    "d1Id": "bdf42c22-190d-4cdf-a166-a9e07ade57f2",
+    "d1Name": "sandeal-production",
+    "appliedMigrations": [
+      "0001_product_storage.sql",
+      "0002_event_jobs.sql",
+      "0003_affiliate_money.sql",
+      "0004_money_snapshot_jobs.sql",
+      "0005_money_platform.sql",
+      "0006_deal_intelligence.sql",
+      "0007_decision_os.sql",
+      "0008_opportunity_experiments.sql"
+    ],
+    "pendingMigrations": [
+      "0009_content_lifecycle.sql",
+      "0010_execution_control_plane.sql"
+    ],
+    "migration0009MetadataPresent": false,
+    "migration0010MetadataPresent": false,
+    "partial0009Tables": [],
+    "partial0009Indexes": [],
+    "partial0009Triggers": [],
+    "partial0009SchemaEffect": "NONE",
+    "canonicalizationMethod": "d1-schema-canonical-v1",
+    "schemaFingerprint": "53800aa7339cb2999fa7e16aa8a3af4d7fe76e5454887c927d5dc93bdddc69fd",
+    "businessRows": 0,
+    "controlRows": [
+      {
+        "id": "revenue-v1",
+        "last_sequence": 0,
+        "claim_key": null
+      }
+    ],
+    "baselineCounts": {
+      "tables": 31,
+      "migrationLedgerTables": 1,
+      "tablesIncludingMigrationLedger": 32,
+      "indexes": 47,
+      "implicitIndexes": 41,
+      "allIndexes": 88,
+      "triggers": 32,
+      "views": 0,
+      "checkConstraints": 152
+    },
+    "canonicalSchemaSha256": "53800aa7339cb2999fa7e16aa8a3af4d7fe76e5454887c927d5dc93bdddc69fd",
+    "stateProvenance": "USER_VERIFIED_INCIDENT_STATE_PLUS_LOCAL_REHEARSAL_NOT_A_FRESH_PRODUCTION_OBSERVATION",
+    "productionInspectedThisTask": false,
+    "requiresFreshReadOnlyProductionAudit": true
+  },
+  "pre0009SchemaFingerprint": "53800aa7339cb2999fa7e16aa8a3af4d7fe76e5454887c927d5dc93bdddc69fd",
+  "incidentEvidence": {
+    "file": "docs/v6/evidence/phase10-d1-production-migration.json",
+    "sha256": "83486a4b548c9d12c79f6706a300fb71726f038db483f4b8c3e65de2b984ab9b",
+    "bytes": 891,
+    "status": "HISTORICAL_FAIL_PRESERVED",
+    "firstAttemptStoppedAt": "0009_content_lifecycle.sql",
+    "productionReinspectedThisTask": false
+  },
+  "requiredFutureReadOnlyEvidence": [
+    "Exact account ID and D1 ID/name",
+    "Exact ordered migration history 0001..0008 with no unknown entries",
+    "0009 and 0010 metadata absent",
+    "No partial 0009 tables, indexes, triggers or other schema effect",
+    "Full d1-schema-canonical-v1 schema equal to expected pre-0009 fingerprint",
+    "Zero business rows and exact unchanged control row",
+    "Repaired source hashes, HEAD and evidence bindings unchanged; clean reviewed checkpoint"
+  ],
+  "allowedFutureMigrationSequence": [
+    "0009_content_lifecycle.sql",
+    "0010_execution_control_plane.sql"
+  ],
+  "forbiddenFutureMigrationReplay": [
+    "0001_product_storage.sql",
+    "0002_event_jobs.sql",
+    "0003_affiliate_money.sql",
+    "0004_money_snapshot_jobs.sql",
+    "0005_money_platform.sql",
+    "0006_deal_intelligence.sql",
+    "0007_decision_os.sql",
+    "0008_opportunity_experiments.sql"
+  ],
   "recoveryPlanStatus": "LOCAL_LIMITATIONS_DOCUMENTED_PRODUCTION_RECOVERY_UNVERIFIED",
   "productionGateBlockers": [
     "FINAL_CHECKPOINT_REQUIRES_HUMAN_REVIEW",
-    "CURRENT_PRODUCTION_IDENTITY_AND_EMPTY_BASELINE_NOT_REVALIDATED",
+    "CURRENT_PRODUCTION_IDENTITY_AND_EXACT_0001_TO_0008_BASELINE_NOT_REVALIDATED",
     "PRODUCTION_BACKUP_AND_RECOVERY_NOT_VERIFIED",
     "REMOTE_APPLY_SEMANTICS_AND_CHANGE_WINDOW_REQUIRE_REVIEW",
     "NO_HUMAN_MIGRATION_AUTHORIZATION"
   ],
   "abortConditions": [
     "Any source, method, harness, HEAD or evidence-reference drift",
-    "Any unknown migration or nonempty/unverified target",
+    "Wrong account/D1 identity, any unknown migration, nonzero business rows or unverified partial baseline",
+    "0009/0010 metadata present, any partial 0009 object or pre-0009 fingerprint mismatch",
     "Any failed local quality, repeatability, integrity, resume or atomicity check",
     "Any unresolved unrelated changes or missing recovery/approval"
   ],
-  "readyForD1ProductionMigrationPreauthReaudit": "YES",
+  "readyForD1PartialBaselinePreauthAudit": "YES",
   "authorizationDecision": "NO",
   "productionMigrationAuthorized": false,
   "productionEffects": {
     "PRODUCTION_D1_MIGRATIONS": 0,
     "PRODUCTION_D1_SCHEMA_MUTATIONS": 0,
     "PRODUCTION_D1_BUSINESS_DATA_MUTATIONS": 0,
+    "PRODUCTION_D1_NEW_MIGRATIONS": 0,
+    "PRODUCTION_D1_ADDITIONAL_SCHEMA_MUTATIONS": 0,
     "PRODUCTION_RESOURCE_CREATED": 0,
     "PRODUCTION_RESOURCE_MODIFIED": 0,
     "PRODUCTION_RESOURCE_DELETED": 0,

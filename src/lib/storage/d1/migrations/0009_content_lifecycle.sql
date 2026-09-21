@@ -35,7 +35,7 @@ CREATE TABLE content_lifecycle_sources (
 CREATE INDEX content_sources_product ON content_lifecycle_sources(product_id,origin,content_id);
 -- statement-breakpoint
 CREATE TRIGGER content_source_cap BEFORE INSERT ON content_lifecycle_sources WHEN NOT EXISTS(SELECT 1 FROM content_lifecycle_sources WHERE origin=NEW.origin AND content_id=NEW.content_id) BEGIN
-  SELECT CASE WHEN (SELECT count(*) FROM (SELECT content_id FROM content_lifecycle_sources WHERE product_id=NEW.product_id LIMIT 16))>=16 THEN RAISE(ABORT,'CONTENT_PRODUCT_CAP') END;
+  SELECT RAISE(ABORT,'CONTENT_PRODUCT_CAP') WHERE (SELECT count(*) FROM (SELECT content_id FROM content_lifecycle_sources WHERE product_id=NEW.product_id LIMIT 16))>=16;
 END;
 -- statement-breakpoint
 CREATE TABLE content_lifecycle_config (
@@ -93,7 +93,7 @@ CREATE TRIGGER content_audit_immutable_update BEFORE UPDATE ON content_lifecycle
 CREATE TRIGGER content_audit_immutable_delete BEFORE DELETE ON content_lifecycle_audit BEGIN SELECT RAISE(ABORT,'IMMUTABLE_LIFECYCLE_AUDIT'); END;
 -- statement-breakpoint
 CREATE TRIGGER content_audit_cap BEFORE INSERT ON content_lifecycle_audit WHEN NOT EXISTS(SELECT 1 FROM content_lifecycle_audit WHERE id=NEW.id) BEGIN
-  SELECT CASE WHEN (SELECT audit_count FROM content_lifecycle_sources WHERE origin=NEW.origin AND content_id=NEW.content_id)>=256 THEN RAISE(ABORT,'CONTENT_AUDIT_CAP') END;
+  SELECT RAISE(ABORT,'CONTENT_AUDIT_CAP') WHERE (SELECT audit_count FROM content_lifecycle_sources WHERE origin=NEW.origin AND content_id=NEW.content_id)>=256;
 END;
 -- statement-breakpoint
 CREATE TRIGGER content_audit_count AFTER INSERT ON content_lifecycle_audit BEGIN

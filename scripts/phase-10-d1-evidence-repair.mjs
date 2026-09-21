@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { METHOD_VERSION, batchRows, canonicalJson, captureSchema, compareText, includedObject, quoteIdentifier, rows, sha256, sqlTokens } from './lib/d1-schema-canonical.mjs';
+import { METHOD_VERSION, batchRows, canonicalJson, captureSchema, compareText, includedObject, normalizeSql, quoteIdentifier, rows, sha256, sqlTokens } from './lib/d1-schema-canonical.mjs';
+import { assertIncidentPreserved, auditRepair, classifyArtifacts, forensicDirectory, incidentFile, incidentHead, legacyExpression, partialBaselineModel, parserCompatibilityGuard, repairedExpression, triggerRepairs } from './lib/d1-0009-repair-guards.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const scratch = '.test-tmp/phase10-d1-evidence-repair';
@@ -15,11 +16,13 @@ const names = ['0001_product_storage.sql', '0002_event_jobs.sql', '0003_affiliat
   '0005_money_platform.sql', '0006_deal_intelligence.sql', '0007_decision_os.sql', '0008_opportunity_experiments.sql',
   '0009_content_lifecycle.sql', '0010_execution_control_plane.sql'];
 const repairFiles = [rehearsalFile, preauthFile, methodFile, 'scripts/lib/d1-schema-canonical.mjs',
-  'scripts/phase-10-d1-evidence-repair.mjs', 'scripts/phase-10-d1-evidence-tests.mjs'];
-const harnessFiles = [...repairFiles.filter(file => ![rehearsalFile, preauthFile].includes(file)), 'package.json', 'package-lock.json',
+  'scripts/phase-10-d1-evidence-repair.mjs', 'scripts/phase-10-d1-evidence-tests.mjs',
+  'scripts/lib/d1-0009-repair-guards.mjs', `${migrationDirectory}/${names[8]}`, incidentFile];
+const harnessFiles = [...repairFiles.filter(file => ![rehearsalFile, preauthFile, incidentFile, `${migrationDirectory}/${names[8]}`].includes(file)), 'package.json', 'package-lock.json',
   'scripts/lib/local-d1.cjs', 'scripts/release-validation.cjs', 'tsconfig.json', 'eslint.config.mjs'].sort(compareText);
 const phase5Files = ['docs/v6/evidence/phase5-accesstrade-shopee-proof.json', 'docs/v6/evidence/phase5-local-money-proof.json'];
 const effects = Object.fromEntries(['PRODUCTION_D1_MIGRATIONS', 'PRODUCTION_D1_SCHEMA_MUTATIONS', 'PRODUCTION_D1_BUSINESS_DATA_MUTATIONS',
+  'PRODUCTION_D1_NEW_MIGRATIONS', 'PRODUCTION_D1_ADDITIONAL_SCHEMA_MUTATIONS',
   'PRODUCTION_RESOURCE_CREATED', 'PRODUCTION_RESOURCE_MODIFIED', 'PRODUCTION_RESOURCE_DELETED', 'CLOUDFLARE_DEPLOYMENTS',
   'QUEUE_MESSAGES_SENT', 'DNS_CHANGES', 'PRODUCTION_TRAFFIC_SHIFT', 'PRODUCTION_SECRET_WRITES'].map(name => [name, 0]));
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }).trim();
@@ -55,22 +58,32 @@ function changedFiles() {
 }
 
 function captureGate() {
-  assert.equal(git('status', '--short'), '', 'DIRTY_GIT_GATE_STOP');
-  assert.equal(git('diff', '--cached', '--name-only'), '', 'DIRTY_INDEX_STOP');
+  assert.ok(changedFiles().every(file => repairFiles.includes(file)), 'UNCLASSIFIED_DIRTY_FILES');
+  const stagedFiles = git('diff', '--cached', '--name-only').split('\n').filter(Boolean);
+  assert.ok(stagedFiles.every(file => file === incidentFile), 'UNRELATED_STAGED_FILES');
   git('diff', '--check'); git('diff', '--cached', '--check');
   const gate = { observedAt: new Date().toISOString(), branch: git('branch', '--show-current'), head: git('rev-parse', 'HEAD'),
-    worktreeClean: true, indexClean: true, status: '', diffCheck: 'PASS', node: process.version,
+    worktreeClean: changedFiles().length === 0, indexClean: stagedFiles.length === 0, status: git('status', '--short'),
+    stagedFiles, indexDiffSha256: sha256(execFileSync('git', ['diff', '--cached', '--binary'], { cwd: root })),
+    diffCheck: 'PASS', node: process.version, artifactClassification: classifyArtifacts(root),
+    classifiedDirtyFiles: changedFiles().map(file => ({ ...digestFile(file), classification: 'REQUIRED_SOURCE',
+      reason: file === incidentFile ? 'Preserve staged historical failed production attempt unchanged.' : 'Local repair, reproducible tests or durable authorization evidence.' })),
+    unrelatedDirtyFiles: [], incident: assertIncidentPreserved(root), repairAudit: auditRepair(root, loadMigrations().manifest),
     migrationSources: loadMigrations().manifest, phase5: phase5Files.map(digestFile),
-    priorEvidence: [rehearsalFile, preauthFile].map(file => ({ ...digestFile(file), value: readJson(file) })) };
+    priorEvidence: [rehearsalFile, preauthFile].map(file => ({ ...digestFile(file), authority: 'HISTORICAL_ONLY_INVALIDATED_BY_0009_REPAIR',
+      outcome: readJson(file).outcome ?? readJson(file).auditStatus, schemaFingerprint: readJson(file).schemaFingerprint ?? null })) };
   writeJson(`${scratch}/initial-gate.json`, gate);
-  console.log('WORKTREE_CLEAN=YES INDEX_CLEAN=YES INITIAL_GATE_CAPTURED=YES');
+  console.log('CLASSIFIED_DIRTY_REPAIR_GATE=PASS INCIDENT_INDEX_PRESERVED=YES INITIAL_GATE_CAPTURED=YES');
 }
 
 function checkWorkspace(gate, manifest) {
-  assert.equal(gate.worktreeClean, true); assert.equal(gate.indexClean, true); assert.equal(gate.status, ''); assert.equal(gate.diffCheck, 'PASS');
+  assert.deepEqual(gate.unrelatedDirtyFiles, []); assert.equal(gate.diffCheck, 'PASS');
   assert.equal(git('rev-parse', 'HEAD'), gate.head, 'HEAD_DRIFT');
   assert.equal(git('branch', '--show-current'), gate.branch, 'BRANCH_DRIFT');
-  assert.equal(git('diff', '--cached', '--name-only'), '', 'INDEX_CHANGED');
+  assert.equal(sha256(execFileSync('git', ['diff', '--cached', '--binary'], { cwd: root })), gate.indexDiffSha256, 'INDEX_CHANGED');
+  assert.deepEqual(assertIncidentPreserved(root), gate.incident);
+  assert.deepEqual(classifyArtifacts(root), gate.artifactClassification);
+  assert.deepEqual(auditRepair(root, manifest), gate.repairAudit);
   assert.deepEqual(loadMigrations().manifest, manifest, 'MIGRATION_SOURCE_DRIFT');
   assert.deepEqual(manifest, gate.migrationSources, 'INITIAL_SOURCE_DRIFT');
   assert.deepEqual(phase5Files.map(digestFile), gate.phase5, 'PHASE5_EVIDENCE_DRIFT');
@@ -239,8 +252,26 @@ async function constraintProbes(database, snapshot) {
   assert.equal((await rows(database, 'SELECT COUNT(*) AS count FROM affiliate_money_events'))[0].count, 3);
   assert.deepEqual(await rows(database, 'SELECT state,amount_minor FROM affiliate_commissions'), [{ state: 'PENDING', amount_minor: 100 }]);
   assert.equal((await rows(database, 'SELECT COUNT(*) AS count FROM execution_contexts'))[0].count, 1);
+  const sourceInsert = contentId => database.prepare('INSERT INTO content_lifecycle_sources(origin,content_id,product_id,intent,token,entity) VALUES(?,?,?,?,?,?)')
+    .bind('TEST_FIXTURE', contentId, 'probe-product', 'fixture', 'fixture', '{}');
+  await database.batch(Array.from({ length: 15 }, (_, ordinal) => sourceInsert(`cap-source-${ordinal}`)));
+  await sourceInsert('cap-source-15').run();
+  await assert.rejects(() => sourceInsert('cap-source-16').run(), /CONTENT_PRODUCT_CAP/);
+  await database.prepare("INSERT INTO content_lifecycle_sources(origin,content_id,product_id,intent,token,entity) VALUES('TEST_FIXTURE','cap-source-15','probe-product','fixture','fixture','{}') ON CONFLICT(origin,content_id) DO NOTHING").run();
+  assert.equal((await rows(database, 'SELECT COUNT(*) AS count FROM content_lifecycle_sources'))[0].count, 16);
+  const auditInsert = ordinal => database.prepare('INSERT INTO content_lifecycle_audit(id,origin,content_id,fingerprint,algorithm_version,created_at,execution_mode,payload) VALUES(?,?,?,?,?,?,?,?)')
+    .bind(`cap-audit-${ordinal}`, 'TEST_FIXTURE', 'cap-source-0', `fingerprint-${ordinal}`, 'fixture', ordinal, 'SHADOW', '{"plan":{"productionAllowed":false}}');
+  for (let offset = 0; offset < 255; offset += 64) {
+    await database.batch(Array.from({ length: Math.min(64, 255 - offset) }, (_, ordinal) => auditInsert(offset + ordinal)));
+  }
+  await auditInsert(255).run();
+  await assert.rejects(() => auditInsert(256).run(), /CONTENT_AUDIT_CAP/);
+  assert.equal((await rows(database, 'SELECT COUNT(*) AS count FROM content_lifecycle_audit'))[0].count, 256);
+  assert.equal((await rows(database, "SELECT audit_count FROM content_lifecycle_sources WHERE content_id='cap-source-0'"))[0].audit_count, 256);
   assert.deepEqual(await rows(database, 'PRAGMA foreign_key_check'), []);
   return { status: 'PASS', checks, positiveMoneyProjection: { status: 'PASS', moneyEvents: 3, commissionAmountMinor: 100 },
+    repairedCapPolicies: { status: 'PASS', source15To16Allowed: true, source17Rejected: 'CONTENT_PRODUCT_CAP', duplicateSourceAtCapAllowed: true,
+      audit255To256Allowed: true, audit257Rejected: 'CONTENT_AUDIT_CAP', sourceRows: 16, auditRows: 256, auditCounter: 256 },
     positiveExecutionContext: 'PASS', fixtureScope: 'SEPARATE_DISPOSABLE_LOCAL_DATABASE_ONLY',
     finalFixtureBusinessRows: (await dataSummary(database, snapshot.schema, false)).businessRows };
 }
@@ -294,12 +325,25 @@ async function runRehearsals(sources) {
     }
     assert.equal(installs[0].schemaFingerprint, installs[1].schemaFingerprint);
     const partialResumes = [];
-    for (const through of [3, 6, 9]) {
+    for (const through of [3, 6, 8, 9]) {
       console.log(`LOCAL_PARTIAL_RESUME_${String(through).padStart(4, '0')}=RUNNING`);
       partialResumes.push(await withDatabase(async (database, baseline) => {
         const prefixSteps = await apply(database, sources, through);
-        const before = { ledger: await ledger(database), fingerprint: (await captureSchema(database)).sha256 };
-        const resumeSteps = await apply(database, sources);
+        const prefixSchema = await captureSchema(database);
+        const before = { ledger: await ledger(database), fingerprint: prefixSchema.sha256,
+          ...(through === 8 ? { canonicalSchema: prefixSchema.schema, counts: prefixSchema.counts,
+            data: await dataSummary(database, prefixSchema.schema), foreignKeyViolations: await rows(database, 'PRAGMA foreign_key_check'),
+            quickCheck: await rows(database, 'PRAGMA quick_check'), migration0009MetadataPresent: false, migration0010MetadataPresent: false,
+            partial0009Objects: (await rows(database, 'SELECT type,name FROM sqlite_schema')).filter(object =>
+              object.name.startsWith('content_') || ['automation_jobs_lifecycle', 'scheduled_tasks_lifecycle'].includes(object.name)) } : {}) };
+        if (through === 8) {
+          assert.equal(before.ledger.length, 8); assert.deepEqual(before.partial0009Objects, []);
+          assert.equal(before.fingerprint, installs[0].steps[7].schemaFingerprint);
+          assert.equal(before.fingerprint, installs[1].steps[7].schemaFingerprint);
+          assert.deepEqual(before.foreignKeyViolations, []);
+        }
+        const resumeSteps = await apply(database, sources, through === 8 ? 9 : 10);
+        if (through === 8) resumeSteps.push((await apply(database, sources, 10)).at(-1));
         assert.ok(resumeSteps.slice(0, through).every(step => step.action === 'ALREADY_APPLIED'));
         assert.ok(resumeSteps.slice(through).every(step => step.action === 'APPLIED'));
         const snapshot = await captureSchema(database);
@@ -363,12 +407,20 @@ async function runRehearsals(sources) {
 }
 
 export function validateRehearsal(report, currentSources, currentHarness, head) {
+  assert.equal(report.schema, 'phase10-d1-rehearsal-evidence-v3');
   assert.equal(report.outcome, 'PASS'); assert.equal(report.sourceHead, head);
   assert.deepEqual(report.migrationSources, currentSources); assert.deepEqual(report.harnessSources, currentHarness);
   assert.equal(report.sourceManifestSha256, digest(currentSources));
   assert.equal(report.migrationCount, 10); assert.equal(report.migrationSequenceValid, true);
-  assert.equal(report.initialGitGate.head, head); assert.equal(report.initialGitGate.worktreeClean, true); assert.equal(report.initialGitGate.indexClean, true);
+  assert.equal(report.initialGitGate.head, head); assert.deepEqual(report.initialGitGate.unrelatedDirtyFiles, []);
+  assert.ok(report.initialGitGate.stagedFiles.every(file => file === incidentFile));
+  assert.equal(report.initialGitGate.indexClean, report.initialGitGate.stagedFiles.length === 0);
+  assert.equal(report.initialGitGate.worktreeClean, report.initialGitGate.status === '');
   assert.deepEqual(report.initialGitGate.migrationSources, currentSources);
+  assert.deepEqual(report.repairAudit, auditRepair(root, currentSources));
+  assert.deepEqual(report.incidentEvidence, assertIncidentPreserved(root));
+  assert.deepEqual(report.parserCompatibility, parserCompatibilityGuard(fs.readFileSync(path.join(root, currentSources[8].file), 'utf8')));
+  assert.equal(report.authorizationEvidenceInvalidatedByRepair, true);
   assert.equal(report.method.version, METHOD_VERSION);
   assert.deepEqual(report.method.documentation, currentHarness.find(source => source.file === methodFile));
   assert.deepEqual(report.method.implementation, currentHarness.find(source => source.file === 'scripts/lib/d1-schema-canonical.mjs'));
@@ -427,7 +479,7 @@ export function validateRehearsal(report, currentSources, currentHarness, head) 
     assert.ok(install.steps.every(step => step.action === 'APPLIED' && step.data.businessRows === 0 && step.foreignKeyViolations.length === 0));
   }
   assert.deepEqual(report.installs[0].counts, report.installs[1].counts);
-  assert.deepEqual(report.partialResumes.map(resume => resume.through), [names[2], names[5], names[8]]);
+  assert.deepEqual(report.partialResumes.map(resume => resume.through), [names[2], names[5], names[7], names[8]]);
   for (const resume of report.partialResumes) {
     assert.equal(resume.status, 'PASS'); assert.equal(resume.sourceManifestSha256, digest(currentSources));
     assert.equal(resume.schemaFingerprint, fingerprint); assert.equal(resume.data.businessRows, 0);
@@ -442,6 +494,28 @@ export function validateRehearsal(report, currentSources, currentHarness, head) 
     assert.deepEqual(resume.resumeSteps.map(step => step.action), names.map(name => names.indexOf(name) < prefixLength ? 'ALREADY_APPLIED' : 'APPLIED'));
     assert.deepEqual(resume.resumeSteps.map(({ file, sha256, bytes }) => ({ file, sha256, bytes })), currentSources);
   }
+  const partial = report.partialResumes.find(resume => resume.through === names[7]);
+  assert.equal(partial.before.fingerprint, digest(partial.before.canonicalSchema));
+  assert.equal(report.pre0009SchemaFingerprint, partial.before.fingerprint);
+  assert.equal(partial.before.fingerprint, report.installs[1].steps[7].schemaFingerprint);
+  assert.deepEqual(partial.before.ledger, report.installs[0].steps[7].ledger);
+  assert.deepEqual(partial.before.counts, report.installs[0].steps[7].counts);
+  assert.deepEqual(partial.before.data, report.installs[0].steps[7].data);
+  assert.deepEqual(partial.before.foreignKeyViolations, []);
+  assert.deepEqual(partial.before.quickCheck.map(row => Object.values(row)[0]), ['ok']);
+  assert.equal(partial.before.migration0009MetadataPresent, false); assert.equal(partial.before.migration0010MetadataPresent, false);
+  assert.deepEqual(partial.before.partial0009Objects, []);
+  assert.equal(partial.resumeSteps[8].action, 'APPLIED'); assert.equal(partial.resumeSteps[9].action, 'APPLIED');
+  assert.deepEqual(report.partialProductionBaselineModel, partialBaselineModel(report));
+  const restoredHistoricalSchema = structuredClone(report.canonicalSchema);
+  for (const repair of triggerRepairs) {
+    const trigger = restoredHistoricalSchema.triggers.find(trigger => trigger.name === repair.name);
+    assert.ok(trigger.sql.includes(normalizeSql(repairedExpression(repair))));
+    trigger.sql = trigger.sql.replace(normalizeSql(repairedExpression(repair)), normalizeSql(legacyExpression(repair)));
+  }
+  assert.equal(digest(restoredHistoricalSchema), report.oldFingerprintComparison.oldFingerprint);
+  assert.equal(report.oldFingerprintComparison.authority, 'HISTORICAL_ONLY_INVALIDATED_BY_0009_REPAIR');
+  assert.equal(report.oldFingerprintComparison.newFingerprint, fingerprint);
   assert.equal(report.failureAtomicity.status, 'PASS'); assert.equal(report.failureAtomicity.sourceManifestSha256, digest(currentSources));
   assert.deepEqual(report.failureAtomicity.failedMigration, currentSources[3]);
   assert.equal(report.failureAtomicity.before.schemaFingerprint, report.installs[0].steps[2].schemaFingerprint);
@@ -454,11 +528,13 @@ export function validateRehearsal(report, currentSources, currentHarness, head) 
   assert.equal(report.constraints.status, 'PASS'); assert.equal(report.constraints.sourceManifestSha256, digest(currentSources));
   assert.equal(report.constraints.schemaFingerprint, fingerprint); assert.ok(report.constraints.checks.length >= 17);
   assert.ok(report.constraints.checks.every(check => check.status === 'PASS' && check.batchRolledBack));
+  assert.deepEqual(report.constraints.repairedCapPolicies, { status: 'PASS', source15To16Allowed: true, source17Rejected: 'CONTENT_PRODUCT_CAP',
+    duplicateSourceAtCapAllowed: true, audit255To256Allowed: true, audit257Rejected: 'CONTENT_AUDIT_CAP', sourceRows: 16, auditRows: 256, auditCounter: 256 });
   assert.equal(report.phase5SideEffectAudit.status, 'UNCHANGED_BYTE_FOR_BYTE');
   assert.deepEqual(report.phase5SideEffectAudit.before, report.phase5SideEffectAudit.after);
   assert.deepEqual(report.productionEffects, effects); assert.equal(report.isolation.externalNetworkAttempts, 0);
   assert.equal(report.isolation.authenticationAttempted, false); assert.equal(report.isolation.allDatabasesDisposed, true);
-  assert.equal(report.isolation.databasesCreated, 7); assert.equal(report.isolation.persistence, false);
+  assert.equal(report.isolation.databasesCreated, 8); assert.equal(report.isolation.persistence, false);
   assert.equal(report.isolation.remoteBindings, false); assert.equal(report.isolation.queueBindings, 0);
   assert.equal(report.quality.status, 'PASS'); assert.equal(report.quality.harnessManifestSha256, digest(currentHarness));
   assert.deepEqual(report.quality.results.map(result => result.name), ['focused-tests', 'typescript', 'eslint', 'secret-scan', 'git-diff-check']);
@@ -519,13 +595,15 @@ function verifyDurable() {
   assert.equal(preauth.sourceHead, report.sourceHead); assert.equal(preauth.methodVersion, METHOD_VERSION);
   assert.equal(preauth.schemaFingerprintA, fingerprint); assert.equal(preauth.schemaFingerprintB, fingerprint);
   assert.equal(preauth.migrationSourceHashesMatchRehearsal, true);
-  assert.equal(preauth.readyForD1ProductionMigrationPreauthReaudit, 'YES');
+  assert.equal(preauth.readyForD1PartialBaselinePreauthAudit, 'YES');
   assert.equal(preauth.authorizationDecision, 'NO'); assert.equal(preauth.productionMigrationAuthorized, false);
-  assert.equal(preauth.currentProductionIdentityVerified, false); assert.equal(preauth.currentProductionEmptyBaselineVerified, false);
+  assert.equal(preauth.currentProductionIdentityVerified, false); assert.equal(preauth.productionIsEmpty, false);
+  assert.equal(preauth.productionInspectedThisTask, false);
+  assert.deepEqual(preauth.partialProductionBaselineModel, partialBaselineModel(report));
+  assert.deepEqual(preauth.incidentEvidence, report.incidentEvidence);
   assert.deepEqual(preauth.productionEffects, effects);
   assert.ok(Object.values(preauth.localRequirements).every(value => value === 'PASS'));
-  assert.equal(git('diff', '--cached', '--name-only'), '');
-  assert.ok(changedFiles().every(file => repairFiles.includes(file)), 'UNRELATED_DIRTY_FILES');
+  checkWorkspace(report.initialGitGate, report.migrationSources);
   console.log(`DURABLE_REHEARSAL_AND_PREAUTH_VERIFIED=PASS SCHEMA_FINGERPRINT=${fingerprint}`);
   return report;
 }
@@ -537,9 +615,11 @@ async function repair() {
     productionMigrationAuthorized: false, readyForD1ProductionMigrationPreauthReaudit: 'NO', productionEffects: effects });
   writeJson(rehearsalFile, { outcome: 'IN_PROGRESS', sourceHead: gate.head, migrationSources: sources.manifest, productionEffects: effects });
   const results = await runRehearsals(sources);
-  const oldFingerprint = '765242eb594e24acd01c1e35ee5a9c13c9a31754b18d6a828f1a7729da2d3859';
+  const historical = JSON.parse(execFileSync('git', ['show', `${incidentHead}:${rehearsalFile}`], { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }));
+  const oldFingerprint = historical.schemaFingerprint;
+  assert.equal(digest(historical.canonicalSchema), oldFingerprint);
   const newFingerprint = results.installs[0].schemaFingerprint;
-  const report = { schema: 'phase10-d1-rehearsal-evidence-v2', outcome: 'PASS', observedAt: new Date().toISOString(),
+  const report = { schema: 'phase10-d1-rehearsal-evidence-v3', outcome: 'PASS', observedAt: new Date().toISOString(),
     sourceHead: gate.head, branch: gate.branch, initialGitGate: gate, migrationCount: sources.manifest.length, migrationSequenceValid: true,
     migrationSources: sources.manifest, sourceManifestSha256: digest(sources.manifest), harnessSources: harness,
     harnessProvenance: 'EXACT_WORKING_TREE_BYTES_AT_SOURCE_HEAD_NOT_AN_IMPLIED_COMMIT',
@@ -549,17 +629,23 @@ async function repair() {
       encoding: 'UTF-8_WITHOUT_BOM', newline: 'ONE_FINAL_LF', hashAlgorithm: 'SHA-256', serialization: 'RECURSIVELY_KEY_SORTED_COMPACT_JSON',
       representation: 'canonicalSchema field in this evidence; hash canonicalJson(field), not pretty-printed file bytes' },
     ...results, schemaFingerprint: newFingerprint, sourceToFingerprintBinding: 'PASS',
+    authorizationEvidenceInvalidatedByRepair: true, repairAudit: auditRepair(root, sources.manifest), incidentEvidence: assertIncidentPreserved(root),
+    parserCompatibility: parserCompatibilityGuard(fs.readFileSync(path.join(root, sources.manifest[8].file), 'utf8')),
+    pre0009SchemaFingerprint: results.partialResumes.find(resume => resume.through === names[7]).before.fingerprint,
     oldFingerprintComparison: { oldFingerprint, newFingerprint, match: oldFingerprint === newFingerprint,
-      changeReason: oldFingerprint === newFingerprint ? 'MATCH' : 'New fully specified canonical schema representation; historical method and source binding are unknown. This mismatch alone does not establish schema drift.',
-      oldMethod: 'UNDOCUMENTED_UNVERIFIABLE', authority: 'NEW_METHOD_FOR_LOCAL_REHEARSAL_ONLY' },
+      changeReason: 'Only the two repaired trigger SQL bodies differ under the unchanged canonicalization method. Replacing them with their historical expressions reproduces the old canonical fingerprint exactly.',
+      oldMethod: METHOD_VERSION, historicalGitReference: `${incidentHead}:${rehearsalFile}`, authority: 'HISTORICAL_ONLY_INVALIDATED_BY_0009_REPAIR',
+      olderUndocumentedFingerprint: '765242eb594e24acd01c1e35ee5a9c13c9a31754b18d6a828f1a7729da2d3859' },
     phase5SideEffectAudit: { status: 'UNCHANGED_BYTE_FOR_BYTE', before: gate.phase5, after: phase5Files.map(digestFile), regenerationPerformed: false },
     recoveryLimitations: ['Per-file D1 batch only; ten migrations are not one atomic transaction.',
       'Table-copy/drop migrations are not automatically reversible; Worker rollback does not restore D1 schema/data.',
       'Empty-prefix resumes do not certify populated production upgrades or remote Wrangler transaction behavior.',
       'No production identity, baseline, backup, export/restore, Time Travel, permissions or change window verified.',
       'A fresh separately authorized production preflight and explicit human migration authorization are still mandatory.'],
-    productionEffects: effects, checkpoint: { filesToCommit: repairFiles, filesToIgnore: [`${scratch}/`], filesToReview: [] },
+    productionEffects: effects, checkpoint: { filesToCommit: changedFiles(), filesToIgnore: [`${scratch}/`, `${forensicDirectory}/`,
+      '.test-tmp/isolated/0001_test.sql', '.test-tmp/bisect/0001_base.sql'], filesToReview: [] },
     quality: { status: 'PENDING' } };
+  report.partialProductionBaselineModel = partialBaselineModel(report);
   writeJson(rehearsalFile, report);
   report.quality = qualityChecks(harness);
   checkWorkspace(gate, sources.manifest);
@@ -567,11 +653,12 @@ async function repair() {
   report.evidenceBindingSha256 = digest(report);
   validateRehearsal(report, sources.manifest, harness, gate.head);
   writeJson(rehearsalFile, report);
-  const preauth = { schema: 'phase10-d1-local-preauth-reaudit-v2', observedAt: new Date().toISOString(), auditStatus: 'LOCAL_EVIDENCE_REAUDIT_READY',
+  const preauth = { schema: 'phase10-d1-partial-production-preauth-v3', observedAt: new Date().toISOString(), auditStatus: 'LOCAL_PARTIAL_BASELINE_EVIDENCE_READY',
     sourceHead: gate.head, branch: gate.branch, scope: 'LOCAL_ONLY_PREAUTH_EVIDENCE_REVALIDATION_NOT_MIGRATION_AUTHORIZATION',
-    priorConclusion: { sha256: gate.priorEvidence.find(item => item.file === preauthFile).sha256, status: 'SUPERSEDED_UNSUPPORTED_BLANKET_PASS',
-      reason: 'Historical booleans did not contain verifiable source-to-rehearsal and fingerprint-method evidence.' },
-    initialWorktreeClean: true, initialIndexClean: true, currentWorktreeClean: changedFiles().length === 0, currentIndexClean: true,
+    priorConclusion: { sha256: gate.priorEvidence.find(item => item.file === preauthFile).sha256, status: 'INVALIDATED_BY_0009_REPAIR_AND_NONEMPTY_PRODUCTION',
+      reason: 'Production has exactly 0001..0008 applied, not an empty schema. Previous migration hashes and canonical fingerprint do not authorize repaired 0009.' },
+    initialWorktreeClean: gate.worktreeClean, initialIndexClean: gate.indexClean, currentWorktreeClean: changedFiles().length === 0,
+    currentIndexClean: git('diff', '--cached', '--name-only') === '',
     expectedDirtyFiles: changedFiles(), unrelatedDirtyFiles: [],
     rehearsalReference: { ...digestFile(rehearsalFile), evidenceBindingSha256: report.evidenceBindingSha256, sourceManifestSha256: report.sourceManifestSha256 },
     migrationSources: sources.manifest, migrationSourceHashesMatchRehearsal: true, methodVersion: METHOD_VERSION,
@@ -579,13 +666,21 @@ async function repair() {
     localRequirements: Object.fromEntries(['durableMigrationHashes', 'hashesTiedToFreshRehearsal', 'fingerprintMethodDocumented',
       'fingerprintRepeatable', 'currentMigrationHashesEqualRehearsal', 'zeroBusinessSeed', 'partialResumesVerified', 'failureBehaviorVerified',
       'recoveryLimitationsDocumented', 'phase5EvidenceUnchanged', 'noUnrelatedDirtyChanges', 'qualityChecks'].map(name => [name, 'PASS'])),
-    currentProductionIdentityVerified: false, currentProductionEmptyBaselineVerified: false, productionInspectedThisTask: false,
+    currentProductionIdentityVerified: false, productionIsEmpty: false, productionInspectedThisTask: false,
+    partialProductionBaselineModel: report.partialProductionBaselineModel, pre0009SchemaFingerprint: report.pre0009SchemaFingerprint,
+    incidentEvidence: report.incidentEvidence,
+    requiredFutureReadOnlyEvidence: ['Exact account ID and D1 ID/name', 'Exact ordered migration history 0001..0008 with no unknown entries',
+      '0009 and 0010 metadata absent', 'No partial 0009 tables, indexes, triggers or other schema effect',
+      'Full d1-schema-canonical-v1 schema equal to expected pre-0009 fingerprint', 'Zero business rows and exact unchanged control row',
+      'Repaired source hashes, HEAD and evidence bindings unchanged; clean reviewed checkpoint'],
+    allowedFutureMigrationSequence: [names[8], names[9]], forbiddenFutureMigrationReplay: names.slice(0, 8),
     recoveryPlanStatus: 'LOCAL_LIMITATIONS_DOCUMENTED_PRODUCTION_RECOVERY_UNVERIFIED',
-    productionGateBlockers: ['FINAL_CHECKPOINT_REQUIRES_HUMAN_REVIEW', 'CURRENT_PRODUCTION_IDENTITY_AND_EMPTY_BASELINE_NOT_REVALIDATED',
+    productionGateBlockers: ['FINAL_CHECKPOINT_REQUIRES_HUMAN_REVIEW', 'CURRENT_PRODUCTION_IDENTITY_AND_EXACT_0001_TO_0008_BASELINE_NOT_REVALIDATED',
       'PRODUCTION_BACKUP_AND_RECOVERY_NOT_VERIFIED', 'REMOTE_APPLY_SEMANTICS_AND_CHANGE_WINDOW_REQUIRE_REVIEW', 'NO_HUMAN_MIGRATION_AUTHORIZATION'],
-    abortConditions: ['Any source, method, harness, HEAD or evidence-reference drift', 'Any unknown migration or nonempty/unverified target',
+    abortConditions: ['Any source, method, harness, HEAD or evidence-reference drift', 'Wrong account/D1 identity, any unknown migration, nonzero business rows or unverified partial baseline',
+      '0009/0010 metadata present, any partial 0009 object or pre-0009 fingerprint mismatch',
       'Any failed local quality, repeatability, integrity, resume or atomicity check', 'Any unresolved unrelated changes or missing recovery/approval'],
-    readyForD1ProductionMigrationPreauthReaudit: 'YES', authorizationDecision: 'NO', productionMigrationAuthorized: false,
+    readyForD1PartialBaselinePreauthAudit: 'YES', authorizationDecision: 'NO', productionMigrationAuthorized: false,
     productionEffects: effects, nextStep: 'STOP_FOR_HUMAN_REVIEW_NO_AUTHENTICATION_NO_PRODUCTION_WRITE_NO_DEPLOY_NO_COMMIT' };
   writeJson(preauthFile, preauth);
   verifyDurable();
@@ -593,7 +688,7 @@ async function repair() {
     execFileSync(binary, args, { cwd: root, windowsHide: true, stdio: 'pipe' });
   }
   console.log(JSON.stringify({ PHASE10_D1_EVIDENCE_REPAIR: 'PASS', fingerprint: newFingerprint, counts: results.installs[0].counts,
-    READY_FOR_D1_PRODUCTION_MIGRATION_PREAUTH_REAUDIT: 'YES', PRODUCTION_MIGRATION_AUTHORIZED: false, ...effects }));
+    READY_FOR_D1_PARTIAL_BASELINE_PREAUTH_AUDIT: 'YES', PRODUCTION_MIGRATION_AUTHORIZED: false, ...effects }));
 }
 
 async function main() {
