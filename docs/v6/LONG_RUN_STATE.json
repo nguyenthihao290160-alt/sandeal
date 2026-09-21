@@ -1,8 +1,8 @@
 {
   "program": "SANDEAL_V6_PHASE10_PRODUCTION_DISCOVERY",
   "currentPhase": "PHASE10",
-  "currentStep": "Read-only discovery stopped at authentication; no production inventory or mutation; STOP",
-  "result": "DISCOVERY_BLOCKED",
+  "currentStep": "Cloudflare local build: all",
+  "result": "RUNNING",
   "completedCheckpoints": [
     "PHASE_3: Focused reconstruction checks: 159 passed, zero failures/skips",
     "PHASE_3_5: Local shadow parity, immutable source and failure proof: 14 PASS",
@@ -2746,21 +2746,6 @@
       "postCheckpoint": true
     },
     {
-      "name": "build-cloudflare-worker",
-      "path": "docs/v6/evidence/build-cloudflare-worker.json",
-      "exit": 0,
-      "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
-      "bytes": 379507,
-      "fileStorageModules": 0,
-      "filesystemSettingsModules": 0
-    },
-    {
-      "name": "build-cloudflare-site",
-      "path": "docs/v6/evidence/build-cloudflare-site.json",
-      "exit": 0,
-      "log": ".test-tmp/v6-cloudflare-worker/site-build.log"
-    },
-    {
       "name": "phase8-5-resume-audit",
       "path": "docs/v6/evidence/phase8-5-resume-audit.json",
       "phase": "PHASE_8_5",
@@ -2915,6 +2900,23 @@
       "sourceFingerprint": "be2c47bbe9522a583b4812c6d6bbf509deecf18a8968f6dd5d476c8ee361e11d",
       "regressionReport": ".test-tmp/phase10/resume-20260919/regressions.json",
       "finalVerification": ".test-tmp/phase10/resume-20260919/final-check.json"
+    },
+    {
+      "name": "build-cloudflare-worker",
+      "path": "docs/v6/evidence/build-cloudflare-worker.json",
+      "exit": 0,
+      "file": "C:\\duan\\sandeal\\.test-tmp\\v6-cloudflare-worker\\worker.mjs",
+      "bytes": 396265,
+      "fileStorageModules": 0,
+      "filesystemSettingsModules": 0
+    },
+    {
+      "name": "build-cloudflare-site",
+      "path": "docs/v6/evidence/build-cloudflare-site.json",
+      "exit": 0,
+      "log": ".test-tmp/v6-cloudflare-worker/site-build.log",
+      "environment": "LOCAL",
+      "origin": "http://localhost:8787"
     }
   ],
   "nextStep": "STOP_OPERATOR_AUTHENTICATES_OUTSIDE_CHAT_CONFIRMS_TARGETS_REVIEWS_AND_COMMITS_CHECKPOINT_THEN_REQUESTS_READ_ONLY_DISCOVERY_AGAIN",
@@ -3218,8 +3220,8 @@
     "nextPhaseRequiresSeparateAuthorization": true
   },
   "branch": "master",
-  "head": "b9e42ceff31dfc214148b2c6d767369fd2aa303d",
-  "workingTreeFingerprint": "8f3db8e4d5d027aeba3c0a378d2f95de7e23131c3e3313cc707f6a40c213fe90",
+  "head": "183eaef16f130ceeb5f7f147ae17a026df8964cb",
+  "workingTreeFingerprint": "fb08cc59b34b6a0bbb1ca00ad11b366238ff01f8f90e546380911a683a0af968",
   "workingTreeFingerprintPolicy": "SHA256 of sorted Git tracked and nonignored untracked path/content hashes; excludes this generated state, evidence, and secret environment files",
   "filesChangedSinceEvidence": [
     ".gitignore",
@@ -3249,6 +3251,8 @@
     "cloudflare/site/next.config.mjs",
     "cloudflare/site/tsconfig.json",
     "cloudflare/worker.ts",
+    "config/cloudflare/production-release-bundle.contract.json",
+    "config/cloudflare/production.contract.json",
     "config/cloudflare/wrangler.runtime.local.jsonc",
     "docs/v6/CLOUDFLARE_ROUTE_MAP.md",
     "docs/v6/CLOUDFLARE_RUNTIME_DECISION.md",
@@ -3263,19 +3267,24 @@
     "docs/v6/phase-08-content-seo-intelligence.md",
     "docs/v6/phase-09-5-preproduction-readiness.md",
     "docs/v6/phase-09-execution-control-plane.md",
+    "docs/v6/phase-10-preauth-contracts.md",
+    "docs/v6/phase-10-production-launch.md",
     "docs/v6/resume-long-run-3.md",
     "scripts/fixtures/v6-cloudflare-product.cjs",
     "scripts/fixtures/v6-deal-intelligence.cjs",
     "scripts/fixtures/v6-money-engine.cjs",
     "scripts/lib/cloudflare-autopilot-test.cjs",
     "scripts/lib/cloudflare-local.cjs",
+    "scripts/lib/phase10-evidence-isolation.mjs",
     "scripts/lib/rehearsal-evidence-isolation.mjs",
     "scripts/lib/release-migration-rehearsal.mjs",
     "scripts/lib/release-rehearsal-checkpoint.mjs",
     "scripts/lib/release-rehearsal-fixtures.mjs",
     "scripts/lib/release-rehearsal.mjs",
+    "scripts/phase-09-5-precommit-audit.mjs",
     "scripts/phase-09-5-preproduction-tests.mjs",
     "scripts/phase-09-execution-control-plane-tests.cjs",
+    "scripts/phase-10-preauth-tests.mjs",
     "scripts/v6-cloudflare-autopilot-tests.cjs",
     "scripts/v6-cloudflare-build.cjs",
     "scripts/v6-cloudflare-cron-tests.cjs",
@@ -3290,6 +3299,7 @@
     "scripts/v6-decision-os-tests.mjs",
     "scripts/v6-money-engine-tests.cjs",
     "scripts/v6-opportunity-experiments-tests.mjs",
+    "scripts/v6-phase10-preauth-validation.mjs",
     "scripts/v6-phase7-validation.mjs",
     "scripts/v6-phase8-5-validation.mjs",
     "scripts/v6-phase9-5-validation.mjs",
@@ -3332,6 +3342,7 @@
     "src/lib/execution-control-plane/fingerprint.ts",
     "src/lib/execution-control-plane/killSwitch.ts",
     "src/lib/execution-control-plane/preflightValidator.ts",
+    "src/lib/execution-control-plane/production.ts",
     "src/lib/execution-control-plane/releaseBundle.ts",
     "src/lib/execution-control-plane/rollback.ts",
     "src/lib/execution-control-plane/targetSafety.ts",
@@ -3349,6 +3360,7 @@
     "src/lib/release-rehearsal/manifest.ts",
     "src/lib/release-rehearsal/migrations.ts",
     "src/lib/release-rehearsal/plans.ts",
+    "src/lib/release-rehearsal/productionDiscovery.ts",
     "src/lib/release-rehearsal/session.ts",
     "src/lib/release-rehearsal/types.ts",
     "src/lib/runtime/cloudflare/autopilot.ts",
@@ -3357,6 +3369,7 @@
     "src/lib/runtime/cloudflare/decision.ts",
     "src/lib/runtime/cloudflare/http.ts",
     "src/lib/runtime/cloudflare/opportunity.ts",
+    "src/lib/runtime/cloudflare/production.ts",
     "src/lib/runtime/cloudflare/publicCatalogue.ts",
     "src/lib/runtime/cloudflare/storageFactory.ts",
     "src/lib/storage/d1/d1AffiliateStore.ts",
@@ -3378,10 +3391,10 @@
     "src/lib/storage/d1/migrations/0008_opportunity_experiments.sql",
     "src/lib/storage/d1/migrations/0009_content_lifecycle.sql",
     "src/lib/storage/d1/migrations/0010_execution_control_plane.sql",
-    "docs/v6/phase-10-production-launch.md"
+    "wrangler.bootstrap.toml"
   ],
   "filesChangedSinceEvidenceBaseline": "docs/v6/evidence/resume-3-baseline.json",
-  "updatedAt": "2026-09-20T09:34:36.998Z",
+  "updatedAt": "2026-09-21T01:18:27.852Z",
   "phase5Plan": [
     "Extend existing provider/offer contracts without new discovery internals",
     "Attach normalized provider offers to the existing canonical product aggregate",
@@ -4046,7 +4059,11 @@
     "authenticationCheckedAt": "2026-09-20T09:34:36.998Z",
     "sourceHead": "b9e42ceff31dfc214148b2c6d767369fd2aa303d",
     "workingTreeFingerprint": "8f3db8e4d5d027aeba3c0a378d2f95de7e23131c3e3313cc707f6a40c213fe90",
-    "filesChangedDuringDiscovery": ["docs/v6/LONG_RUN_STATE.json", "docs/v6/evidence/phase10-production-discovery.json", "docs/v6/phase-10-production-launch.md"],
+    "filesChangedDuringDiscovery": [
+      "docs/v6/LONG_RUN_STATE.json",
+      "docs/v6/evidence/phase10-production-discovery.json",
+      "docs/v6/phase-10-production-launch.md"
+    ],
     "legacyRootFileChangeMetadataScope": "filesChangedSinceEvidence and its baseline are preserved historical metadata, not this discovery changeset",
     "worktreeCleanAtDiscoveryStart": true,
     "indexCleanAtDiscoveryStart": true,
@@ -4085,5 +4102,8 @@
     "historicalTestEvidenceCountPreserved": 53,
     "outcomesReference": "docs/v6/evidence/phase10-production-discovery.json#outcomes",
     "stop": true
+  },
+  "outcomes": {
+    "PHASE10_BOOTSTRAP_PROVISIONING": "COMPLETE_RESOURCE_BASELINE_ONLY"
   }
 }

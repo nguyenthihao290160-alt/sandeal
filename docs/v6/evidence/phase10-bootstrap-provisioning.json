@@ -1,0 +1,16 @@
+﻿{
+  "worker": {
+    "name": "sandeal-production",
+    "deployment": "eee7c19e-0b14-4efc-9ec1-336be52bafcf"
+  },
+  "d1": {
+    "name": "sandeal-production",
+    "id": "bdf42c22-190d-4cdf-a166-a9e07ade57f2",
+    "binding": "DB"
+  },
+  "queue": {
+    "name": "sandeal-production-jobs",
+    "id": "e56ec5f032c24abc82aeb2680606b186",
+    "binding": "JOB_QUEUE"
+  }
+}

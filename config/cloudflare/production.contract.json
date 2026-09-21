@@ -6,26 +6,63 @@
   "environment": "PRODUCTION",
   "architecture": "ONE_WORKER_WITH_STATIC_ASSETS_D1_QUEUE_AND_OPTIONAL_CRON",
   "resources": {
-    "accountId": { "type": "CloudflareAccountId", "value": null, "source": "AUTHENTICATED_DISCOVERY" },
-    "workerName": { "type": "WorkerName", "value": null, "source": "AUTHENTICATED_DISCOVERY" },
-    "staticTarget": { "type": "SameWorkerName", "value": null, "separatePagesProject": false },
-    "databaseId": { "type": "D1DatabaseId", "binding": "DB", "value": null },
-    "queueName": { "type": "QueueName", "binding": "JOB_QUEUE", "value": null },
-    "assets": { "type": "Fetcher", "binding": "ASSETS", "directory": "cloudflare/site/out" },
-    "domain": { "type": "VerifiedHostname", "value": null },
-    "route": { "type": "ExactDomainWildcard", "value": null },
-    "zoneId": { "type": "CloudflareZoneId", "value": null }
+    "accountId": {
+      "type": "CloudflareAccountId",
+      "value": "88d3839bee4ac092d39fbb293e3eb426",
+      "source": "AUTHENTICATED_DISCOVERY"
+    },
+    "workerName": {
+      "type": "WorkerName",
+      "value": "sandeal-production",
+      "source": "AUTHENTICATED_DISCOVERY"
+    },
+    "staticTarget": {
+      "type": "SameWorkerName",
+      "value": "sandeal-production",
+      "separatePagesProject": false
+    },
+    "databaseId": {
+      "type": "D1DatabaseId",
+      "binding": "DB",
+      "value": "bdf42c22-190d-4cdf-a166-a9e07ade57f2"
+    },
+    "queueName": {
+      "type": "QueueName",
+      "binding": "JOB_QUEUE",
+      "value": "sandeal-production-jobs"
+    },
+    "assets": {
+      "type": "Fetcher",
+      "binding": "ASSETS",
+      "directory": "cloudflare/site/out"
+    },
+    "domain": {
+      "type": "VerifiedHostname",
+      "value": null
+    },
+    "route": {
+      "type": "ExactDomainWildcard",
+      "value": null
+    },
+    "zoneId": {
+      "type": "CloudflareZoneId",
+      "value": null
+    }
   },
   "worker": {
     "entry": "cloudflare/worker.ts",
     "artifact": ".test-tmp/v6-cloudflare-worker/worker.mjs",
     "compatibilityDateReference": "config/cloudflare/wrangler.runtime.local.jsonc#compatibility_date",
-    "compatibilityFlags": ["nodejs_compat"],
+    "compatibilityFlags": [
+      "nodejs_compat"
+    ],
     "workersDev": false,
     "previewUrls": false,
     "runWorkerFirst": true,
     "runWorkerFirstRequirement": "ALL_ROUTES_MUST_PASS_AUTHORITY_GATE_NO_ASSET_BYPASS",
-    "capabilitiesImplemented": ["READ_PRODUCTION_HEALTH"],
+    "capabilitiesImplemented": [
+      "READ_PRODUCTION_HEALTH"
+    ],
     "allOtherCapabilities": "DENY_INCLUDING_STATIC_PUBLICATION_CATALOGUE_REDIRECTS_WRITES_QUEUE_AND_CRON",
     "approvalStorage": "release_bundles.payload keyed by prod-<bundleFingerprint>; environment PRODUCTION",
     "controlStorage": "execution_controls global row with target-bound production payload",
@@ -33,26 +70,85 @@
     "productionMutationExecutor": "ABSENT"
   },
   "variables": {
-    "SANDEAL_RUNTIME": { "type": "enum", "required": "cloudflare" },
-    "SANDEAL_LOCAL_ONLY": { "type": "boolean-string", "futureRequired": "false", "currentLocal": "true" },
-    "SANDEAL_PRODUCTION": { "type": "boolean-string", "futureRequired": "true", "currentLocal": "false" },
-    "SANDEAL_PRODUCTION_EXECUTION_ENABLED": { "type": "boolean-string", "default": "false" },
-    "SANDEAL_PRODUCTION_IDENTITY": { "type": "ProductionIdentityJSON", "value": null },
-    "SANDEAL_PRODUCTION_BUNDLE_FINGERPRINT": { "type": "SHA256", "value": null },
-    "SANDEAL_PRODUCTION_APPROVAL_KEYS": { "type": "PinnedEd25519PublicKeysAndHumanApproverIdsJSON", "value": null },
-    "SANDEAL_AUTOPILOT_ENABLED": { "type": "boolean-string", "required": "false" },
-    "SANDEAL_MONEY_ENGINE_ENABLED": { "type": "boolean-string", "required": "false" },
-    "SANDEAL_DEAL_INTELLIGENCE_ENABLED": { "type": "boolean-string", "required": "false" },
-    "SANDEAL_DECISION_OS_ENABLED": { "type": "boolean-string", "required": "false" },
-    "SANDEAL_DECISION_EXECUTION_MODE": { "type": "enum", "required": "DISABLED" },
-    "SANDEAL_OPPORTUNITY_ENABLED": { "type": "boolean-string", "required": "false" },
-    "SANDEAL_CONTENT_LIFECYCLE_ENABLED": { "type": "boolean-string", "required": "false" },
-    "SHOPEE_AFFILIATE_ENABLED": { "type": "boolean-string", "required": "false" },
-    "AFFILIATE_REDIRECT_HOSTS": { "type": "ApprovedHTTPSHostnameCSV", "value": null, "currentlyEnabled": false }
+    "SANDEAL_RUNTIME": {
+      "type": "enum",
+      "required": "cloudflare"
+    },
+    "SANDEAL_LOCAL_ONLY": {
+      "type": "boolean-string",
+      "futureRequired": "false",
+      "currentLocal": "true"
+    },
+    "SANDEAL_PRODUCTION": {
+      "type": "boolean-string",
+      "futureRequired": "true",
+      "currentLocal": "false"
+    },
+    "SANDEAL_PRODUCTION_EXECUTION_ENABLED": {
+      "type": "boolean-string",
+      "default": "false"
+    },
+    "SANDEAL_PRODUCTION_IDENTITY": {
+      "type": "ProductionIdentityJSON",
+      "value": null
+    },
+    "SANDEAL_PRODUCTION_BUNDLE_FINGERPRINT": {
+      "type": "SHA256",
+      "value": null
+    },
+    "SANDEAL_PRODUCTION_APPROVAL_KEYS": {
+      "type": "PinnedEd25519PublicKeysAndHumanApproverIdsJSON",
+      "value": null
+    },
+    "SANDEAL_AUTOPILOT_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "SANDEAL_MONEY_ENGINE_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "SANDEAL_DEAL_INTELLIGENCE_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "SANDEAL_DECISION_OS_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "SANDEAL_DECISION_EXECUTION_MODE": {
+      "type": "enum",
+      "required": "DISABLED"
+    },
+    "SANDEAL_OPPORTUNITY_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "SANDEAL_CONTENT_LIFECYCLE_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "SHOPEE_AFFILIATE_ENABLED": {
+      "type": "boolean-string",
+      "required": "false"
+    },
+    "AFFILIATE_REDIRECT_HOSTS": {
+      "type": "ApprovedHTTPSHostnameCSV",
+      "value": null,
+      "currentlyEnabled": false
+    }
   },
   "secretReferences": {
-    "requiredNames": ["BASIC_AUTH_PASSWORD", "BASIC_AUTH_USER"],
-    "conditionalNames": [{ "name": "ACCESS_TRADE_API_KEY", "condition": "SEPARATE_REVIEWED_PROVIDER_CAPABILITY_NOT_IMPLEMENTED_BY_PRODUCTION_RUNTIME" }],
+    "requiredNames": [
+      "BASIC_AUTH_PASSWORD",
+      "BASIC_AUTH_USER"
+    ],
+    "conditionalNames": [
+      {
+        "name": "ACCESS_TRADE_API_KEY",
+        "condition": "SEPARATE_REVIEWED_PROVIDER_CAPABILITY_NOT_IMPLEMENTED_BY_PRODUCTION_RUNTIME"
+      }
+    ],
     "privateApprovalSigningKey": "EXTERNAL_HUMAN_SIGNER_NEVER_WORKER_OR_REPOSITORY",
     "valuesAllowed": false,
     "presence": "UNKNOWN_UNTIL_AUTHENTICATED_DISCOVERY",
@@ -62,20 +158,38 @@
     "binding": "JOB_QUEUE",
     "productionConsumerEnabled": false,
     "productionProducerEnabled": false,
-    "localReferenceOnly": { "maxBatchSize": 10, "maxRetries": 3 },
+    "localReferenceOnly": {
+      "maxBatchSize": 10,
+      "maxRetries": 3
+    },
     "activationRequirement": "SEPARATELY_IMPLEMENTED_AND_REVIEWED_CAPABILITY_AND_REAL_QUEUE_IDENTITY"
   },
   "cron": {
     "productionEnabled": false,
     "productionSchedules": null,
-    "localReferenceOnly": ["*/5 * * * *"],
-    "requirements": ["EXPLICIT_UTC_SCHEDULE", "TARGET_WORKER_IDENTITY", "NO_DUPLICATE_SCHEDULER", "BOUNDED_WORK", "SEPARATE_AUTHORIZATION"],
+    "localReferenceOnly": [
+      "*/5 * * * *"
+    ],
+    "requirements": [
+      "EXPLICIT_UTC_SCHEDULE",
+      "TARGET_WORKER_IDENTITY",
+      "NO_DUPLICATE_SCHEDULER",
+      "BOUNDED_WORK",
+      "SEPARATE_AUTHORIZATION"
+    ],
     "unknownSchedule": "BLOCK_NO_COPY_OF_LOCAL_CRON_TO_PRODUCTION"
   },
   "accessTrade": {
     "enabled": false,
     "provider": "accesstrade",
-    "references": { "endpointProvenance": null, "campaignId": null, "merchantId": null, "platform": null, "affiliateFieldProvenance": null, "destinationAllowlist": null },
+    "references": {
+      "endpointProvenance": null,
+      "campaignId": null,
+      "merchantId": null,
+      "platform": null,
+      "affiliateFieldProvenance": null,
+      "destinationAllowlist": null
+    },
     "secretReference": "ACCESS_TRADE_API_KEY",
     "directShopeeApi": "FORBIDDEN"
   },
@@ -86,16 +200,36 @@
     "basePath": "",
     "assetPrefix": "SAME_ORIGIN",
     "siteOrigin": null,
-    "publicVariables": ["NEXT_PUBLIC_SITE_URL", "NEXT_PUBLIC_SANDEAL_RUNTIME", "NEXT_PUBLIC_SANDEAL_ENVIRONMENT"],
+    "publicVariables": [
+      "NEXT_PUBLIC_SITE_URL",
+      "NEXT_PUBLIC_SANDEAL_RUNTIME",
+      "NEXT_PUBLIC_SANDEAL_ENVIRONMENT"
+    ],
     "buildEnvironment": "SANDEAL_SITE_ENVIRONMENT",
     "publicConfigurationFreeze": "NEXT_BUILD_REQUIRES_REBUILD_WHEN_ORIGIN_OR_ENVIRONMENT_CHANGES",
     "runtimeConfiguration": "NO_SECRETS_IN_BROWSER_SAME_ORIGIN_API_ONLY",
     "artifactDirectory": "cloudflare/site/out",
-    "requiredArtifacts": ["index.html", "404.html", "product/index.html", "_headers"],
-    "reservedWorkerRoutes": ["/api", "/api/*", "/go", "/go/*", "/dashboard", "/dashboard/*", "/deals/*"],
+    "requiredArtifacts": [
+      "index.html",
+      "404.html",
+      "product/index.html",
+      "_headers"
+    ],
+    "reservedWorkerRoutes": [
+      "/api",
+      "/api/*",
+      "/go",
+      "/go/*",
+      "/dashboard",
+      "/dashboard/*",
+      "/deals/*"
+    ],
     "robotsPolicy": "NOINDEX_NOFOLLOW_UNTIL_SEPARATE_CONTENT_AUTHORIZATION",
     "routePublication": "DISABLED_PREAUTH_READ_ONLY_HEALTH_CAPABILITY_ONLY"
   },
-  "changeWindow": { "status": "REVIEW_REQUIRED_NOT_CONFIGURED", "policy": null },
+  "changeWindow": {
+    "status": "REVIEW_REQUIRED_NOT_CONFIGURED",
+    "policy": null
+  },
   "productionVerified": false
 }

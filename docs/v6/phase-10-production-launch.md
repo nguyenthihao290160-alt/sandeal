@@ -276,3 +276,6 @@ Read-only official documentation was retrieved September 18, 2026 and hashed in 
 - Cloudflare Workers: `https://developers.cloudflare.com/workers/versions-and-deployments/gradual-deployments/`
 - Cloudflare Workers rollback and binding/data limitations: `https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/`
 - D1 Time Travel and recovery limitations: `https://developers.cloudflare.com/d1/reference/time-travel/`
+
+### Production Resource Provisioning Checkpoint
+PHASE10_BOOTSTRAP_PROVISIONING=COMPLETE_RESOURCE_BASELINE_ONLY

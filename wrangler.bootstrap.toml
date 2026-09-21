@@ -1,0 +1,16 @@
+﻿name = "sandeal-production"
+main = ".test-tmp/v6-cloudflare-worker/worker.mjs"
+compatibility_date = "2026-09-08"
+compatibility_flags = ["nodejs_compat"]
+
+[placement]
+mode = "smart"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sandeal-production"
+database_id = "bdf42c22-190d-4cdf-a166-a9e07ade57f2"
+
+[[queues.producers]]
+queue = "sandeal-production-jobs"
+binding = "JOB_QUEUE"
