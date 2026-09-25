@@ -1,0 +1,49 @@
+﻿{
+    "bookmarkEvidence":  {
+                             "observedAt":  "2026-09-25T11:52:55.119Z",
+                             "bookmark":  "00000001-00000004-000050f1-9fbfbcede7007c8a611f450e2a567d84"
+                         },
+    "productionIntegrity":  {
+                                "preDrillFingerprint":  "16af48356ed1ae61da3008107b8dc25190f2b444ec704298aa0952f1364f52aa",
+                                "productionUnchanged":  true,
+                                "postDrillFingerprint":  "16af48356ed1ae61da3008107b8dc25190f2b444ec704298aa0952f1364f52aa"
+                            },
+    "rpo":  {
+                "proven":  "A bookmark-selected prior state could be restored on the isolated nonproduction D1",
+                "model":  "fresh pre-change Cloudflare D1 Time Travel bookmark obtained immediately before an authorized production schema change"
+            },
+    "classification":  "NONPRODUCTION_REPRESENTATIVE_DRILL",
+    "timestamps":  {
+                       "drillStart":  "2026-09-25T11:48:09.971Z",
+                       "operationEnd":  "2026-09-25T11:57:01.676Z",
+                       "validationEnd":  "2026-09-25T12:03:45.356Z",
+                       "operationStart":  "2026-09-25T11:56:59.896Z"
+                   },
+    "restoreResult":  {
+                          "quickCheck":  "ok",
+                          "foreignKeyCheck":  "PASS_NO_VIOLATIONS",
+                          "expectedBaselineRestored":  true
+                      },
+    "productionTargetExclusion":  true,
+    "target":  {
+                   "id":  "114b82ee-8d98-4990-882c-c14f3647c2a5",
+                   "name":  "sandeal-recovery-rto-test"
+               },
+    "sourceEvidencePaths":  [
+                                ".test-tmp/phase10-recovery-drill-20260925T114809971Z/result.json",
+                                ".test-tmp/phase10-recovery-drill-20260925T114809971Z/pre-restore.json"
+                            ],
+    "schema":  "phase10-durable-recovery-evidence-v1",
+    "rto":  {
+                "targetSeconds":  1800,
+                "measuredEndToEndDurationSeconds":  935.384,
+                "pass":  true,
+                "measuredRestoreDurationSeconds":  1.781
+            },
+    "limitationsAndStatements":  {
+                                     "doesNotAuthorizeDeployment":  "This evidence does not itself authorize deployment.",
+                                     "productionRestoreNotExecuted":  "Production restore was NOT executed.",
+                                     "limitations":  "Representative drill on a synthetic dataset; not a production-volume benchmark.",
+                                     "noRealDataUsed":  "No real money or business data was used."
+                                 }
+}

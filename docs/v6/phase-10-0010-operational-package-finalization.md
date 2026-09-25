@@ -1,13 +1,10 @@
-# Phase 10 - resumed 0010 operational package finalization
+﻿# Phase 10 - resumed 0010 operational package finalization
 
 ## Decision
 
 The operational package is complete for review, **not executable**.
 
-`READY_FOR_0010_PRODUCTION_EXECUTION_AUTHORIZATION=NO` because
-`RECOVERY_RTO_TECHNICALLY_FEASIBLE=UNKNOWN`. The human-approved 30-minute target
-has not been demonstrated by a recovery drill. No production restore or 0010
-execution is performed to manufacture that evidence.
+`READY_FOR_0010_PRODUCTION_EXECUTION_AUTHORIZATION=NO`. Although `RECOVERY_RTO_TECHNICALLY_FEASIBLE=YES` and the human-approved 30-minute target has been demonstrated by a representative recovery drill (recorded in `docs/v6/evidence/phase10-recovery-rto-rpo-validation.json`), execution still requires a fresh clean checkpoint and explicit human authorization. No production restore or 0010 execution is performed here.
 
 Read this additive finalization record together with the preserved
 `docs/v6/phase-10-0010-operational-package.md` and the completed machine-readable
@@ -100,10 +97,7 @@ and re-audit. Actual UTC window times and a clean execution checkpoint are still
 required at any later separately authorized attempt. No window opens here.
 
 RTO and RPO are approved **planning targets**. The fresh pre-attempt bookmark RPO
-is technically supported; the 30-minute end-to-end RTO remains UNKNOWN. Neither
-the platform's SQL/API timeout nor a short audit duration demonstrates successful
-restore plus human access, authorization, and all acceptance checks within RTO.
-No reviewed reference supplies that end-to-end bound; no measured restore exists.
+is technically supported; the 30-minute end-to-end RTO is now proven by the recorded nonproduction recovery drill (measured restore duration 1.781s, end-to-end 935.384s). No production restore exists or is performed.
 
 ## Completion checks and next permitted step
 
@@ -116,10 +110,7 @@ All production effect counters are zero: migrations, schema/business-data writes
 restores, deployments, Queue messages, DNS changes, traffic shifts, and secret
 writes. The same holds for this resume and the preserved interrupted work.
 
-Next: the human reviews the finished package and separately authorizes a scoped,
-representative **nonproduction** Time Travel recovery validation, or supplies
-existing measured recovery evidence sufficient to establish the full 30-minute
-objective. Do not create resources or perform that drill under this task. Any
+Next: the human reviews the finished package and the recorded recovery drill evidence (`docs/v6/evidence/phase10-recovery-rto-rpo-validation.json`). Do not create resources or perform that drill under this task. Any
 future drill must not apply 0010 unless explicitly authorized. Validate its
 applicability rather than claiming a production guarantee from a local mock.
 Then re-audit fresh access, baseline, bookmark, clean checkpoint and all gates
