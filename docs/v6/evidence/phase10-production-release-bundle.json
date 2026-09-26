@@ -1,0 +1,635 @@
+{
+  "schema": "sandeal-phase10-production-release-reference-v1",
+  "createdAt": "2026-09-26T10:36:12.394Z",
+  "status": "BLOCKED_NOT_A_DEPLOYABLE_PRODUCTION_BUNDLE",
+  "executable": false,
+  "environment": "PRODUCTION",
+  "productionMutationMode": "BLOCKED",
+  "approval": null,
+  "readyForFinalProductionDeploymentPreauth": false,
+  "source": {
+    "head": "93ee792634acacfd6b112924322de2580a87c83a",
+    "branch": "master",
+    "gitTree": "130cfb820a2cbcbb1d1e9489a0f13b5be375cfd4",
+    "fingerprint": "551ef2c7988f3c1650efcd3bde29fcc19d0f708407d31383b17d83f2ca295ed4",
+    "method": "SHA-256 of canonicalJson(path-sorted tracked {path,sha256,bytes} inventory); raw checkout bytes at clean HEAD; generated untracked evidence excluded",
+    "trackedFileCount": 834,
+    "inventory": {
+      "path": ".test-tmp/phase10-release-bundle-20260926/source-inventory.json",
+      "sha256": "46d16842bae88d3caa3e5c351145b77e0a4e1e808350d11cb654ec0072a3b134",
+      "bytes": 135788
+    },
+    "worktreeCleanAtStart": true,
+    "indexCleanAtStart": true
+  },
+  "target": {
+    "accountId": "88d3839bee4ac092d39fbb293e3eb426",
+    "workerName": "sandeal-production",
+    "staticTarget": "sandeal-production",
+    "databaseId": "bdf42c22-190d-4cdf-a166-a9e07ade57f2",
+    "databaseName": "sandeal-production",
+    "queueId": "e56ec5f032c24abc82aeb2680606b186",
+    "queueName": "sandeal-production-jobs",
+    "domain": null,
+    "route": null,
+    "productionConfig": {
+      "path": "config/cloudflare/production.contract.json",
+      "sha256": "82171b7cc5d8e9ce29da935c36a1a68cda498c05a51b761e0afa3e1cba5d5848",
+      "bytes": 6977
+    }
+  },
+  "activeProductionBaseline": {
+    "id": "eee7c19e-0b14-4efc-9ec1-336be52bafcf",
+    "deploymentId": "45604f86-418f-4b14-bf4e-df7c6c51515e",
+    "deploymentCreatedOn": "2026-09-21T01:19:23.690928Z",
+    "trafficPercent": 100,
+    "unchangedFromPriorEvidence": true,
+    "previousReference": {
+      "path": ".test-tmp/phase10-0010-preauth-resume/runtime-audit.json",
+      "sha256": "1d35a3f8811cf20547156d2c2b8656901ba05f39c5cba1c8b3ee7d99e2d1a4bf",
+      "bytes": 16717
+    },
+    "scriptEtag": "e40e5a41d576d2af20869e0a02e0dcf02eb9b036671ea6e1389f14560d9916e7",
+    "bindings": [
+      {
+        "name": "DB",
+        "type": "d1",
+        "id": "bdf42c22-190d-4cdf-a166-a9e07ade57f2"
+      },
+      {
+        "name": "JOB_QUEUE",
+        "type": "queue",
+        "queue_name": "sandeal-production-jobs"
+      }
+    ]
+  },
+  "nonDeployedSecretVersion": {
+    "id": "5ccab794-c534-4daf-8c96-e140bd8dca78",
+    "number": 2,
+    "createdOn": "2026-09-26T00:25:02.490241Z",
+    "tag": "phase10-basic-auth",
+    "message": "Phase 10 Basic Auth secrets only - NOT DEPLOYED",
+    "exists": true,
+    "activeTrafficPercent": 0,
+    "wasNeverInObservedDeploymentHistory": true,
+    "bindings": [
+      {
+        "name": "BASIC_AUTH_PASSWORD",
+        "type": "secret_text"
+      },
+      {
+        "name": "BASIC_AUTH_USER",
+        "type": "secret_text"
+      },
+      {
+        "name": "DB",
+        "type": "d1",
+        "id": "bdf42c22-190d-4cdf-a166-a9e07ade57f2"
+      },
+      {
+        "name": "JOB_QUEUE",
+        "type": "queue",
+        "queue_name": "sandeal-production-jobs"
+      }
+    ],
+    "secretReferenceNames": [
+      "BASIC_AUTH_PASSWORD",
+      "BASIC_AUTH_USER"
+    ],
+    "scriptEtag": "e40e5a41d576d2af20869e0a02e0dcf02eb9b036671ea6e1389f14560d9916e7",
+    "compatibility": {
+      "compatibility_date": "2026-09-08",
+      "compatibility_flags": [
+        "nodejs_compat"
+      ],
+      "usage_model": "standard"
+    },
+    "sourceMatchesActiveVersion": true
+  },
+  "bindings": {
+    "DB": {
+      "required": {
+        "type": "d1",
+        "id": "bdf42c22-190d-4cdf-a166-a9e07ade57f2"
+      },
+      "match": true
+    },
+    "JOB_QUEUE": {
+      "required": {
+        "type": "queue",
+        "name": "sandeal-production-jobs",
+        "id": "e56ec5f032c24abc82aeb2680606b186"
+      },
+      "match": true
+    },
+    "ASSETS": {
+      "required": {
+        "type": "assets",
+        "directory": "cloudflare/site/out",
+        "runWorkerFirst": true
+      },
+      "observed": null,
+      "match": false,
+      "reason": "ABSENT_ON_EXACT_NON_DEPLOYED_SECRET_VERSION"
+    },
+    "secretReferences": [
+      "BASIC_AUTH_PASSWORD",
+      "BASIC_AUTH_USER"
+    ],
+    "secretValuesRetrieved": false
+  },
+  "artifacts": {
+    "worker": {
+      "fingerprint": "f187fb3477aed419e0e8f8b0469f1dc9287f81f4a65f4198fe8072cd43079069",
+      "method": "SHA-256 of exact downloaded worker.js module bytes",
+      "bytes": 406411,
+      "moduleName": "worker.js",
+      "versionBinding": "RESPONSE_ETAG_EQUALS_BOTH_IMMUTABLE_VERSION_SCRIPT_ETAGS",
+      "etag": "e40e5a41d576d2af20869e0a02e0dcf02eb9b036671ea6e1389f14560d9916e7",
+      "priorRemoteArtifactMatch": true,
+      "remoteArtifactEvidence": {
+        "path": ".test-tmp/phase10-0010-preauth-resume/runtime-audit.json",
+        "sha256": "1d35a3f8811cf20547156d2c2b8656901ba05f39c5cba1c8b3ee7d99e2d1a4bf",
+        "bytes": 16717
+      },
+      "localBuildSha256": "1486ab1c62bd7fa480194ca723506d478b44188a5945ec9441796147f525eba6",
+      "localBuildBytes": 396265,
+      "localBuildMatchesRetainedInventory": true,
+      "localBuildInventory": {
+        "path": ".test-tmp/phase10-preauth/build.json",
+        "sha256": "b1ea41e4efc7d25da0cc4ca8a04ec758ad317a473906e142a0ec5688c707216a",
+        "bytes": 125751
+      },
+      "buildSourceEvidence": {
+        "path": "docs/v6/evidence/build-cloudflare-worker.json",
+        "sha256": "4eb546749bcb6a2301cc6c1ed7011393ef5906608757ee04566b784f224ddee6",
+        "bytes": 88506
+      },
+      "unchangedBuildInputCount": 83,
+      "sourceInputMismatchCount": 0,
+      "packaging": "LOCAL_ESBUILD_MODULE_AND_REMOTE_WRANGLER_MODULE_ARE_DISTINCT_BYTE_ARTIFACTS_NOT_INTERCHANGEABLE"
+    },
+    "static": {
+      "productionReleaseFingerprint": null,
+      "productionVersion": null,
+      "productionCertified": false,
+      "reason": "EXACT_CANDIDATE_HAS_NO_ASSETS_BINDING_OR_ASSET_VERSION",
+      "observedLocalFingerprint": "415ad8ade5b30cf1192f8dcca90df12f21a6f5e49c7d53b6100cdf495d5cffd6",
+      "fingerprintMethod": "SHA-256 of canonicalJson(path-sorted {path,sha256,bytes} inventory)",
+      "observedFileCount": 109,
+      "environment": "LOCAL",
+      "origin": "http://localhost:8787",
+      "buildEvidence": {
+        "path": "docs/v6/evidence/build-cloudflare-site.json",
+        "sha256": "486a34675b8524744ccc1abdd22e2937b63174f6c0acaa930be312955950467c",
+        "bytes": 88572
+      },
+      "observedInventory": {
+        "path": ".test-tmp/phase10-release-bundle-20260926/static-inventory.json",
+        "sha256": "38f69329efe9839111c607c36586288ad593a21290ba600f7f5cefaf0c56e0f6",
+        "bytes": 17964
+      },
+      "retainedReleaseInventory": {
+        "path": ".test-tmp/phase10-preauth/build.json",
+        "sha256": "b1ea41e4efc7d25da0cc4ca8a04ec758ad317a473906e142a0ec5688c707216a",
+        "bytes": 125751
+      },
+      "retainedStaticInventoriesMatch": false,
+      "matchedFileCount": 30,
+      "unmatchedRetainedFileCount": 79,
+      "localOrRehearsalEvidenceNotPromotedToProduction": true
+    }
+  },
+  "migrations": {
+    "canonicalization": "d1-schema-canonical-v1",
+    "schemaFingerprint": "2d857eed231f8eef4f846dbd9f1134787f3b8becb557521cb54f0512a444cfd4",
+    "appliedCount": 10,
+    "ledger": [
+      {
+        "id": 1,
+        "name": "0001_product_storage.sql",
+        "applied_at": "2026-09-21 09:40:23"
+      },
+      {
+        "id": 2,
+        "name": "0002_event_jobs.sql",
+        "applied_at": "2026-09-21 09:40:24"
+      },
+      {
+        "id": 3,
+        "name": "0003_affiliate_money.sql",
+        "applied_at": "2026-09-21 09:40:24"
+      },
+      {
+        "id": 4,
+        "name": "0004_money_snapshot_jobs.sql",
+        "applied_at": "2026-09-21 09:40:24"
+      },
+      {
+        "id": 5,
+        "name": "0005_money_platform.sql",
+        "applied_at": "2026-09-21 09:40:24"
+      },
+      {
+        "id": 6,
+        "name": "0006_deal_intelligence.sql",
+        "applied_at": "2026-09-21 09:40:25"
+      },
+      {
+        "id": 7,
+        "name": "0007_decision_os.sql",
+        "applied_at": "2026-09-21 09:40:25"
+      },
+      {
+        "id": 8,
+        "name": "0008_opportunity_experiments.sql",
+        "applied_at": "2026-09-21 09:40:25"
+      },
+      {
+        "id": 9,
+        "name": "0009_content_lifecycle.sql",
+        "applied_at": "2026-09-22 23:40:57"
+      },
+      {
+        "id": 10,
+        "name": "0010_execution_control_plane.sql",
+        "applied_at": "2026-09-25 12:31:13"
+      }
+    ],
+    "localSqlInventory": [
+      {
+        "name": "0001_product_storage.sql",
+        "sha256": "1fad5e55594346eebca93362755a94d235a37f9814099422618622a70d858c84"
+      },
+      {
+        "name": "0002_event_jobs.sql",
+        "sha256": "4ceaa99be08658c4d4486bfdfe95eb1802e57dbf1979d6dfebed5194b9c0c279"
+      },
+      {
+        "name": "0003_affiliate_money.sql",
+        "sha256": "53cbe21758ba82cb0bf78e56db16eecc421f1ec15bf4f6c4cf2b21dc4cef3424"
+      },
+      {
+        "name": "0004_money_snapshot_jobs.sql",
+        "sha256": "2ea269d75b554d75f92918fa5123b7a9dd59ce6e116c9c71661110fd60d74baa"
+      },
+      {
+        "name": "0005_money_platform.sql",
+        "sha256": "ac8ff8986c7d4111713f15799dfe588ef2a6d0be338c05483a583771be084165"
+      },
+      {
+        "name": "0006_deal_intelligence.sql",
+        "sha256": "8f6c72694d3997f503edc4f80cd396874be0f833890dda82c5b09ce9dd7fc75e"
+      },
+      {
+        "name": "0007_decision_os.sql",
+        "sha256": "be8b2236e9428601c47df301f6ad9271e26c5c4ee2b012dedeb1f58c90142847"
+      },
+      {
+        "name": "0008_opportunity_experiments.sql",
+        "sha256": "ad0fcd6c46b49706b5c4840a49f540fbf23111e3715a62cd28b7a3307c5fe251"
+      },
+      {
+        "name": "0009_content_lifecycle.sql",
+        "sha256": "6ec406bf5ef0815ee02dd2f3d69e9083a834b11eecf66ac3f6d70416f97cd7af"
+      },
+      {
+        "name": "0010_execution_control_plane.sql",
+        "sha256": "7402fcea62eb779d24f2ee99aec011f54924006d3963d265cc6ca5b45a8380a2"
+      }
+    ],
+    "pendingNames": [],
+    "schemaEvidence": {
+      "path": "docs/v6/evidence/phase10-d1-clean-install-rehearsal.json",
+      "sha256": "4998b40049c60abeccf5a46e8a646ab942d678a8ccf4c14d3d6b47aafdf69aa3",
+      "bytes": 1051937
+    },
+    "ledgerDoesNotRecordSqlHashes": true,
+    "migrationBytesNotInferredFromNamesAlone": true
+  },
+  "safety": {
+    "killSwitch": {
+      "ready": false,
+      "localDefaultDenyVerified": true,
+      "productionControlsRows": 0,
+      "reason": "NO_TARGET_BOUND_LIVE_CONTROL_OR_PRODUCTION_STOP_DRILL"
+    },
+    "emergencyStop": {
+      "ready": false,
+      "reason": "NO_VERIFIED_TARGET_BOUND_PRODUCTION_OPERATOR_PROCEDURE_OR_DRILL"
+    },
+    "approvalValidator": {
+      "localReady": true,
+      "productionReady": false,
+      "source": {
+        "path": "src/lib/execution-control-plane/production.ts",
+        "sha256": "c97f29863edf15cb37c9f2583be33adbb2055d32fb9d9fdeb5c7c67591278daa",
+        "bytes": 11053
+      },
+      "tests": {
+        "path": ".test-tmp/phase10-preauth/focused-results.json",
+        "sha256": "dcab9ff055bd977f9b8e98347a9417c67ab062da3a94c69bfe8207ab29862552",
+        "bytes": 92832
+      },
+      "preservedSyntheticPassCount": 105,
+      "failed": 0,
+      "skipped": 0,
+      "unchangedSourceFiles": 32,
+      "trustedProductionKeyBindingPresent": false,
+      "realApprovalIssued": false
+    },
+    "observability": {
+      "ready": false,
+      "logpush": false,
+      "observabilityConfigurationPresent": false,
+      "productionSignalVerification": "UNVERIFIED",
+      "thresholds": null,
+      "destination": null
+    },
+    "canary": {
+      "ready": false,
+      "mechanism": "WORKER_VERSION_PERCENTAGES_OBSERVED_BUT_TARGET_SPECIFIC_CANARY_NOT_APPROVED",
+      "currentAllocation": [
+        {
+          "versionId": "eee7c19e-0b14-4efc-9ec1-336be52bafcf",
+          "percentage": 100
+        },
+        {
+          "versionId": "5ccab794-c534-4daf-8c96-e140bd8dca78",
+          "percentage": 0
+        }
+      ],
+      "approvedStages": null,
+      "approvedHoldDuration": null
+    },
+    "abortConditions": {
+      "planPresent": true,
+      "operationalReady": false,
+      "conditions": [
+        "ARTIFACT_OR_SOURCE_OR_BUNDLE_MISMATCH",
+        "MISSING_OR_UNKNOWN_BINDING",
+        "MIGRATION_FAILURE_OR_UNKNOWN_DESTRUCTIVE_PENDING_SQL",
+        "D1_UNAVAILABLE",
+        "REQUIRED_QUEUE_UNAVAILABLE",
+        "WORKER_OR_STATIC_HEALTH_FAILURE",
+        "MONEY_INVARIANT_FAILURE",
+        "UNEXPECTED_PRODUCTION_MUTATION",
+        "KILL_SWITCH_ACTIVE_UNKNOWN_OR_STALE",
+        "PROVIDER_INTEGRITY_OR_UNSAFE_REDIRECT",
+        "SECURITY_FAILURE",
+        "APPROVAL_INVALID_EXPIRED_OR_WRONG_ENVIRONMENT",
+        "TELEMETRY_UNAVAILABLE",
+        "CRITICAL_ROLLBACK_UNAVAILABLE",
+        "CHANGE_WINDOW_INVALID"
+      ],
+      "missing": [
+        "APPROVED_THRESHOLDS",
+        "TARGET_BOUND_OPERATOR",
+        "VERIFIED_MONITOR_AND_ROLLBACK"
+      ]
+    },
+    "historicalEvidencePreserved": true,
+    "references": [
+      {
+        "path": "docs/v6/phase-10-preauth-contracts.md",
+        "sha256": "18c79e2ea24753944a42eaf7d5abe485c15714e697cce24501874be701bc4af9",
+        "bytes": 13872
+      },
+      {
+        "path": "docs/v6/evidence/phase10-production-launch.json",
+        "sha256": "8b152506d25f4a322201b6b743ae848a91d765c623b2f57824b3831888198761",
+        "bytes": 29553
+      },
+      {
+        "path": "docs/v6/evidence/phase10-preauth-remediation.json",
+        "sha256": "45ec15fe035c54d9574399ed8098c7e53b8f0f67d83d6f7f620b476d8481e601",
+        "bytes": 2516
+      }
+    ]
+  },
+  "rollback": {
+    "ready": false,
+    "worker": {
+      "previousVersionId": "eee7c19e-0b14-4efc-9ec1-336be52bafcf",
+      "previousDeploymentId": "45604f86-418f-4b14-bf4e-df7c6c51515e",
+      "previousAllocationPercent": 100,
+      "artifactFingerprint": "f187fb3477aed419e0e8f8b0469f1dc9287f81f4a65f4198fe8072cd43079069",
+      "targetExists": true,
+      "operationNotRehearsedThisTask": true
+    },
+    "static": {
+      "previousAssetVersion": null,
+      "ready": false,
+      "reason": "ACTIVE_BASELINE_AND_CANDIDATE_BOTH_HAVE_NO_ASSETS_BINDING"
+    },
+    "d1": {
+      "boundary": "WORKER_OR_STATIC_ROLLBACK_DOES_NOT_REVERSE_SCHEMA_DATA_BINDINGS_OR_QUEUE_EFFECTS",
+      "retainAppliedMigrationCount": 10,
+      "retainSchemaFingerprint": "2d857eed231f8eef4f846dbd9f1134787f3b8becb557521cb54f0512a444cfd4",
+      "automaticSqlDowngrade": false,
+      "restoreAuthorized": false,
+      "requiresSeparateAuthorizationAndFreshExactProductionBookmark": true
+    },
+    "evidence": [
+      {
+        "path": ".test-tmp/phase10-0010-preauth-resume/runtime-audit.json",
+        "sha256": "1d35a3f8811cf20547156d2c2b8656901ba05f39c5cba1c8b3ee7d99e2d1a4bf",
+        "bytes": 16717
+      },
+      {
+        "path": "docs/v6/evidence/phase10-0010-operational-package.json",
+        "sha256": "0a20898cfa4d9fbabd37234fecc5a9ad152d965855e84151236c8057cdc5b279",
+        "bytes": 14355
+      }
+    ]
+  },
+  "recovery": {
+    "durableEvidence": {
+      "path": "docs/v6/evidence/phase10-recovery-rto-rpo-validation.json",
+      "sha256": "bf845961515e55a01f72187e2633ecfab5b8a53245f8f94404b4f85a30c33869",
+      "bytes": 2820
+    },
+    "supportingEvidence": [
+      {
+        "path": ".test-tmp/phase10-recovery-drill-20260925T114809971Z/result.json",
+        "sha256": "f8878252b137b9fc1095fb26c7ba9c19233f057636228872a1d0cfa33c40e3ce",
+        "bytes": 10252
+      },
+      {
+        "path": ".test-tmp/phase10-recovery-drill-20260925T114809971Z/pre-restore.json",
+        "sha256": "fcb15995e6f361758685167a93c3555aacf0ebd77d6d501d6adbfc16feecf105",
+        "bytes": 3870
+      }
+    ],
+    "evidenceValid": true,
+    "classification": "NONPRODUCTION_REPRESENTATIVE_DRILL",
+    "drillDatabaseId": "114b82ee-8d98-4990-882c-c14f3647c2a5",
+    "productionTargetExcluded": true,
+    "sourceArtifactsHashMatch": true,
+    "rtoTargetSeconds": 1800,
+    "measuredEndToEndSeconds": 935.384,
+    "measuredRestoreSeconds": 1.781,
+    "rpoModel": "fresh pre-change Cloudflare D1 Time Travel bookmark obtained immediately before an authorized production schema change",
+    "limitations": "SYNTHETIC_NONPRODUCTION_DRILL_BEFORE_0010_NOT_A_PRODUCTION_VOLUME_OR_POST_0010_RESTORE_GUARANTEE",
+    "productionRestorePerformed": false,
+    "drillBookmarkMustNeverBeUsedForProduction": true,
+    "historicalEvidenceNotRegenerated": true
+  },
+  "evidenceReferences": [
+    {
+      "path": "config/cloudflare/production.contract.json",
+      "sha256": "82171b7cc5d8e9ce29da935c36a1a68cda498c05a51b761e0afa3e1cba5d5848",
+      "bytes": 6977
+    },
+    {
+      "path": "config/cloudflare/production-release-bundle.contract.json",
+      "sha256": "10322fbcb565991750fa3ef96cc44f761baa2f12bb44f6923d330b1f11c856d5",
+      "bytes": 1570
+    },
+    {
+      "path": "docs/v6/phase-10-preauth-contracts.md",
+      "sha256": "18c79e2ea24753944a42eaf7d5abe485c15714e697cce24501874be701bc4af9",
+      "bytes": 13872
+    },
+    {
+      "path": "docs/v6/evidence/phase10-production-launch.json",
+      "sha256": "8b152506d25f4a322201b6b743ae848a91d765c623b2f57824b3831888198761",
+      "bytes": 29553
+    },
+    {
+      "path": "docs/v6/evidence/phase10-preauth-remediation.json",
+      "sha256": "45ec15fe035c54d9574399ed8098c7e53b8f0f67d83d6f7f620b476d8481e601",
+      "bytes": 2516
+    },
+    {
+      "path": "docs/v6/evidence/phase10-bootstrap-provisioning.json",
+      "sha256": "cd486448fd15cad78d36081fff9f79f133c1ea2b4cbbd4cbda1a1492babc59fa",
+      "bytes": 366
+    },
+    {
+      "path": "docs/v6/evidence/phase10-d1-clean-install-rehearsal.json",
+      "sha256": "4998b40049c60abeccf5a46e8a646ab942d678a8ccf4c14d3d6b47aafdf69aa3",
+      "bytes": 1051937
+    },
+    {
+      "path": "docs/v6/evidence/phase10-0010-operational-package.json",
+      "sha256": "0a20898cfa4d9fbabd37234fecc5a9ad152d965855e84151236c8057cdc5b279",
+      "bytes": 14355
+    },
+    {
+      "path": "docs/v6/evidence/phase10-recovery-rto-rpo-validation.json",
+      "sha256": "bf845961515e55a01f72187e2633ecfab5b8a53245f8f94404b4f85a30c33869",
+      "bytes": 2820
+    },
+    {
+      "path": "docs/v6/evidence/build-cloudflare-worker.json",
+      "sha256": "4eb546749bcb6a2301cc6c1ed7011393ef5906608757ee04566b784f224ddee6",
+      "bytes": 88506
+    },
+    {
+      "path": "docs/v6/evidence/build-cloudflare-site.json",
+      "sha256": "486a34675b8524744ccc1abdd22e2937b63174f6c0acaa930be312955950467c",
+      "bytes": 88572
+    },
+    {
+      "path": "scripts/lib/d1-schema-canonical.mjs",
+      "sha256": "5f2d036c752dd57211125529bd7ff3aa19199d43c295627884d949175b940d76",
+      "bytes": 8511
+    },
+    {
+      "path": "src/lib/execution-control-plane/production.ts",
+      "sha256": "c97f29863edf15cb37c9f2583be33adbb2055d32fb9d9fdeb5c7c67591278daa",
+      "bytes": 11053
+    },
+    {
+      "path": "src/lib/execution-control-plane/killSwitch.ts",
+      "sha256": "6fe4a9724641087d576c08084489ffb58caf488f2c75540e451ebb4f45407e19",
+      "bytes": 1686
+    },
+    {
+      "path": "src/lib/runtime/cloudflare/production.ts",
+      "sha256": "aed08f9562b7a025ff381db5a178cc85dc937575c567c0a8e0223b50a4c2fc3c",
+      "bytes": 5852
+    },
+    {
+      "path": "scripts/phase-10-preauth-tests.mjs",
+      "sha256": "5410721781b4df67b33e28403fb76d1241b3837aae0cbf557b0a4bac76b3cbbe",
+      "bytes": 25448
+    },
+    {
+      "path": ".test-tmp/phase10-0010-preauth-resume/runtime-audit.json",
+      "sha256": "1d35a3f8811cf20547156d2c2b8656901ba05f39c5cba1c8b3ee7d99e2d1a4bf",
+      "bytes": 16717
+    },
+    {
+      "path": ".test-tmp/phase10-preauth/build.json",
+      "sha256": "b1ea41e4efc7d25da0cc4ca8a04ec758ad317a473906e142a0ec5688c707216a",
+      "bytes": 125751
+    },
+    {
+      "path": ".test-tmp/phase10-preauth/focused-results.json",
+      "sha256": "dcab9ff055bd977f9b8e98347a9417c67ab062da3a94c69bfe8207ab29862552",
+      "bytes": 92832
+    },
+    {
+      "path": ".test-tmp/phase10-recovery-drill-20260925T114809971Z/result.json",
+      "sha256": "f8878252b137b9fc1095fb26c7ba9c19233f057636228872a1d0cfa33c40e3ce",
+      "bytes": 10252
+    },
+    {
+      "path": ".test-tmp/phase10-recovery-drill-20260925T114809971Z/pre-restore.json",
+      "sha256": "fcb15995e6f361758685167a93c3555aacf0ebd77d6d501d6adbfc16feecf105",
+      "bytes": 3870
+    }
+  ],
+  "readOnlyObservationReference": {
+    "path": ".test-tmp/phase10-release-bundle-20260926/observations.json",
+    "sha256": "81be8eb7d7d349b0c87c5495f34fb7802be85e10c13676f3d86ae0cffbb9a5a0",
+    "bytes": 22235
+  },
+  "blockers": [
+    "EXACT_SECRET_VERSION_MISSING_ASSETS_BINDING",
+    "PRODUCTION_STATIC_ARTIFACT_UNAVAILABLE_LOCALHOST_LOCAL_BUILD_ONLY",
+    "STATIC_BYTES_DO_NOT_MATCH_RETAINED_RELEASE_INVENTORY",
+    "PRODUCTION_DOMAIN_ROUTE_AND_WORKER_FIRST_ASSET_ROUTING_UNVERIFIED",
+    "PRODUCTION_KILL_SWITCH_AND_EMERGENCY_STOP_NOT_PROVISIONED_OR_DRILLED",
+    "PRODUCTION_APPROVAL_TRUST_KEYS_AND_INSTALLATION_PROCEDURE_UNVERIFIED",
+    "PRODUCTION_OBSERVABILITY_THRESHOLDS_DESTINATION_AND_SIGNALS_UNVERIFIED",
+    "TARGET_BOUND_CANARY_EXPOSURE_HOLD_AND_ABORT_OPERATOR_UNAPPROVED",
+    "STATIC_ROLLBACK_BASELINE_AND_COMPLETE_ROLLBACK_PROOF_UNAVAILABLE",
+    "DEPLOYMENT_CHANGE_WINDOW_NOT_CONFIGURED"
+  ],
+  "authorizationBoundary": {
+    "deploymentAuthorized": false,
+    "activationAuthorized": false,
+    "trafficShiftAuthorized": false,
+    "additionalSecretWritesAuthorized": false,
+    "productionDataWritesAuthorized": false,
+    "validRuntimeProductionBundle": false,
+    "freshApprovalIssued": false,
+    "observationIsNotFreshRuntimeProof": true,
+    "runtimeProofMaximumAgeMilliseconds": 300000,
+    "commitOrRebuildRequiresRevalidation": true
+  },
+  "effects": {
+    "productionD1Migrations": 0,
+    "productionD1SchemaMutations": 0,
+    "productionD1BusinessDataMutations": 0,
+    "cloudflareDeployments": 0,
+    "workerVersionActivations": 0,
+    "workerVersionUploads": 0,
+    "queueMessagesSent": 0,
+    "dnsChanges": 0,
+    "routeChanges": 0,
+    "cronChanges": 0,
+    "productionTrafficShift": 0,
+    "productionSecretWrites": 0,
+    "productionRestores": 0,
+    "rawSecretOutput": 0,
+    "commits": 0,
+    "pushes": 0
+  },
+  "nextStep": "Review the blocked package. Resolve the absent ASSETS binding, production static provenance and operational proofs in a separately authorized task; then rebind a clean committed candidate and request fresh deployment preauthorization. Do not deploy or change this version under the current authority.",
+  "bundleFingerprint": "d5dd4a9b1ec63d7d062a9f4584ee0af39a24d2f40c55de0343b8c16d1859076f",
+  "bundleFingerprintMethod": "SHA-256 of canonicalJson(bundle excluding bundleFingerprint and bundleFingerprintMethod); sorted object keys, ordered arrays, UTF-8, one LF"
+}

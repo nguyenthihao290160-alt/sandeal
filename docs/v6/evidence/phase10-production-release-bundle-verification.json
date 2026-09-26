@@ -1,0 +1,297 @@
+{
+  "schema": "phase10-production-release-bundle-verification-v1",
+  "verifiedAt": "2026-09-26T10:44:07.408Z",
+  "classification": "BLOCKED_CHECKPOINT_NOT_DEPLOYMENT_PREAUTH",
+  "checks": {
+    "PHASE10_PRODUCTION_RELEASE_BUNDLE_FINALIZATION": "BLOCKED",
+    "BRANCH": "master",
+    "HEAD": "93ee792634acacfd6b112924322de2580a87c83a",
+    "WORKTREE_CLEAN_AT_START": "YES",
+    "INDEX_CLEAN_AT_START": "YES",
+    "CLOUDFLARE_AUTHENTICATED": "YES",
+    "PRODUCTION_ACCOUNT_TARGET_MATCH": "YES",
+    "PRODUCTION_WORKER_IDENTITY_MATCH": "YES",
+    "ACTIVE_PRODUCTION_VERSION_UNCHANGED": "YES",
+    "ACTIVE_PRODUCTION_TRAFFIC_PERCENT": 100,
+    "NON_DEPLOYED_SECRET_VERSION_EXISTS": "YES",
+    "NON_DEPLOYED_SECRET_VERSION_ID": "5ccab794-c534-4daf-8c96-e140bd8dca78",
+    "NON_DEPLOYED_SECRET_VERSION_ACTIVE_TRAFFIC_PERCENT": 0,
+    "BASIC_AUTH_USER_SECRET_PRESENT": "YES",
+    "BASIC_AUTH_PASSWORD_SECRET_PRESENT": "YES",
+    "RAW_SECRET_OUTPUT": 0,
+    "PRODUCTION_APPLIED_MIGRATION_COUNT": 10,
+    "PRODUCTION_SCHEMA_FINGERPRINT_MATCH": "YES",
+    "PRODUCTION_EXECUTION_ENABLED": "NO",
+    "QUEUE_BUSINESS_CONSUMER_ENABLED": "NO",
+    "RELEASE_CANDIDATE_DB_BINDING_MATCH": "YES",
+    "RELEASE_CANDIDATE_QUEUE_BINDING_MATCH": "YES",
+    "RELEASE_CANDIDATE_ASSETS_BINDING_MATCH": "NO",
+    "KILL_SWITCH_READY": "NO",
+    "EMERGENCY_STOP_READY": "NO",
+    "APPROVAL_VALIDATOR_READY": "NO_PRODUCTION_TRUST_UNCONFIGURED",
+    "OBSERVABILITY_READY": "NO",
+    "CANARY_READY": "NO",
+    "ABORT_CONDITIONS_READY": "NO_PRODUCTION_VERIFICATION",
+    "ROLLBACK_READY": "NO_STATIC_ROLLBACK_BASELINE",
+    "RECOVERY_RTO_RPO_EVIDENCE_VALID": "YES_REPRESENTATIVE_NONPRODUCTION",
+    "RELEASE_BUNDLE_CREATED_OR_UPDATED": "YES_NONEXECUTABLE_REFERENCE_ONLY",
+    "RELEASE_BUNDLE_PINNED_TO_HEAD": "YES",
+    "RELEASE_BUNDLE_PINNED_TO_WORKER_VERSION": "YES",
+    "RELEASE_BUNDLE_SOURCE_FINGERPRINT_MATCH": "YES",
+    "RELEASE_BUNDLE_WORKER_FINGERPRINT_MATCH": "YES",
+    "RELEASE_BUNDLE_STATIC_FINGERPRINT_MATCH": "NO",
+    "RELEASE_BUNDLE_SCHEMA_FINGERPRINT_MATCH": "YES",
+    "RELEASE_BUNDLE_RECOVERY_EVIDENCE_MATCH": "YES",
+    "TYPESCRIPT": "PASS",
+    "ESLINT": "PASS_0_ERRORS_74_EXISTING_WARNINGS",
+    "SECRET_SCAN": "PASS",
+    "GIT_DIFF_CHECK": "PASS",
+    "PRODUCTION_D1_MIGRATIONS": 0,
+    "PRODUCTION_D1_SCHEMA_MUTATIONS": 0,
+    "PRODUCTION_D1_BUSINESS_DATA_MUTATIONS": 0,
+    "CLOUDFLARE_DEPLOYMENTS": 0,
+    "QUEUE_MESSAGES_SENT": 0,
+    "DNS_CHANGES": 0,
+    "PRODUCTION_TRAFFIC_SHIFT": 0,
+    "PRODUCTION_SECRET_WRITES": 0,
+    "READY_FOR_FINAL_PRODUCTION_DEPLOYMENT_PREAUTH": "NO"
+  },
+  "bundle": {
+    "path": "docs/v6/evidence/phase10-production-release-bundle.json",
+    "sha256": "408f3751fd438ae3b1e773036e13580151ae8e34449cb63c94a2beef410acb13",
+    "bytes": 22858
+  },
+  "bundleFingerprint": "d5dd4a9b1ec63d7d062a9f4584ee0af39a24d2f40c55de0343b8c16d1859076f",
+  "readme": {
+    "path": "docs/v6/phase-10-production-release-bundle-finalization.md",
+    "sha256": "3affd5badf6af14f12bd555e6a18b5df3759bc7048d1517e2fec0acf6a6c6659",
+    "bytes": 7303
+  },
+  "authentication": {
+    "authenticated": true,
+    "accountTargetMatch": true,
+    "workerIdentityMatch": true,
+    "method": "EXISTING_CACHED_OAUTH_READ_ONLY_API_NO_LOGIN_NO_REFRESH",
+    "credentialExpiration": "2026-09-26T10:58:25.585Z"
+  },
+  "remoteRecheck": {
+    "startedAt": "2026-09-26T10:41:27.951Z",
+    "completedAt": "2026-09-26T10:42:12.210Z",
+    "activeProductionVersionUnchanged": true,
+    "activeVersionId": "eee7c19e-0b14-4efc-9ec1-336be52bafcf",
+    "activeTrafficPercent": 100,
+    "nonDeployedSecretVersionUnchanged": true,
+    "nonDeployedVersionId": "5ccab794-c534-4daf-8c96-e140bd8dca78",
+    "nonDeployedTrafficPercent": 0,
+    "queueConsumerCount": 0,
+    "cronScheduleCount": 0,
+    "migrationCount": 10,
+    "schemaFingerprint": "2d857eed231f8eef4f846dbd9f1134787f3b8becb557521cb54f0512a444cfd4",
+    "executionControlsRows": 0,
+    "releaseBundlesRows": 0,
+    "quickCheck": "ok",
+    "foreignKeyCheck": [],
+    "productionExecutionEnabled": false
+  },
+  "requestAccounting": {
+    "journal": {
+      "path": ".test-tmp/phase10-release-bundle-20260926/read-only-requests-final.json",
+      "sha256": "109d0b8f400a0dae7051c1d75512eafd5363e3d94cd129299481c50fde216c2e",
+      "bytes": 118373
+    },
+    "totalApiRequests": 64,
+    "getRequests": 18,
+    "d1ReadOnlyPostRequests": 46,
+    "readOnlySqlStatementCount": 636,
+    "allSqlResponsesZeroWritesAndChanges": true,
+    "allSqlResponsesChangedDbFalse": true,
+    "otherRemoteMutationRequests": 0
+  },
+  "quality": {
+    "typescript": {
+      "command": [
+        "node",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit"
+      ],
+      "startedAt": "2026-09-26T10:38:48.827Z",
+      "completedAt": "2026-09-26T10:38:51.751Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "log": {
+        "path": ".test-tmp/phase10-release-bundle-20260926/typescript.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    "eslint": {
+      "command": [
+        "node",
+        "node_modules/eslint/bin/eslint.js",
+        ".",
+        "--format",
+        "json"
+      ],
+      "startedAt": "2026-09-26T10:38:48.838Z",
+      "completedAt": "2026-09-26T10:40:11.342Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "log": {
+        "path": ".test-tmp/phase10-release-bundle-20260926/eslint.log",
+        "sha256": "101631a99f77e323f2fde0240688d089cd4f59ad2a0bf88a8e463de6b708487e",
+        "bytes": 1125463
+      },
+      "errorCount": 0,
+      "warningCount": 74,
+      "warningFiles": [
+        ".test-tmp/phase9/execution-worker.mjs",
+        ".test-tmp/v6-cloudflare-worker/worker.mjs",
+        "scripts/prompt10-shadow-safety-tests.cjs",
+        "scripts/source-discovery-identity-tests.cjs",
+        "scripts/storage-migration.cjs",
+        "scripts/v6-content-seo-tests.mjs",
+        "src/lib/automation/botRegistry.ts",
+        "src/lib/bots/dealScorer.ts",
+        "src/lib/storage/contentPackages.ts",
+        "src/lib/storage/linkHealth.ts",
+        "src/lib/storage/mongoSerialization.ts"
+      ]
+    },
+    "secretScan": {
+      "command": [
+        "node",
+        "scripts/release-validation.cjs",
+        "secret-scan"
+      ],
+      "startedAt": "2026-09-26T10:38:48.848Z",
+      "completedAt": "2026-09-26T10:38:49.076Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "log": {
+        "path": ".test-tmp/phase10-release-bundle-20260926/secret-scan.log",
+        "sha256": "b07ea4db537aac85efecf69742df7191022fad1c48ab622ad35a0812b68043b8",
+        "bytes": 28
+      }
+    },
+    "gitDiffCheck": {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "startedAt": "2026-09-26T10:38:48.860Z",
+      "completedAt": "2026-09-26T10:38:48.958Z",
+      "exitCode": 0,
+      "signal": null,
+      "status": "PASS",
+      "log": {
+        "path": ".test-tmp/phase10-release-bundle-20260926/git-diff-check.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    }
+  },
+  "ideBuild": {
+    "tool": "PhpStorm build_project",
+    "isSuccess": true,
+    "limitation": "Limited build diagnostics; actual TypeScript and ESLint CLI results are authoritative"
+  },
+  "preservation": {
+    "headUnchanged": true,
+    "branchUnchanged": true,
+    "indexUnchanged": true,
+    "trackedFilesUnchanged": 834,
+    "preservedEvidenceReferencesUnchanged": 21
+  },
+  "bundleVerification": {
+    "bundleFingerprintMatch": true,
+    "nonExecutable": true,
+    "newFileWhitespace": "PASS"
+  },
+  "credentialSafety": {
+    "basicAuthValuesNeverRetrieved": true,
+    "onlySecretNamesAndTypesRetained": true,
+    "knownCachedCredentialByteMatches": 0,
+    "newFilesChecked": 15,
+    "rawSecretOutput": 0,
+    "credentialValuesWritten": 0
+  },
+  "artifactValidation": {
+    "workerRemoteHashMatchesHistorical": true,
+    "workerSourceInputsUnchanged": 83,
+    "sourceInventoryMatch": true,
+    "localStaticRehashStable": true,
+    "staticProductionCertified": false,
+    "staticMatchesRetainedReleaseInventory": false,
+    "sourceInventory": {
+      "path": ".test-tmp/phase10-release-bundle-20260926/source-inventory.json",
+      "sha256": "46d16842bae88d3caa3e5c351145b77e0a4e1e808350d11cb654ec0072a3b134",
+      "bytes": 135788
+    },
+    "staticInventory": {
+      "path": ".test-tmp/phase10-release-bundle-20260926/static-inventory.json",
+      "sha256": "38f69329efe9839111c607c36586288ad593a21290ba600f7f5cefaf0c56e0f6",
+      "bytes": 17964
+    },
+    "productionSchema": {
+      "path": ".test-tmp/phase10-release-bundle-20260926/production-schema.json",
+      "sha256": "0d55fa1dfe94dfd5df8100dc08cfc617008493fc0984b29650cd84247acdd2e3",
+      "bytes": 374460
+    }
+  },
+  "recoveryEvidence": {
+    "path": "docs/v6/evidence/phase10-recovery-rto-rpo-validation.json",
+    "sha256": "bf845961515e55a01f72187e2633ecfab5b8a53245f8f94404b4f85a30c33869",
+    "bytes": 2820
+  },
+  "scopeCaveats": [
+    "The approval validator and abort conditions pass preserved local tests but are not configured or verified for production.",
+    "The recovery evidence is a representative synthetic nonproduction drill, not a post-0010 production restore or a production-volume guarantee.",
+    "The local static fingerprint is recorded for inspection only; no production static fingerprint or ASSETS binding exists on the pinned version.",
+    "Observations are audit evidence, not runtime proofs or authorization; the five-minute runtime freshness rule is unchanged."
+  ],
+  "filesToCommitAfterHumanReviewOnly": [
+    "docs/v6/evidence/phase10-production-release-bundle.json",
+    "docs/v6/evidence/phase10-production-release-bundle-verification.json",
+    "docs/v6/phase-10-production-release-bundle-finalization.md"
+  ],
+  "filesToIgnore": [
+    ".test-tmp/phase10-release-bundle-20260926/",
+    "tsconfig.tsbuildinfo"
+  ],
+  "filesToReview": [],
+  "blockers": [
+    "EXACT_SECRET_VERSION_MISSING_ASSETS_BINDING",
+    "PRODUCTION_STATIC_ARTIFACT_UNAVAILABLE_LOCALHOST_LOCAL_BUILD_ONLY",
+    "STATIC_BYTES_DO_NOT_MATCH_RETAINED_RELEASE_INVENTORY",
+    "PRODUCTION_DOMAIN_ROUTE_AND_WORKER_FIRST_ASSET_ROUTING_UNVERIFIED",
+    "PRODUCTION_KILL_SWITCH_AND_EMERGENCY_STOP_NOT_PROVISIONED_OR_DRILLED",
+    "PRODUCTION_APPROVAL_TRUST_KEYS_AND_INSTALLATION_PROCEDURE_UNVERIFIED",
+    "PRODUCTION_OBSERVABILITY_THRESHOLDS_DESTINATION_AND_SIGNALS_UNVERIFIED",
+    "TARGET_BOUND_CANARY_EXPOSURE_HOLD_AND_ABORT_OPERATOR_UNAPPROVED",
+    "STATIC_ROLLBACK_BASELINE_AND_COMPLETE_ROLLBACK_PROOF_UNAVAILABLE",
+    "DEPLOYMENT_CHANGE_WINDOW_NOT_CONFIGURED"
+  ],
+  "nextStep": "Review the blocked package. Resolve the absent ASSETS binding, production static provenance and operational proofs in a separately authorized task; then rebind a clean committed candidate and request fresh deployment preauthorization. Do not deploy or change this version under the current authority.",
+  "effects": {
+    "productionD1Migrations": 0,
+    "productionD1SchemaMutations": 0,
+    "productionD1BusinessDataMutations": 0,
+    "cloudflareDeployments": 0,
+    "workerVersionActivations": 0,
+    "workerVersionUploads": 0,
+    "queueMessagesSent": 0,
+    "dnsChanges": 0,
+    "routeChanges": 0,
+    "cronChanges": 0,
+    "productionTrafficShift": 0,
+    "productionSecretWrites": 0,
+    "productionRestores": 0,
+    "rawSecretOutput": 0,
+    "commits": 0,
+    "pushes": 0
+  }
+}
