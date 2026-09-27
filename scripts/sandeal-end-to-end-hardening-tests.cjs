@@ -292,8 +292,16 @@ function jobRequest(idempotencyKey, productId = 'scan-product') {
   await test('build release resolver xử lý explicit, mismatch và môi trường không có .git', async () => {
     const configModule = require('../next.config.ts');
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim().toLowerCase();
-    assert.equal(configModule.resolveBuildCommit({ explicitReleaseId: head, gitCommitOverride: null, nodeEnv: 'production' }), head);
-    assert.equal(configModule.resolveBuildCommit({ explicitReleaseId: head.toUpperCase(), gitCommitOverride: null, nodeEnv: 'production' }), head);
+        assert.throws(
+      () => configModule.resolveBuildCommit({ explicitReleaseId: head, gitCommitOverride: null, nodeEnv: 'production' }),
+      /GIT_HEAD_UNAVAILABLE/,
+    );
+    assert.equal(configModule.resolveBuildCommit({ explicitReleaseId: head, gitCommitOverride: head, nodeEnv: 'production' }), head);
+        assert.throws(
+      () => configModule.resolveBuildCommit({ explicitReleaseId: head.toUpperCase(), gitCommitOverride: null, nodeEnv: 'production' }),
+      /GIT_HEAD_UNAVAILABLE/,
+    );
+    assert.equal(configModule.resolveBuildCommit({ explicitReleaseId: head.toUpperCase(), gitCommitOverride: head, nodeEnv: 'production' }), head);
     assert.equal(configModule.resolveBuildCommit({ gitCommitOverride: null, nodeEnv: 'development' }), 'development');
     assert.throws(
       () => configModule.resolveBuildCommit({ gitCommitOverride: null, nodeEnv: 'production' }),

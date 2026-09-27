@@ -8,8 +8,26 @@ export function resolveBuildCommit(input: {
     gitCommitOverride?: string | null;
     nodeEnv?: string;
 } = {}): string {
-    const explicit = String(input.explicitReleaseId ?? process.env.SANDEAL_RELEASE_ID ?? process.env.GIT_COMMIT_SHA ?? '').trim();
-    const nodeEnv = input.nodeEnv ?? process.env.NODE_ENV;
+    const explicitArg = input.explicitReleaseId !== undefined ? String(input.explicitReleaseId).trim() : null;
+    const sandealId = String(process.env.SANDEAL_RELEASE_ID ?? '').trim();
+    const gitCommitSha = String(process.env.GIT_COMMIT_SHA ?? '').trim();
+    const nodeEnv = input.nodeEnv ?? process.env.NODE_ENV ?? 'production';
+
+    if (explicitArg === null && sandealId && gitCommitSha && sandealId !== gitCommitSha) {
+        throw new Error('CONFLICTING_RELEASE_IDS');
+    }
+
+    const explicit = explicitArg !== null ? explicitArg : (sandealId || gitCommitSha);
+    const explicitCommit = GIT_SHA.test(explicit) ? explicit.toLowerCase() : '';
+
+    if (nodeEnv === 'production' && !explicitCommit) {
+        throw new Error('SANDEAL_RELEASE_ID_GIT_SHA_REQUIRED');
+    }
+
+    if (explicit && !explicitCommit && nodeEnv === 'production') {
+        throw new Error('SANDEAL_RELEASE_ID_GIT_SHA_REQUIRED');
+    }
+
     let gitCommit = '';
     if (input.gitCommitOverride !== undefined) {
         gitCommit = String(input.gitCommitOverride || '').trim().toLowerCase();
@@ -17,15 +35,30 @@ export function resolveBuildCommit(input: {
         try {
             gitCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim().toLowerCase();
         } catch {
-            // Production builds fail below; development can retain an explicit label.
+            // Fallthrough
         }
     }
-    const explicitCommit = GIT_SHA.test(explicit) ? explicit.toLowerCase() : '';
-    if (explicit && !explicitCommit && nodeEnv === 'production') throw new Error('SANDEAL_RELEASE_ID_GIT_SHA_REQUIRED');
-    if (gitCommit && !GIT_SHA.test(gitCommit)) throw new Error('GIT_HEAD_SHA_INVALID');
-    if (explicitCommit && gitCommit && explicitCommit !== gitCommit) throw new Error('SANDEAL_RELEASE_ID_GIT_HEAD_MISMATCH');
-    if (explicitCommit || gitCommit) return explicitCommit || gitCommit;
-    if (nodeEnv === 'production') throw new Error('SANDEAL_RELEASE_ID_GIT_SHA_REQUIRED');
+
+    if (nodeEnv === 'production' && !gitCommit) {
+        throw new Error('GIT_HEAD_UNAVAILABLE');
+    }
+
+    if (gitCommit && !GIT_SHA.test(gitCommit)) {
+        throw new Error('GIT_HEAD_SHA_INVALID');
+    }
+
+    if (explicitCommit && gitCommit && explicitCommit !== gitCommit) {
+        throw new Error('SANDEAL_RELEASE_ID_GIT_HEAD_MISMATCH');
+    }
+
+    if (explicitCommit || gitCommit) {
+        return explicitCommit || gitCommit;
+    }
+
+    if (nodeEnv === 'production') {
+        throw new Error('SANDEAL_RELEASE_ID_GIT_SHA_REQUIRED');
+    }
+
     return explicit || 'development';
 }
 
