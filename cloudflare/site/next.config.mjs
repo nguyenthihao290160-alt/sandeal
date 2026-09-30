@@ -52,6 +52,8 @@ function resolveBuildCommit() {
 }
 
 const buildCommit = resolveBuildCommit();
+const publicReleaseId = String(process.env.NEXT_PUBLIC_SANDEAL_RELEASE_ID ?? '').trim().toLowerCase();
+if (publicReleaseId && publicReleaseId !== buildCommit) throw new Error('NEXT_PUBLIC_SANDEAL_RELEASE_ID_GIT_HEAD_MISMATCH');
 
 const siteDirectory = path.dirname(fileURLToPath(import.meta.url));
 const buildEnvironment = builder.siteBuildEnvironment({ environment: process.env.SANDEAL_SITE_ENVIRONMENT ?? 'LOCAL', origin: process.env.NEXT_PUBLIC_SITE_URL });

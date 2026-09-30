@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const { build } = require('esbuild');
 const { root, recordEvidence, writeState } = require('./v6-run-state.cjs');
 const outputDirectory = path.join(root, '.test-tmp/v6-cloudflare-worker');
@@ -35,9 +35,26 @@ function siteBuildEnvironment(options = {}) {
   return { NEXT_TELEMETRY_DISABLED: '1', NODE_ENV: 'production', SANDEAL_RUNTIME: 'cloudflare',
     SANDEAL_SITE_ENVIRONMENT: environment, NEXT_PUBLIC_SANDEAL_ENVIRONMENT: environment, NEXT_PUBLIC_SITE_URL: origin };
 }
-function buildSite(options = {}) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(?:PATH|PATHEXT|SystemRoot|WINDIR|TEMP|TMP|LOCALAPPDATA|APPDATA|USERPROFILE|COMSPEC|NUMBER_OF_PROCESSORS)$/i.test(name)));
+function siteBuildProcessEnvironment(options = {}, inherited = process.env) {
+  const env = Object.fromEntries(Object.entries(inherited).filter(([name]) => /^(?:PATH|PATHEXT|SystemRoot|WINDIR|TEMP|TMP|LOCALAPPDATA|APPDATA|USERPROFILE|COMSPEC|NUMBER_OF_PROCESSORS)$/i.test(name)));
   Object.assign(env, siteBuildEnvironment(options));
+  for (const name of ['SANDEAL_RELEASE_ID', 'GIT_COMMIT_SHA', 'NEXT_PUBLIC_SANDEAL_RELEASE_ID']) {
+    if (inherited[name] !== undefined) env[name] = inherited[name];
+  }
+  if (env.SANDEAL_SITE_ENVIRONMENT !== 'PRODUCTION' && !env.SANDEAL_RELEASE_ID?.trim() && !env.GIT_COMMIT_SHA?.trim()) {
+    env.SANDEAL_RELEASE_ID = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim();
+  }
+  return env;
+}
+function siteBuildIdentity() {
+  const config = JSON.parse(fs.readFileSync(path.join(root, 'cloudflare/site/.next/required-server-files.json'), 'utf8')).config;
+  const buildId = config.env?.NEXT_PUBLIC_SANDEAL_RELEASE_ID;
+  if (!/^[a-f0-9]{40}$/.test(buildId) || config.deploymentId !== buildId) throw new Error('STATIC_BUILT_RELEASE_ID_INVALID');
+  return { buildId, nextBuildId: fs.readFileSync(path.join(root, 'cloudflare/site/.next/BUILD_ID'), 'utf8').trim(),
+    environment: config.env.NEXT_PUBLIC_SANDEAL_ENVIRONMENT, origin: config.env.NEXT_PUBLIC_SITE_URL };
+}
+function buildSite(options = {}) {
+  const env = siteBuildProcessEnvironment(options);
   const result = spawnSync(process.execPath, [require.resolve('next/dist/bin/next'), 'build', 'cloudflare/site', '--webpack'],
     { cwd: root, env, encoding: 'utf8', timeout: 360000, maxBuffer: 16 * 1024 * 1024 });
   fs.mkdirSync(outputDirectory, { recursive: true });
@@ -46,7 +63,7 @@ function buildSite(options = {}) {
   if (result.status !== 0) throw new Error('CLOUDFLARE_STATIC_BUILD_FAILED');
   const headers = '/*\n  X-Content-Type-Options: nosniff\n  X-Frame-Options: DENY\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  Content-Security-Policy: default-src \'self\'; base-uri \'self\'; object-src \'none\'; frame-ancestors \'none\'; form-action \'self\'; script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: https:; connect-src \'self\'; font-src \'self\' data:\n  X-Robots-Tag: noindex, nofollow\n\n/_next/static/*\n  Cache-Control: public, max-age=31536000, immutable\n';
   fs.writeFileSync(path.join(root, 'cloudflare/site/out/_headers'), headers);
-  return { exit: 0, log: '.test-tmp/v6-cloudflare-worker/site-build.log', environment: env.SANDEAL_SITE_ENVIRONMENT, origin: env.NEXT_PUBLIC_SITE_URL };
+  return { exit: 0, log: '.test-tmp/v6-cloudflare-worker/site-build.log', ...siteBuildIdentity() };
 }
 async function main() {
   const mode = process.argv[2] || 'all';
@@ -56,4 +73,4 @@ async function main() {
   if (mode !== 'worker') recordEvidence('build-cloudflare-site', buildSite());
 }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
-module.exports = { buildWorker, buildSite, siteBuildEnvironment, outputDirectory };
+module.exports = { buildWorker, buildSite, siteBuildEnvironment, siteBuildProcessEnvironment, siteBuildIdentity, outputDirectory };
