@@ -151,11 +151,28 @@ for (const name of production.PRODUCTION_REQUIREMENTS) await test(`proof ${name}
   const input = fixture(); input.bundle.requirements[name].environment = 'LOCAL'; resign(input); blocked(input, `UNVERIFIED_${name}`);
 });
 await test('malformed preflight inputs fail closed without throwing', () => { for (const input of [null, {}, { bundle: null }]) blocked(input); });
-await test('real production configuration contract contains names and null targets only', () => {
+await test('real production configuration contract preserves discovered targets without authorizing production', () => {
   const contract = JSON.parse(fs.readFileSync(path.join(root, 'config/cloudflare/production.contract.json')));
   assert.equal(contract.deployable, false); assert.equal(contract.productionExecutionEnabled, false);
   assert.equal(contract.worker.runWorkerFirst, true); assert.equal(contract.productionVerified, false);
-  for (const name of ['accountId', 'workerName', 'staticTarget', 'databaseId', 'queueName', 'domain', 'route', 'zoneId']) assert.equal(contract.resources[name].value, null);
+  const expectedContractTargets = {
+    accountId: '88d3839bee4ac092d39fbb293e3eb426',
+    workerName: 'sandeal-production',
+    staticTarget: 'sandeal-production',
+    databaseId: 'bdf42c22-190d-4cdf-a166-a9e07ade57f2',
+    queueName: 'sandeal-production-jobs',
+    domain: null,
+    route: null,
+    zoneId: null,
+  };
+  assert.deepEqual(Object.fromEntries(Object.keys(expectedContractTargets).map(name => [name, contract.resources[name].value])), expectedContractTargets);
+  assert.equal(contract.resources.staticTarget.value, contract.resources.workerName.value);
+  assert.equal(contract.resources.accountId.source, 'AUTHENTICATED_DISCOVERY');
+  assert.equal(contract.resources.workerName.source, 'AUTHENTICATED_DISCOVERY');
+  assert.deepEqual(contract.worker.capabilitiesImplemented, ['READ_PRODUCTION_HEALTH']);
+  for (const name of ['SANDEAL_PRODUCTION_APPROVAL_KEYS', 'SANDEAL_PRODUCTION_IDENTITY', 'SANDEAL_PRODUCTION_BUNDLE_FINGERPRINT']) assert.equal(contract.variables[name].value, null);
+  assert.equal(contract.queue.productionProducerEnabled, false); assert.equal(contract.queue.productionConsumerEnabled, false);
+  assert.equal(contract.cron.productionEnabled, false);
   assert.deepEqual(contract.secretReferences.requiredNames, [...production.PRODUCTION_SECRET_REFERENCES].sort());
   assert.equal(contract.secretReferences.valuesAllowed, false); assert.deepEqual(contract.secretReferences.directShopeeReferences, []);
   assert.equal(contract.changeWindow.policy, null); assert.equal(contract.changeWindow.status, 'REVIEW_REQUIRED_NOT_CONFIGURED');

@@ -14,6 +14,8 @@ Object.assign(process.env, {
   SANDEAL_ADMIN_PERMISSIONS: '*', ALLOW_PAID_AI: 'false', AUTO_PUBLISH_ENABLED: 'false',
   ALLOW_PUBLISHING_API: 'false', ACCESS_TRADE_API_KEY: '', GEMINI_API_KEY: '',
   SANDEAL_RELEASE_ID: 'prompt11-test-build', SANDEAL_RUNTIME_OPT_IN: 'false',
+  SANDEAL_BUILD_MANIFEST_COMMIT: '', SANDEAL_BUILD_COMMIT: '',
+  GIT_COMMIT_SHA: '', NEXT_PUBLIC_SANDEAL_RELEASE_ID: '',
 });
 require('./register-typescript.cjs');
 
@@ -169,10 +171,23 @@ async function main() {
     assert.ok(stale); assert.equal(stale.occurrenceCount, 2); assert.equal(stale.autoResolve, true);
   });
 
-  await test('health live is public/minimal, readiness is authenticated, and 401 differs from missing route', async () => {
+  await test('health live exposes public release identity, readiness is authenticated, and 401 differs from missing route', async () => {
     const live = await liveRoute.GET(); const liveBody = await live.json();
     assert.equal(live.status, 200); assert.equal(liveBody.status, 'PASS'); assert.equal(liveBody.buildId, 'prompt11-test-build');
-    assert.deepEqual(Object.keys(liveBody).sort(), ['app', 'buildId', 'status', 'timestamp', 'version'].sort());
+    assert.deepEqual(Object.keys(liveBody).sort(), [
+      'app', 'buildId', 'buildManifestAvailable', 'commitSha', 'embeddedBuildId',
+      'gitCommitSha', 'publicBuildId', 'releaseId', 'releaseMismatch',
+      'releaseMismatchReasons', 'releaseSource', 'runtimeReleaseId',
+      'status', 'timestamp', 'version',
+    ].sort());
+    assert.equal(liveBody.releaseId, 'prompt11-test-build');
+    assert.equal(liveBody.runtimeReleaseId, 'prompt11-test-build');
+    assert.equal(liveBody.commitSha, null); assert.equal(liveBody.gitCommitSha, null);
+    assert.equal(liveBody.embeddedBuildId, 'development'); assert.equal(liveBody.publicBuildId, 'development');
+    assert.equal(liveBody.buildManifestAvailable, false); assert.equal(liveBody.releaseMismatch, false);
+    assert.deepEqual(liveBody.releaseMismatchReasons, []);
+    assert.equal(liveBody.releaseSource, 'runtime_environment');
+    assert.equal(live.headers.get('Cache-Control'), 'no-store');
     const denied = await readyRoute.GET(new NextRequest('http://localhost/api/health/ready'));
     assert.equal(denied.status, 401);
     const allowed = await readyRoute.GET(new NextRequest('http://localhost/api/health/ready', { headers: { authorization: auth } }));

@@ -15,6 +15,7 @@ const eslintConfig = defineConfig([
     "cloudflare/site/.next/**",
     "cloudflare/site/out/**",
     "cloudflare/site/next-env.d.ts",
+    ".test-tmp/**",
   ]),
 ]);
 
