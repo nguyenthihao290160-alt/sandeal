@@ -1,0 +1,28 @@
+{
+  "schema": "sandeal-gate2-review-pins-v1",
+  "sourceSha": "4c1e501ad7ca07741f07d89dd30fadc1957c8711",
+  "branch": "master",
+  "remoteRef": "refs/remotes/origin/master",
+  "candidateIdentifier": "1687ef0f1a333abab319317c44f4d9c74fb75899e51addda0836419c4dd93146",
+  "candidateReference": {
+    "path": ".test-tmp/phase10-local-clean-4c1e501-20261003/phase10-production-release-bundle.json",
+    "sha256": "7f52674388e9f170edf24fff05f6a02fc91a72e17eafa91b2cfbee3f1761ec71",
+    "bytes": 7545
+  },
+  "reviewEvidence": {
+    "path": ".test-tmp/phase10-local-clean-4c1e501-20261003-control/resume-20261004/final-integrity.json",
+    "sha256": "a0cdc914a3418e64101de34ff5c44d161d9861a658bc8ffaa4760650296602b5",
+    "bytes": 53942
+  },
+  "reviewedAtUtc": "2026-10-04T04:50:25.284Z",
+  "localEvidenceMaxAgeMs": 604800000,
+  "artifactCount": 110,
+  "staticFileCount": 109,
+  "target": {
+    "accountId": "88d3839bee4ac092d39fbb293e3eb426",
+    "workerName": "sandeal-production",
+    "staticTarget": "sandeal-production",
+    "environment": "PRODUCTION"
+  },
+  "productionMutationMode": "BLOCKED"
+}
